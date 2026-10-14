@@ -26,6 +26,10 @@ struct Args {
     /// Run the control service with no window.
     #[arg(long)]
     background: bool,
+    /// Keep the streamed Windows cursor visible; runs in the user's desktop.
+    #[cfg(windows)]
+    #[arg(long, hide = true, conflicts_with_all = ["background", "setup", "setup_elevated", "brand_engine"])]
+    cursor_guard: Option<u32>,
     /// Started by an update: wait for this process to give up the port.
     #[arg(long, requires = "background")]
     replaces: Option<u32>,
@@ -68,6 +72,14 @@ fn main() -> Result<()> {
     // Before anything can replace it: which file this process is.
     let _ = service::started_from();
     let args = Args::parse();
+    #[cfg(windows)]
+    if let Some(parent) = args.cursor_guard {
+        init_logging("cursor.log");
+        return latch_host::cursor::run(parent).map_err(|e| {
+            tracing::error!("cursor guard: {e:#}");
+            e
+        });
+    }
     if let Some(dir) = &args.local_app_data {
         // Before any thread or data_dir() call; edition 2021, so set_var is safe.
         std::env::set_var("LOCALAPPDATA", dir);

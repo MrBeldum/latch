@@ -360,6 +360,20 @@ impl Service {
                         Ok(false) => {} // Retried once nobody watches.
                         Err(e) => self.log(format!("stream profile could not be applied: {e:#}")),
                     }
+                } else if cfg!(windows) {
+                    // Which display the engine captures is kept current all
+                    // along: the virtual display can come or change any time.
+                    let api = Api {
+                        user: &cfg.sunshine_user,
+                        pass: &cfg.sunshine_pass,
+                    };
+                    if let Some(install) = &install {
+                        match crate::virtual_display::follow(&api, install, &dir) {
+                            Ok(Some(changed)) => self.log(changed),
+                            Ok(None) => {}
+                            Err(e) => self.log(format!("capture display could not be set: {e:#}")),
+                        }
+                    }
                 }
             }
         }
@@ -451,6 +465,10 @@ impl Service {
         if tick.is_multiple_of(6) {
             let install = self.install.lock().clone();
             if let Some(install) = install {
+                #[cfg(windows)]
+                if let Err(e) = crate::cursor::start() {
+                    tracing::debug!("cursor bounds: {e:#}");
+                }
                 let audio_problem = self.streamer.lock().audio_problem.clone();
                 if !streamer::running() {
                     if let Err(e) = streamer::start(&install) {
