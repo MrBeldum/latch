@@ -36,9 +36,9 @@ jobs:
         run: bash scripts/bundle-macos.sh
       - name: package
         run: |
-          cp docs/MACOS.md dist/README-MACOS.md
-          cp LICENSE NOTICE dist/
-          cd dist && tar czf latch-macos-arm64.tar.gz Latch.app README-MACOS.md LICENSE NOTICE
+          cp docs/MACOS.md dist.noindex/README-MACOS.md
+          cp LICENSE NOTICE dist.noindex/
+          cd dist.noindex && tar czf latch-macos-arm64.tar.gz Latch.app README-MACOS.md LICENSE NOTICE
       # A 4.0 updater downloads brolink-macos-arm64.tar.gz and installs the
       # BroLink.app inside it. The same app under that folder name is what
       # lets it update at all; on its first run it moves itself to Latch.app
@@ -46,17 +46,17 @@ jobs:
       # adopt_legacy_bundle). Nothing in 4.1 or later reads this asset.
       - name: package for 4.0 updaters
         run: |
-          mkdir dist/legacy
-          ditto dist/Latch.app dist/legacy/BroLink.app
-          cp docs/MACOS.md dist/legacy/README-MACOS.md
-          cp LICENSE NOTICE dist/legacy/
-          cd dist/legacy && tar czf ../brolink-macos-arm64.tar.gz BroLink.app README-MACOS.md LICENSE NOTICE
+          mkdir dist.noindex/legacy
+          ditto dist.noindex/Latch.app dist.noindex/legacy/BroLink.app
+          cp docs/MACOS.md dist.noindex/legacy/README-MACOS.md
+          cp LICENSE NOTICE dist.noindex/legacy/
+          cd dist.noindex/legacy && tar czf ../brolink-macos-arm64.tar.gz BroLink.app README-MACOS.md LICENSE NOTICE
       - uses: actions/upload-artifact@v4
         with:
           name: latch-macos-arm64
           path: |
-            dist/latch-macos-arm64.tar.gz
-            dist/brolink-macos-arm64.tar.gz
+            dist.noindex/latch-macos-arm64.tar.gz
+            dist.noindex/brolink-macos-arm64.tar.gz
           if-no-files-found: error
 
   windows:

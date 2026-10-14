@@ -8,6 +8,9 @@ pub const FILE: &str = "client.toml";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Resolution {
+    P540,
+    P720,
+    P900,
     P1080,
     P1440,
     P2160,
@@ -16,12 +19,26 @@ pub enum Resolution {
 }
 
 impl Resolution {
+    /// Every choice, in the order the list shows them.
+    pub const ALL: [Resolution; 7] = [
+        Resolution::Native,
+        Resolution::P540,
+        Resolution::P720,
+        Resolution::P900,
+        Resolution::P1080,
+        Resolution::P1440,
+        Resolution::P2160,
+    ];
+
     /// This choice applied to a screen of `native` pixels: the standard
     /// 16:9 sizes are exactly that, and "Match screen" is the screen
     /// itself. See `latch_core::screens`.
     pub fn pixels(self, native: (u32, u32)) -> (u32, u32) {
-        let [p1080, p1440, p2160] = latch_core::screens::STANDARD;
+        let [p540, p720, p900, p1080, p1440, p2160] = latch_core::screens::STANDARD;
         match self {
+            Resolution::P540 => p540,
+            Resolution::P720 => p720,
+            Resolution::P900 => p900,
             Resolution::P1080 => p1080,
             Resolution::P1440 => p1440,
             Resolution::P2160 => p2160,
@@ -92,6 +109,9 @@ impl Preset {
 impl Resolution {
     pub fn label(self) -> &'static str {
         match self {
+            Resolution::P540 => "540p",
+            Resolution::P720 => "720p",
+            Resolution::P900 => "900p",
             Resolution::P1080 => "1080p",
             Resolution::P1440 => "1440p",
             Resolution::P2160 => "4K",
@@ -308,6 +328,9 @@ mod tests {
         assert_eq!(Resolution::P1080.pixels((3024, 1964)), (1920, 1080));
         assert_eq!(Resolution::P1440.pixels((3024, 1964)), (2560, 1440));
         assert_eq!(Resolution::P2160.pixels((1920, 1080)), (3840, 2160));
+        assert_eq!(Resolution::P900.pixels((3024, 1964)), (1600, 900));
+        assert_eq!(Resolution::P720.pixels((3024, 1964)), (1280, 720));
+        assert_eq!(Resolution::P540.pixels((3024, 1964)), (960, 540));
         assert_eq!(
             Resolution::Native.describe((3024, 1964)),
             "Match screen · 3024 × 1964"
@@ -316,13 +339,9 @@ mod tests {
             Resolution::P1080.describe((3024, 1964)),
             "1080p · 1920 × 1080"
         );
+        assert_eq!(Resolution::P720.describe((3024, 1964)), "720p · 1280 × 720");
         let modes = latch_core::screens::stream_modes();
-        for r in [
-            Resolution::P1080,
-            Resolution::P1440,
-            Resolution::P2160,
-            Resolution::Native,
-        ] {
+        for r in Resolution::ALL {
             for &screen in latch_core::screens::SCREENS {
                 assert!(
                     modes.contains(&r.pixels(screen)),
@@ -339,6 +358,8 @@ mod tests {
         let c: ClientConfig = toml::from_str("[stream]\nfps = 90\n").unwrap();
         assert_eq!(c.stream.quality, Quality::Auto);
         assert_eq!(c.stream.fps, 90);
+        let c: ClientConfig = toml::from_str("[stream]\nresolution = \"P720\"\n").unwrap();
+        assert_eq!(c.stream.resolution, Resolution::P720);
         let mut st = StreamSettings::default();
         assert_eq!(st.preset(), Some(Preset::Balanced));
         st.apply_preset(Preset::Smooth);

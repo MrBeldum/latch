@@ -4,6 +4,75 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## Unreleased
+
+- **Resolutions below 1080p: 900p, 720p and 540p** (1600 × 900, 1280 × 720,
+  960 × 540), for a machine that encodes in software or a slow network.
+  The frame-rate ceiling a small-CPU host reports (30 fps) now holds at
+  1080p and rises in proportion for fewer pixels, so 720p gets 60 fps
+  from a two-core VPS; larger sizes keep 30. A host with a fixed desktop
+  is still never asked for more than its own size, but a smaller size is
+  now honoured (scaled down) instead of replaced by the desktop's.
+  Windows PCs on the Virtual Display Driver need **Repair setup** once so
+  the driver lists the three new sizes.
+- **A new size starts the Desktop again.** Connecting while the PC's
+  Desktop still ran from an earlier stream resumed it, and a Linux desktop
+  that resizes itself to the viewer only does so at a launch: a 540p stream
+  showed the 3024 x 1964 desktop scaled down, with captured mouse movement
+  crossing it at a third of the speed. The Mac now ends and relaunches the
+  Desktop whenever it asks for a different size than it last launched it
+  at (or does not know), and resumes it at the same size. Games and other
+  apps are never ended for this.
+- Captured mouse movement over a desktop of fixed size that the stream
+  shrinks (a 1080p VPS desktop streamed at 720p) is scaled to the
+  desktop's pixels, so it keeps the Mac's speed.
+- **Pairing with Sunshine from October 2026.** Those engines keep the PIN
+  request open until the Mac has finished the pairing handshake, and the
+  Mac only went on with it once Latch Host had answered, so pairing a new
+  Mac timed out. Latch Host now answers as soon as the engine has taken the
+  PIN, and answers the Mac's retries for that PIN without asking the
+  engine again.
+- `connect_real` (an ignored test in `crates/client/src/session.rs`)
+  connects to a machine through the window's own path at a list of sizes,
+  with optional pointer probes, typing and frame-rate sampling.
+- **Clipboard with a Linux desktop.** ⌘C, ⌘X and ⌘V reach a Linux machine
+  as Ctrl+Insert, Shift+Delete and Shift+Insert, the shortcuts GTK, Qt,
+  Firefox, Chromium and the terminals all honour. They were Ctrl+C and
+  Ctrl+V, which in a terminal interrupt the running program and type a
+  literal instead of copying and pasting. Held modifiers are let go for
+  the chord, so ⌘ held as Ctrl does not turn a paste into Ctrl+Shift+Insert.
+  Latch Host on Linux puts pasted text in the selection as well as the
+  clipboard, since xterm and the VTE terminals paste the selection on
+  Shift+Insert, and says so in `/v1/clipboard` (`selection`); against an
+  older Linux host the Mac keeps Ctrl+V for paste, which would otherwise
+  paste the terminal's last selection.
+- **A VPS desktop streams at its own size and a frame rate it can keep.**
+  Latch Host reports the X screen it captures and, when it encodes in
+  software on fewer than four cores, a 30 fps ceiling; the Mac asks for
+  exactly that. "Match screen" used to ask a 1920 × 1080 desktop for the
+  Mac's size, which Sunshine met by scaling the same pixels up (blurrier,
+  and more work for the encoder). On a two-core VPS, 60 fps desktop
+  sessions averaged 33 to 47 encoded frames a second; Sunshine took 136%
+  CPU for a still desktop at 60 fps and 78% for a busier one at 30.
+- On Linux the engine no longer holds a 60 fps floor
+  (`minimum_fps_target = 0`): X11 capture already delivers a frame every
+  interval, so the floor could only re-encode the last picture whenever a
+  frame was done early. Part of the CPU the 30 fps ceiling frees goes to
+  the `superfast` preset, whose keyframes keep text legible (QP 21 instead
+  of 38 at 20 Mbps, for 19% more encoding time a frame). Existing
+  hosts pick both up once (`stream-profile-v4`) while nothing streams,
+  checked through GameStream's `/serverinfo`, which reports the running
+  app; `/api/apps` does not.
+- The native VPS units give the engine and the X server ten times the CPU
+  share of other user services (`CPUWeight=1000`).
+- **A Mac can be only a viewer.** On a Mac, **Share this Mac** on the
+  Sharing page (stored as the old start-at-login switch) decides whether
+  Latch runs in the background. Off, opening Latch no longer starts the
+  background service or the streaming engine (a service started anyway,
+  say by an older window, exits at once), turning it off stops both, and
+  nothing of Latch runs once the window closes. Connecting to other
+  machines needs neither.
+
 ## 4.1.1 (2026-10-02)
 
 - Setting up a Windows PC that an earlier version had set up (when the

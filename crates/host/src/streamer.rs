@@ -170,6 +170,43 @@ fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
     })
 }
 
+/// The size of the X screen the engine captures on Linux. Sunshine records
+/// the whole root window of `$DISPLAY` and scales it to whatever size a
+/// viewer asked for, so this is the one size that arrives unscaled. `None`
+/// elsewhere, when no X server answers, and when the desktop resizes itself
+/// to each viewer (`LATCH_DISPLAY_FOLLOWS_VIEWER=1`: a prep command switches
+/// the X screen to the size asked for), so viewers ask for their own size.
+#[cfg(target_os = "linux")]
+pub fn capture_size() -> Option<[u32; 2]> {
+    use x11rb::connection::Connection;
+    if std::env::var_os("LATCH_DISPLAY_FOLLOWS_VIEWER").is_some_and(|v| v == "1") {
+        return None;
+    }
+    let (conn, screen) = x11rb::connect(None).ok()?;
+    let root = conn.setup().roots.get(screen)?;
+    Some([root.width_in_pixels.into(), root.height_in_pixels.into()])
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn capture_size() -> Option<[u32; 2]> {
+    None
+}
+
+/// The frame rate the engine keeps up with here at 1080p, 0 for no known
+/// limit: 30 when it encodes in software on fewer than four cores (a viewer
+/// asking for a smaller picture raises it in proportion). On a two-core
+/// Ampere VPS, desktop sessions asked for at 60 fps averaged 33 to 47
+/// encoded frames a second by Sunshine's own per-session counts; Sunshine
+/// took 136% CPU streaming a still desktop at 60 fps and 78% streaming a
+/// busier one at 30, leaving the desktop itself the rest of two cores.
+pub fn max_fps(encoder: &str, cores: usize) -> u32 {
+    if encoder == "software" && cores < 4 {
+        30
+    } else {
+        0
+    }
+}
+
 pub fn find() -> Option<Install> {
     #[cfg(windows)]
     {
@@ -351,19 +388,27 @@ impl Api<'_> {
     }
 
     pub fn session_active(&self) -> bool {
-        self.call("GET", "/api/apps", None)
-            .ok()
-            .is_some_and(|v| session_listed(&v))
+        // /api/apps only lists configured apps; it carries no running state.
+        latch_core::http::request(
+            ("127.0.0.1", SUNSHINE_PORT),
+            "GET",
+            "/serverinfo",
+            None,
+            Duration::from_secs(2),
+        )
+        .ok()
+        .filter(|r| r.status == 200)
+        .and_then(|r| session_in_serverinfo(&r.body))
+        .unwrap_or(true)
     }
 
     /// Migrate managed installations once, without interrupting a running app.
     pub fn upgrade_stream_profile(&self) -> Result<bool> {
-        let apps = self.call("GET", "/api/apps", None)?;
-        if session_listed(&apps) {
+        if self.session_active() {
             return Ok(false);
         }
         let current = self.call("GET", "/api/config", None)?;
-        let desired = stream_profile(&current)?;
+        let desired = stream_profile(&current, &crate::setup::engine_conf())?;
         if desired != current {
             self.call("POST", "/api/config", Some(&desired.to_string()))?;
             // Sunshine closes this HTTP connection as it restarts.
@@ -386,18 +431,35 @@ impl Api<'_> {
     /// Accept the PIN the Mac is pairing with. Sunshine says no until the
     /// Mac has actually started pairing, so callers retry.
     ///
-    /// Releases up to 2026.5 take `{pin, name}`; later ones list the waiting
-    /// requests on `GET /api/pin` and want the request's `pairing_id` too.
-    pub fn submit_pin(&self, pin: &str, name: &str) -> Result<()> {
+    /// Releases up to 2026.5 take `{pin, name}` and answer at once; later
+    /// ones list the waiting requests on `GET /api/pin`, want the request's
+    /// `pairing_id` too, and from October 2026 keep the post open until the
+    /// Mac has finished the handshake. The Mac only goes on with it once
+    /// this has answered, so a post still open after [`PIN_TAKEN_AFTER`]
+    /// is left to finish on its own and reported as [`Pin::Taken`].
+    pub fn submit_pin(&self, pin: &str, name: &str) -> Result<Pin> {
         let pending = pending_pairings(self.call("GET", "/api/pin", None).ok());
         for id in pending {
             let mut body = serde_json::json!({ "pin": pin, "name": name });
             if let Some(id) = id {
                 body["pairing_id"] = id.into();
             }
-            let v = self.call("POST", "/api/pin", Some(&body.to_string()))?;
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (user, pass) = (self.user.to_string(), self.pass.to_string());
+            std::thread::spawn(move || {
+                let api = Api {
+                    user: &user,
+                    pass: &pass,
+                };
+                let _ = tx.send(api.call("POST", "/api/pin", Some(&body.to_string())));
+            });
+            let v = match rx.recv_timeout(PIN_TAKEN_AFTER) {
+                Ok(reply) => reply?,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(Pin::Taken),
+                Err(e) => bail!("PIN post: {e}"),
+            };
             if v["status"].as_bool() == Some(true) || v["status"].as_str() == Some("true") {
-                return Ok(());
+                return Ok(Pin::Paired);
             }
         }
         bail!("the streaming engine did not accept the PIN (is the Mac pairing right now?)")
@@ -434,6 +496,21 @@ impl Api<'_> {
     }
 }
 
+/// What became of a PIN handed to the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pin {
+    /// The engine says the Mac is paired.
+    Paired,
+    /// The engine took the PIN and waits for the Mac to finish the
+    /// handshake, which it does once it hears the PIN was entered.
+    Taken,
+}
+
+/// How long a PIN post may stay open before it counts as taken. An engine
+/// that turns a PIN down (or one that never holds the post) answers well
+/// within this; one that took it waits for the Mac.
+pub const PIN_TAKEN_AFTER: Duration = Duration::from_millis(600);
+
 /// The pairing ids `GET /api/pin` lists on a Sunshine master build. Every
 /// other reply (a release Sunshine answers 200 `{"error":"Not Found"}`, an
 /// old one 404, curl failing) means "no ids": still send the PIN once
@@ -455,13 +532,15 @@ fn pending_pairings(reply: Option<serde_json::Value>) -> Vec<Option<String>> {
     }
 }
 
-/// Preserve unrelated engine settings; metadata from GET is never written.
-fn stream_profile(current: &serde_json::Value) -> Result<serde_json::Value> {
+/// `current` with the keys of `conf` (this platform's
+/// [`crate::setup::engine_conf`]) in force. Unrelated engine settings are
+/// kept; metadata from GET is never written.
+fn stream_profile(current: &serde_json::Value, conf: &[(&str, &str)]) -> Result<serde_json::Value> {
     let mut config = current
         .as_object()
         .context("engine config is not an object")?
         .clone();
-    let changed = crate::setup::ENGINE_CONF
+    let changed = conf
         .iter()
         .any(|(k, v)| config.get(*k).and_then(|v| v.as_str()) != Some(*v));
     if !changed {
@@ -470,7 +549,7 @@ fn stream_profile(current: &serde_json::Value) -> Result<serde_json::Value> {
     for k in ["status", "platform", "version"] {
         config.remove(k);
     }
-    for (k, v) in crate::setup::ENGINE_CONF {
+    for (k, v) in conf {
         config.insert((*k).into(), (*v).into());
     }
     Ok(config.into())
@@ -512,20 +591,18 @@ fn parse_reply(text: &str) -> Result<serde_json::Value> {
     Ok(v)
 }
 
-pub fn session_listed(v: &serde_json::Value) -> bool {
-    match v.get("current_app") {
-        Some(serde_json::Value::String(s)) if !s.is_empty() => return true,
-        Some(serde_json::Value::Number(n)) if n.as_u64().is_some_and(|n| n > 0) => return true,
-        _ => {}
-    }
-    v.get("apps")
-        .and_then(|a| a.as_array())
-        .is_some_and(|apps| {
-            apps.iter().any(|a| {
-                a.get("running").and_then(|x| x.as_bool()) == Some(true)
-                    || a.get("current").and_then(|x| x.as_bool()) == Some(true)
-            })
-        })
+/// Whether the GameStream `/serverinfo` XML says an app is running: its
+/// `currentgame` is the running app's id, 0 when nothing streams. `None`
+/// when the reply does not say.
+pub(crate) fn session_in_serverinfo(xml: &str) -> Option<bool> {
+    xml.split_once("<currentgame>")?
+        .1
+        .split_once("</currentgame>")?
+        .0
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .map(|id| id != 0)
 }
 
 fn parse_clients(v: &serde_json::Value) -> Vec<(String, String)> {
@@ -552,7 +629,7 @@ mod tests {
     fn streaming_profile_replaces_caps_and_fixed_modes_without_losing_other_settings() {
         let original = serde_json::json!({"status":true,"version":"x", "platform":"windows",
             "encoder":"amdvce", "max_bitrate":"1000", "dd_resolution_option":"manual", "output_name":"virtual"});
-        let profile = stream_profile(&original).unwrap();
+        let profile = stream_profile(&original, crate::setup::ENGINE_CONF).unwrap();
         assert_eq!(profile["max_bitrate"], "0");
         assert_eq!(profile["amd_rc"], "cbr");
         assert_eq!(profile["amd_quality"], "speed");
@@ -565,8 +642,29 @@ mod tests {
         assert_eq!(profile["encoder"], "amdvce");
         assert_eq!(profile["output_name"], "virtual");
         assert!(profile.get("platform").is_none());
-        assert_eq!(stream_profile(&profile).unwrap(), profile);
-        assert!(stream_profile(&serde_json::Value::Null).is_err());
+        assert_eq!(
+            stream_profile(&profile, crate::setup::ENGINE_CONF).unwrap(),
+            profile
+        );
+        assert!(stream_profile(&serde_json::Value::Null, crate::setup::ENGINE_CONF).is_err());
+    }
+
+    #[test]
+    fn a_linux_engine_drops_the_frame_rate_floor_and_reapplies_it_elsewhere() {
+        // The node kit's VPS profile: a 60 fps floor under every stream.
+        let vps = serde_json::json!({"status":true, "capture":"x11", "encoder":"software",
+            "minimum_fps_target":"60", "sw_preset":"ultrafast", "min_threads":"2"});
+        let linux = crate::setup::engine_conf_for(true);
+        let profile = stream_profile(&vps, &linux).unwrap();
+        assert_eq!(profile["minimum_fps_target"], "0");
+        assert_eq!(profile["sw_preset"], "superfast");
+        assert_eq!(profile["capture"], "x11", "the deployment's own keys stay");
+        assert_eq!(profile["encoder"], "software");
+        assert_eq!(stream_profile(&profile, &linux).unwrap(), profile);
+        let other = crate::setup::engine_conf_for(false);
+        let elsewhere = stream_profile(&profile, &other).unwrap();
+        assert_eq!(elsewhere["minimum_fps_target"], "60");
+        assert_eq!(elsewhere["sw_preset"], "ultrafast");
     }
 
     #[test]
@@ -602,19 +700,29 @@ mod tests {
     }
 
     #[test]
-    fn session_listed_reads_current_app_and_running_flags() {
-        assert!(!session_listed(&serde_json::json!({"apps": []})));
-        assert!(session_listed(
-            &serde_json::json!({"current_app": "Desktop"})
-        ));
-        assert!(!session_listed(&serde_json::json!({"current_app": ""})));
-        assert!(session_listed(&serde_json::json!({"current_app": 1})));
-        assert!(session_listed(
-            &serde_json::json!({"apps": [{"name": "Desktop", "running": true}]})
-        ));
-        assert!(!session_listed(
-            &serde_json::json!({"apps": [{"name": "Desktop", "running": false}]})
-        ));
+    fn only_software_encoding_on_a_small_cpu_caps_the_frame_rate() {
+        assert_eq!(max_fps("software", 2), 30);
+        assert_eq!(max_fps("software", 1), 30);
+        assert_eq!(max_fps("software", 4), 0);
+        assert_eq!(max_fps("nvenc", 2), 0);
+        assert_eq!(max_fps("", 2), 0, "unknown encoder: no limit yet");
+    }
+
+    #[test]
+    fn serverinfo_reports_a_running_session_and_unknown_state_stays_unknown() {
+        assert_eq!(
+            session_in_serverinfo("<root><currentgame>0</currentgame></root>"),
+            Some(false)
+        );
+        assert_eq!(
+            session_in_serverinfo("<root><currentgame>881448767</currentgame></root>"),
+            Some(true)
+        );
+        assert_eq!(
+            session_in_serverinfo("<root><currentgame>bad</currentgame></root>"),
+            None
+        );
+        assert_eq!(session_in_serverinfo("<root/>"), None);
     }
 
     #[test]

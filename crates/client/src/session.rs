@@ -454,12 +454,18 @@ pub struct Live {
     pub started: Instant,
     pub codec: &'static str,
     pub requested: (u32, u32, u32),
+    /// The PC's desktop, when it is a fixed size other than the stream's
+    /// (the stream is that desktop scaled down). Relative mouse movement
+    /// lands in its pixels, not the stream's.
+    pub desktop: Option<(u32, u32)>,
     /// The settings the stream was started with, after Auto had its say.
     pub settings: StreamSettings,
     /// The path as measured right before connecting.
     pub path: Path,
     /// Clipboard both ways, through Latch Host on the PC.
     pub clipboard: clipboard::Sync,
+    /// How the PC spells copy, cut and paste.
+    pub shortcuts: clipboard::Shortcuts,
 }
 
 impl Drop for Live {
@@ -481,6 +487,12 @@ pub struct Target {
     pub server_cert: Option<Vec<u8>>,
     /// What discovery last knew about the path; re-measured at connect.
     pub path: Path,
+    /// Tailscale's OS string for the PC.
+    pub os: String,
+    /// The PC's fixed capture size and frame-rate ceiling, from its last
+    /// status; see [`fit_to_host`].
+    pub capture_size: Option<[u32; 2]>,
+    pub max_fps: u32,
 }
 
 impl Target {
@@ -501,8 +513,73 @@ impl Target {
                 .and_then(|k| k.server_cert.as_deref())
                 .and_then(latch_stream::nvhttp::unhex),
             path: pc.path.clone(),
+            os: pc.os.clone(),
+            capture_size: pc.host.as_ref().and_then(|h| h.streamer.capture_size),
+            max_fps: pc.host.as_ref().map_or(0, |h| h.streamer.max_fps),
         })
     }
+}
+
+/// What to ask a PC for, from what was wanted: its own capture size when
+/// that is fixed and the wanted size is larger in either direction
+/// (Sunshine would only scale the same desktop up, blurring it and costing
+/// the encoder more; a smaller size is scaled down and is cheaper to
+/// encode), and no more frames a second than it keeps up with. The host's
+/// ceiling is for its capture size, or 1920 × 1080 when that is not fixed;
+/// a smaller picture gets a ceiling higher in proportion to the pixels it
+/// saves, since software encoding time follows the pixel count. A larger
+/// one keeps the host's ceiling. Implausible sizes are ignored.
+pub fn fit_to_host(
+    wanted: (u32, u32),
+    fps: u32,
+    capture_size: Option<[u32; 2]>,
+    max_fps: u32,
+) -> (u32, u32, u32) {
+    let fixed = fixed_desktop(capture_size);
+    let (w, h) = match fixed {
+        Some(c) if wanted.0 > c.0 || wanted.1 > c.1 => c,
+        _ => wanted,
+    };
+    let fps = if max_fps > 0 {
+        let (rw, rh) = fixed.unwrap_or((1920, 1080));
+        let budget = u64::from(max_fps) * u64::from(rw) * u64::from(rh);
+        let ceiling = (budget / (u64::from(w) * u64::from(h)).max(1)).max(max_fps.into());
+        fps.min(u32::try_from(ceiling).unwrap_or(u32::MAX))
+    } else {
+        fps
+    };
+    (w, h, fps)
+}
+
+/// A host's fixed capture size, when it reported a plausible one.
+fn fixed_desktop(capture_size: Option<[u32; 2]>) -> Option<(u32, u32)> {
+    match capture_size {
+        Some([w, h]) if (320..=8192).contains(&w) && (240..=8192).contains(&h) => Some((w, h)),
+        _ => None,
+    }
+}
+
+/// The size each PC's Desktop was last launched at from here, by node.
+static LAUNCHED: Mutex<BTreeMap<String, (u32, u32)>> = Mutex::new(BTreeMap::new());
+
+/// Whether the running app has to be ended before this launch. Another app
+/// always does. The Desktop does when asked to (a broken capture) and when
+/// it may be running at another size: resuming keeps the PC's display as
+/// the launch left it, since a host's prep command (a Linux desktop
+/// resizing itself to the viewer) runs only at a launch, so a stream at a
+/// new size would be the old desktop scaled, with the mouse moving over
+/// the old one. A Desktop this Mac did not launch, or launched before it
+/// was last opened, is of unknown size.
+fn must_relaunch(
+    current_game: u32,
+    app_id: u32,
+    desktop: bool,
+    restart_capture: bool,
+    launched_at: Option<(u32, u32)>,
+    size: (u32, u32),
+) -> bool {
+    current_game != 0
+        && (current_game != app_id || (desktop && (restart_capture || launched_at != Some(size))))
 }
 
 pub struct Connect {
@@ -663,12 +740,20 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     //    carry.
     report(Step::Launching, "Measuring the path…".into());
     let path = measure_path(&t.node_id, t.ip, &t.path);
-    let settings = path::effective(&c.settings);
+    let mut settings = path::effective(&c.settings);
+    let wanted = settings.resolution.pixels(c.native);
+    let (w, h, fps) = fit_to_host(wanted, settings.fps, t.capture_size, t.max_fps);
+    settings.fps = fps;
     tracing::info!(
-        "path to {}: {} · {}",
+        "path to {}: {} · {}{}",
         t.name,
         path.label(),
-        settings.describe()
+        settings.describe(),
+        if (w, h) != wanted {
+            format!(" · {w} × {h}, the size {} draws", t.name)
+        } else {
+            String::new()
+        }
     );
     report(Step::Launching, "Starting the stream…".into());
     let apps = client.app_list()?;
@@ -679,10 +764,16 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         .or_else(|| apps.iter().find(|a| a.title == "Desktop"))
         .or_else(|| apps.first())
         .ok_or_else(|| anyhow!("{} offers nothing to stream", t.name))?;
-    if info.current_game != 0
-        && (info.current_game != app.id
-            || (c.restart_capture && app.title.eq_ignore_ascii_case("Desktop")))
-    {
+    let desktop = app.title.eq_ignore_ascii_case("Desktop");
+    let launched_at = LAUNCHED.lock().get(&t.node_id).copied();
+    if must_relaunch(
+        info.current_game,
+        app.id,
+        desktop,
+        c.restart_capture,
+        launched_at,
+        (w, h),
+    ) {
         client.quit()?;
         let stopped = Instant::now();
         loop {
@@ -702,8 +793,6 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             std::thread::sleep(Duration::from_millis(250));
         }
     }
-    let (w, h) = settings.resolution.pixels(c.native);
-    let fps = settings.fps;
     let ri_key: [u8; 16] = rand::random();
     let ri_id: u32 = rand::random();
     let mut ri_iv = [0u8; 16];
@@ -718,6 +807,9 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         ri_id,
         info.current_game != 0,
     )?;
+    if desktop {
+        LAUNCHED.lock().insert(t.node_id.clone(), (w, h));
+    }
 
     // 5. Connect.
     if stale(&c.progress, generation) {
@@ -766,9 +858,11 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         started: Instant::now(),
         codec: if hevc { "HEVC" } else { "H.264" },
         requested: (w, h, fps),
+        desktop: fixed_desktop(t.capture_size).filter(|&d| d != (w, h)),
         settings,
         path,
         clipboard: clipboard::Sync::spawn(t.ip, c.ctx.clone()),
+        shortcuts: clipboard::Shortcuts::for_os(&t.os),
     });
     report(Step::Connecting, "Connecting…".into());
     Ok(())
@@ -827,7 +921,9 @@ fn submit_pin(ip: Ipv4Addr, pin: &str, progress: &Mutex<Progress>, ctx: &egui::C
         if progress.lock().cancel {
             return;
         }
-        match http::post_json::<_, Ack>((ip, CONTROL_PORT), "/v1/pin", &req, Duration::from_secs(1))
+        // Latch Host answers once the engine has the PIN: up to a little
+        // over half a second with an engine that holds the post open.
+        match http::post_json::<_, Ack>((ip, CONTROL_PORT), "/v1/pin", &req, Duration::from_secs(3))
         {
             Ok(a) if a.ok => return,
             Ok(a) => {
@@ -895,6 +991,127 @@ pub fn wake_only(pc: &Pc) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_desktop_running_at_another_size_is_launched_again() {
+        const DESKTOP: u32 = 7;
+        let p720 = (1280, 720);
+        // Nothing running: a plain launch.
+        assert!(!must_relaunch(0, DESKTOP, true, true, None, p720));
+        // Launched from here at this size: resumed.
+        assert!(!must_relaunch(
+            DESKTOP,
+            DESKTOP,
+            true,
+            false,
+            Some(p720),
+            p720
+        ));
+        // At another size, or at a size this Mac does not know: launched
+        // again, so the PC's display follows the new size.
+        assert!(must_relaunch(
+            DESKTOP,
+            DESKTOP,
+            true,
+            false,
+            Some((3024, 1964)),
+            p720
+        ));
+        assert!(must_relaunch(DESKTOP, DESKTOP, true, false, None, p720));
+        // A broken capture, or another app, always.
+        assert!(must_relaunch(
+            DESKTOP,
+            DESKTOP,
+            true,
+            true,
+            Some(p720),
+            p720
+        ));
+        assert!(must_relaunch(9, DESKTOP, true, false, Some(p720), p720));
+        // A game is never ended for a size change.
+        assert!(!must_relaunch(9, 9, false, false, None, p720));
+        assert!(!must_relaunch(9, 9, false, true, None, p720));
+    }
+
+    #[test]
+    fn a_fixed_desktop_is_asked_for_at_its_own_size_and_frame_rate() {
+        // A VPS draws 1920 × 1080 and encodes in software on two cores.
+        let vps = (Some([1920, 1080]), 30);
+        assert_eq!(
+            fit_to_host((2284, 1208), 60, vps.0, vps.1),
+            (1920, 1080, 30)
+        );
+        assert_eq!(
+            fit_to_host((1920, 1080), 30, vps.0, vps.1),
+            (1920, 1080, 30)
+        );
+        assert_eq!(
+            fit_to_host((3840, 2160), 24, vps.0, vps.1),
+            (1920, 1080, 24)
+        );
+        assert_eq!(
+            fit_to_host((2560, 1080), 30, vps.0, vps.1),
+            (1920, 1080, 30),
+            "wider than the desktop is scaling up too"
+        );
+        // A smaller size is scaled down, and fewer pixels keep up with more
+        // frames: 720p is 2.25 times fewer than 1080p.
+        assert_eq!(fit_to_host((1280, 720), 60, vps.0, vps.1), (1280, 720, 60));
+        assert_eq!(fit_to_host((1600, 900), 60, vps.0, vps.1), (1600, 900, 43));
+        assert_eq!(fit_to_host((960, 540), 144, vps.0, vps.1), (960, 540, 120));
+        // A desktop that takes the viewer's size: the ceiling is for 1080p.
+        let follows = (None, 30);
+        assert_eq!(
+            fit_to_host((1280, 720), 60, follows.0, follows.1),
+            (1280, 720, 60)
+        );
+        assert_eq!(
+            fit_to_host((1920, 1080), 60, follows.0, follows.1),
+            (1920, 1080, 30)
+        );
+        assert_eq!(
+            fit_to_host((3024, 1964), 60, follows.0, follows.1),
+            (3024, 1964, 30),
+            "a larger picture keeps the host's ceiling"
+        );
+        // A Windows PC matches the viewer's size itself and has no ceiling.
+        assert_eq!(fit_to_host((2284, 1208), 60, None, 0), (2284, 1208, 60));
+        // Nonsense from a host is ignored.
+        assert_eq!(
+            fit_to_host((1920, 1080), 60, Some([0, 0]), 0),
+            (1920, 1080, 60)
+        );
+        assert_eq!(
+            fit_to_host((1920, 1080), 60, Some([100_000, 1080]), 0),
+            (1920, 1080, 60)
+        );
+    }
+
+    #[test]
+    fn a_target_carries_the_hosts_limits_and_os() {
+        let pc = Pc {
+            node_id: "n".into(),
+            name: "artemis".into(),
+            os: "linux".into(),
+            ip: Some("100.64.0.9".parse().unwrap()),
+            online: true,
+            host: Some(Status {
+                streamer: latch_core::api::Streamer {
+                    capture_size: Some([1920, 1080]),
+                    max_fps: 30,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let t = Target::from_pc(&pc).unwrap();
+        assert_eq!(t.os, "linux");
+        assert_eq!(t.capture_size, Some([1920, 1080]));
+        assert_eq!(t.max_fps, 30);
+        let old = Target::from_pc(&Pc { host: None, ..pc }).unwrap();
+        assert_eq!((old.capture_size, old.max_fps), (None, 0));
+    }
 
     #[test]
     fn update_reservation_blocks_connect_in_every_idle_state() {
@@ -988,6 +1205,132 @@ mod tests {
     }
 
     /// `cargo test -p latch-client scan_real -- --ignored --nocapture`
+    /// Connects to `LATCH_TEST_PC` (its Tailscale name) through the
+    /// window's own path, once for each of `LATCH_TEST_RESOLUTIONS` in turn
+    /// ("540p,720p,1080p,native"), with this Mac's identity and pairing, and
+    /// leaves the PC's Desktop running as the window does. At each size it
+    /// puts the PC's pointer at the stream's centre and a quarter in, then
+    /// moves it 100 stream pixels right, running `LATCH_TEST_PROBE` (a shell
+    /// command, say one that prints the pointer and the display size over
+    /// ssh) after each step.
+    #[test]
+    #[ignore = "needs Tailscale and a paired PC"]
+    fn connect_real() {
+        use crate::config::{Quality, Resolution};
+        let _ = tracing_subscriber::fmt().with_target(false).try_init();
+        let name = std::env::var("LATCH_TEST_PC").expect("LATCH_TEST_PC");
+        let probe = || {
+            let Ok(cmd) = std::env::var("LATCH_TEST_PROBE") else {
+                return;
+            };
+            std::thread::sleep(Duration::from_millis(400));
+            let out = std::process::Command::new("sh")
+                .args(["-c", &cmd])
+                .output()
+                .expect("probe");
+            eprint!("    probe: {}", String::from_utf8_lossy(&out.stdout));
+        };
+        let list = std::env::var("LATCH_TEST_RESOLUTIONS").unwrap_or_else(|_| "720p".into());
+        for label in list.split(',') {
+            let resolution = Resolution::ALL
+                .into_iter()
+                .find(|r| r.label() == label || (label == "native" && *r == Resolution::Native))
+                .unwrap_or_else(|| panic!("no resolution {label}"));
+            // Afresh each time, as the window does, so a pairing made by the
+            // first connect is used by the next.
+            let cfg = ClientConfig::load();
+            let discovery = scan(&cfg);
+            let pc = discovery
+                .pcs
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("{name} is not on the tailnet"));
+            let c = Connect {
+                target: Target::from_pc(pc).expect("target"),
+                settings: StreamSettings {
+                    quality: Quality::Custom,
+                    resolution,
+                    fps: 60,
+                    bitrate_kbps: 10_000,
+                    ..cfg.stream.clone()
+                },
+                restart_capture: false,
+                native: (3024, 1964),
+                progress: Arc::default(),
+                live: Arc::default(),
+                ctx: egui::Context::default(),
+            };
+            let generation = NEXT_CONNECT.fetch_add(1, Ordering::Relaxed);
+            c.progress.lock().generation = generation;
+            run(&c, generation).expect("connect");
+            let live = c.live.lock().take().expect("a stream");
+            let start = Instant::now();
+            loop {
+                match live.events.recv_timeout(Duration::from_secs(20)) {
+                    Ok(Event::Connected) => break,
+                    Ok(Event::Failed { .. } | Event::Terminated { .. }) | Err(_) => {
+                        panic!("no stream at {label}")
+                    }
+                    Ok(_) => {}
+                }
+            }
+            let (w, h, fps) = live.requested;
+            eprintln!(
+                "{label}: asked {w}x{h} at {fps} fps, desktop {:?}, connected in {:?}",
+                live.desktop,
+                start.elapsed()
+            );
+            std::thread::sleep(Duration::from_secs(2));
+            let (iw, ih) = (w as i16, h as i16);
+            eprintln!("  pointer to the centre, {}x{}", w / 2, h / 2);
+            live.input.mouse_position(iw / 2, ih / 2, iw, ih);
+            probe();
+            eprintln!("  pointer to a quarter in, {}x{}", w / 4, h / 4);
+            live.input.mouse_position(iw / 4, ih / 4, iw, ih);
+            probe();
+            eprintln!("  100 stream pixels right, in steps of 10");
+            for _ in 0..10 {
+                live.input.mouse_move(10, 0);
+                std::thread::sleep(Duration::from_millis(16));
+            }
+            probe();
+            eprintln!("  100 stream pixels right at once");
+            live.input.mouse_move(100, 0);
+            probe();
+            // Letters, digits and spaces as key presses, then Return.
+            if let Ok(line) = std::env::var("LATCH_TEST_TYPE") {
+                eprintln!("  typing {line:?}");
+                for c in line.chars().map(|c| c.to_ascii_uppercase()) {
+                    assert!(c.is_ascii_alphanumeric() || c == ' ', "can't type {c:?}");
+                    for down in [true, false] {
+                        live.input.key(c as i16, down, 0);
+                        std::thread::sleep(Duration::from_millis(15));
+                    }
+                }
+                for down in [true, false] {
+                    live.input.key(crate::input::VK_RETURN, down, 0);
+                }
+                probe();
+            }
+            let seconds: u64 =
+                std::env::var("LATCH_TEST_SECONDS").map_or(0, |s| s.parse().expect("seconds"));
+            for second in 1..=seconds {
+                std::thread::sleep(Duration::from_secs(1));
+                let s = live.session.stats();
+                eprintln!(
+                    "  {second:>2}s {:.1} fps, {:.1} Mbps, loss {:.1}%, host {:.1} ms",
+                    s.fps, s.mbps, s.loss_pct, s.host_ms
+                );
+            }
+            live.session.stop();
+            let t = Instant::now();
+            while !live.session.finished() && t.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            drop(live);
+        }
+    }
+
     #[test]
     #[ignore = "needs Tailscale"]
     fn scan_real_tailnet() {

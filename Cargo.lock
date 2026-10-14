@@ -2176,6 +2176,7 @@ dependencies = [
  "tracing-subscriber",
  "windows 0.58.0",
  "winresource",
+ "x11rb",
 ]
 
 [[package]]

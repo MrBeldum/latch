@@ -105,6 +105,46 @@ pub const ENGINE_CONF: &[(&str, &str)] = &[
     ("vt_realtime", "enabled"),
 ];
 
+/// What Linux changes in [`ENGINE_CONF`]. Latch's Linux hosts are VPS
+/// desktops that encode in software.
+///
+/// Sunshine's X11 capture hands the encoder a picture every frame interval
+/// whether or not anything moved, so a frame-rate floor above the stream's
+/// rate can only re-encode the last picture: whenever a frame is done in
+/// under 16.7 ms (a still desktop on an idle core), a 60 fps floor encodes
+/// the same picture again before the next one arrives, up to doubling the
+/// work under a 30 fps stream. 0 is the engine's own default, half the
+/// stream's rate, which periodic capture never falls below.
+///
+/// The viewer asks a small CPU for 30 fps (see `streamer::max_fps`): on a
+/// two-core Ampere VPS Sunshine took 136% CPU for a still desktop at 60 fps
+/// and 78% for a busier one at 30. That leaves room for superfast: on an Ampere core it took 17.1 ms a
+/// 1080p frame of scrolling text against ultrafast's 14.4 ms, and at
+/// 20 Mbps its keyframes came out at QP 21 instead of 38 (Y PSNR 35.1 dB
+/// against 31.8): text stays legible after every keyframe the viewer asks
+/// for, instead of smearing until the next frames repair it.
+pub const LINUX_ENGINE_CONF: &[(&str, &str)] =
+    &[("minimum_fps_target", "0"), ("sw_preset", "superfast")];
+
+/// [`ENGINE_CONF`], with [`LINUX_ENGINE_CONF`] in place when `linux`.
+pub fn engine_conf_for(linux: bool) -> Vec<(&'static str, &'static str)> {
+    ENGINE_CONF
+        .iter()
+        .map(|&(k, v)| {
+            let linux_value = LINUX_ENGINE_CONF
+                .iter()
+                .find(|(n, _)| linux && *n == k)
+                .map(|&(_, v)| v);
+            (k, linux_value.unwrap_or(v))
+        })
+        .collect()
+}
+
+/// The engine keys for this machine's platform.
+pub fn engine_conf() -> Vec<(&'static str, &'static str)> {
+    engine_conf_for(cfg!(target_os = "linux"))
+}
+
 /// The only streamable app Latch launches. Upstream ships extra entries
 /// (Steam, a low-res desktop) that would show as a second product.
 pub const DESKTOP_APPS_JSON: &str = r#"{
@@ -127,21 +167,26 @@ fn conf_key(line: &str) -> Option<&str> {
     (!k.is_empty()).then_some(k)
 }
 
-/// Upsert `ENGINE_CONF` into an existing sunshine.conf. Known keys are
-/// replaced in place (first occurrence wins, later copies of those keys
-/// dropped); everything else is kept. Sunshine's parser uses `emplace`, so
-/// a naive append would leave an old `system_tray = enabled` in force.
+/// Upsert this platform's [`engine_conf`] into an existing sunshine.conf.
+/// Known keys are replaced in place (first occurrence wins, later copies of
+/// those keys dropped); everything else is kept. Sunshine's parser uses
+/// `emplace`, so a naive append would leave an old `system_tray = enabled`
+/// in force.
 pub fn conceal_conf(existing: &str) -> String {
+    conceal_conf_with(existing, &engine_conf())
+}
+
+fn conceal_conf_with(existing: &str, conf: &[(&str, &str)]) -> String {
     let existing = existing.strip_prefix('\u{feff}').unwrap_or(existing);
-    let mut seen = [false; ENGINE_CONF.len()];
+    let mut seen = vec![false; conf.len()];
     let mut out = String::new();
     if !existing.trim().is_empty() {
         for line in existing.lines() {
-            match conf_key(line).and_then(|k| ENGINE_CONF.iter().position(|(n, _)| *n == k)) {
+            match conf_key(line).and_then(|k| conf.iter().position(|(n, _)| *n == k)) {
                 Some(i) if seen[i] => continue,
                 Some(i) => {
                     seen[i] = true;
-                    let (n, v) = ENGINE_CONF[i];
+                    let (n, v) = conf[i];
                     out.push_str(n);
                     out.push_str(" = ");
                     out.push_str(v);
@@ -154,7 +199,7 @@ pub fn conceal_conf(existing: &str) -> String {
             }
         }
     }
-    for (i, (n, v)) in ENGINE_CONF.iter().enumerate() {
+    for (i, (n, v)) in conf.iter().enumerate() {
         if !seen[i] {
             out.push_str(n);
             out.push_str(" = ");
@@ -1110,6 +1155,7 @@ mod tests {
             "after the engine, before the power steps"
         );
         assert!(s.contains("@(3024,1964)"), "{s}");
+        assert!(s.contains("@(1280,720)"), "{s}");
         assert!(s.contains("pnputil /restart-device"), "{s}");
         let dry = script(&Plan {
             dry_run: true,
@@ -1281,6 +1327,29 @@ system_tray = enabled
         assert_eq!(key_hits(&got, "system_tray"), 1, "{got}");
         assert_eq!(key_hits(&got, "origin_web_ui_allowed"), 1, "{got}");
         assert_eq!(conceal_conf(&got), got);
+    }
+
+    #[test]
+    fn linux_engines_get_no_frame_rate_floor_and_others_keep_theirs() {
+        fn get(conf: &[(&'static str, &'static str)], key: &str) -> Option<&'static str> {
+            conf.iter().find(|(k, _)| *k == key).map(|&(_, v)| v)
+        }
+        for (k, _) in LINUX_ENGINE_CONF {
+            assert!(get(ENGINE_CONF, k).is_some(), "{k} overrides nothing");
+        }
+        let linux = engine_conf_for(true);
+        let other = engine_conf_for(false);
+        assert_eq!(linux.len(), ENGINE_CONF.len());
+        assert_eq!(other, ENGINE_CONF);
+        assert_eq!(get(&linux, "minimum_fps_target"), Some("0"));
+        assert_eq!(get(&other, "minimum_fps_target"), Some("60"));
+        assert_eq!(get(&linux, "sw_preset"), Some("superfast"));
+        assert_eq!(get(&other, "sw_preset"), Some("ultrafast"));
+        assert_eq!(get(&linux, "sw_tune"), Some("zerolatency"));
+        let conf = conceal_conf_with("minimum_fps_target = 60\ncapture = x11\n", &linux);
+        assert_eq!(key_hits(&conf, "minimum_fps_target"), 1, "{conf}");
+        assert!(conf.contains("minimum_fps_target = 0"), "{conf}");
+        assert!(conf.contains("capture = x11"), "{conf}");
     }
 
     #[test]

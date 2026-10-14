@@ -56,6 +56,9 @@ pub struct Clipboard {
     pub seq: u64,
     /// The text was cut to [`CLIPBOARD_MAX_BYTES`].
     pub truncated: bool,
+    /// A write also sets the X selection (PRIMARY), so Shift+Insert pastes
+    /// it in a terminal. Linux hosts newer than 4.1.1; false from any other.
+    pub selection: bool,
 }
 
 impl Clipboard {
@@ -69,6 +72,7 @@ impl Clipboard {
             text: text[..end].to_string(),
             seq,
             truncated: end < text.len(),
+            selection: false,
         }
     }
 }
@@ -157,6 +161,19 @@ pub struct Streamer {
     /// with no monitor or speakers has no audio device, and Sunshine then
     /// streams silence.
     pub audio_problem: String,
+    /// The desktop the engine captures, `[width, height]`, when its size is
+    /// fixed whatever a viewer asks for: a Linux X screen. Absent when the
+    /// host matches the viewer's size itself (Windows' virtual display), and
+    /// from 4.1.1 and older hosts. A viewer asks for no more than this size:
+    /// a larger one is the same picture scaled up, blurrier and dearer to
+    /// encode; a smaller one is scaled down and cheaper.
+    pub capture_size: Option<[u32; 2]>,
+    /// The highest frame rate the engine keeps up with on this machine at
+    /// `capture_size`, or at 1920 × 1080 when that is absent; 0 when
+    /// nothing limits it. Set for software encoding on a small CPU, where
+    /// asking for more only drops frames. A viewer asking for fewer pixels
+    /// raises it in proportion.
+    pub max_fps: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,6 +250,21 @@ mod tests {
     }
 
     #[test]
+    fn an_older_host_reports_no_capture_size_or_frame_rate_limit() {
+        let s: Status =
+            serde_json::from_str(r#"{"streamer":{"running":true,"encoder":"software"}}"#).unwrap();
+        assert_eq!(s.streamer.capture_size, None);
+        assert_eq!(s.streamer.max_fps, 0);
+        let mut s = s;
+        s.streamer.capture_size = Some([1920, 1080]);
+        s.streamer.max_fps = 30;
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""capture_size":[1920,1080]"#), "{json}");
+        let back: Status = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
     fn power_actions_are_lowercase_on_the_wire() {
         let r = PowerRequest {
             action: PowerAction::Shutdown,
@@ -244,6 +276,13 @@ mod tests {
         let r: PowerRequest = serde_json::from_str(r#"{"action":"sleep"}"#).unwrap();
         assert_eq!(r.action, PowerAction::Sleep);
         assert!(serde_json::from_str::<PowerRequest>(r#"{"action":"Sleep"}"#).is_err());
+    }
+
+    #[test]
+    fn an_older_hosts_clipboard_does_not_claim_the_selection() {
+        let c: Clipboard = serde_json::from_str(r#"{"text":"x","seq":1}"#).unwrap();
+        assert!(!c.selection);
+        assert!(!Clipboard::fit("x", 1).selection);
     }
 
     #[test]

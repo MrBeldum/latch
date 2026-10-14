@@ -38,17 +38,22 @@ startxfce4 >/var/log/xfce.log 2>&1 &
 sleep 1
 
 CONF=/root/.config/sunshine/sunshine.conf
+# X11 capture delivers a picture every frame interval, so a frame-rate floor
+# above the stream's rate can only re-encode the last picture: 0 is
+# Sunshine's default (half the stream's rate). superfast keeps keyframe text legible at
+# the 30 fps a small CPU is asked for. Latch Host keeps the same keys current
+# (crates/host/src/setup.rs, ENGINE_CONF and LINUX_ENGINE_CONF).
 cat >"$CONF" <<'EOF'
 system_tray = disabled
 origin_web_ui_allowed = pc
 credentials_file = /root/.config/sunshine/latch-web.json
 max_bitrate = 0
-minimum_fps_target = 60
+minimum_fps_target = 0
 fec_percentage = 20
 packetsize = 1184
 amd_rc = cbr
 vaapi_rc = cbr
-sw_preset = ultrafast
+sw_preset = superfast
 sw_tune = zerolatency
 min_threads = 4
 capture = x11

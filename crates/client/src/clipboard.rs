@@ -8,7 +8,12 @@
 //! the Mac's clipboard; and a paste first sends the Mac's text to the PC,
 //! then presses Ctrl+V there. Hosts before 3.1 have no such route; the
 //! worker notices the 404 and says so once.
+//!
+//! A Linux desktop is sent the X11 shortcuts instead (see [`Shortcuts`]):
+//! in its terminals Ctrl+C interrupts the running program and Ctrl+V types
+//! a literal, so ⌘C and ⌘V did harm there instead of copying.
 
+use crate::input::{VK_C, VK_CONTROL, VK_DELETE, VK_INSERT, VK_SHIFT, VK_V, VK_X};
 use latch_core::api::{Ack, Clipboard, CLIPBOARD_PATH};
 use latch_core::{http, CONTROL_PORT};
 use parking_lot::Mutex;
@@ -23,6 +28,59 @@ const POLL: Duration = Duration::from_millis(1500);
 const POKE_DELAY: Duration = Duration::from_millis(400);
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// A clipboard shortcut pressed on the Mac and replayed on the PC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edit {
+    Copy,
+    Cut,
+    Paste,
+}
+
+/// How the PC spells copy, cut and paste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Shortcuts {
+    /// What ⌘ stands for there (Ctrl, or the Windows key) with C, X or V:
+    /// Windows and macOS.
+    #[default]
+    Letters,
+    /// Ctrl+Insert, Shift+Delete and Shift+Insert: the X11 shortcuts GTK,
+    /// Qt, Firefox, Chromium, Electron and the terminals all honour. Ctrl+C
+    /// in a terminal interrupts the running program and Ctrl+V types a
+    /// literal. Shift+Insert pastes the selection in xterm and VTE
+    /// terminals, which is why Latch Host puts pasted text in both (and
+    /// why paste stays Ctrl+V with a host that does not say it does).
+    Insert,
+}
+
+impl Shortcuts {
+    /// From Tailscale's OS string for the PC.
+    pub fn for_os(os: &str) -> Self {
+        if os.eq_ignore_ascii_case("linux") {
+            Shortcuts::Insert
+        } else {
+            Shortcuts::Letters
+        }
+    }
+
+    /// The chord for `edit`, given what ⌘ stands for on the PC, and whether
+    /// it must arrive without other held modifiers: ⌘ held as Ctrl would
+    /// turn Shift+Insert into Ctrl+Shift+Insert. `selection` is whether the
+    /// host puts pasted text in the X selection; a Linux host that does not
+    /// (4.1.1 and older) keeps Ctrl+V for paste, since Shift+Insert in a
+    /// terminal would paste whatever was last selected there.
+    pub fn keys(self, edit: Edit, modifier: i16, selection: bool) -> (Vec<i16>, bool) {
+        match (self, edit) {
+            (Shortcuts::Insert, Edit::Paste) if !selection => (vec![modifier, VK_V], false),
+            (Shortcuts::Letters, Edit::Copy) => (vec![modifier, VK_C], false),
+            (Shortcuts::Letters, Edit::Cut) => (vec![modifier, VK_X], false),
+            (Shortcuts::Letters, Edit::Paste) => (vec![modifier, VK_V], false),
+            (Shortcuts::Insert, Edit::Copy) => (vec![VK_CONTROL, VK_INSERT], true),
+            (Shortcuts::Insert, Edit::Cut) => (vec![VK_SHIFT, VK_DELETE], true),
+            (Shortcuts::Insert, Edit::Paste) => (vec![VK_SHIFT, VK_INSERT], true),
+        }
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     /// Text the PC copied that the window has not taken yet.
@@ -32,6 +90,8 @@ struct Shared {
     last_seq: Option<u64>,
     /// The host answered 404: older than 3.1.
     unsupported: bool,
+    /// The host puts pasted text in the X selection too (`Clipboard::selection`).
+    selection: bool,
     /// Something the window can show about the last exchange.
     note: Option<(String, Instant)>,
     pokes: u32,
@@ -81,6 +141,12 @@ impl Sync {
 
     pub fn unsupported(&self) -> bool {
         self.shared.lock().unsupported
+    }
+
+    /// Whether the host has said it puts pasted text in the X selection,
+    /// which is what makes Shift+Insert paste it in a terminal.
+    pub fn pastes_to_selection(&self) -> bool {
+        self.shared.lock().selection
     }
 
     /// A short line for the toolbar, while it is fresh.
@@ -201,6 +267,7 @@ fn poll_loop(ip: Ipv4Addr, shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool>, ct
             Ok(c) => {
                 failures = 0;
                 let mut sh = shared.lock();
+                sh.selection = c.selection;
                 if !primed {
                     // The PC's existing clipboard is not a copy that happened
                     // during this stream. Seed last/seq so we do not overwrite
@@ -256,6 +323,48 @@ pub fn worth_sending(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_linux_pc_gets_the_insert_shortcuts_and_the_rest_keep_the_letters() {
+        use crate::input::VK_LWIN;
+        assert_eq!(Shortcuts::for_os("linux"), Shortcuts::Insert);
+        assert_eq!(Shortcuts::for_os("windows"), Shortcuts::Letters);
+        assert_eq!(Shortcuts::for_os("macOS"), Shortcuts::Letters);
+        assert_eq!(Shortcuts::for_os(""), Shortcuts::Letters);
+        let linux = Shortcuts::Insert;
+        assert_eq!(
+            linux.keys(Edit::Copy, VK_LWIN, true),
+            (vec![VK_CONTROL, VK_INSERT], true)
+        );
+        assert_eq!(
+            linux.keys(Edit::Cut, VK_CONTROL, true),
+            (vec![VK_SHIFT, VK_DELETE], true)
+        );
+        assert_eq!(
+            linux.keys(Edit::Paste, VK_CONTROL, true),
+            (vec![VK_SHIFT, VK_INSERT], true)
+        );
+        // A host that leaves the selection alone: Shift+Insert would paste
+        // the terminal's last selection, so paste stays Ctrl+V. Copy and
+        // cut need nothing from the host.
+        assert_eq!(
+            linux.keys(Edit::Paste, VK_CONTROL, false),
+            (vec![VK_CONTROL, VK_V], false)
+        );
+        assert_eq!(
+            linux.keys(Edit::Copy, VK_CONTROL, false),
+            (vec![VK_CONTROL, VK_INSERT], true)
+        );
+        let windows = Shortcuts::Letters;
+        assert_eq!(
+            windows.keys(Edit::Copy, VK_CONTROL, true),
+            (vec![VK_CONTROL, VK_C], false)
+        );
+        assert_eq!(
+            windows.keys(Edit::Paste, VK_LWIN, false),
+            (vec![VK_LWIN, VK_V], false)
+        );
+    }
 
     #[test]
     fn a_push_of_the_same_text_runs_the_paste_at_once() {

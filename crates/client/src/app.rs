@@ -2154,6 +2154,7 @@ pub(crate) mod snapshots {
                 api_ok: true,
                 encoder: "nvenc".into(),
                 audio_problem: String::new(),
+                ..Default::default()
             },
             ..Default::default()
         }

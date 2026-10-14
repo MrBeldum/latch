@@ -18,14 +18,12 @@ if [[ -z "$BIN" ]]; then
   echo "build the app first: cargo build --release -p latch-host" >&2
   exit 1
 fi
-APP="$ROOT/dist/Latch.app"
+# Spotlight excludes .noindex folders, so this build copy stays out of app search.
+APP="$ROOT/dist.noindex/Latch.app"
 # The workspace version, so the bundle cannot drift from the binary inside it.
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-# dist/ is a staging copy. Keep Spotlight from listing it next to
-# /Applications/Latch.app.
-touch "$ROOT/dist/.metadata_never_index"
 cp "$BIN" "$APP/Contents/MacOS/Latch"
 chmod +x "$APP/Contents/MacOS/Latch"
 # The Finder/Dock icon: the ink tile with the logo knocked out, built by

@@ -10,7 +10,7 @@
 //! menus and the panels are only laid out while they show, and every
 //! timed notice asks for a bounded, slow repaint only while it is up.
 
-use crate::clipboard;
+use crate::clipboard::{self, Edit};
 use crate::config::{ClientConfig, StreamSettings};
 use crate::input::{self, press_chord, Held};
 use crate::path::Path;
@@ -1079,13 +1079,13 @@ impl View {
         let ppp = ctx.pixels_per_point();
         let motion_scale = {
             let stats = live.session.stats();
-            let stream_w = if stats.width > 0 {
-                stats.width as f32
+            let stream = if stats.width > 0 && stats.height > 0 {
+                (stats.width, stats.height)
             } else {
-                live.requested.0 as f32
+                (live.requested.0, live.requested.1)
             };
             if video.width() >= 1.0 {
-                stream_w / video.width()
+                stream.0 as f32 / video.width() * desktop_per_stream_pixel(live.desktop, stream)
             } else {
                 ppp
             }
@@ -1150,11 +1150,11 @@ impl View {
                     }
                 }
                 Event::Copy if keys_to_pc => {
-                    self.clipboard_chord(live, input::VK_C, cfg);
+                    self.clipboard_chord(live, Edit::Copy, cfg);
                     live.clipboard.poke();
                 }
                 Event::Cut if keys_to_pc => {
-                    self.clipboard_chord(live, input::VK_X, cfg);
+                    self.clipboard_chord(live, Edit::Cut, cfg);
                     live.clipboard.poke();
                 }
                 Event::Paste(text) if keys_to_pc => {
@@ -1162,7 +1162,11 @@ impl View {
                     // what was copied here, not what it had. The chord is
                     // sent whole: by the time the text has crossed the
                     // network a quick tap has let go of ⌘.
-                    let keys = vec![self.clipboard_modifier(cfg), input::VK_V];
+                    let (keys, alone) = live.shortcuts.keys(
+                        Edit::Paste,
+                        self.clipboard_modifier(cfg),
+                        live.clipboard.pastes_to_selection(),
+                    );
                     let mask = self.held.mask();
                     let handle = input.clone();
                     let text = if clipboard::worth_sending(&text) {
@@ -1170,8 +1174,13 @@ impl View {
                     } else {
                         String::new()
                     };
-                    live.clipboard
-                        .push(text, move || press_chord(&handle, &keys, mask));
+                    live.clipboard.push(text, move || {
+                        if alone {
+                            input::press_chord_alone(&handle, &keys, mask);
+                        } else {
+                            press_chord(&handle, &keys, mask);
+                        }
+                    });
                 }
                 Event::PointerMoved(p) if !self.captured && over_video => position = Some(p),
                 Event::MouseMoved(d) if self.captured => {
@@ -1251,9 +1260,17 @@ impl View {
 
     /// egui swallows Cmd/Ctrl+C/X/V into clipboard events; replay them as
     /// the key chord the PC expects.
-    fn clipboard_chord(&mut self, live: &Live, vk: i16, cfg: &ClientConfig) {
-        let modifier = self.clipboard_modifier(cfg);
-        self.held.chord(&live.input, &[modifier, vk]);
+    fn clipboard_chord(&mut self, live: &Live, edit: Edit, cfg: &ClientConfig) {
+        let (keys, alone) = live.shortcuts.keys(
+            edit,
+            self.clipboard_modifier(cfg),
+            live.clipboard.pastes_to_selection(),
+        );
+        if alone {
+            self.held.chord_alone(&live.input, &keys);
+        } else {
+            self.held.chord(&live.input, &keys);
+        }
     }
 }
 
@@ -1291,6 +1308,19 @@ pub fn fit(area: Rect, aspect: f32) -> Rect {
         (area.width(), area.width() / aspect)
     };
     Rect::from_center_size(area.center(), Vec2::new(w.floor(), h.floor()))
+}
+
+/// How many of the PC's desktop pixels one stream pixel stands for. 1
+/// unless the desktop is a fixed size the stream shrinks, keeping its
+/// proportions, to fit inside; relative mouse movement lands in the
+/// desktop's pixels, so it is scaled by this too.
+fn desktop_per_stream_pixel(desktop: Option<(u32, u32)>, stream: (u32, u32)) -> f32 {
+    match desktop {
+        Some((dw, dh)) if stream.0 > 0 && stream.1 > 0 => {
+            (dw as f32 / stream.0 as f32).max(dh as f32 / stream.1 as f32)
+        }
+        _ => 1.0,
+    }
 }
 
 /// The quality profile a stream runs at, named as Settings names it.
@@ -1358,6 +1388,20 @@ pub(crate) mod tests {
             16.0 / 9.0,
         );
         assert_eq!(tall.width(), 800.0);
+    }
+
+    #[test]
+    fn mouse_movement_crosses_a_scaled_desktop_at_the_desktops_scale() {
+        assert_eq!(desktop_per_stream_pixel(None, (1280, 720)), 1.0);
+        // 720p of a fixed 1080p desktop: each stream pixel is 1.5 of its.
+        assert_eq!(
+            desktop_per_stream_pixel(Some((1920, 1080)), (1280, 720)),
+            1.5
+        );
+        // A 16:10 desktop in a 16:9 stream is fitted by its height.
+        let s = desktop_per_stream_pixel(Some((1920, 1200)), (1280, 720));
+        assert!((s - 1200.0 / 720.0).abs() < 1e-6, "{s}");
+        assert_eq!(desktop_per_stream_pixel(Some((1920, 1080)), (0, 0)), 1.0);
     }
 
     #[test]
@@ -1476,9 +1520,11 @@ pub(crate) mod tests {
             started: Instant::now(),
             codec: "HEVC",
             requested: (1920, 1080, 60),
+            desktop: None,
             settings,
             path,
             clipboard: crate::clipboard::Sync::spawn(ip, ctx.clone()),
+            shortcuts: Default::default(),
         }
     }
 
@@ -1998,6 +2044,35 @@ pub(crate) mod tests {
             save(
                 h.render().unwrap(),
                 &file_name("stream", "fps-open", min, ppp),
+            );
+            // The resolution list, the first select in the panel, reaches 4K.
+            let view = View {
+                settings: Some(ClientConfig::default().stream),
+                ..view_with_bar()
+            };
+            let mut h = harness_with(min, ppp, true, fixture(view, windows_old_host()));
+            for _ in 0..30 {
+                if focused(&h, Role::ComboBox) {
+                    break;
+                }
+                h.press_key(egui::Key::Tab);
+                h.run_steps(1);
+            }
+            assert!(focused(&h, Role::ComboBox), "Tab reaches the select");
+            h.query_all(By::new().predicate(|n| n.is_focused()))
+                .next()
+                .unwrap()
+                .simulate_click();
+            h.run_steps(3);
+            let list = latch_ui::open_menu_rect(&h.ctx).expect("the list is open");
+            assert_inside("the resolution list", list, screen);
+            let last = "4K · 3840 × 2160";
+            tab_to(&mut h, last);
+            let list = latch_ui::open_menu_rect(&h.ctx).expect("Tab keeps the list open");
+            assert_inside(last, node_rect(&h.get_by_label(last)), list);
+            save(
+                h.render().unwrap(),
+                &file_name("stream", "resolution-open", min, ppp),
             );
         }
     }

@@ -25,6 +25,14 @@ The `.service` files in this directory are installed in
 ordering without conflicting with Latch's automatic registration.
 `wait-engine.py` is installed as `/usr/local/libexec/latch-wait-engine.py`.
 
+`latch-engine.service` and `latch-display.service` carry `CPUWeight=1000`:
+the encoder and the X server it copies frames from get ten times the CPU
+share of other user services, which matters on a small VPS that also runs
+agents. Latch Host keeps the engine on the Linux profile
+(`crates/host/src/setup.rs`, `LINUX_ENGINE_CONF`: no frame-rate floor,
+`superfast`) and tells viewers the X screen's size and, on fewer than four
+cores, a 30 fps ceiling.
+
 `latch.service` pulls in `latch-engine.service`,
 `latch-desktop.service`, and `latch-display.service`. PulseAudio runs as
 its standard user service. Check them as `ubuntu`:
@@ -44,6 +52,26 @@ The X server disables TCP and uses an authentication cookie in
 in the `input` group: Sunshine must use its XTest fallback for this Xvfb session.
 Granting `/dev/uinput` access makes input go to kernel devices that Xvfb does not
 consume, resulting in visible video but no functioning mouse or keyboard.
+
+## A desktop that takes the viewer's size
+
+Xvfb cannot change size, so the relay desktop is streamed at 1920x1080 (a
+smaller size the Mac asks for is that desktop scaled down). An X server that
+can resize (Xorg with the dummy driver) can instead switch to each stream's
+size: give Sunshine a `global_prep_cmd` that runs `xrandr` with
+`SUNSHINE_CLIENT_WIDTH` and `SUNSHINE_CLIENT_HEIGHT`, and set
+`LATCH_DISPLAY_FOLLOWS_VIEWER=1` in `latch.service.d/desktop.conf` so Latch
+Host stops reporting a fixed capture size. Use a mode at 60 Hz for every size
+(`xrandr --newmode` with a pixel clock of 60 x htotal x vtotal): the
+compositor and browsers draw at the mode's rate.
+
+That needs Sunshine 2026.1014 or later. Earlier ones send absolute pointer
+positions through an XTest fallback that keeps the screen size it saw at
+startup, so after a resize the pointer lands at that size's scale (twice as
+far at 540p, two thirds as far at a 3024x1964 Match screen). Relative
+movement, and a desktop that stays at its startup size, are fine with any
+version. The Mac launches the Desktop again whenever it asks for another
+size than it last did, since a prep command runs only at a launch.
 
 ## Upgrading from BroLink (before 4.1.0)
 

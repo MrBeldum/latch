@@ -88,7 +88,9 @@ fn main() -> Result<()> {
             e
         });
     }
-    service::ensure_service_running();
+    if service::starts_with_window(&latch_host::config::HostConfig::load()) {
+        service::ensure_service_running();
+    }
     eframe::run_native(
         "Latch",
         latch_client::native_options(),

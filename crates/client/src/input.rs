@@ -13,6 +13,7 @@ pub const VK_SHIFT: i16 = 0x10;
 pub const VK_CONTROL: i16 = 0x11;
 pub const VK_MENU: i16 = 0x12;
 pub const VK_LWIN: i16 = 0x5B;
+pub const VK_INSERT: i16 = 0x2D;
 pub const VK_DELETE: i16 = 0x2E;
 pub const VK_ESCAPE: i16 = 0x1B;
 pub const VK_TAB: i16 = 0x09;
@@ -36,7 +37,7 @@ pub fn vk(key: Key) -> Option<i16> {
         Backspace => 0x08,
         Enter => 0x0D,
         Space => 0x20,
-        Insert => 0x2D,
+        Insert => VK_INSERT,
         Delete => VK_DELETE,
         Home => 0x24,
         End => 0x23,
@@ -128,19 +129,72 @@ pub fn button(b: PointerButton) -> Option<i32> {
     })
 }
 
+/// One key event as Moonlight takes it: the key, down or up, and the
+/// modifier mask sent with it.
+type KeyEvent = (i16, bool, c_char);
+
+/// The modifier keys, in the order their mask bits are listed.
+const MODIFIERS: [i16; 4] = [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN];
+
+fn send(input: &Input, events: &[KeyEvent]) {
+    for &(vk, down, mask) in events {
+        input.key(vk, down, mask);
+    }
+}
+
 /// Press `keys` in order and release them in reverse, with `mask` for the
 /// modifiers already held. Usable from any thread, which is what a paste
 /// that first has to reach the PC's clipboard needs.
 pub fn press_chord(input: &Input, keys: &[i16], mask: c_char) {
+    send(input, &chord_events(keys, mask));
+}
+
+fn chord_events(keys: &[i16], mask: c_char) -> Vec<KeyEvent> {
+    let mut events = Vec::new();
     let mut held = Vec::new();
     for &k in keys {
         held.push(k);
-        input.key(k, true, mask | mask_of(&held));
+        events.push((k, true, mask | mask_of(&held)));
     }
     for &k in keys.iter().rev() {
         held.retain(|&h| h != k);
-        input.key(k, false, mask | mask_of(&held));
+        events.push((k, false, mask | mask_of(&held)));
     }
+    events
+}
+
+/// [`press_chord`] for a chord that must arrive with no other modifier:
+/// those in `mask` that `keys` does not use are let go first, so ⌘ held as
+/// Ctrl does not turn Shift+Insert into Ctrl+Shift+Insert. They stay up;
+/// the window presses a modifier the user still holds back down once the
+/// paste is done (see `clipboard::Sync::pastes_done`).
+pub fn press_chord_alone(input: &Input, keys: &[i16], mask: c_char) {
+    send(input, &alone_events(keys, keys, mask, false));
+}
+
+/// The events that send `keys` with no other modifier down. Modifiers in
+/// `mask` outside `keys` are released first and, with `restore`, pressed
+/// again after; `press` is the part of `keys` to press, all of it when
+/// `mask` may be stale (a worker thread's copy).
+fn alone_events(keys: &[i16], press: &[i16], mask: c_char, restore: bool) -> Vec<KeyEvent> {
+    let others: Vec<i16> = MODIFIERS
+        .into_iter()
+        .filter(|&vk| mask & mask_of(&[vk]) != 0 && !keys.contains(&vk))
+        .collect();
+    let mut mask = mask;
+    let mut events = Vec::new();
+    for &vk in &others {
+        mask &= !mask_of(&[vk]);
+        events.push((vk, false, mask));
+    }
+    events.extend(chord_events(press, mask));
+    if restore {
+        for &vk in &others {
+            mask |= mask_of(&[vk]);
+            events.push((vk, true, mask));
+        }
+    }
+    events
 }
 
 fn mask_of(keys: &[i16]) -> c_char {
@@ -240,6 +294,17 @@ impl Held {
         press_chord(input, &fresh, self.mask());
     }
 
+    /// [`Held::chord`] for a chord that must arrive with no other modifier:
+    /// held modifiers it does not use are let go for it and pressed again
+    /// after, so the PC ends up holding what the user holds.
+    pub fn chord_alone(&mut self, input: &Input, keys: &[i16]) {
+        send(input, &self.chord_alone_events(keys));
+    }
+
+    fn chord_alone_events(&self, keys: &[i16]) -> Vec<KeyEvent> {
+        alone_events(keys, &self.chord_plan(keys), self.mask(), true)
+    }
+
     /// The keys of `keys` a chord would have to press: those not held.
     pub fn chord_plan(&self, keys: &[i16]) -> Vec<i16> {
         keys.iter()
@@ -329,6 +394,73 @@ mod tests {
         );
         assert_eq!(mask_of(&[VK_LWIN]), MODIFIER_META);
         assert_eq!(mask_of(&[VK_C]), 0);
+    }
+
+    #[test]
+    fn a_chord_alone_lets_go_of_other_modifiers_and_restores_them() {
+        // ⌘ is down as Ctrl. Copy on Linux is Ctrl+Insert: Ctrl stays down.
+        let mut held = Held::default();
+        held.keys.insert(VK_CONTROL);
+        assert_eq!(
+            held.chord_alone_events(&[VK_CONTROL, VK_INSERT]),
+            vec![
+                (VK_INSERT, true, MODIFIER_CTRL),
+                (VK_INSERT, false, MODIFIER_CTRL)
+            ]
+        );
+        // Cut is Shift+Delete: Ctrl+Shift+Delete would be another shortcut
+        // (Firefox clears history), so Ctrl goes up for it and back down.
+        assert_eq!(
+            held.chord_alone_events(&[VK_SHIFT, VK_DELETE]),
+            vec![
+                (VK_CONTROL, false, 0),
+                (VK_SHIFT, true, MODIFIER_SHIFT),
+                (VK_DELETE, true, MODIFIER_SHIFT),
+                (VK_DELETE, false, MODIFIER_SHIFT),
+                (VK_SHIFT, false, 0),
+                (VK_CONTROL, true, MODIFIER_CTRL),
+            ]
+        );
+        // ⌘ as the Windows key: Super+Ctrl+Insert would copy nothing.
+        let mut held = Held::default();
+        held.keys.insert(VK_LWIN);
+        assert_eq!(
+            held.chord_alone_events(&[VK_CONTROL, VK_INSERT]),
+            vec![
+                (VK_LWIN, false, 0),
+                (VK_CONTROL, true, MODIFIER_CTRL),
+                (VK_INSERT, true, MODIFIER_CTRL),
+                (VK_INSERT, false, MODIFIER_CTRL),
+                (VK_CONTROL, false, 0),
+                (VK_LWIN, true, MODIFIER_META),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_paste_alone_from_the_worker_presses_the_whole_chord_and_restores_nothing() {
+        // The mask is the worker's copy from when ⌘V arrived; the window
+        // puts Ctrl back once the paste is counted.
+        assert_eq!(
+            alone_events(
+                &[VK_SHIFT, VK_INSERT],
+                &[VK_SHIFT, VK_INSERT],
+                MODIFIER_CTRL,
+                false
+            ),
+            vec![
+                (VK_CONTROL, false, 0),
+                (VK_SHIFT, true, MODIFIER_SHIFT),
+                (VK_INSERT, true, MODIFIER_SHIFT),
+                (VK_INSERT, false, MODIFIER_SHIFT),
+                (VK_SHIFT, false, 0),
+            ]
+        );
+        assert_eq!(
+            alone_events(&[VK_CONTROL, VK_V], &[VK_CONTROL, VK_V], 0, false),
+            chord_events(&[VK_CONTROL, VK_V], 0),
+            "nothing held: the same as a plain chord"
+        );
     }
 
     #[test]

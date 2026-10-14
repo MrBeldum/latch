@@ -141,12 +141,29 @@ pub fn read() -> Result<Clipboard> {
         Err(arboard::Error::ContentNotAvailable) => Ok(String::new()),
         other => other,
     })?;
-    Ok(Clipboard::fit(&text, text_seq(&text)))
+    Ok(Clipboard {
+        // write() below puts pasted text in the selection too.
+        selection: cfg!(target_os = "linux"),
+        ..Clipboard::fit(&text, text_seq(&text))
+    })
 }
 
+/// On Linux the text also becomes the X selection (PRIMARY): a Mac sends
+/// ⌘V to a Linux PC as Shift+Insert, which pastes the selection rather
+/// than the clipboard in xterm and the VTE terminals (GNOME's, XFCE's).
 #[cfg(not(windows))]
 pub fn write(text: &str) -> Result<()> {
-    with_clipboard(|c| c.set_text(text.to_string()))
+    with_clipboard(|c| {
+        c.set_text(text.to_string())?;
+        #[cfg(target_os = "linux")]
+        {
+            use arboard::{LinuxClipboardKind, SetExtLinux};
+            c.set()
+                .clipboard(LinuxClipboardKind::Primary)
+                .text(text.to_string())?;
+        }
+        Ok(())
+    })
 }
 
 /// macOS and X11 have no sequence number a program can read, so the text

@@ -30,6 +30,9 @@ pub struct Shared {
     pub setup_running: bool,
     pub setup_result: Option<Result<(), String>>,
     pub setup_log: Vec<String>,
+    /// A Mac whose owner turned sharing off: it only connects to the
+    /// others, so the window neither starts nor restarts the service.
+    pub viewer_only: bool,
     /// Moves whenever anything above changes, so a reader can skip copying
     /// what it already has.
     pub rev: u64,
@@ -98,10 +101,17 @@ pub struct HostApp {
 
 impl HostApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let shared = Arc::new(Mutex::new(Shared::default()));
+        let cfg = HostConfig::load();
+        let viewer_only = !crate::service::starts_with_window(&cfg);
+        let shared = Arc::new(Mutex::new(Shared {
+            viewer_only,
+            // Down on purpose, as if stopped here: nothing restarts it.
+            service_error: viewer_only.then(|| STOPPED.into()),
+            ..Default::default()
+        }));
         spawn_poller(shared.clone(), cc.egui_ctx.clone());
         Self {
-            cfg: HostConfig::load(),
+            cfg,
             autostart: setup::starts_with_windows(),
             bundled_engine: std::env::current_exe().is_ok_and(|e| setup::bundled_engine(&e)),
             live: true,
@@ -255,6 +265,15 @@ impl HostApp {
             self.autostart = on;
             return;
         }
+        if self.os == Os::Mac && on {
+            // Loading the login item starts the service at once, and on a
+            // Mac it exits unless it reads that this Mac is shared.
+            let mut cfg = self.cfg.clone();
+            cfg.start_with_windows = true;
+            if let Err(e) = cfg.save() {
+                tracing::warn!("could not save host config: {e:#}");
+            }
+        }
         let result = std::env::current_exe()
             .map_err(anyhow::Error::from)
             .and_then(|exe| setup::set_start_with_windows(on, &exe));
@@ -263,6 +282,16 @@ impl HostApp {
                 self.autostart = on;
                 self.cfg.start_with_windows = on;
                 self.dirty = true;
+                if self.os == Os::Mac {
+                    // On a Mac this is the switch between sharing and only
+                    // connecting to the others: it takes effect now.
+                    self.shared.lock().viewer_only = !on;
+                    if on {
+                        self.start_service();
+                    } else {
+                        self.stop_sharing();
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!("autostart: {e:#}");
@@ -292,6 +321,20 @@ impl HostApp {
         s.status = None;
         s.service_error = Some(STOPPED.into());
         s.touch();
+    }
+
+    /// Stop the service and the engine it started: nothing is shared and
+    /// nothing of Latch keeps running once the window closes.
+    fn stop_sharing(&mut self) {
+        self.stop_service();
+        #[cfg(not(windows))]
+        if self.live {
+            std::thread::spawn(|| {
+                // After the service has gone, or it starts the engine again.
+                std::thread::sleep(Duration::from_millis(800));
+                crate::unix_setup::stop_engine();
+            });
+        }
     }
 
     fn start_service(&mut self) {
@@ -407,6 +450,23 @@ impl HostApp {
 
     fn no_service(&mut self, ui: &mut egui::Ui, error: Option<&str>) {
         ui::page_header(ui, "Sharing", None, |_| {});
+        if self.shared.lock().viewer_only {
+            ui::banner(
+                ui,
+                Tone::Neutral,
+                &format!("This {} is not shared", self.os.noun()),
+                Some(&format!(
+                    "It connects to your other machines, but they can't connect to it, and nothing of Latch runs once this window closes. Share this {} to let them in, also after a restart.",
+                    self.os.noun()
+                )),
+                |ui| {
+                    if ui::primary_button(ui, &format!("Share this {}", self.os.noun())).clicked() {
+                        self.set_autostart(true);
+                    }
+                },
+            );
+            return;
+        }
         if error == Some(STOPPED) {
             ui::banner(
                 ui,
@@ -832,14 +892,20 @@ impl HostApp {
             }
             ui::row_separator(ui);
             let mut auto = self.autostart;
-            if ui::toggle_row(
-                ui,
-                &mut auto,
-                "Start Latch when you log in",
-                Some(&format!(
-                    "So others can connect after this {noun} restarts, with nobody at the keyboard."
-                )),
-            ) {
+            let (title, detail) = if self.os == Os::Mac {
+                (
+                    "Share this Mac".to_string(),
+                    "Others can connect whenever it is on, also after a restart. Off, this Mac only connects to your other machines and nothing of Latch runs once its window closes.".to_string(),
+                )
+            } else {
+                (
+                    "Start Latch when you log in".to_string(),
+                    format!(
+                        "So others can connect after this {noun} restarts, with nobody at the keyboard."
+                    ),
+                )
+            };
+            if ui::toggle_row(ui, &mut auto, &title, Some(&detail)) {
                 self.set_autostart(auto);
             }
         });
@@ -1095,7 +1161,8 @@ fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
                 Err(e) => {
                     failures += 1;
                     let mut s = shared.lock();
-                    let stopped_by_user = s.service_error.as_deref() == Some(STOPPED);
+                    let stopped_by_user =
+                        s.service_error.as_deref() == Some(STOPPED) || s.viewer_only;
                     changed |= s.status.is_some();
                     s.status = None;
                     if !stopped_by_user {
@@ -1240,6 +1307,7 @@ mod snapshots {
                     "videotoolbox".into()
                 },
                 audio_problem: String::new(),
+                ..Default::default()
             },
             power_allowed: true,
             nat: Some(latch_core::api::NatReport {
@@ -1360,6 +1428,15 @@ mod snapshots {
                 Os::Windows,
                 Shared {
                     service_error: Some(STOPPED.into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "mac-viewer",
+                Os::Mac,
+                Shared {
+                    service_error: Some(STOPPED.into()),
+                    viewer_only: true,
                     ..Default::default()
                 },
             ),

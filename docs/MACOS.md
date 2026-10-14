@@ -48,7 +48,7 @@ quarantine flag is how you tell macOS you fetched it deliberately.
 ```
 
 builds for `aarch64-apple-darwin` (Xcode command line tools and CMake are
-needed for the C parts), bundles `dist/Latch.app`, and installs it to
+needed for the C parts), bundles `dist.noindex/Latch.app`, and installs it to
 `/Applications`. A locally built app never carries the quarantine flag.
 
 ### Signing
@@ -59,9 +59,9 @@ notarize:
 
 ```bash
 CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/bundle-macos.sh
-ditto -c -k --keepParent dist/Latch.app dist/Latch.zip
-xcrun notarytool submit dist/Latch.zip --keychain-profile "notary" --wait
-xcrun stapler staple dist/Latch.app
+ditto -c -k --keepParent dist.noindex/Latch.app dist.noindex/Latch.zip
+xcrun notarytool submit dist.noindex/Latch.zip --keychain-profile "notary" --wait
+xcrun stapler staple dist.noindex/Latch.app
 ```
 
 ## First run
@@ -137,6 +137,29 @@ then presses Ctrl+V there). Text only, up to 32 KB; an image or a file on
 either clipboard is left alone. Short notices under the toolbar say when
 something crossed. With an older host, ⌘V pastes what the PC last copied.
 
+A Linux machine gets ⌘C, ⌘X and ⌘V as Ctrl+Insert, Shift+Delete and
+Shift+Insert, which GTK and Qt apps, Firefox, Chromium and terminals all
+take for copy, cut and paste; Ctrl+C in a terminal would interrupt the
+running program. Latch Host there puts pasted text in the selection as
+well as the clipboard, because terminals paste the selection on
+Shift+Insert. To copy in a terminal, select the text and press ⌘C.
+
+A Linux VPS draws a desktop of one fixed size and encodes on the CPU, so
+Latch never asks it for more than that size: a larger resolution setting
+gets the desktop's own size, a smaller one (720p, say) is scaled down. On
+a machine with fewer than four cores, Latch asks for at most 30 fps at
+1080p, and more for a smaller picture in proportion to the pixels it
+saves: up to 67 fps at 720p, 43 at 900p, 120 at 540p. To get 60 fps from
+such a machine, pick 720p (or 540p) and 60 fps.
+
+## Only connecting from this Mac
+
+On a Mac, **Share this Mac** on the **Sharing** page decides whether Latch
+runs in the background so other machines can connect here. Turn it off and
+this Mac only connects to the others: the background service and the
+streaming engine stop, opening Latch no longer starts them, and nothing of
+Latch runs once its window closes. **Share this Mac** turns it back on.
+
 ### Laggy? Look at the path
 
 Tailscale connects the Mac and the PC directly when it can punch through
@@ -177,7 +200,7 @@ it from this network (see below).
 | Setting | What it changes |
 |---------|-----------------|
 | Quality | **Recommended** (the default) asks for this screen's own size at 50 Mbps, on every path. **Smooth** is 1080p · 60 fps · 20 Mbps, **Balanced** match screen · 60 · 50, **Sharp** match screen · 60 · 100. **Custom** uses the rows below; changing one of them switches to it |
-| Resolution | **Match screen** is this display's own pixel size (3024×1964 on a 14" MacBook Pro), so the picture fills it exactly. **1080p**, **1440p** and **4K** are the standard 16:9 sizes, 1920×1080, 2560×1440 and 3840×2160; on a display of another shape they leave a bar above and below. The list shows the pixel size of each. The PC switches its display to the size asked for; a PC with no monitor needs a virtual display that lists that size, which setup on the PC arranges for the Virtual Display Driver |
+| Resolution | **Match screen** is this display's own pixel size (3024×1964 on a 14" MacBook Pro), so the picture fills it exactly. **540p**, **720p**, **900p**, **1080p**, **1440p** and **4K** are the standard 16:9 sizes, 960×540, 1280×720, 1600×900, 1920×1080, 2560×1440 and 3840×2160; on a display of another shape they leave a bar above and below. The sizes below 1080p are for a PC that encodes in software or a slow network: fewer pixels leave more bitrate for each and a higher frame rate. The list shows the pixel size of each. The PC switches its display to the size asked for; a PC with no monitor needs a virtual display that lists that size, which setup on the PC arranges for the Virtual Display Driver |
 | Frame rate | 30 to 240; the PC's display is switched to match when it can |
 | Bitrate | 2 to 150 Mbps; arrow keys step by 1, Shift-arrow by 10. The encoder holds this rate. Large swings mean the path is dropping packets |
 | Codec | Auto (HEVC when both ends can), HEVC, H.264 |

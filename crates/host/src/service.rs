@@ -35,6 +35,9 @@ const AUTH_TTL: Duration = Duration::from_secs(60);
 /// How long an answer is remembered, so the same peer is not logged again.
 const AUTH_REMEMBER: Duration = Duration::from_secs(3600);
 const AUTH_CACHE_LIMIT: usize = 256;
+/// How long a PIN the engine took counts as entered for the Mac's retries:
+/// longer than the engine waits for the handshake.
+const PIN_TAKEN_FOR: Duration = Duration::from_secs(30);
 /// Ticks (of 5 s) between runs of `tailscale netcheck`: it takes seconds
 /// and the network does not move often.
 const NETCHECK_TICKS: u64 = 120;
@@ -62,6 +65,10 @@ pub struct Service {
     nat: Mutex<Option<NatReport>>,
     nat_running: AtomicBool,
     update_running: Arc<AtomicBool>,
+    /// A PIN the engine took and is pairing with, and when: the Mac's
+    /// retries for it are answered without asking the engine again, which
+    /// is busy with that very handshake.
+    pin_taken: Mutex<Option<(String, Instant)>>,
 }
 
 impl Service {
@@ -81,6 +88,7 @@ impl Service {
             nat: Mutex::new(None),
             nat_running: AtomicBool::new(false),
             update_running: Arc::new(AtomicBool::new(false)),
+            pin_taken: Mutex::new(None),
         }
     }
 
@@ -107,6 +115,13 @@ impl Service {
     /// update just started: the old one is still answering its last request,
     /// so wait for the port rather than give up.
     pub fn run(self: Arc<Self>, replacing: bool) -> Result<()> {
+        if !starts_with_window(&self.cfg.lock()) {
+            // A Mac that is only a viewer: an older window (or anything else)
+            // that starts the service must not share it. Exit 0, so launchd
+            // does not try again.
+            self.log("this Mac is not shared (Share this Mac is off); the service exits");
+            return Ok(());
+        }
         let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, CONTROL_PORT));
         let listener = if replacing {
             let deadline = Instant::now() + Duration::from_secs(60);
@@ -236,10 +251,11 @@ impl Service {
             running && self.streamer.lock().api_ok
         };
         // Apply the streaming profile on any engine Latch can log into,
-        // after any old app has ended. The marker survives panel/config saves.
+        // after any old app has ended. The marker survives panel/config saves;
+        // v4 drops Linux's frame-rate floor (see setup::LINUX_ENGINE_CONF).
         if tick.is_multiple_of(6) && api_ok && install.is_some() {
             if let Ok(dir) = latch_core::config::data_dir() {
-                let marker = dir.join("stream-profile-v3");
+                let marker = dir.join("stream-profile-v4");
                 if !marker.exists() {
                     let api = Api {
                         user: &cfg.sunshine_user,
@@ -250,7 +266,11 @@ impl Service {
                             if let Err(e) = std::fs::write(&marker, "1") {
                                 self.log(format!("could not save stream profile version: {e}"));
                             }
-                            self.log("stream profile ready: match client display, constant bitrate, 60 fps");
+                            self.log(if cfg!(target_os = "linux") {
+                                "stream profile ready: constant bitrate, the viewer's frame rate"
+                            } else {
+                                "stream profile ready: match client display, constant bitrate, 60 fps"
+                            });
                         }
                         Ok(false) => {} // A running app owns the display until it ends.
                         Err(e) => self.log(format!("stream profile could not be applied: {e:#}")),
@@ -261,7 +281,9 @@ impl Service {
         // The encoder Sunshine picked and whether it could capture audio,
         // from its log; re-read now and then since Sunshine restarts on
         // its own after setup and every session tries the audio device.
-        let (encoder, audio_problem) =
+        // The X screen it captures is re-read with them: a VPS desktop can
+        // be restarted at another size.
+        let (encoder, audio_problem, capture_size) =
             if tick.is_multiple_of(12) || self.streamer.lock().encoder.is_empty() {
                 let log = install.as_ref().and_then(streamer::log_text);
                 (
@@ -271,11 +293,18 @@ impl Service {
                     log.as_deref()
                         .and_then(streamer::audio_problem_in)
                         .unwrap_or_default(),
+                    streamer::capture_size(),
                 )
             } else {
                 let cur = self.streamer.lock();
-                (cur.encoder.clone(), cur.audio_problem.clone())
+                (
+                    cur.encoder.clone(),
+                    cur.audio_problem.clone(),
+                    cur.capture_size,
+                )
             };
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let max_fps = streamer::max_fps(&encoder, cores);
         let st = Streamer {
             kind: install
                 .as_ref()
@@ -286,6 +315,8 @@ impl Service {
             api_ok,
             encoder,
             audio_problem,
+            capture_size,
+            max_fps,
         };
         {
             let mut cur = self.streamer.lock();
@@ -691,13 +722,29 @@ impl Service {
                 ),
             );
         }
+        if self
+            .pin_taken
+            .lock()
+            .as_ref()
+            .is_some_and(|(pin, at)| *pin == p.pin && at.elapsed() < PIN_TAKEN_FOR)
+        {
+            return Response::json(200, &Ack::ok());
+        }
         let api = Api {
             user: &cfg.sunshine_user,
             pass: &cfg.sunshine_pass,
         };
         match api.submit_pin(&p.pin, &p.name) {
-            Ok(()) => {
+            Ok(streamer::Pin::Paired) => {
                 self.log(format!("paired \"{}\"", p.name));
+                Response::json(200, &Ack::ok())
+            }
+            Ok(streamer::Pin::Taken) => {
+                *self.pin_taken.lock() = Some((p.pin.clone(), Instant::now()));
+                self.log(format!(
+                    "PIN from \"{}\" entered; it finishes pairing itself",
+                    p.name
+                ));
                 Response::json(200, &Ack::ok())
             }
             Err(e) => {
@@ -883,6 +930,18 @@ pub fn service_alive() -> bool {
     .unwrap_or(false)
 }
 
+/// Whether opening the window starts the background service. A PC must
+/// stay reachable, so on Windows and Linux it always does. A Mac does only
+/// while it is shared ("Share this Mac", stored as `start_with_windows`):
+/// off, it is a viewer, and nothing of Latch outlives its window.
+pub fn starts_with_window(cfg: &HostConfig) -> bool {
+    starts_with_window_on(cfg!(target_os = "macos"), cfg)
+}
+
+fn starts_with_window_on(mac: bool, cfg: &HostConfig) -> bool {
+    !mac || cfg.start_with_windows
+}
+
 /// Start `--background` if nothing answers on loopback.
 pub fn ensure_service_running() {
     if service_alive() {
@@ -951,6 +1010,20 @@ fn push_log(log: &Mutex<VecDeque<String>>, msg: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_mac_that_is_not_shared_opens_without_the_service() {
+        let shared = HostConfig::default();
+        let viewer = HostConfig {
+            start_with_windows: false,
+            ..Default::default()
+        };
+        assert!(starts_with_window_on(true, &shared));
+        assert!(!starts_with_window_on(true, &viewer));
+        // A PC nobody can reach in person keeps its service either way.
+        assert!(starts_with_window_on(false, &viewer));
+        assert!(starts_with_window_on(false, &shared));
+    }
 
     fn whois(id: u64, login: &str) -> tailscale::WhoIs {
         tailscale::WhoIs {
