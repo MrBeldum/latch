@@ -8,4 +8,9 @@ description = "Shared egui theme and widgets for the Latch host and client"
 
 [dependencies]
 latch-core.workspace = true
-egui.workspace = true
+# accesskit: the custom slider answers a screen reader's increment and
+# decrement, as egui's own does. eframe turns the feature on anyway.
+egui = { workspace = true, features = ["accesskit"] }
+# The parser egui's fonts use, to check a system font before handing it
+# over: egui panics on one it cannot read.
+ab_glyph = "0.2"

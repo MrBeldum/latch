@@ -1131,12 +1131,33 @@ pub fn keep_in_view(response: &Response) {
 /// Where the menu open now sits on screen, or the visible part of an open
 /// [`select`]'s list, for layout checks.
 pub fn open_menu_rect(ctx: &egui::Context) -> Option<Rect> {
-    let (id, rect): (Id, Rect) = ctx.data(|d| d.get_temp(open_menu_key()))?;
+    let (id, rect, _): (Id, Rect, u64) = ctx.data(|d| d.get_temp(open_menu_key()))?;
     ctx.memory(|m| m.is_popup_open(id)).then_some(rect)
 }
 
 fn open_menu_key() -> Id {
     Id::new("latch.open_menu")
+}
+
+/// Note that the menu or list `id` was drawn at `rect` in this pass.
+fn drawn_menu(ctx: &egui::Context, id: Id, rect: Rect) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.insert_temp(open_menu_key(), (id, rect, pass)));
+}
+
+/// Run at the end of every pass (see [`crate::apply`]): close a menu or
+/// list that egui still holds open but nothing drew this pass. Its button
+/// went away (the toolbar folded into More, the stream ended, the page
+/// changed), so nothing on screen could close it, and an open popup keeps
+/// the stream's toolbar up and its keys and mouse from the PC. Popups that
+/// are not Latch's own are left alone.
+pub(crate) fn close_orphan_menu(ctx: &egui::Context) {
+    let Some((id, _, pass)) = ctx.data(|d| d.get_temp::<(Id, Rect, u64)>(open_menu_key())) else {
+        return;
+    };
+    if pass != ctx.cumulative_pass_nr() && ctx.memory(|m| m.is_popup_open(id)) {
+        ctx.memory_mut(|m| m.close_popup());
+    }
 }
 
 /// Open a popup menu under `trigger` while it is toggled on. A real egui
@@ -1146,8 +1167,18 @@ fn open_menu_key() -> Id {
 /// it never runs past the window's top or bottom: it opens upwards when
 /// there is more room above, and scrolls when neither side has room for
 /// all of it (see [`place_popup`]).
-fn popup_menu<R>(ui: &mut Ui, trigger: &Response, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
-    let id = trigger.id.with("menu");
+///
+/// The menu is known by its `label`, not by the button's place: egui names
+/// a widget by its position among its siblings, so a toolbar that gained a
+/// tag, or a machine list that gained a row above, handed an open menu to
+/// another button (another machine's Sleep).
+fn popup_menu<R>(
+    ui: &mut Ui,
+    trigger: &Response,
+    label: &str,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    let id = Id::new("latch.menu").with(label);
     if trigger.clicked() {
         ui.memory_mut(|m| m.toggle_popup(id));
     }
@@ -1191,9 +1222,13 @@ fn popup_menu<R>(ui: &mut Ui, trigger: &Response, add: impl FnOnce(&mut Ui) -> R
             ctx.request_discard("menu moved to fit the window");
         }
     }
-    ctx.data_mut(|d| d.insert_temp(open_menu_key(), (id, shown.response.rect)));
+    drawn_menu(&ctx, id, shown.response.rect);
     let outside = trigger.clicked_elsewhere() && shown.response.clicked_elsewhere();
-    if outside || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+    // Escape that closes the menu is used up here: otherwise the stream
+    // forwards it to the PC once the menu has gone, and a panel behind the
+    // menu closes on it too.
+    let escape = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    if outside || escape {
         ui.memory_mut(|m| m.close_popup());
     }
     Some(shown.inner.inner)
@@ -1202,7 +1237,7 @@ fn popup_menu<R>(ui: &mut Ui, trigger: &Response, add: impl FnOnce(&mut Ui) -> R
 /// A quiet button with a chevron that opens a menu.
 pub fn menu_button<R>(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
     let trigger = labelled_button(ui, Kind::Quiet, label, Some(Icon::ChevronDown), label);
-    popup_menu(ui, &trigger, add)
+    popup_menu(ui, &trigger, label, add)
 }
 
 /// An icon button that opens a menu; `label` is its accessible name.
@@ -1213,7 +1248,7 @@ pub fn icon_menu<R>(
     add: impl FnOnce(&mut Ui) -> R,
 ) -> Option<R> {
     let trigger = icon_button(ui, icon, label);
-    popup_menu(ui, &trigger, add)
+    popup_menu(ui, &trigger, label, add)
 }
 
 fn menu_row(ui: &mut Ui, label: &str, checked: Option<bool>, enabled: bool) -> Response {
@@ -1540,6 +1575,8 @@ pub fn select<R>(
     let above = y - h / 2.0 - space::XS - (screen.top() + space::SM);
     let chrome = ui.spacing().menu_margin.sum().y + 2.0 * ui.visuals().window_stroke.width;
     let height = (below.max(above) - chrome).clamp(size::CONTROL, 320.0);
+    let selected: WidgetText = selected.into();
+    let shown = selected.text().to_owned();
     let mut list = None;
     let out = egui::ComboBox::from_id_salt(id)
         .selected_text(selected)
@@ -1555,6 +1592,9 @@ pub fn select<R>(
             );
         })
         .show_ui(ui, |ui| {
+            // The chosen row is marked by its wash and full-strength text:
+            // accent text on the accent wash read at 3.7:1, under AA.
+            ui.visuals_mut().selection.stroke = stroke(1.0, P.text);
             let out = clipped_scroll(ui, "latch.select", height, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.spacing_mut().button_padding = Vec2::new(space::SM, 6.0);
@@ -1564,13 +1604,31 @@ pub fn select<R>(
             out.inner
         });
     keep_in_view(&out.response);
+    // egui names the control with an empty string; a screen reader said
+    // only "pop up button". Name it after its setting row, and give the
+    // choice as its value.
+    let name: Option<String> = ui.ctx().data(|d| d.get_temp(row_label_key()));
+    let enabled = ui.is_enabled();
+    out.response.widget_info(|| WidgetInfo {
+        label: Some(name.clone().unwrap_or_else(|| shown.clone())),
+        current_text_value: Some(shown.clone()),
+        enabled,
+        ..WidgetInfo::new(WidgetType::ComboBox)
+    });
     if let Some(rect) = list {
         // How egui's ComboBox names its popup.
         let popup = out.response.id.with("popup");
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(open_menu_key(), (popup, rect)));
+        drawn_menu(ui.ctx(), popup, rect);
+        // egui has just closed the list on Escape without using the key
+        // up: the Stream settings panel behind it would close on it too.
+        ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
     }
     out.inner
+}
+
+/// Where [`setting_row`] leaves its label for the control it holds.
+fn row_label_key() -> Id {
+    Id::new("latch.row_label")
 }
 
 /// A row in a [`select`]'s list: chosen when clicked, marked while chosen,
@@ -1640,11 +1698,46 @@ pub fn slider(
             *value = value.saturating_sub(step);
         }
     }
+    // A screen reader's increment and decrement (VoiceOver's VO-Up and
+    // VO-Down) and its "set to", as egui's own slider takes them.
+    {
+        use egui::accesskit::{Action, ActionData};
+        let (inc, dec, set) = ui.input(|i| {
+            (
+                i.num_accesskit_action_requests(response.id, Action::Increment),
+                i.num_accesskit_action_requests(response.id, Action::Decrement),
+                i.accesskit_action_requests(response.id, Action::SetValue)
+                    .filter_map(|r| match &r.data {
+                        Some(ActionData::NumericValue(v)) => Some(*v),
+                        _ => None,
+                    })
+                    .last(),
+            )
+        });
+        *value = value.saturating_add(inc as u32).saturating_sub(dec as u32);
+        if let Some(v) = set {
+            *value = v.round().clamp(f64::from(lo), f64::from(hi)) as u32;
+        }
+    }
     *value = (*value).clamp(lo, hi);
     if *value != before {
         response.mark_changed();
     }
     response.widget_info(|| WidgetInfo::slider(ui.is_enabled(), f64::from(*value), label));
+    let now = *value;
+    ui.ctx().accesskit_node_builder(response.id, |b| {
+        use egui::accesskit::Action;
+        b.set_min_numeric_value(f64::from(lo));
+        b.set_max_numeric_value(f64::from(hi));
+        b.set_numeric_value_step(1.0);
+        b.add_action(Action::SetValue);
+        if now < hi {
+            b.add_action(Action::Increment);
+        }
+        if now > lo {
+            b.add_action(Action::Decrement);
+        }
+    });
     if ui.is_rect_visible(rect) {
         let t = (*value - lo) as f32 / (hi - lo).max(1) as f32;
         let x = egui::lerp(rail.left()..=rail.right(), t);
@@ -1826,12 +1919,18 @@ pub fn setting_row<R>(
     } else {
         (size::ROW, 13.0)
     };
-    split_row(ui, h, top, control, |ui| {
+    // The label is drawn after the control (see `split_row`); a select in
+    // the row takes its accessible name from here.
+    let key = row_label_key();
+    ui.ctx().data_mut(|d| d.insert_temp(key, label.to_owned()));
+    let r = split_row(ui, h, top, control, |ui| {
         ui.label(RichText::new(label).color(P.text));
         if let Some(h) = hint {
             caption(ui, h);
         }
-    })
+    });
+    ui.ctx().data_mut(|d| d.remove::<String>(key));
+    r
 }
 
 /// A settings row whose control is too wide to sit beside its label: the
@@ -2118,8 +2217,11 @@ fn paint_mark(ui: &Ui, rect: egui::Rect, ink: Color32, accent: Color32) {
 }
 
 /// A paced activity indicator: unlike egui's immediate-repaint spinner this
-/// asks for at most 30 frames a second, and only while it is on screen, so
-/// it stays bounded when the low-latency stream renderer has vsync off.
+/// asks for at most 30 frames a second, and only while it is inside the
+/// visible part of the window, so it stays bounded when the low-latency
+/// stream renderer has vsync off. While the window is not the one in front
+/// (behind another, minimised) it turns four times a second: a page left
+/// on a spinner for hours redrew the whole window 30 times a second.
 pub fn spinner(size: f32, color: egui::Color32) -> impl egui::Widget {
     move |ui: &mut egui::Ui| {
         let (rect, response) =
@@ -2134,11 +2236,17 @@ pub fn spinner(size: f32, color: egui::Color32) -> impl egui::Widget {
                 .collect();
             ui.painter()
                 .add(egui::Shape::line(points, egui::Stroke::new(1.5_f32, color)));
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(33));
+            ui.ctx().request_repaint_after(spinner_pace(
+                ui.input(|i| i.viewport().focused.unwrap_or(true)),
+            ));
         }
         response
     }
+}
+
+/// How soon a [`spinner`] asks to be drawn again.
+fn spinner_pace(focused: bool) -> std::time::Duration {
+    std::time::Duration::from_millis(if focused { 33 } else { 250 })
 }
 
 #[cfg(test)]
@@ -2208,6 +2316,230 @@ mod tests {
         );
         let high = Rect::from_min_size(Pos2::new(8.0, 8.0), Vec2::splat(28.0));
         assert!(!place_popup(screen, high, 900.0, false).above);
+    }
+
+    /// A context with Latch's style, after one empty pass.
+    fn context() -> egui::Context {
+        let ctx = egui::Context::default();
+        crate::apply(&ctx);
+        let _ = ctx.run(Default::default(), |_| {});
+        ctx
+    }
+
+    fn escape() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn menu_id(label: &str) -> Id {
+        Id::new("latch.menu").with(label)
+    }
+
+    #[test]
+    fn escape_that_closes_a_menu_is_used_up() {
+        let ctx = context();
+        ctx.memory_mut(|m| m.open_popup(menu_id("Keys")));
+        let mut later = None;
+        let _ = ctx.run(input(vec![escape()]), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                menu_button(ui, "Keys", |ui| menu_item(ui, "Escape"));
+                later = Some(ui.input(|i| i.key_pressed(egui::Key::Escape)));
+            });
+        });
+        assert!(
+            !ctx.memory(|m| m.any_popup_open()),
+            "Escape closes the menu"
+        );
+        assert_eq!(later, Some(false), "and nothing after it sees the key");
+    }
+
+    #[test]
+    fn a_menu_stays_with_its_button_when_the_widgets_before_it_change() {
+        let ctx = context();
+        ctx.memory_mut(|m| m.open_popup(menu_id("More for Gaming-PC")));
+        for extra in [0, 1, 3] {
+            let _ = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    // A row added above shifts every position-based id.
+                    for _ in 0..extra {
+                        let _ = ui.button("Connect");
+                    }
+                    icon_menu(ui, Icon::More, "More for Gaming-PC", |ui| {
+                        menu_item(ui, "Sleep")
+                    });
+                });
+            });
+            assert!(
+                open_menu_rect(&ctx).is_some(),
+                "still open with {extra} widgets before it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_menu_whose_button_is_gone_is_closed() {
+        let ctx = context();
+        ctx.memory_mut(|m| m.open_popup(menu_id("Keys")));
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                menu_button(ui, "Keys", |ui| menu_item(ui, "Escape"));
+            });
+        });
+        assert!(ctx.memory(|m| m.any_popup_open()));
+        // The toolbar folds into More: Keys is not drawn any more.
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = ui.button("More");
+            });
+        });
+        assert!(!ctx.memory(|m| m.any_popup_open()));
+        // A popup that is not one of Latch's is left alone.
+        let theirs = Id::new("someone else's popup");
+        ctx.memory_mut(|m| m.open_popup(theirs));
+        let _ = ctx.run(Default::default(), |_| {});
+        assert!(ctx.memory(|m| m.is_popup_open(theirs)));
+    }
+
+    /// One pass of a "Resolution" setting row holding a select: what the
+    /// screen reader is told about the select, whether anything after it
+    /// still sees an Escape, and the id of the select's list.
+    fn resolution_row(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> (Option<egui::accesskit::Node>, bool, Id) {
+        let mut later = false;
+        let mut list = Id::NULL;
+        let out = ctx.run(input(events), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                setting_row(ui, "Resolution", None, |ui| {
+                    // How egui's ComboBox names its list.
+                    list = ui.make_persistent_id(Id::new("res")).with("popup");
+                    let mut pick = 1080;
+                    select(ui, "res", "1080p", 160.0, |ui| {
+                        for r in [720, 1080] {
+                            select_option(ui, &mut pick, r, format!("{r}p"));
+                        }
+                    });
+                });
+                later = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            });
+        });
+        let node = out.platform_output.accesskit_update.and_then(|u| {
+            u.nodes
+                .into_iter()
+                .map(|(_, n)| n)
+                .find(|n| n.role() == egui::accesskit::Role::ComboBox)
+        });
+        (node, later, list)
+    }
+
+    #[test]
+    fn a_select_is_named_after_its_row_and_reads_its_choice() {
+        let ctx = context();
+        ctx.enable_accesskit();
+        let (node, _, _) = resolution_row(&ctx, vec![]);
+        let node = node.expect("the select is in the tree");
+        assert_eq!(node.label(), Some("Resolution"));
+        assert_eq!(node.value(), Some("1080p"));
+    }
+
+    #[test]
+    fn escape_that_closes_a_select_list_is_used_up() {
+        let ctx = context();
+        let (_, _, list) = resolution_row(&ctx, vec![]);
+        ctx.memory_mut(|m| m.open_popup(list));
+        let (_, later, _) = resolution_row(&ctx, vec![]);
+        assert!(!later);
+        assert!(ctx.memory(|m| m.is_popup_open(list)), "the list is open");
+        let (_, later, _) = resolution_row(&ctx, vec![escape()]);
+        assert!(
+            !ctx.memory(|m| m.any_popup_open()),
+            "Escape closes the list"
+        );
+        assert!(!later, "and the panel behind it does not see the key");
+        // With the list closed, Escape is left for whoever wants it.
+        let (_, later, _) = resolution_row(&ctx, vec![escape()]);
+        assert!(later);
+    }
+
+    #[test]
+    fn the_chosen_option_in_a_list_reads_at_aa() {
+        let v = crate::theme::visuals();
+        let wash = v.selection.bg_fill;
+        for surface in [P.surface, P.raised] {
+            let a = f32::from(wash.a()) / 255.0;
+            let behind = lerp_color(surface, wash.to_opaque(), a);
+            assert!(contrast(P.text, behind) >= 4.5);
+        }
+    }
+
+    #[test]
+    fn a_screen_reader_can_step_and_set_the_slider() {
+        use egui::accesskit::{Action, ActionData, ActionRequest};
+        let ctx = context();
+        ctx.enable_accesskit();
+        let mut value = 50u32;
+        let pass = |ctx: &egui::Context, events, value: &mut u32| {
+            let mut id = Id::NULL;
+            let out = ctx.run(input(events), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    id = slider(ui, value, 2..=150, 180.0, "Bitrate").id;
+                });
+            });
+            (out, id)
+        };
+        let (out, id) = pass(&ctx, vec![], &mut value);
+        let node = out
+            .platform_output
+            .accesskit_update
+            .unwrap()
+            .nodes
+            .into_iter()
+            .find(|(n, _)| *n == id.value().into())
+            .map(|(_, n)| n)
+            .expect("the slider is in the tree");
+        assert_eq!(node.min_numeric_value(), Some(2.0));
+        assert_eq!(node.max_numeric_value(), Some(150.0));
+        assert!(node.supports_action(Action::Increment));
+        let request = |action, data| {
+            egui::Event::AccessKitActionRequest(ActionRequest {
+                action,
+                target: id.value().into(),
+                data,
+            })
+        };
+        pass(&ctx, vec![request(Action::Increment, None)], &mut value);
+        assert_eq!(value, 51);
+        pass(&ctx, vec![request(Action::Decrement, None)], &mut value);
+        pass(&ctx, vec![request(Action::Decrement, None)], &mut value);
+        assert_eq!(value, 49);
+        pass(
+            &ctx,
+            vec![request(
+                Action::SetValue,
+                Some(ActionData::NumericValue(400.0)),
+            )],
+            &mut value,
+        );
+        assert_eq!(value, 150, "a value past the end is held to the range");
+    }
+
+    #[test]
+    fn a_spinner_slows_down_when_its_window_is_not_in_front() {
+        assert_eq!(spinner_pace(true).as_millis(), 33);
+        assert!(spinner_pace(false) >= std::time::Duration::from_millis(250));
     }
 
     #[test]
