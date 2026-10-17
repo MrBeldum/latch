@@ -42,9 +42,14 @@ pub const UPDATE_MAX_BYTES: usize = 128 * 1024 * 1024;
 pub const FIRST_UPDATE_VERSION: &str = "3.1.0";
 
 pub const CLIPBOARD_PATH: &str = "/v1/clipboard";
-/// Clipboard text longer than this is cut. It has to fit a 64 KiB request
-/// body once JSON-escaped, and nobody pastes a novel through a stream.
+/// Clipboard text longer than this is cut: nobody pastes a novel through a
+/// stream.
 pub const CLIPBOARD_MAX_BYTES: usize = 32 * 1024;
+/// ... and so is text that would be longer than this once JSON-escaped, so
+/// it fits the 64 KiB body either side accepts with room for the other
+/// fields. A quote or a newline takes two bytes there and other control
+/// characters six, so 32 KiB of them alone would not fit.
+pub const CLIPBOARD_MAX_JSON: usize = 60 * 1024;
 
 /// The PC's clipboard, as far as it is text.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,11 +67,18 @@ pub struct Clipboard {
 }
 
 impl Clipboard {
-    /// `text` cut to the size limit on a character boundary.
+    /// `text` cut on a character boundary to [`CLIPBOARD_MAX_BYTES`], and
+    /// to [`CLIPBOARD_MAX_JSON`] once escaped.
     pub fn fit(text: &str, seq: u64) -> Self {
-        let mut end = text.len().min(CLIPBOARD_MAX_BYTES);
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
+        let (mut raw, mut escaped, mut end) = (0, 0, text.len());
+        for (i, c) in text.char_indices() {
+            let (r, e) = (c.len_utf8(), json_len(c));
+            if raw + r > CLIPBOARD_MAX_BYTES || escaped + e > CLIPBOARD_MAX_JSON {
+                end = i;
+                break;
+            }
+            raw += r;
+            escaped += e;
         }
         Self {
             text: text[..end].to_string(),
@@ -74,6 +86,15 @@ impl Clipboard {
             truncated: end < text.len(),
             selection: false,
         }
+    }
+}
+
+/// How many bytes `c` takes inside a JSON string as serde_json writes it.
+fn json_len(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\u{08}' | '\u{0C}' | '\n' | '\r' | '\t' => 2,
+        c if (c as u32) < 0x20 => 6,
+        c => c.len_utf8(),
     }
 }
 
@@ -303,6 +324,43 @@ mod tests {
         assert_eq!(s.nat, None);
         assert_eq!(s.streamer.encoder, "");
         assert_eq!(s.streamer.audio_problem, "");
+    }
+
+    #[test]
+    fn clipboard_text_fits_a_request_body_however_it_escapes() {
+        let body = |c: &Clipboard| serde_json::to_string(c).unwrap().len();
+        for s in [
+            "\u{1b}".repeat(CLIPBOARD_MAX_BYTES),
+            "\"".repeat(CLIPBOARD_MAX_BYTES),
+            "\n".repeat(CLIPBOARD_MAX_BYTES),
+            "a\u{1}\"é\\".repeat(20_000),
+        ] {
+            let c = Clipboard::fit(&s, u64::MAX);
+            assert!(c.truncated);
+            assert!(s.starts_with(&c.text));
+            assert!(body(&c) <= 64 * 1024, "{} bytes", body(&c));
+        }
+        // Plain text still runs to the byte limit.
+        let plain = "x".repeat(CLIPBOARD_MAX_BYTES + 10);
+        let c = Clipboard::fit(&plain, 1);
+        assert_eq!(c.text.len(), CLIPBOARD_MAX_BYTES);
+        assert!(c.truncated);
+        let exact = "x".repeat(CLIPBOARD_MAX_BYTES);
+        assert!(!Clipboard::fit(&exact, 1).truncated);
+    }
+
+    #[test]
+    fn the_escaped_length_matches_serde_json() {
+        let mut chars: Vec<char> = (0u8..128).map(char::from).collect();
+        chars.extend(['é', '€', '한', '😀', '\u{7f}', '\u{2028}']);
+        for c in chars {
+            let s = c.to_string();
+            assert_eq!(
+                json_len(c),
+                serde_json::to_string(&s).unwrap().len() - 2,
+                "{c:?}"
+            );
+        }
     }
 
     #[test]
