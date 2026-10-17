@@ -422,7 +422,11 @@ impl Service {
         std::thread::spawn(move || {
             match tailscale::netcheck() {
                 Ok(n) => {
-                    let report = n.report();
+                    let home = match &*svc.tailscale.lock() {
+                        Ok(st) => st.self_node.relay.clone(),
+                        Err(_) => String::new(),
+                    };
+                    let report = n.report_near(&home);
                     let mut cur = svc.nat.lock();
                     if cur.as_ref().is_none_or(|c| nat_changed(c, &report)) {
                         svc.log(describe_nat(&report));
