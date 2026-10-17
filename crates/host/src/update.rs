@@ -67,8 +67,11 @@ fn with_suffix(exe: &Path, suffix: &str) -> PathBuf {
     exe.with_file_name(name)
 }
 
-pub fn refuse_self_update(engine_running: bool, session_active: bool) -> bool {
-    engine_running && session_active
+/// Whether to put an update off: only while a viewer is actually connected.
+/// A Desktop left launched for a viewer to resume is no reason; refusing
+/// then kept a PC from updating until it next restarted.
+pub fn refuse_self_update(engine_running: bool, someone_watching: bool) -> bool {
+    engine_running && someone_watching
 }
 
 /// Check the upload and stage it beside `exe`. Returns the version it

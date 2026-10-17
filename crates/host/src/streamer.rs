@@ -5,7 +5,7 @@
 
 use anyhow::{bail, Context, Result};
 use latch_core::{SUNSHINE_PORT, SUNSHINE_WEB_PORT};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -339,7 +339,9 @@ impl Api<'_> {
     fn request(&self, method: &str, path: &str, body: Option<&str>) -> Result<String> {
         let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
         let mut c = Command::new(curl);
-        c.args(["-sk", "--max-time", "8", "--config", "-"])
+        // -S keeps curl's own error message under -s: without it every
+        // failure read "curl: ", whatever went wrong.
+        c.args(["-sSk", "--max-time", "8", "--config", "-"])
             .args(["-X", method, "-H", "Content-Type: application/json"])
             .arg(format!("https://localhost:{SUNSHINE_WEB_PORT}{path}"));
         if let Some(b) = body {
@@ -377,7 +379,7 @@ impl Api<'_> {
         let out = child.wait_with_output().context("wait for curl")?;
         written?;
         if !out.status.success() {
-            bail!("curl: {}", String::from_utf8_lossy(&out.stderr).trim());
+            bail!("{}", curl_failure(out.status.code(), &out.stderr));
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
@@ -387,43 +389,37 @@ impl Api<'_> {
         self.call("GET", "/api/apps", None).is_ok()
     }
 
-    pub fn session_active(&self) -> bool {
-        // /api/apps only lists configured apps; it carries no running state.
-        latch_core::http::request(
-            ("127.0.0.1", SUNSHINE_PORT),
-            "GET",
-            "/serverinfo",
-            None,
-            Duration::from_secs(2),
-        )
-        .ok()
-        .filter(|r| r.status == 200)
-        .and_then(|r| session_in_serverinfo(&r.body))
-        .unwrap_or(true)
-    }
-
-    /// Migrate managed installations once, without interrupting a running app.
-    pub fn upgrade_stream_profile(&self) -> Result<bool> {
-        if self.session_active() {
-            return Ok(false);
-        }
+    /// Migrate managed installations once, without interrupting a viewer.
+    /// Applying the profile restarts the engine, which ends whatever app is
+    /// launched; one nobody watches (the Desktop a viewer left to resume) is
+    /// closed first, so its undo commands run, and the next viewer starts
+    /// it again.
+    pub fn upgrade_stream_profile(&self, install: Option<&Install>) -> Result<bool> {
         let current = self.call("GET", "/api/config", None)?;
         let desired = stream_profile(&current, &crate::setup::engine_conf())?;
-        if desired != current {
-            self.call("POST", "/api/config", Some(&desired.to_string()))?;
-            // Sunshine closes this HTTP connection as it restarts.
-            let _ = self.raw("POST", "/api/restart");
-            std::thread::sleep(Duration::from_secs(1));
-            let deadline = std::time::Instant::now() + Duration::from_secs(20);
-            loop {
-                if self.ok() {
-                    break;
-                }
-                if std::time::Instant::now() >= deadline {
-                    bail!("streaming engine did not return after applying the display profile");
-                }
-                std::thread::sleep(Duration::from_millis(500));
+        if desired == current {
+            return Ok(true);
+        }
+        let s = session(install);
+        if s.maybe_watched() {
+            return Ok(false);
+        }
+        if s.app_running == Some(true) {
+            self.close_app();
+        }
+        self.call("POST", "/api/config", Some(&desired.to_string()))?;
+        // Sunshine closes this HTTP connection as it restarts.
+        let _ = self.raw("POST", "/api/restart");
+        std::thread::sleep(Duration::from_secs(1));
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if self.ok() {
+                break;
             }
+            if std::time::Instant::now() >= deadline {
+                bail!("streaming engine did not return after applying the display profile");
+            }
+            std::thread::sleep(Duration::from_millis(500));
         }
         Ok(true)
     }
@@ -437,30 +433,45 @@ impl Api<'_> {
     /// Mac has finished the handshake. The Mac only goes on with it once
     /// this has answered, so a post still open after [`PIN_TAKEN_AFTER`]
     /// is left to finish on its own and reported as [`Pin::Taken`].
-    pub fn submit_pin(&self, pin: &str, name: &str) -> Result<Pin> {
-        let pending = pending_pairings(self.call("GET", "/api/pin", None).ok());
-        for id in pending {
-            let mut body = serde_json::json!({ "pin": pin, "name": name });
-            if let Some(id) = id {
-                body["pairing_id"] = id.into();
-            }
-            let (tx, rx) = std::sync::mpsc::channel();
-            let (user, pass) = (self.user.to_string(), self.pass.to_string());
-            std::thread::spawn(move || {
-                let api = Api {
-                    user: &user,
-                    pass: &pass,
-                };
-                let _ = tx.send(api.call("POST", "/api/pin", Some(&body.to_string())));
-            });
-            let v = match rx.recv_timeout(PIN_TAKEN_AFTER) {
-                Ok(reply) => reply?,
+    ///
+    /// The PIN goes to the request that came from `peer` (or, where every
+    /// address looks local, from a machine called `name`), never simply to
+    /// the first one listed: that may be another device's, or an abandoned
+    /// one, and handing it this PIN fails both.
+    pub fn submit_pin(&self, pin: &str, name: &str, peer: IpAddr) -> Result<Pin> {
+        let listed = self.call("GET", "/api/pin", None).ok();
+        let id = match choose_pairing(listed.as_ref(), peer, name) {
+            Pairing::Unlisted => None,
+            Pairing::Id(id) => Some(id),
+            Pairing::NotYet => return Ok(Pin::NotYet),
+        };
+        let mut body = serde_json::json!({ "pin": pin, "name": name });
+        if let Some(id) = &id {
+            body["pairing_id"] = id.as_str().into();
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (user, pass) = (self.user.to_string(), self.pass.to_string());
+        std::thread::spawn(move || {
+            let api = Api {
+                user: &user,
+                pass: &pass,
+            };
+            let _ = tx.send(api.call("POST", "/api/pin", Some(&body.to_string())));
+        });
+        // Only an engine with pairing ids holds the post open; one without
+        // answers, however slowly, and curl's own time limit bounds that.
+        let reply = if id.is_some() {
+            match rx.recv_timeout(PIN_TAKEN_AFTER) {
+                Ok(reply) => reply,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(Pin::Taken),
                 Err(e) => bail!("PIN post: {e}"),
-            };
-            if v["status"].as_bool() == Some(true) || v["status"].as_str() == Some("true") {
-                return Ok(Pin::Paired);
             }
+        } else {
+            rx.recv().context("PIN post")?
+        };
+        let v = reply?;
+        if v["status"].as_bool() == Some(true) || v["status"].as_str() == Some("true") {
+            return Ok(Pin::Paired);
         }
         bail!("the streaming engine did not accept the PIN (is the Mac pairing right now?)")
     }
@@ -504,6 +515,10 @@ pub enum Pin {
     /// The engine took the PIN and waits for the Mac to finish the
     /// handshake, which it does once it hears the PIN was entered.
     Taken,
+    /// The engine lists the requests waiting for a PIN, and none is this
+    /// Mac's yet: it asks a moment after it starts pairing, and a slow path
+    /// can bring the PIN first. Nothing was sent; the Mac tries again.
+    NotYet,
 }
 
 /// How long a PIN post may stay open before it counts as taken. An engine
@@ -511,24 +526,76 @@ pub enum Pin {
 /// within this; one that took it waits for the Mac.
 pub const PIN_TAKEN_AFTER: Duration = Duration::from_millis(600);
 
-/// The pairing ids `GET /api/pin` lists on a Sunshine master build. Every
-/// other reply (a release Sunshine answers 200 `{"error":"Not Found"}`, an
-/// old one 404, curl failing) means "no ids": still send the PIN once
-/// without one, which is what those versions want.
-fn pending_pairings(reply: Option<serde_json::Value>) -> Vec<Option<String>> {
-    let ids: Vec<Option<String>> = reply
-        .as_ref()
-        .and_then(|v| v["pairings"].as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|p| p["id"].as_str().map(|s| Some(s.to_string())))
-                .collect()
+/// Which of the engine's waiting pairing requests a PIN is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pairing {
+    /// The engine keeps no list (a release Sunshine answers 200
+    /// `{"error":"Not Found"}`, an old one 404, or curl failed): send the
+    /// PIN once without an id, which is what those versions want.
+    Unlisted,
+    /// The request with this id.
+    Id(String),
+    /// The engine lists requests, but none is this machine's: an empty
+    /// list included, since 2026.10 turns down a PIN without an id.
+    NotYet,
+}
+
+/// Pick the request `GET /api/pin` lists for the machine at `peer` called
+/// `name`. Sunshine lists each as `{id, name, address}`, oldest first, and
+/// keeps one for five minutes after its device gave up. The address decides
+/// when there is one to go by; a local peer (the window, or every peer of a
+/// Docker node, which reaches the engine through loopback too) falls back
+/// to the name. A request from another address or under another name is
+/// never picked: this machine's own may simply not have arrived yet.
+fn choose_pairing(reply: Option<&serde_json::Value>, peer: IpAddr, name: &str) -> Pairing {
+    let Some(list) = reply.and_then(|v| v["pairings"].as_array()) else {
+        return Pairing::Unlisted;
+    };
+    struct Entry<'a> {
+        id: &'a str,
+        name: Option<&'a str>,
+        address: Option<IpAddr>,
+    }
+    let entries: Vec<Entry> = list
+        .iter()
+        .filter_map(|p| {
+            Some(Entry {
+                id: p["id"].as_str().filter(|id| !id.is_empty())?,
+                name: p["name"].as_str().filter(|n| !n.is_empty()),
+                address: p["address"].as_str().and_then(|a| {
+                    a.trim_start_matches('[')
+                        .trim_end_matches(']')
+                        .parse::<IpAddr>()
+                        .ok()
+                        .map(|ip| ip.to_canonical())
+                }),
+            })
         })
-        .unwrap_or_default();
-    if ids.is_empty() {
-        vec![None]
-    } else {
-        ids
+        .collect();
+    let peer = peer.to_canonical();
+    let one = |found: Vec<&Entry>| match found.as_slice() {
+        [only] => Some(Pairing::Id(only.id.to_string())),
+        _ => None,
+    };
+    let named = |e: &&Entry| e.name == Some(name);
+    if !peer.is_loopback() {
+        let from_peer: Vec<&Entry> = entries.iter().filter(|e| e.address == Some(peer)).collect();
+        if from_peer.len() > 1 {
+            return one(from_peer.into_iter().filter(named).collect()).unwrap_or(Pairing::NotYet);
+        }
+        if let Some(found) = one(from_peer) {
+            return found;
+        }
+    }
+    // By name, among the requests that do not plainly come from elsewhere.
+    let local = |e: &&Entry| e.address.is_none_or(|a| a.is_loopback() || a == peer);
+    if let Some(found) = one(entries.iter().filter(local).filter(named).collect()) {
+        return found;
+    }
+    // A build that lists bare ids: the only one there is.
+    match entries.as_slice() {
+        [only] if only.name.is_none() && only.address.is_none() => Pairing::Id(only.id.to_string()),
+        _ => Pairing::NotYet,
     }
 }
 
@@ -553,6 +620,19 @@ fn stream_profile(current: &serde_json::Value, conf: &[(&str, &str)]) -> Result<
         config.insert((*k).into(), (*v).into());
     }
     Ok(config.into())
+}
+
+/// What a failed curl run says: its own message, which names its exit code
+/// ("curl: (7) Failed to connect…", "curl: (28) Operation timed out…"), or
+/// the code alone when it printed nothing.
+fn curl_failure(code: Option<i32>, stderr: &[u8]) -> String {
+    let msg = String::from_utf8_lossy(stderr);
+    let msg = msg.trim();
+    match code {
+        _ if !msg.is_empty() => msg.to_string(),
+        Some(code) => format!("curl exited with code {code}"),
+        None => "curl was stopped".into(),
+    }
 }
 
 /// Sunshine's config carries its own web login and the pairing secrets.
@@ -589,6 +669,79 @@ fn parse_reply(text: &str) -> Result<serde_json::Value> {
         }
     }
     Ok(v)
+}
+
+/// What the engine says about a stream right now. An app being launched is
+/// not someone watching: a viewer that disconnects leaves its Desktop
+/// running, to be resumed, until the engine restarts or something closes
+/// it (Sunshine treats a Desktop with no command as a placebo that never
+/// ends by itself). Only the engine's log says whether a viewer is there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Session {
+    /// An app is launched (`currentgame` in `/serverinfo`); `None` when the
+    /// engine did not answer.
+    pub app_running: Option<bool>,
+    /// The last line of the engine's log that starts or ends a session is
+    /// a viewer connecting; `None` when the log has neither.
+    pub viewer: Option<bool>,
+}
+
+impl Session {
+    /// Someone may be watching, counting what is unknown as yes: what
+    /// restarting the engine (which ends any stream) has to wait for.
+    pub fn maybe_watched(&self) -> bool {
+        self.app_running.unwrap_or(true) && self.viewer.unwrap_or(true)
+    }
+
+    /// The log says a viewer is connected and the engine does not say
+    /// nothing runs. Swapping Latch's own executable never touches the
+    /// engine, so only this defers an update; an unknown never blocks one
+    /// forever.
+    pub fn watched(&self) -> bool {
+        self.viewer == Some(true) && self.app_running != Some(false)
+    }
+}
+
+/// Ask the engine whether an app runs, and read its log for a viewer.
+pub fn session(install: Option<&Install>) -> Session {
+    let app_running = latch_core::http::request(
+        ("127.0.0.1", SUNSHINE_PORT),
+        "GET",
+        "/serverinfo",
+        None,
+        Duration::from_secs(2),
+    )
+    .ok()
+    .filter(|r| r.status == 200)
+    .and_then(|r| session_in_serverinfo(&r.body));
+    let viewer = install
+        .and_then(log_text)
+        .as_deref()
+        .and_then(viewer_connected_in);
+    Session {
+        app_running,
+        viewer,
+    }
+}
+
+/// Whether a viewer is connected, from the engine's log: the last line that
+/// starts a session (`CLIENT CONNECTED`) or ends one decides. A session ends
+/// with `CLIENT DISCONNECTED` when the viewer quits, but only with `<ip>:
+/// Ping Timeout` when it vanished (a Mac that slept, Wi-Fi that dropped).
+/// `None` when the log holds neither, as after the engine restarted (it
+/// rewrites its log at every start).
+pub(crate) fn viewer_connected_in(log: &str) -> Option<bool> {
+    // "Initial Ping Timeout" (a viewer that never got going) ends one too.
+    const ENDED: [&str; 2] = ["CLIENT DISCONNECTED", "Ping Timeout"];
+    log.lines().rev().find_map(|line| {
+        if ENDED.iter().any(|k| line.contains(k)) {
+            Some(false)
+        } else if line.contains("CLIENT CONNECTED") {
+            Some(true)
+        } else {
+            None
+        }
+    })
 }
 
 /// Whether the GameStream `/serverinfo` XML says an app is running: its
@@ -725,6 +878,76 @@ mod tests {
         assert_eq!(session_in_serverinfo("<root/>"), None);
     }
 
+    /// stuzha's own log, 2026-10-17: two sessions that ended with a ping
+    /// timeout (the Mac slept) and none with a disconnect line, while
+    /// `/serverinfo` still said Desktop was running.
+    const STUZHA_LOG: &str = "\
+[2026-10-17 16:32:42.610]: Info: Executing Undo Cmd: [/usr/local/bin/stuzha-display 1920 1080]
+[2026-10-17 16:32:44.410]: Info: Found H.264 encoder: libx264 [software]
+[2026-10-17 16:32:44.916]: Info: Executing [Desktop]
+[2026-10-17 16:32:45.085]: Info: CLIENT CONNECTED
+[2026-10-17 16:33:08.397]: Info: 100.111.100.57: Ping Timeout
+[2026-10-17 16:36:36.882]: Info: Found H.264 encoder: libx264 [software]
+[2026-10-17 16:36:37.224]: Info: CLIENT CONNECTED
+[2026-10-17 16:37:28.162]: Info: 100.111.100.57: Ping Timeout
+";
+
+    #[test]
+    fn a_viewer_is_connected_only_until_its_session_ends() {
+        let connected = "[2026-10-14 19:00:00.000]: Info: CLIENT CONNECTED\n";
+        let quit = format!("{connected}[2026-10-14 19:21:54.306]: Info: CLIENT DISCONNECTED\n");
+        assert_eq!(viewer_connected_in(connected), Some(true));
+        assert_eq!(viewer_connected_in(&quit), Some(false));
+        assert_eq!(
+            viewer_connected_in(&format!("{quit}{connected}")),
+            Some(true),
+            "a later session counts"
+        );
+        assert_eq!(viewer_connected_in(STUZHA_LOG), Some(false));
+        assert_eq!(
+            viewer_connected_in("[x]: Info: 100.64.0.5:51234: Initial Ping Timeout\n"),
+            Some(false)
+        );
+        // A fresh log (the engine restarted) says nothing either way.
+        assert_eq!(
+            viewer_connected_in("[x]: Info: Executing [Desktop]\n"),
+            None
+        );
+        assert_eq!(viewer_connected_in(""), None);
+    }
+
+    #[test]
+    fn a_desktop_left_to_resume_is_nobody_watching() {
+        let s = |app_running, viewer| Session {
+            app_running,
+            viewer,
+        };
+        // stuzha after the Mac slept: Desktop still launched, nobody there.
+        let resumable = s(Some(true), viewer_connected_in(STUZHA_LOG));
+        assert!(!resumable.watched());
+        assert!(!resumable.maybe_watched());
+        assert!(!crate::update::refuse_self_update(
+            true,
+            resumable.watched()
+        ));
+
+        let live = s(Some(true), Some(true));
+        assert!(live.watched() && live.maybe_watched());
+        assert!(crate::update::refuse_self_update(true, live.watched()));
+        // The engine did not answer, but its log has a viewer: watched.
+        assert!(s(None, Some(true)).watched());
+        // Nothing launched: whatever the log says, nobody is watching.
+        assert!(!s(Some(false), Some(true)).watched());
+        assert!(!s(Some(false), None).maybe_watched());
+        // Unknowns never block an update, which leaves the engine alone...
+        assert!(!s(None, None).watched());
+        assert!(!s(Some(true), None).watched());
+        // ...but do hold back an engine restart, which would end a stream.
+        assert!(s(None, None).maybe_watched());
+        assert!(s(Some(true), None).maybe_watched());
+        assert!(!s(None, Some(false)).maybe_watched());
+    }
+
     #[test]
     fn the_encoder_family_is_read_from_the_log() {
         let log = "[2026-09-07 10:00:00.001]: Info: // Testing for available encoders //\n\
@@ -788,6 +1011,19 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_engine_call_says_why() {
+        assert_eq!(
+            curl_failure(
+                Some(7),
+                b"curl: (7) Failed to connect to localhost port 47990: Connection refused\n"
+            ),
+            "curl: (7) Failed to connect to localhost port 47990: Connection refused"
+        );
+        assert_eq!(curl_failure(Some(28), b""), "curl exited with code 28");
+        assert_eq!(curl_failure(None, b"  "), "curl was stopped");
+    }
+
+    #[test]
     fn replies_are_parsed_and_errors_surfaced() {
         assert!(parse_reply(r#"{"status":true}"#).is_ok());
         let e = parse_reply(r#"{"status":false,"error":"Invalid PIN"}"#).unwrap_err();
@@ -798,19 +1034,87 @@ mod tests {
     }
 
     #[test]
-    fn pin_is_sent_once_without_an_id_unless_sunshine_lists_some() {
+    fn the_pin_goes_to_the_requesters_own_pairing() {
+        let mac: IpAddr = "100.100.1.2".parse().unwrap();
+        let name = "Daniel\u{2019}s MacBook Pro";
+        let pick =
+            |reply: serde_json::Value, peer: IpAddr| choose_pairing(Some(&reply), peer, name);
         // Release Sunshine: 200 with a "Not Found" body, no pairings key.
         let not_found = serde_json::json!({"error": "Not Found", "status_code": 404});
-        assert_eq!(pending_pairings(Some(not_found)), vec![None]);
-        assert_eq!(pending_pairings(None), vec![None]);
+        assert_eq!(pick(not_found, mac), Pairing::Unlisted);
+        assert_eq!(choose_pairing(None, mac, name), Pairing::Unlisted);
+        // 2026.10 lists none yet: posting without an id would be refused.
         assert_eq!(
-            pending_pairings(Some(serde_json::json!({"pairings": []}))),
-            vec![None]
+            pick(serde_json::json!({"pairings": []}), mac),
+            Pairing::NotYet
         );
-        let master = serde_json::json!({"pairings": [{"id": "a", "name": "mac"}, {"id": "b"}]});
+
+        let ipad = serde_json::json!({"id": "a", "name": "iPad", "address": "100.64.0.5"});
+        let ours = serde_json::json!({"id": "b", "name": name, "address": "100.100.1.2"});
+        // Another device's request is listed first (oldest first).
         assert_eq!(
-            pending_pairings(Some(master)),
-            vec![Some("a".to_string()), Some("b".to_string())]
+            pick(serde_json::json!({"pairings": [ipad, ours]}), mac),
+            Pairing::Id("b".into())
+        );
+        // Only someone else's is there: ours has not arrived yet.
+        assert_eq!(
+            pick(serde_json::json!({"pairings": [ipad]}), mac),
+            Pairing::NotYet
+        );
+        // An IPv4-mapped address is the same machine.
+        let mapped = serde_json::json!({"id": "c", "name": "x", "address": "::ffff:100.100.1.2"});
+        assert_eq!(
+            pick(serde_json::json!({"pairings": [ipad, mapped]}), mac),
+            Pairing::Id("c".into())
+        );
+        // Two from one address: the name tells them apart, or nothing does.
+        let moonlight =
+            serde_json::json!({"id": "d", "name": "Moonlight", "address": "100.100.1.2"});
+        assert_eq!(
+            pick(serde_json::json!({"pairings": [moonlight, ours]}), mac),
+            Pairing::Id("b".into())
+        );
+        assert_eq!(
+            pick(serde_json::json!({"pairings": [moonlight, moonlight]}), mac),
+            Pairing::NotYet
+        );
+
+        // A Docker node: every peer, and every request, is loopback.
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let node =
+            |id: &str, n: &str| serde_json::json!({"id": id, "name": n, "address": "127.0.0.1"});
+        assert_eq!(
+            pick(
+                serde_json::json!({"pairings": [node("a", "iPad"), node("b", name)]}),
+                local
+            ),
+            Pairing::Id("b".into())
+        );
+        assert_eq!(
+            pick(
+                serde_json::json!({"pairings": [node("a", name), node("b", name)]}),
+                local
+            ),
+            Pairing::NotYet
+        );
+        // The same name from another address is someone else.
+        let twin = serde_json::json!({"id": "e", "name": name, "address": "100.64.0.9"});
+        assert_eq!(
+            pick(serde_json::json!({"pairings": [twin]}), mac),
+            Pairing::NotYet
+        );
+
+        // Builds that list bare ids: the only one, never a guess among two.
+        assert_eq!(
+            pick(serde_json::json!({"pairings": [{"id": "f"}]}), mac),
+            Pairing::Id("f".into())
+        );
+        assert_eq!(
+            pick(
+                serde_json::json!({"pairings": [{"id": "f"}, {"id": "g"}]}),
+                mac
+            ),
+            Pairing::NotYet
         );
     }
 

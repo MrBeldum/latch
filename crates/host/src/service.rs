@@ -69,6 +69,8 @@ pub struct Service {
     /// retries for it are answered without asking the engine again, which
     /// is busy with that very handshake.
     pin_taken: Mutex<Option<(String, Instant)>>,
+    /// The last PIN refusal logged.
+    pin_refused: Mutex<Option<String>>,
 }
 
 impl Service {
@@ -89,6 +91,7 @@ impl Service {
             nat_running: AtomicBool::new(false),
             update_running: Arc::new(AtomicBool::new(false)),
             pin_taken: Mutex::new(None),
+            pin_refused: Mutex::new(None),
         }
     }
 
@@ -96,14 +99,11 @@ impl Service {
         push_log(&self.log, msg.into());
     }
 
-    fn session_active(&self) -> bool {
-        let cfg = self.cfg.lock().clone();
-        cfg.has_creds()
-            && Api {
-                user: &cfg.sunshine_user,
-                pass: &cfg.sunshine_pass,
-            }
-            .session_active()
+    /// A viewer is connected right now. A Desktop left running for the
+    /// viewer to resume does not count: see [`streamer::Session`].
+    fn someone_watching(&self) -> bool {
+        let install = self.install.lock().clone();
+        streamer::session(install.as_ref()).watched()
     }
 
     pub fn run_arc(self, replacing: bool) -> Result<()> {
@@ -261,7 +261,7 @@ impl Service {
                         user: &cfg.sunshine_user,
                         pass: &cfg.sunshine_pass,
                     };
-                    match api.upgrade_stream_profile() {
+                    match api.upgrade_stream_profile(install.as_ref()) {
                         Ok(true) => {
                             if let Err(e) = std::fs::write(&marker, "1") {
                                 self.log(format!("could not save stream profile version: {e}"));
@@ -272,7 +272,7 @@ impl Service {
                                 "stream profile ready: match client display, constant bitrate, 60 fps"
                             });
                         }
-                        Ok(false) => {} // A running app owns the display until it ends.
+                        Ok(false) => {} // Retried once nobody watches.
                         Err(e) => self.log(format!("stream profile could not be applied: {e:#}")),
                     }
                 }
@@ -617,7 +617,7 @@ impl Service {
             ("GET", "/v1/status") => Response::json(200, &self.status(local)),
             ("GET", "/v1/display") => Response::json(200, &self.display()),
             ("POST", "/v1/display") => self.set_display(peer.ip(), req),
-            ("POST", "/v1/pin") => self.pin(req),
+            ("POST", "/v1/pin") => self.pin(peer.ip(), req),
             ("POST", "/v1/power") => self.power(peer.ip(), req),
             ("POST", p) if p == UPDATE_PATH => self.update(peer.ip(), req),
             ("GET", p) if p == CLIPBOARD_PATH => match clipboard::read() {
@@ -661,7 +661,7 @@ impl Service {
             return Response::json(409, &Ack::err("an update is already being installed"));
         }
         let engine_running = self.streamer.lock().running;
-        if update::refuse_self_update(engine_running, self.session_active()) {
+        if update::refuse_self_update(engine_running, self.someone_watching()) {
             self.update_running.store(false, Ordering::Release);
             self.log("update deferred: a stream is running");
             return Response::json(
@@ -706,7 +706,7 @@ impl Service {
         }
     }
 
-    fn pin(&self, req: &Request) -> Response {
+    fn pin(&self, from: IpAddr, req: &Request) -> Response {
         let Ok(p) = req.json::<PinRequest>() else {
             return Response::json(400, &Ack::err("expected {\"pin\",\"name\"}"));
         };
@@ -734,7 +734,7 @@ impl Service {
             user: &cfg.sunshine_user,
             pass: &cfg.sunshine_pass,
         };
-        match api.submit_pin(&p.pin, &p.name) {
+        match api.submit_pin(&p.pin, &p.name, from) {
             Ok(streamer::Pin::Paired) => {
                 self.log(format!("paired \"{}\"", p.name));
                 Response::json(200, &Ack::ok())
@@ -747,8 +747,26 @@ impl Service {
                 ));
                 Response::json(200, &Ack::ok())
             }
+            Ok(streamer::Pin::NotYet) => {
+                // Not an error: the Mac retries within a second. A 200 with
+                // the reason is what it shows while it waits; any other
+                // status reads to it as "Latch isn't answering".
+                Response::json(
+                    200,
+                    &Ack::err(
+                        "waiting for this machine's pairing request to reach the streaming engine",
+                    ),
+                )
+            }
             Err(e) => {
-                self.log(format!("PIN from \"{}\" refused: {e:#}", p.name));
+                // The Mac retries every second for over a minute; one line
+                // per reason, not one per retry.
+                let line = format!("PIN from \"{}\" refused: {e:#}", p.name);
+                let mut last = self.pin_refused.lock();
+                if last.as_deref() != Some(line.as_str()) {
+                    self.log(line.clone());
+                    *last = Some(line);
+                }
                 Response::json(502, &Ack::err(e.to_string()))
             }
         }
