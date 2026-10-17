@@ -8,6 +8,10 @@
 //! more: a machine shared in from someone else's tailnet can reach the
 //! port, but may not pair, sleep the PC, read its clipboard or push it an
 //! executable.
+//!
+//! Under userspace Tailscale (a container's tailscaled) every tailnet peer
+//! arrives from loopback too, so there loopback alone proves nothing:
+//! `tailscale whois` of the connection's own port says who is behind it.
 
 use crate::clipboard;
 use crate::config::HostConfig;
@@ -61,6 +65,12 @@ pub struct Service {
     auth: Mutex<HashMap<IpAddr, (Instant, bool)>>,
     /// The last `whois` failure logged.
     whois_failed: Mutex<Option<String>>,
+    /// Whether Tailscale here has a kernel TUN device, as last reported.
+    /// Kept when a later `status` fails: `Some(false)` (userspace) is what
+    /// makes loopback a peer's address too, and must not lapse.
+    tun: Mutex<Option<bool>>,
+    /// The last line logged about a peer forwarded through loopback.
+    forwarded_logged: Mutex<Option<String>>,
     /// This PC's side of the NAT story, from `tailscale netcheck`.
     nat: Mutex<Option<NatReport>>,
     nat_running: AtomicBool,
@@ -87,6 +97,8 @@ impl Service {
             log: Arc::new(Mutex::new(VecDeque::new())),
             auth: Mutex::new(HashMap::new()),
             whois_failed: Mutex::new(None),
+            tun: Mutex::new(None),
+            forwarded_logged: Mutex::new(None),
             nat: Mutex::new(None),
             nat_running: AtomicBool::new(false),
             update_running: Arc::new(AtomicBool::new(false)),
@@ -162,6 +174,11 @@ impl Service {
             }
             self.ensure_autostart(&exe);
         }
+        // Before the first request: under userspace Tailscale every tailnet
+        // peer arrives from loopback, so that has to be known first.
+        if let Ok(st) = tailscale::status() {
+            self.note_tun(&st);
+        }
         let refresher = self.clone();
         std::thread::spawn(move || refresher.refresh_loop());
         // (refresh_loop takes the Arc so netcheck can run on its own thread.)
@@ -213,6 +230,9 @@ impl Service {
         }
 
         let ts = tailscale::status().map_err(|e| e.to_string());
+        if let Ok(st) = &ts {
+            self.note_tun(st);
+        }
         let came_up;
         {
             let mut cur = self.tailscale.lock();
@@ -512,9 +532,59 @@ impl Service {
         }
     }
 
-    /// Loopback is the control panel; a tailnet peer must pass
-    /// [`Owner::admits`]. A `whois` answer is remembered for [`AUTH_TTL`],
-    /// a refusal included; a failed `whois` is not remembered.
+    fn note_tun(&self, st: &tailscale::Status) {
+        if let Some(tun) = st.tun {
+            *self.tun.lock() = Some(tun);
+        }
+    }
+
+    /// Who sent a request, once it has been read. A loopback connection is
+    /// a process on this machine, unless Tailscale runs in userspace mode:
+    /// then it may be a tailnet peer that tailscaled relayed, which must
+    /// pass [`Owner::admits`] like any other and never counts as local.
+    /// Asked after the request is read, when tailscaled has certainly
+    /// recorded which peer the connection is from (it does so only after
+    /// it has connected to this port). Never cached: every relayed peer
+    /// shares 127.0.0.1.
+    fn caller(&self, peer: SocketAddr) -> Caller {
+        if !peer.ip().is_loopback() {
+            return Caller::Peer {
+                allowed: self.authorized(peer.ip()),
+            };
+        }
+        let tun = *self.tun.lock();
+        let owner = self.tailscale.lock().as_ref().ok().map(Owner::of);
+        loopback_caller(tun, owner.as_ref(), || {
+            let found = tailscale::whois_addr(peer);
+            let line = match &found {
+                Ok(Some(w)) => Some(format!(
+                    "{} ({}) asked through userspace Tailscale{}",
+                    w.node.computed_name,
+                    w.user_profile.login_name,
+                    if owner.as_ref().is_some_and(|o| o.admits(w)) {
+                        ""
+                    } else {
+                        ": not this account, refused"
+                    }
+                )),
+                Ok(None) => None,
+                Err(e) => Some(format!("whois {peer}: {e}; refused")),
+            };
+            if let Some(line) = line {
+                let mut last = self.forwarded_logged.lock();
+                if last.as_deref() != Some(line.as_str()) {
+                    self.log(line.clone());
+                    *last = Some(line);
+                }
+            }
+            found
+        })
+    }
+
+    /// Loopback may connect (see [`Service::caller`] for what it may do);
+    /// a tailnet peer must pass [`Owner::admits`]. A `whois` answer is
+    /// remembered for [`AUTH_TTL`], a refusal included; a failed `whois` is
+    /// not remembered.
     fn authorized(&self, ip: IpAddr) -> bool {
         if ip.is_loopback() {
             return true;
@@ -593,7 +663,8 @@ impl Service {
                 &Ack::err("browser access to the control API is disabled"),
             );
         }
-        if !self.authorized(peer.ip()) {
+        let caller = self.caller(peer);
+        if !caller.allowed() {
             return Response::json(
                 403,
                 &Ack::err("not a machine on this PC's Tailscale account"),
@@ -612,7 +683,8 @@ impl Service {
                 &Ack::err("a Latch request carries JSON or an executable"),
             );
         }
-        let local = peer.ip().is_loopback();
+        // The service log and /v1/quit are for this machine's own window.
+        let local = caller == Caller::Local;
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/v1/status") => Response::json(200, &self.status(local)),
             ("GET", "/v1/display") => Response::json(200, &self.display()),
@@ -873,6 +945,45 @@ pub fn describe_nat(n: &NatReport) -> String {
     }
 }
 
+/// Who sent a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Caller {
+    /// A process on this machine: its own window, or a script.
+    Local,
+    /// A tailnet machine, and whether this machine's owner admits it.
+    Peer { allowed: bool },
+}
+
+impl Caller {
+    fn allowed(self) -> bool {
+        match self {
+            Caller::Local => true,
+            Caller::Peer { allowed } => allowed,
+        }
+    }
+}
+
+/// Who is behind a loopback connection. Only with userspace networking
+/// (`TUN` false) can it be a tailnet peer; then `whois` of the connection's
+/// address says which, and an address Tailscale knows nothing about is a
+/// process on this machine. A lookup that fails admits nobody.
+fn loopback_caller(
+    tun: Option<bool>,
+    owner: Option<&Owner>,
+    whois: impl FnOnce() -> Result<Option<tailscale::WhoIs>>,
+) -> Caller {
+    if tun != Some(false) {
+        return Caller::Local;
+    }
+    match whois() {
+        Ok(None) => Caller::Local,
+        Ok(Some(w)) => Caller::Peer {
+            allowed: owner.is_some_and(|o| o.admits(&w)),
+        },
+        Err(_) => Caller::Peer { allowed: false },
+    }
+}
+
 /// Whose machine this is, for deciding who may use the control API.
 #[derive(Debug, Clone, PartialEq)]
 struct Owner {
@@ -1108,6 +1219,66 @@ mod tests {
         };
         assert!(!unnamed.admits(&mac));
         assert!(!unnamed.admits(&relay));
+    }
+
+    /// A Docker node's tailscaled in userspace mode relays every tailnet
+    /// peer from 127.0.0.1: only `whois` of the port tells them apart from
+    /// the node's own processes.
+    #[test]
+    fn a_peer_relayed_through_loopback_is_judged_like_any_other() {
+        let owner = Owner {
+            user: 21,
+            tagged: false,
+            tailnet: "ada@example.com".into(),
+        };
+        let never = || -> Result<Option<tailscale::WhoIs>> { panic!("no whois needed") };
+        // A kernel TUN, or a Tailscale that does not say: loopback is local.
+        assert_eq!(
+            loopback_caller(Some(true), Some(&owner), never),
+            Caller::Local
+        );
+        assert_eq!(loopback_caller(None, Some(&owner), never), Caller::Local);
+        // Userspace: whoever whois finds behind the port.
+        let found = |id, login: &str| {
+            let w = whois(id, login);
+            move || Ok(Some(w))
+        };
+        assert_eq!(
+            loopback_caller(Some(false), Some(&owner), found(21, "ada@example.com")),
+            Caller::Peer { allowed: true },
+            "the owner's Mac may ask, but is not the local window"
+        );
+        assert_eq!(
+            loopback_caller(Some(false), Some(&owner), found(77, "bob@example.net")),
+            Caller::Peer { allowed: false }
+        );
+        assert_eq!(
+            loopback_caller(Some(false), None, found(21, "ada@example.com")),
+            Caller::Peer { allowed: false },
+            "nobody to compare with while Tailscale is down"
+        );
+        assert_eq!(
+            loopback_caller(Some(false), Some(&owner), || Ok(None)),
+            Caller::Local,
+            "no peer behind the port: a process on this machine"
+        );
+        assert_eq!(
+            loopback_caller(Some(false), Some(&owner), || anyhow::bail!("timed out")),
+            Caller::Peer { allowed: false },
+            "a failed lookup admits nobody"
+        );
+        assert!(!Caller::Peer { allowed: false }.allowed());
+        assert!(Caller::Local.allowed());
+
+        // The window keeps working, and loopback never enters the cache.
+        let svc = Service::new();
+        let req = Request {
+            method: "GET".into(),
+            path: "/v1/status".into(),
+            ..Default::default()
+        };
+        assert_eq!(svc.handle("127.0.0.1:5".parse().unwrap(), &req).status, 200);
+        assert!(svc.auth.lock().is_empty());
     }
 
     #[test]

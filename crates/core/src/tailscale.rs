@@ -70,6 +70,11 @@ pub struct Status {
     pub user: BTreeMap<String, User>,
     /// The tailnet this machine is in. Absent before Tailscale 1.26.
     pub current_tailnet: Option<Tailnet>,
+    /// Whether tailscaled runs a kernel TUN device. `false` is userspace
+    /// networking (a container's tailscaled), where every tailnet peer
+    /// reaches a local service from 127.0.0.1; `None` when it does not say.
+    #[serde(rename = "TUN")]
+    pub tun: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -273,6 +278,32 @@ pub fn whois(ip: std::net::IpAddr) -> Result<WhoIs> {
         Duration::from_secs(2),
     )?;
     serde_json::from_str(&out).context("parse tailscale whois")
+}
+
+/// `tailscale whois` for a connection that reached this machine from
+/// `addr`, a loopback `ip:port`. Under userspace networking tailscaled
+/// relays each tailnet peer's TCP connection from loopback and remembers
+/// which peer every local port belongs to. `Ok(None)` when it knows of
+/// none: a process on this machine made the connection.
+pub fn whois_addr(addr: std::net::SocketAddr) -> Result<Option<WhoIs>> {
+    let cli = cli().ok_or_else(|| anyhow::anyhow!("Tailscale is not installed"))?;
+    let out = run_limited(
+        Command::new(cli).args(["whois", "--json", "--proto=tcp", &addr.to_string()]),
+        Duration::from_secs(2),
+    );
+    match out {
+        Ok(out) => serde_json::from_str(&out)
+            .map(Some)
+            .context("parse tailscale whois"),
+        Err(e) if no_such_peer(&e.to_string()) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The CLI's answer for an address no peer is behind: it logs
+/// "2026/10/17 16:46:33 peer not found" and exits 1.
+fn no_such_peer(err: &str) -> bool {
+    err.contains("peer not found") || err.contains("no match for")
 }
 
 /// `tailscale netcheck --format=json`, the parts that explain why a peer
@@ -738,6 +769,19 @@ mod tests {
         .unwrap();
         assert_eq!(st.current_tailnet.unwrap().name, "user@example.com");
         assert!(parse_status(SAMPLE).unwrap().current_tailnet.is_none());
+    }
+
+    #[test]
+    fn userspace_networking_is_told_from_a_kernel_tun() {
+        let st = parse_status(r#"{"BackendState":"Running","TUN":false}"#).unwrap();
+        assert_eq!(st.tun, Some(false));
+        let st = parse_status(r#"{"BackendState":"Running","TUN":true}"#).unwrap();
+        assert_eq!(st.tun, Some(true));
+        assert_eq!(parse_status(SAMPLE).unwrap().tun, None, "older versions");
+        assert!(no_such_peer("2026/10/17 16:46:33 peer not found"));
+        assert!(no_such_peer("no match for IP:port 127.0.0.1:5"));
+        assert!(!no_such_peer("tailscale timed out"));
+        assert!(!no_such_peer("failed to connect to local Tailscale daemon"));
     }
 
     #[test]
