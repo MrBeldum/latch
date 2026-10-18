@@ -80,6 +80,8 @@ pub struct Service {
     reinstall_tried: AtomicBool,
     /// The machine is being kept from idle-sleeping (see `power::keep_awake`).
     kept_awake: AtomicBool,
+    /// The macOS firewall turns away connections to this program.
+    firewall_blocked: AtomicBool,
     /// This PC's side of the NAT story, from `tailscale netcheck`.
     nat: Mutex<Option<NatReport>>,
     nat_running: AtomicBool,
@@ -111,6 +113,7 @@ impl Service {
             cfg_problem: Mutex::new(None),
             reinstall_tried: AtomicBool::new(false),
             kept_awake: AtomicBool::new(false),
+            firewall_blocked: AtomicBool::new(false),
             nat: Mutex::new(None),
             nat_running: AtomicBool::new(false),
             update_running: Arc::new(AtomicBool::new(false)),
@@ -450,6 +453,16 @@ impl Service {
         if !cfg!(windows) && tick % 12 == 11 {
             self.follow_reinstall();
         }
+        #[cfg(target_os = "macos")]
+        if tick.is_multiple_of(12) {
+            if let Ok(exe) = std::env::current_exe() {
+                let blocked = crate::unix_setup::firewall_blocks(&exe);
+                if blocked && !self.firewall_blocked.swap(blocked, Ordering::AcqRel) {
+                    self.log("the macOS firewall blocks incoming connections to Latch, so other machines cannot reach this Mac; run setup here");
+                }
+                self.firewall_blocked.store(blocked, Ordering::Release);
+            }
+        }
         // What an update retired is kept until the new version has served
         // for a while: the update's watcher puts it back if it does not.
         if tick == TIDY_TICK {
@@ -560,6 +573,9 @@ impl Service {
         }
         if wake.fast_startup == Some(true) {
             setup.push("Fast Startup is on, so the PC cannot be woken after a shutdown.".into());
+        }
+        if self.firewall_blocked.load(Ordering::Acquire) {
+            setup.push("The macOS firewall blocks other machines from reaching Latch.".into());
         }
         if *self.virtual_display.lock() == Some(false) {
             setup.push(

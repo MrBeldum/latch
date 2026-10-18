@@ -191,7 +191,16 @@ fn run_inner(p: &Plan<'_>, log: &mut Vec<String>) -> Result<()> {
         install_engine(&dir, log)?;
     }
 
-    stop_engine();
+    // A native Linux node (deploy/native, stuzha) runs the engine as a
+    // systemd user unit, with the desktop's environment and its priority.
+    // Killing it there stopped the unit for good (a clean exit is no
+    // failure to restart from), and the copy started here instead lacked
+    // DISPLAY when setup ran over SSH: every stream failed while the port
+    // still answered.
+    let unit = engine_unit();
+    if unit.is_none() {
+        stop_engine();
+    }
     let conf = conf_path()?;
     let existing = fs::read_to_string(&conf).unwrap_or_default();
     let credentials = conf.with_file_name(LOGIN_FILE);
@@ -226,16 +235,100 @@ fn run_inner(p: &Plan<'_>, log: &mut Vec<String>) -> Result<()> {
         step(log, "engine login set");
     }
 
-    stop_engine();
-    std::thread::sleep(Duration::from_millis(400));
-    streamer::start(&install).context("start streaming engine")?;
-    step(log, "streaming engine started");
+    if let Some(unit) = unit {
+        // Through `Requires=`, Latch's own unit restarts with it.
+        anyhow::ensure!(
+            systemctl_user(&["restart", unit])?,
+            "systemctl --user restart {unit} failed"
+        );
+        // Its start may wait for the X screen first.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !streamer::running() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        anyhow::ensure!(streamer::running(), "{unit} did not start listening");
+        step(
+            log,
+            format!("restarted the streaming engine's unit, {unit}"),
+        );
+    } else {
+        stop_engine();
+        std::thread::sleep(Duration::from_millis(400));
+        streamer::start(&install).context("start streaming engine")?;
+        step(log, "streaming engine started");
+    }
 
     if let Ok(exe) = std::env::current_exe() {
         set_autostart(true, &exe)?;
         step(log, "Latch starts at login so others can connect");
+        #[cfg(target_os = "macos")]
+        if firewall_blocks(&exe) {
+            allow_through_firewall(&exe)?;
+            step(log, "the macOS firewall lets other machines reach Latch");
+        }
     }
     Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+const FIREWALL: &str = "/usr/libexec/ApplicationFirewall/socketfilterfw";
+
+/// Whether the macOS application firewall turns away connections to
+/// `exe`: the control service then looks absent to every other machine
+/// (no PIN entry, no status), while the Mac's own window says "Shared". A
+/// rule for an ad-hoc signed app can lapse with each new build.
+#[cfg(target_os = "macos")]
+pub fn firewall_blocks(exe: &Path) -> bool {
+    let run = |args: &[&str]| {
+        Command::new(FIREWALL)
+            .args(args)
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    };
+    firewall_on(&run(&["--getglobalstate"]))
+        && app_blocked(&run(&["--getappblocked", &exe.display().to_string()]))
+}
+
+/// "Firewall is enabled. (State = 1)"; 2 is "block all but essentials".
+#[cfg(any(target_os = "macos", test))]
+fn firewall_on(global: &str) -> bool {
+    global.contains("State = 1") || global.contains("State = 2")
+}
+
+/// "Incoming connection to <exe> is blocked." (or "is permitted.").
+#[cfg(any(target_os = "macos", test))]
+fn app_blocked(answer: &str) -> bool {
+    answer.contains("is blocked")
+}
+
+/// Add `exe` to the firewall's list as allowed. That takes an
+/// administrator, so macOS asks for the password; setup is something the
+/// owner started at the Mac.
+#[cfg(target_os = "macos")]
+fn allow_through_firewall(exe: &Path) -> Result<()> {
+    let out = Command::new("osascript")
+        .args(["-e", &firewall_allow_script(&exe.display().to_string())])
+        .stdin(Stdio::null())
+        .output()
+        .context("run osascript")?;
+    anyhow::ensure!(
+        out.status.success() && !firewall_blocks(exe),
+        "the macOS firewall blocks Latch, so other machines cannot reach it ({}). Allow Latch in System Settings > Network > Firewall > Options",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(())
+}
+
+/// The AppleScript that runs `socketfilterfw --add` and `--unblockapp` for
+/// `exe` as an administrator.
+#[cfg(any(target_os = "macos", test))]
+fn firewall_allow_script(exe: &str) -> String {
+    let exe = exe.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        "set exe to \"{exe}\"\ndo shell script \"{FIREWALL} --add \" & quoted form of exe & \" && {FIREWALL} --unblockapp \" & quoted form of exe with administrator privileges"
+    )
 }
 
 fn install_engine(dir: &Path, log: &mut Vec<String>) -> Result<()> {
@@ -385,6 +478,41 @@ fn which(name: &str) -> Option<PathBuf> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
+}
+
+/// The systemd user unit that runs the engine on this machine, when there is
+/// one: then the engine is systemd's to stop and start, never Latch's.
+pub fn engine_unit() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        const UNIT: &str = "latch-engine.service";
+        let out = Command::new("systemctl")
+            .args([
+                "--user",
+                "show",
+                "-p",
+                "LoadState",
+                "-p",
+                "UnitFileState",
+                UNIT,
+            ])
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        unit_installed(&String::from_utf8_lossy(&out.stdout)).then_some(UNIT)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// `systemctl show -p LoadState -p UnitFileState` of a unit that exists
+/// and is not masked. ("not-found" when nobody installed one.)
+#[cfg(any(target_os = "linux", test))]
+fn unit_installed(show: &str) -> bool {
+    show.lines().any(|l| l.trim() == "LoadState=loaded")
 }
 
 pub fn stop_engine() {
@@ -885,7 +1013,6 @@ fn retire_legacy_user_unit() {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn systemctl_user(args: &[&str]) -> Result<bool> {
     Ok(Command::new("systemctl")
         .arg("--user")
@@ -1025,6 +1152,43 @@ mod tests {
         assert!(!in_latch_unit(
             "0::/user.slice/user-1004.slice/session-3.scope\n"
         ));
+    }
+
+    #[test]
+    fn a_firewall_that_blocks_latch_is_recognised_and_opened_by_path() {
+        assert!(firewall_on("Firewall is enabled. (State = 1)\n"));
+        assert!(!firewall_on("Firewall is disabled. (State = 0)\n"));
+        assert!(app_blocked(
+            "Incoming connection to /Applications/Latch.app/Contents/MacOS/Latch is blocked.\n"
+        ));
+        assert!(!app_blocked(
+            "Incoming connection to /Applications/Latch.app/Contents/MacOS/Latch is permitted.\n"
+        ));
+        let script = firewall_allow_script("/Applications/My \"Latch\".app/Contents/MacOS/Latch");
+        assert!(
+            script.starts_with(
+                "set exe to \"/Applications/My \\\"Latch\\\".app/Contents/MacOS/Latch\"\n"
+            ),
+            "{script}"
+        );
+        assert!(script.contains("--add \" & quoted form of exe"), "{script}");
+        assert!(
+            script.contains("--unblockapp \" & quoted form of exe"),
+            "{script}"
+        );
+        assert!(
+            script.ends_with("with administrator privileges"),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn an_engine_systemd_runs_is_left_to_systemd() {
+        assert!(unit_installed("LoadState=loaded\nUnitFileState=static\n"));
+        assert!(unit_installed("LoadState=loaded\nUnitFileState=enabled\n"));
+        assert!(!unit_installed("LoadState=not-found\nUnitFileState=\n"));
+        assert!(!unit_installed("LoadState=masked\nUnitFileState=masked\n"));
+        assert!(!unit_installed(""));
     }
 
     #[test]

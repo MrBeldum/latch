@@ -252,6 +252,17 @@ pub fn start(install: &Install) -> Result<()> {
         if running() {
             return Ok(());
         }
+        if let Some(unit) = crate::unix_setup::engine_unit() {
+            // systemd's engine (it stopped, or someone stopped it): start
+            // the unit, with its environment, rather than a copy beside it.
+            // --no-block: the unit may wait for the desktop first.
+            let started = Command::new("systemctl")
+                .args(["--user", "start", "--no-block", unit])
+                .status()
+                .context("systemctl --user start")?;
+            anyhow::ensure!(started.success(), "systemctl --user start {unit} failed");
+            return Ok(());
+        }
         let conf = install.conf();
         let mut c = Command::new(install.exe());
         if conf.exists() {
