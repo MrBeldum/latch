@@ -1594,7 +1594,7 @@ impl ClientApp {
                     ui,
                     &mut self.cfg.cmd_is_ctrl,
                     "Command acts as Ctrl",
-                    Some("So Command-C, V and Z copy, paste and undo on Windows. Off, Command is the Windows key."),
+                    Some("So Command-C, V and Z copy, paste and undo on Windows and Linux. Off, Command is the Windows key. A Mac always gets Command."),
                 ) {
                     self.dirty = true;
                 }
