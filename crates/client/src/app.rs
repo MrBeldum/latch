@@ -43,6 +43,25 @@ const NOTICE_FOR: Duration = Duration::from_secs(12);
 /// A one-line result, filled in by a worker thread.
 type Notice = Arc<Mutex<Option<(Tone, String)>>>;
 
+/// A PC's fixed desktop size and frame-rate ceiling, from its last status.
+type HostLimits = (Option<[u32; 2]>, u32);
+
+/// A question about one machine, waiting for a second click. The machine
+/// is its node id: names are not unique on a tailnet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Confirm {
+    node_id: String,
+    name: String,
+    action: Confirmable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Confirmable {
+    Power(PowerAction),
+    /// Forget what Latch saved about it, its pairing included.
+    Forget,
+}
+
 /// The window's pages, one per tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -95,12 +114,20 @@ pub struct ClientApp {
     tailscale_ok: Arc<AtomicBool>,
     brand: ui::Brand,
     page: Page,
+    /// Whether the window is full screen, as the system last reported it.
     fullscreen: bool,
-    /// A restart or shutdown waits for a second click.
-    confirm: Option<(String, PowerAction)>,
+    /// Full screen or not once streaming is over: what the window was when
+    /// the stream first connected. Kept across a reconnect.
+    fullscreen_after: Option<bool>,
+    /// A restart, a shutdown or forgetting a machine waits for a second
+    /// click.
+    confirm: Option<Confirm>,
     notice: Option<(Tone, String, Instant)>,
     /// After a session ends, offer to sleep this PC.
     offer_sleep: Option<Pc>,
+    /// A power action went to the machine of the current attempt: its end
+    /// is no failure, and no reason to offer sleep. Cleared if refused.
+    power_sent: Arc<AtomicBool>,
     ended_seen: bool,
     pending_notice: Option<Notice>,
     updates: Arc<Mutex<update::State>>,
@@ -165,9 +192,11 @@ impl ClientApp {
             brand: ui::Brand::new(&cc.egui_ctx),
             page: Page::Machines,
             fullscreen: false,
+            fullscreen_after: None,
             confirm: None,
             notice: None,
             offer_sleep: None,
+            power_sent: Arc::default(),
             ended_seen: true,
             pending_notice: None,
             updates: Arc::default(),
@@ -253,9 +282,12 @@ impl ClientApp {
         self.streamed = false;
         self.stream_failed = false;
         self.confirm = None;
+        self.power_sent.store(false, Ordering::Relaxed);
         self.last_pc = Some(pc.clone());
         self.asked_about_video = false;
-        *self.video_help.lock() = None;
+        // A new slot, so an answer still on its way about the last stream
+        // lands in the old one.
+        self.video_help = Arc::default();
         self.display_at_connect = Self::native_pixels(ctx);
         self.display_change = None;
         session::connect(Connect {
@@ -284,30 +316,43 @@ impl ClientApp {
         self.pending_notice = Some(notice);
     }
 
-    /// The first time a connected stream diagnoses its own picture as
-    /// broken, ask the PC what it can see. One question per stream: the
-    /// answer does not change while the same capture keeps failing.
-    fn ask_why_black(&mut self, ctx: &egui::Context, live: &Live) {
+    /// The first time a connected stream finds its picture black, ask the
+    /// PC what it can see. Only then: a picture that stopped arriving or
+    /// cannot be decoded is the network's or this Mac's doing, which the PC
+    /// cannot explain. One question per stream: the answer does not change
+    /// while the same capture keeps failing. Every way it ends leaves an
+    /// answer, so "Asking the PC why…" never stays up.
+    fn ask_why_black(&mut self, ctx: &egui::Context, live: &Live, os: &str) {
+        let problem = live.session.stats().video_problem;
         if self.asked_about_video
-            || live.session.stats().video_problem.is_none()
+            || !problem
+                .as_deref()
+                .is_some_and(crate::display::is_black_picture)
             || !live.session.connected()
         {
             return;
         }
         self.asked_about_video = true;
-        let (ip, help, ctx) = (live.ip, self.video_help.clone(), ctx.clone());
+        let help = self.video_help.clone();
+        if !crate::display::can_explain(os) {
+            *help.lock() = Some(crate::display::no_answer(os));
+            return;
+        }
+        let (ip, ctx, os) = (live.ip, ctx.clone(), os.to_string());
         std::thread::spawn(move || {
             let answer = match crate::display::ask(ip) {
                 Ok(report) => crate::display::verdict(&report),
                 Err(e) => {
                     tracing::warn!("display report: {e:#}");
-                    return;
+                    Default::default()
                 }
             };
-            if !answer.message.is_empty() {
-                *help.lock() = Some(answer);
-                ctx.request_repaint();
-            }
+            *help.lock() = Some(if answer.message.is_empty() {
+                crate::display::no_answer(&os)
+            } else {
+                answer
+            });
+            ctx.request_repaint();
         });
     }
 
@@ -347,20 +392,50 @@ impl ClientApp {
         self.disconnect();
     }
 
+    /// Ask the machine at `ip` to sleep, restart or shut down. A stream from
+    /// it, or a connection to it, ends once it has agreed (its host ends
+    /// the stream itself first), so a refusal leaves the stream up. A
+    /// connection to any other machine is none of this action's business.
     fn power(&mut self, ip: std::net::Ipv4Addr, name: &str, action: PowerAction) {
         let name = name.to_string();
-        // End the stream first so Sunshine sees a clean disconnect.
-        self.disconnect();
-        self.notify_later(move || {
-            std::thread::sleep(Duration::from_millis(600));
-            match session::power(ip, action) {
-                Ok(()) => (
+        let ours = self.is_current_target(ip);
+        if ours {
+            self.power_sent.store(true, Ordering::Relaxed);
+            if self.live.lock().is_some() {
+                self.view.toast(
+                    Tone::Neutral,
+                    format!("Asking {name} to {}…", action.label().to_lowercase()),
+                );
+            }
+        }
+        let (live, progress, sent) = (
+            self.live.clone(),
+            self.progress.clone(),
+            self.power_sent.clone(),
+        );
+        self.notify_later(move || match session::power(ip, action) {
+            Ok(()) => {
+                if ours {
+                    end_connection_to(&live, &progress, ip);
+                }
+                (
                     Tone::Success,
                     format!("{name}: {} requested.", action.label().to_lowercase()),
-                ),
-                Err(e) => (Tone::Danger, format!("{name}: {e}")),
+                )
+            }
+            Err(e) => {
+                if ours {
+                    sent.store(false, Ordering::Relaxed);
+                }
+                (Tone::Danger, format!("{name}: {e}"))
             }
         });
+    }
+
+    /// The machine this window is streaming from or connecting to.
+    fn is_current_target(&self, ip: std::net::Ipv4Addr) -> bool {
+        let live_ip = self.live.lock().as_ref().map(|l| l.ip);
+        targets(live_ip, &self.progress.lock(), ip)
     }
 
     fn test_wake(&mut self, pc: &Pc) {
@@ -411,6 +486,7 @@ impl ClientApp {
                         prog.step = Step::Streaming;
                         prog.since = Instant::now();
                         self.streamed = true;
+                        self.fullscreen_after.get_or_insert(self.fullscreen);
                         if self.cfg.stream.fullscreen {
                             fullscreen = Some(true);
                         } else {
@@ -428,7 +504,12 @@ impl ClientApp {
                         }
                     }
                     Event::Failed { stage, code } => {
-                        let cancelled = prog.cancel;
+                        let cancelled = prog.cancel || self.power_sent.load(Ordering::Relaxed);
+                        tracing::warn!(
+                            "{}: the stream failed at the {stage} step (code {code}){}",
+                            live.pc,
+                            if cancelled { " after a stop" } else { "" }
+                        );
                         self.stream_failed = !cancelled;
                         prog.step = Step::Ended {
                             error: (!cancelled).then_some(format!(
@@ -437,8 +518,17 @@ impl ClientApp {
                         };
                     }
                     Event::Terminated { code, message } => {
-                        let cancelled = prog.cancel;
+                        let cancelled = prog.cancel || self.power_sent.load(Ordering::Relaxed);
                         let error = code != 0 && !cancelled;
+                        if code != 0 {
+                            tracing::warn!(
+                                "{}: the stream ended, code {code}: {message}{}",
+                                live.pc,
+                                if cancelled { " (after a stop)" } else { "" }
+                            );
+                        } else {
+                            tracing::info!("{}: the stream ended: {message}", live.pc);
+                        }
                         self.stream_failed = error;
                         prog.step = Step::Ended {
                             error: error.then_some(message),
@@ -458,7 +548,8 @@ impl ClientApp {
                 }
                 self.view.reset(ctx, Some(live));
                 *guard = None;
-                fullscreen = Some(false);
+                fullscreen =
+                    fullscreen_when_finished(self.reconnect.is_some(), &mut self.fullscreen_after);
             } else if ended {
                 live.session.stop();
             }
@@ -468,9 +559,53 @@ impl ClientApp {
         }
     }
 
+    /// Reconnect when the window has moved to a display of another size
+    /// (held for a second), if that changes what the stream asks for: it
+    /// does for Match screen, and not for a fixed size or for a PC whose
+    /// fixed desktop is smaller than both displays. `asked` is what the
+    /// stream asked for; `limits` the PC's fixed desktop and frame-rate
+    /// ceiling, when discovery knows them (without them, it reconnects).
+    fn follow_display(
+        &mut self,
+        ctx: &egui::Context,
+        (asked, limits): ((u32, u32, u32), Option<HostLimits>),
+    ) {
+        let size = Self::native_pixels(ctx);
+        if size == self.display_at_connect || self.reconnect.is_some() {
+            self.display_change = None;
+            return;
+        }
+        match self.display_change {
+            Some((candidate, at))
+                if candidate == size && at.elapsed() >= Duration::from_secs(1) =>
+            {
+                let changes = limits.is_none_or(|(capture_size, max_fps)| {
+                    session::request_for(&self.cfg.stream, size, capture_size, max_fps) != asked
+                });
+                if changes {
+                    self.restart_capture = true;
+                    self.reconnect = self.last_pc.clone();
+                    self.disconnect();
+                } else {
+                    // Nothing to ask for anew: this display is the one the
+                    // stream is for now.
+                    self.display_at_connect = size;
+                    self.display_change = None;
+                }
+            }
+            Some((candidate, _)) if candidate == size => {}
+            _ => self.display_change = Some((size, Instant::now())),
+        }
+    }
+
     fn poll_notice(&mut self) {
         let ready = self.pending_notice.as_ref().and_then(|n| n.lock().take());
         if let Some((tone, text)) = ready {
+            // The machine list is out of sight while a stream runs: a
+            // refused power action, say, has to be read over the picture.
+            if self.live.lock().is_some() {
+                self.view.toast(tone, text.clone());
+            }
             self.notice = Some((tone, text, Instant::now()));
             self.pending_notice = None;
         }
@@ -514,6 +649,70 @@ impl ClientApp {
     }
 }
 
+/// Full screen or not once a stream has finished. A restart, new settings
+/// or a new display reconnect at once, so the window stays as it is rather
+/// than leaving full screen and coming back; otherwise it goes back to what
+/// it was before the stream (`after`), if the stream ever showed.
+fn fullscreen_when_finished(reconnecting: bool, after: &mut Option<bool>) -> Option<bool> {
+    if reconnecting {
+        None
+    } else {
+        after.take()
+    }
+}
+
+/// Where to send a power action meant for the machine `node_id`: the
+/// listed machine with that id, if it answers and allows it. Never another
+/// machine of the same name.
+fn power_target(disc: &Discovery, node_id: &str) -> Option<std::net::Ipv4Addr> {
+    disc.pcs
+        .iter()
+        .find(|p| p.node_id == node_id && !p.remembered && p.online && p.power_allowed())
+        .and_then(|p| p.ip)
+}
+
+/// What forgetting a machine does, for the question before it.
+fn forget_question(disc: &Discovery, node_id: &str, name: &str) -> String {
+    let listed = disc
+        .pcs
+        .iter()
+        .any(|p| p.node_id == node_id && !p.remembered);
+    if listed {
+        format!("Latch forgets how to wake {name} and its pairing. It stays in this list while it is on your Tailscale network; remove it in Tailscale's admin console to retire it.")
+    } else {
+        format!("Latch forgets {name}'s address, how to wake it and its pairing. If it is still on your Tailscale network, it is listed again once Tailscale is back, and pairs again on the next connect.")
+    }
+}
+
+/// Whether `ip` is the machine of the stream (`live_ip`) or of the
+/// connection under way.
+fn targets(
+    live_ip: Option<std::net::Ipv4Addr>,
+    progress: &Progress,
+    ip: std::net::Ipv4Addr,
+) -> bool {
+    live_ip == Some(ip) || (progress.active() && progress.ip == Some(ip))
+}
+
+/// End the stream from `ip`, or the connection to it, from a worker: what
+/// a disconnect does, for that machine only. One lock at a time, as the
+/// window takes them.
+fn end_connection_to(
+    live: &Mutex<Option<Live>>,
+    progress: &Mutex<Progress>,
+    ip: std::net::Ipv4Addr,
+) {
+    {
+        let mut p = progress.lock();
+        if p.active() && p.ip == Some(ip) {
+            p.cancel = true;
+        }
+    }
+    if let Some(l) = live.lock().as_ref().filter(|l| l.ip == ip) {
+        l.session.stop();
+    }
+}
+
 /// Look for Tailscale's CLI every few seconds on a thread of its own, and
 /// repaint when the answer changes.
 fn spawn_tailscale_probe(ok: Arc<AtomicBool>, ctx: egui::Context) {
@@ -528,6 +727,11 @@ fn spawn_tailscale_probe(ok: Arc<AtomicBool>, ctx: egui::Context) {
 
 impl eframe::App for ClientApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // The window's green button (or Globe-F) changes full screen behind
+        // the app's back: what the system reports is what is true.
+        if let Some(on) = ctx.input(|i| i.viewport().fullscreen) {
+            self.fullscreen = on;
+        }
         self.poll_live(ctx);
         self.poll_notice();
 
@@ -549,20 +753,40 @@ impl eframe::App for ClientApp {
                     .and_then(|p| p.host.as_ref())
                     .and_then(|h| stream::old_host(&h.version, latest.as_ref()));
                 self.tend_handover(pc_now, &l.pc);
-                self.ask_why_black(ctx, l);
-                let help = self.video_help.lock().clone();
+                let os = pc_now.map(|p| p.os.clone()).unwrap_or_default();
+                self.ask_why_black(ctx, l, &os);
+                // The PC's answer is about a black picture: it goes under
+                // that headline and no other.
+                let black = l
+                    .session
+                    .stats()
+                    .video_problem
+                    .as_deref()
+                    .is_some_and(crate::display::is_black_picture);
+                let help = self.video_help.lock().clone().filter(|_| black);
                 let env = Env {
                     live: l,
                     cfg: &self.cfg,
                     fullscreen: self.fullscreen,
                     path: pc_now.map(|p| p.path.clone()),
-                    os: pc_now.map(|p| p.os.clone()).unwrap_or_default(),
+                    os,
                     old_host,
                     handover: self.handover.as_ref().map(|h| h.status(&l.pc)),
                     video_help: help,
+                    // Discovery's fresh word on it; without that, nothing.
+                    power_allowed: pc_now.is_some_and(|p| p.power_allowed()),
+                    can_sleep: pc_now.is_some_and(|p| p.can_sleep()),
                 };
                 let actions = self.view.show(ctx, &env);
                 let (ip, name, input) = (l.ip, l.pc.clone(), l.input.clone());
+                // What a reconnect for a new display would ask for, beside
+                // what this stream asked for.
+                let display_request = (
+                    l.requested,
+                    pc_now
+                        .and_then(|p| p.host.as_ref())
+                        .map(|h| (h.streamer.capture_size, h.streamer.max_fps)),
+                );
                 drop(guard);
                 for a in actions {
                     match a {
@@ -599,22 +823,7 @@ impl eframe::App for ClientApp {
                         }
                     }
                 }
-            }
-            let size = Self::native_pixels(ctx);
-            if size != self.display_at_connect && self.reconnect.is_none() {
-                match self.display_change {
-                    Some((candidate, at))
-                        if candidate == size && at.elapsed() >= Duration::from_secs(1) =>
-                    {
-                        self.restart_capture = true;
-                        self.reconnect = self.last_pc.clone();
-                        self.disconnect();
-                    }
-                    Some((candidate, _)) if candidate == size => {}
-                    _ => self.display_change = Some((size, Instant::now())),
-                }
-            } else {
-                self.display_change = None;
+                self.follow_display(ctx, display_request);
             }
             self.commit();
             return;
@@ -645,11 +854,16 @@ impl eframe::App for ClientApp {
         if let Step::Ended { .. } = &prog.step {
             if !self.ended_seen {
                 self.ended_seen = true;
-                if self.cfg.sleep_prompt {
+                // A reconnect that failed before its stream came back: the
+                // window leaves full screen as the stream's end would have.
+                if let Some(on) = self.fullscreen_after.take() {
+                    self.set_fullscreen(ctx, on);
+                }
+                if self.cfg.sleep_prompt && !self.power_sent.load(Ordering::Relaxed) {
                     self.offer_sleep = disc
                         .pcs
                         .iter()
-                        .find(|p| p.name == prog.pc && p.power_allowed())
+                        .find(|p| p.node_id == prog.node_id && p.can_sleep())
                         .cloned();
                 }
             }
@@ -812,27 +1026,68 @@ impl ClientApp {
     }
 
     fn confirm_banner(&mut self, ui: &mut egui::Ui, disc: &Discovery) {
-        let Some((name, action)) = self.confirm.clone() else {
+        let Some(q) = self.confirm.clone() else {
             return;
         };
-        let pc = disc.pcs.iter().find(|p| p.name == name).cloned();
-        ui::banner(
-            ui,
-            Tone::Danger,
-            &format!("{} {name}?", action.label()),
-            Some("Programs there close without asking, and anything unsaved is lost."),
-            |ui| {
-                if ui::destructive_button(ui, action.label()).clicked() {
-                    if let Some(ip) = pc.as_ref().and_then(|p| p.ip) {
-                        self.power(ip, &name, action);
-                    }
-                    self.confirm = None;
+        let name = &q.name;
+        let (title, body, button) = match q.action {
+            Confirmable::Power(action) => (
+                format!("{} {name}?", action.label()),
+                match action {
+                    PowerAction::Sleep => "Asleep, it can only be woken from its own network, or through a router that forwards wake packets to it.".to_string(),
+                    _ => "Programs there close without asking, and anything unsaved is lost.".to_string(),
+                },
+                action.label(),
+            ),
+            Confirmable::Forget => (
+                format!("Forget {name}?"),
+                forget_question(disc, &q.node_id, name),
+                "Forget",
+            ),
+        };
+        ui::banner(ui, Tone::Danger, &title, Some(&body), |ui| {
+            if ui::destructive_button(ui, button).clicked() {
+                match q.action {
+                    Confirmable::Power(action) => match power_target(disc, &q.node_id) {
+                        Some(ip) => self.power(ip, name, action),
+                        None => {
+                            self.notice = Some((
+                                Tone::Danger,
+                                format!("Nothing was sent: {name} is offline, or no longer takes power actions from here."),
+                                Instant::now(),
+                            ))
+                        }
+                    },
+                    Confirmable::Forget => self.forget(&q.node_id, name),
                 }
-                if ui::ghost_button(ui, "Cancel").clicked() {
-                    self.confirm = None;
-                }
-            },
-        );
+                self.confirm = None;
+            }
+            if ui::ghost_button(ui, "Cancel").clicked() {
+                self.confirm = None;
+            }
+        });
+    }
+
+    /// Remove what Latch saved about a machine, its pairing included. A
+    /// remembered row goes at once; a machine still on the tailnet stays
+    /// listed, unpaired.
+    fn forget(&mut self, node_id: &str, name: &str) {
+        let outcome = ClientConfig::update(|c| {
+            c.forget(node_id);
+        });
+        self.cfg.forget(node_id);
+        self.discovery
+            .lock()
+            .pcs
+            .retain(|p| !(p.remembered && p.node_id == node_id));
+        self.notice = Some(match outcome {
+            Ok(()) => (Tone::Neutral, format!("Forgot {name}."), Instant::now()),
+            Err(e) => (
+                Tone::Danger,
+                format!("Couldn't forget {name}: {e}"),
+                Instant::now(),
+            ),
+        });
     }
 
     fn machine_list(
@@ -912,6 +1167,7 @@ impl ClientApp {
         let g = slot.lock();
         let running = g.setup_running;
         let stopped = g.service_stopped;
+        let viewer_only = g.viewer_only;
         let status = g.status.clone();
         drop(g);
         let noun = this_noun(status.as_ref().map(|s| s.os.as_str()).unwrap_or_default());
@@ -924,6 +1180,11 @@ impl ClientApp {
             .as_ref()
             .is_some_and(|s| s.streamer.running && s.streamer.api_ok);
         let (tone, detail) = match &status {
+            // Off on purpose, not a fault: Share this Mac is off.
+            None if viewer_only => (
+                Tone::Neutral,
+                "Not shared · it only connects to your other machines".to_string(),
+            ),
             None if stopped => (
                 Tone::Neutral,
                 "Not shared · the background service is stopped".to_string(),
@@ -957,22 +1218,37 @@ impl ClientApp {
             ),
         };
         ui::list_row(ui, Some(tone), &name, &detail, |ui| {
-            let label = if shared { "Manage" } else { "Set up sharing" };
+            // Only ever the Sharing page: nothing starts from the list.
+            let label = if shared {
+                "Manage"
+            } else if viewer_only && status.is_none() {
+                "Share this Mac…"
+            } else {
+                "Set up sharing"
+            };
             if ui::secondary_button(ui, label).clicked() {
                 self.page = Page::Sharing;
             }
         });
     }
 
-    /// The row's "…" menu: wake, power, copy the address.
+    /// The row's "…" menu: wake, power, copy the address, forget.
     fn row_menu(&mut self, ui: &mut egui::Ui, pc: &Pc) {
         let live = !pc.remembered;
         let wake = live && !pc.online && pc.can_wake();
         let test_wake = live && pc.online && pc.host.is_some() && pc.can_wake();
         let power = live && pc.online && pc.power_allowed();
-        if !(wake || test_wake || power || pc.ip.is_some()) {
+        // Only a machine that is away: one that answers is re-learned
+        // within seconds, and forgetting it would only unpair it.
+        let forget = !pc.online && pc.known.is_some();
+        if !(wake || test_wake || power || forget || pc.ip.is_some()) {
             return;
         }
+        let ask = |action| Confirm {
+            node_id: pc.node_id.clone(),
+            name: pc.name.clone(),
+            action,
+        };
         ui::icon_menu(ui, Icon::More, &format!("More for {}", pc.name), |ui| {
             if wake && ui::menu_item(ui, "Wake").clicked() {
                 self.notice = Some(match session::wake_only(pc) {
@@ -994,16 +1270,18 @@ impl ClientApp {
                 if wake || test_wake {
                     ui::menu_separator(ui);
                 }
-                if ui::menu_item(ui, "Sleep").clicked() {
+                // Only where something can wake it again: never a Linux
+                // VPS or a Mac, which would stay asleep.
+                if pc.can_sleep() && ui::menu_item(ui, "Sleep").clicked() {
                     if let Some(ip) = pc.ip {
                         self.power(ip, &pc.name, PowerAction::Sleep);
                     }
                 }
                 if ui::menu_item(ui, "Restart…").clicked() {
-                    self.confirm = Some((pc.name.clone(), PowerAction::Restart));
+                    self.confirm = Some(ask(Confirmable::Power(PowerAction::Restart)));
                 }
                 if ui::menu_item(ui, "Shut down…").clicked() {
-                    self.confirm = Some((pc.name.clone(), PowerAction::Shutdown));
+                    self.confirm = Some(ask(Confirmable::Power(PowerAction::Shutdown)));
                 }
             }
             if let Some(ip) = pc.ip {
@@ -1017,6 +1295,14 @@ impl ClientApp {
                         format!("Copied {ip}, {}'s Tailscale address.", pc.name),
                         Instant::now(),
                     ));
+                }
+            }
+            if forget {
+                if wake || test_wake || power || pc.ip.is_some() {
+                    ui::menu_separator(ui);
+                }
+                if ui::menu_item(ui, "Forget this machine…").clicked() {
+                    self.confirm = Some(ask(Confirmable::Forget));
                 }
             }
         });
@@ -1043,7 +1329,8 @@ impl ClientApp {
     /// Everything worth knowing about the paths and keys that is not
     /// urgent, folded away. Urgent key expiry is at the top of the page.
     fn details(&self, ui: &mut egui::Ui, disc: &Discovery) {
-        let mut items: Vec<(Tone, String)> = path_warnings(disc)
+        let release = self.updates.lock().release.clone();
+        let mut items: Vec<(Tone, String)> = path_warnings(disc, release.as_ref())
             .into_iter()
             .map(|t| (Tone::Warning, t))
             .collect();
@@ -1096,10 +1383,12 @@ impl ClientApp {
                 return;
             }
         }
-        let token = latch_core::update::token(self.cfg.github_token.as_deref());
+        // The token is looked up on the handover's own thread: git's
+        // credential helper may wait on a Keychain prompt, and this thread
+        // draws the stream.
         self.handover = Some(Handover::start(
             release,
-            token,
+            self.cfg.github_token.clone(),
             mac_ip,
             ip,
             input,
@@ -1372,7 +1661,7 @@ impl ClientApp {
                 ui,
                 &mut self.cfg.auto_update,
                 "Keep Latch up to date",
-                Some("Checks GitHub every few hours, installs new versions of this app, and sends updates to your other machines over Tailscale."),
+                Some("Checks GitHub every few hours, installs new versions of this app, and sends updates to your Windows PCs over Tailscale."),
             ) {
                 self.dirty = true;
             }
@@ -1727,8 +2016,9 @@ fn host_audio_problem(discovery: &Mutex<Discovery>, node_id: &str) -> Option<Str
 }
 
 /// One line per PC that is relayed, encodes in software, has no sound to
-/// send, or runs a host too old to update itself.
-fn path_warnings(disc: &Discovery) -> Vec<String> {
+/// send, runs a host too old to update itself, or runs one this Mac cannot
+/// update that is behind `release`.
+fn path_warnings(disc: &Discovery, release: Option<&latch_core::update::Release>) -> Vec<String> {
     let mut out = Vec::new();
     for pc in disc.pcs.iter().filter(|p| !p.remembered && p.online) {
         let nat = pc.host.as_ref().and_then(|h| h.nat.as_ref());
@@ -1751,6 +2041,11 @@ fn path_warnings(disc: &Discovery) -> Vec<String> {
             if let Ok(v) = Version::parse(&h.version) {
                 if !latch_core::update::host_can_receive_update(&v) {
                     out.push(update::old_host_message(&pc.name, &v));
+                }
+                if let Some(t) =
+                    release.and_then(|rel| update::manual_update_message(&pc.name, &h.os, &v, rel))
+                {
+                    out.push(t);
                 }
             }
         }
@@ -1887,7 +2182,7 @@ mod tests {
             pcs: vec![gaming_pc.clone()],
             ..Default::default()
         };
-        let w = path_warnings(&disc);
+        let w = path_warnings(&disc, None);
         assert_eq!(w.len(), 4, "{w:?}");
         assert!(w[0].contains("Tokyo relay"), "{}", w[0]);
         assert!(w[1].contains("software"), "{}", w[1]);
@@ -1911,7 +2206,7 @@ mod tests {
             pcs: vec![gaming_pc.clone()],
             ..Default::default()
         };
-        assert!(path_warnings(&disc).is_empty());
+        assert!(path_warnings(&disc, None).is_empty());
         // Nothing is said about a PC that is off.
         gaming_pc.online = false;
         gaming_pc.path.direct = Some(false);
@@ -1919,7 +2214,115 @@ mod tests {
             pcs: vec![gaming_pc],
             ..Default::default()
         };
-        assert!(path_warnings(&disc).is_empty());
+        assert!(path_warnings(&disc, None).is_empty());
+    }
+
+    fn power_pc(id: &str, os: &str, ip: &str, online: bool) -> Pc {
+        Pc {
+            node_id: id.into(),
+            name: "latch-node".into(),
+            os: os.into(),
+            ip: Some(ip.parse().unwrap()),
+            online,
+            host: online.then(|| latch_core::api::Status {
+                power_allowed: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_power_action_goes_to_the_machine_asked_for_never_its_namesake() {
+        let disc = Discovery {
+            pcs: vec![
+                power_pc("old", "windows", "100.64.0.3", false),
+                power_pc("a", "windows", "100.64.0.1", true),
+                power_pc("b", "linux", "100.64.0.2", true),
+            ],
+            ..Default::default()
+        };
+        let ip = |s: &str| Some(s.parse().unwrap());
+        assert_eq!(power_target(&disc, "a"), ip("100.64.0.1"));
+        assert_eq!(power_target(&disc, "b"), ip("100.64.0.2"));
+        assert_eq!(
+            power_target(&disc, "old"),
+            None,
+            "asleep, so nothing to send to"
+        );
+        assert_eq!(power_target(&disc, "gone"), None);
+        let mut refused = disc.clone();
+        refused.pcs[1].host.as_mut().unwrap().power_allowed = false;
+        assert_eq!(power_target(&refused, "a"), None, "its owner said no");
+    }
+
+    #[test]
+    fn sleep_is_offered_only_where_a_wake_packet_brings_it_back() {
+        assert!(power_pc("a", "windows", "100.64.0.1", true).can_sleep());
+        for os in ["linux", "macOS", ""] {
+            assert!(!power_pc("a", os, "100.64.0.1", true).can_sleep(), "{os:?}");
+        }
+        let mut pc = power_pc("a", "windows", "100.64.0.1", true);
+        pc.host.as_mut().unwrap().power_allowed = false;
+        assert!(!pc.can_sleep());
+    }
+
+    #[test]
+    fn a_power_action_ends_only_the_connection_to_its_own_machine() {
+        let (gaming, den) = (
+            "100.64.0.10".parse().unwrap(),
+            "100.64.0.31".parse().unwrap(),
+        );
+        let mut p = Progress {
+            step: Step::Waking,
+            ip: Some(gaming),
+            ..Default::default()
+        };
+        assert!(targets(None, &p, gaming), "the machine being woken");
+        assert!(
+            !targets(None, &p, den),
+            "another machine's sleep leaves it be"
+        );
+        assert!(targets(Some(den), &p, den), "the machine streaming");
+        p.step = Step::Ended { error: None };
+        assert!(!targets(None, &p, gaming), "nothing under way any more");
+    }
+
+    #[test]
+    fn a_reconnect_keeps_full_screen_and_the_end_restores_the_window() {
+        let mut after = Some(false);
+        assert_eq!(fullscreen_when_finished(true, &mut after), None);
+        assert_eq!(after, Some(false), "kept for the stream that follows");
+        assert_eq!(fullscreen_when_finished(false, &mut after), Some(false));
+        assert_eq!(after, None);
+        assert_eq!(
+            fullscreen_when_finished(false, &mut after),
+            None,
+            "a stream that never showed changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_host_this_mac_cannot_update_is_named_once_a_release_is_out() {
+        let mut stuzha = power_pc("s", "linux", "100.64.0.5", true);
+        stuzha.name = "stuzha".into();
+        let h = stuzha.host.as_mut().unwrap();
+        h.version = "4.1.1".into();
+        h.os = "linux".into();
+        let disc = Discovery {
+            pcs: vec![stuzha],
+            ..Default::default()
+        };
+        let rel = latch_core::update::Release {
+            version: Version::new(4, 1, 2),
+            tag: "v4.1.2".into(),
+            prerelease: false,
+            assets: vec![],
+        };
+        assert!(path_warnings(&disc, None).is_empty());
+        let w = path_warnings(&disc, Some(&rel));
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("stuzha runs Latch Host 4.1.1"), "{}", w[0]);
     }
 
     fn a_relay(online: bool) -> Relay {
@@ -2398,6 +2801,11 @@ pub(crate) mod snapshots {
             });
             self
         }
+
+        fn local_share(mut self, share: share::LocalShare) -> Self {
+            self.local = Some(share);
+            self
+        }
     }
 
     pub fn build(
@@ -2535,8 +2943,38 @@ pub(crate) mod snapshots {
                 Setup::new(pcs()).step(
                     "Gaming-PC",
                     Step::Pairing { pin: "4821".into() },
-                    "Latch on that machine isn't answering, so it can't enter the PIN. Open Latch there and set up sharing, then try again.",
+                    "Latch on Gaming-PC isn't answering, so it can't enter the PIN. Open Latch there and set up sharing, or type this PIN into the streaming engine's web page on that machine.",
                 ),
+            ),
+            (
+                "pairing-refused-for-now",
+                Setup::new(pcs()).step(
+                    "Gaming-PC",
+                    Step::Pairing { pin: "4821".into() },
+                    "Latch on Gaming-PC couldn't enter the PIN yet: the streaming engine did not accept the PIN (is the Mac pairing right now?)",
+                ),
+            ),
+            (
+                "pairing-refused",
+                failed("Gaming-PC", "Latch on Gaming-PC refused the PIN: not a machine on this PC's Tailscale account."),
+            ),
+            (
+                "confirm-forget",
+                Setup::new(remembered()).tweak(|app| {
+                    app.confirm = Some(Confirm {
+                        node_id: "n2".into(),
+                        name: "Office".into(),
+                        action: Confirmable::Forget,
+                    })
+                }),
+            ),
+            (
+                "lobby-mac-not-shared",
+                Setup::new(pcs()).local_share(share::LocalShare {
+                    service_stopped: true,
+                    viewer_only: true,
+                    ..Default::default()
+                }),
             ),
             (
                 "failed",
@@ -2559,7 +2997,11 @@ pub(crate) mod snapshots {
             (
                 "confirm-restart",
                 Setup::new(pcs()).tweak(|app| {
-                    app.confirm = Some(("Gaming-PC".into(), PowerAction::Restart))
+                    app.confirm = Some(Confirm {
+                        node_id: "n1".into(),
+                        name: "Gaming-PC".into(),
+                        action: Confirmable::Power(PowerAction::Restart),
+                    })
                 }),
             ),
             (
@@ -2659,12 +3101,124 @@ pub(crate) mod snapshots {
         );
         assert_eq!(
             h.state().confirm,
-            Some(("Gaming-PC".into(), PowerAction::Restart))
+            Some(Confirm {
+                node_id: "n1".into(),
+                name: "Gaming-PC".into(),
+                action: Confirmable::Power(PowerAction::Restart),
+            })
         );
         assert!(
             h.query_by_label("Restart").is_some(),
             "the confirming button"
         );
+    }
+
+    #[test]
+    fn a_linux_machine_is_never_offered_sleep() {
+        let mut h = build(Setup::new(many()), TYPICAL, 1.0, false);
+        h.get_by_label("More for vps-sanjose").simulate_click();
+        h.run_steps(2);
+        assert!(h.query_by_label("Restart…").is_some());
+        assert!(h.query_by_label("Sleep").is_none(), "nothing could wake it");
+    }
+
+    #[test]
+    fn a_machine_that_is_away_can_be_forgotten_after_a_question() {
+        // Asleep but still on the tailnet: offered, with what it costs.
+        let mut h = build(Setup::new(pcs()), TYPICAL, 1.0, false);
+        h.get_by_label("More for Office").simulate_click();
+        h.run_steps(2);
+        h.get_by_label("Forget this machine…").simulate_click();
+        h.run_steps(2);
+        assert_eq!(
+            h.state().confirm,
+            Some(Confirm {
+                node_id: "n2".into(),
+                name: "Office".into(),
+                action: Confirmable::Forget,
+            })
+        );
+        assert!(h.query_by_label("Forget Office?").is_some());
+        assert!(h
+            .query_by_label_contains("stays in this list while it is on your Tailscale network")
+            .is_some());
+        // A machine that answers is not offered it: it would only unpair.
+        let mut h = build(Setup::new(pcs()), TYPICAL, 1.0, false);
+        h.get_by_label("More for Gaming-PC").simulate_click();
+        h.run_steps(2);
+        assert!(h.query_by_label("Forget this machine…").is_none());
+        // Remembered while Tailscale is off: offered too.
+        let mut h = build(Setup::new(remembered()), TYPICAL, 1.0, false);
+        h.get_by_label("More for Office").simulate_click();
+        h.run_steps(2);
+        assert!(h.query_by_label("Forget this machine…").is_some());
+    }
+
+    #[test]
+    fn a_mac_with_sharing_off_is_not_reported_as_a_stopped_service() {
+        let h = build(
+            Setup::new(pcs()).local_share(share::LocalShare {
+                service_stopped: true,
+                viewer_only: true,
+                ..Default::default()
+            }),
+            MIN,
+            1.0,
+            false,
+        );
+        assert!(h.query_by_label_contains("service is stopped").is_none());
+        assert!(h
+            .query_by_label_contains("only connects to your other machines")
+            .is_some());
+        assert!(h.query_by_label("Share this Mac…").is_some());
+        // Someone pressed Stop: that is what it says.
+        let h = build(
+            Setup::new(pcs()).local_share(share::LocalShare {
+                service_stopped: true,
+                ..Default::default()
+            }),
+            MIN,
+            1.0,
+            false,
+        );
+        assert!(h.query_by_label_contains("service is stopped").is_some());
+    }
+
+    #[test]
+    fn full_screen_is_what_the_system_says_it_is() {
+        let mut h = build(Setup::new(pcs()), MIN, 1.0, false);
+        assert!(!h.state().fullscreen);
+        let root = |h: &mut egui_kittest::Harness<'_, ClientApp>, on| {
+            h.input_mut()
+                .viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .fullscreen = Some(on);
+            h.run_steps(1);
+        };
+        root(&mut h, true);
+        assert!(h.state().fullscreen, "the green button entered it");
+        root(&mut h, false);
+        assert!(!h.state().fullscreen, "and left it");
+    }
+
+    #[test]
+    fn a_reconnect_that_fails_before_its_stream_leaves_full_screen() {
+        let setup = Setup::new(pcs())
+            .step(
+                "Gaming-PC",
+                Step::Ended {
+                    error: Some("timed out".into()),
+                },
+                "",
+            )
+            .tweak(|app| {
+                app.ended_seen = false;
+                app.fullscreen = true;
+                app.fullscreen_after = Some(false);
+            });
+        let h = build(setup, MIN, 1.0, false);
+        assert_eq!(h.state().fullscreen_after, None, "the window went back");
     }
 
     #[test]

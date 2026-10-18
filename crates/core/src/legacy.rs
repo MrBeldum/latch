@@ -15,6 +15,10 @@ pub const STREAMER_KIND: &str = "BroLink";
 /// The update push's headers, which a 4.0 host requires and a 4.0 Mac sends.
 pub const UPDATE_VERSION_HEADER: &str = "x-brolink-version";
 pub const UPDATE_SHA256_HEADER: &str = "x-brolink-sha256";
+/// A Windows host from 4.0 or older: its process name, and where the
+/// install script put it under `%LOCALAPPDATA%`.
+pub const WINDOWS_HOST_PROCESS: &str = "brolink-host";
+pub const WINDOWS_HOST_EXE: &str = r"BroLink\brolink-host.exe";
 
 /// Whether `app` is what a Latch node (this version or an older one) puts in
 /// `Status::app`.

@@ -1,5 +1,6 @@
 //! Getting a new Latch Host onto a PC whose host is too old to take
-//! `/v1/update`, with nobody at the PC: the stream itself is the way in.
+//! `/v1/update` (before 3.1, so one still named BroLink), with nobody at
+//! the PC: the stream itself is the way in.
 //!
 //! The Mac serves the new `latch-host.exe` and a small PowerShell script
 //! on its own Tailscale address, to that one PC only, for a few minutes.
@@ -15,7 +16,7 @@ use crate::input::{self, press_chord};
 use anyhow::{anyhow, Context, Result};
 use latch_core::http;
 use latch_core::update::{self, Release};
-use latch_core::HANDOVER_PORT;
+use latch_core::{legacy, HANDOVER_PORT};
 use latch_stream::Input;
 use parking_lot::Mutex;
 use semver::Version;
@@ -58,10 +59,12 @@ pub struct Handover {
 impl Handover {
     /// Serve `release`'s host (fetching it first) and type the install
     /// command on the PC at `pc_ip` through `input`. `mac_ip` is this Mac's
-    /// Tailscale address, the only one the PC can reach.
+    /// Tailscale address, the only one the PC can reach. `configured_token`
+    /// is the one in Settings; without it, git's is asked for here, off
+    /// the window's thread.
     pub fn start(
         release: Option<Release>,
-        token: Option<String>,
+        configured_token: Option<String>,
         mac_ip: Ipv4Addr,
         pc_ip: Ipv4Addr,
         input: Input,
@@ -79,6 +82,7 @@ impl Handover {
             std::thread::Builder::new()
                 .name("handover".into())
                 .spawn(move || {
+                    let token = update::token(configured_token.as_deref());
                     let outcome = run(
                         release,
                         token.as_deref(),
@@ -150,8 +154,10 @@ pub fn command(mac_ip: Ipv4Addr) -> String {
     format!("powershell -ep bypass -c \"irm http://{mac_ip}:{HANDOVER_PORT}/u.ps1|iex\"")
 }
 
-/// The script the PC runs. It finds the running host by its process, or
-/// the usual install folder, and replaces that file.
+/// The script the PC runs. It finds the running host by its process, under
+/// either name, or the file where an install put it, and replaces that file
+/// where it is: a host this old is a BroLink one, and its firewall rules
+/// name that path. A fresh folder is made only when there is none.
 pub fn script(mac_ip: Ipv4Addr, version: &Version, sha256_hex: &str) -> String {
     format!(
         r#"# Latch Host {version}: installed from your Mac through the stream.
@@ -159,7 +165,8 @@ $ErrorActionPreference = 'Stop'
 $src = 'http://{mac_ip}:{port}'
 $host.UI.RawUI.WindowTitle = 'Latch Host update'
 Write-Host "Installing Latch Host {version} from your Mac..."
-$p = (Get-Process latch-host -ErrorAction SilentlyContinue | Select-Object -First 1).Path
+$p = (Get-Process latch-host, {old_process} -ErrorAction SilentlyContinue | Where-Object Path | Select-Object -First 1).Path
+if (-not $p) {{ foreach ($c in (Join-Path $env:LOCALAPPDATA 'Latch\latch-host.exe'), (Join-Path $env:LOCALAPPDATA '{old_exe}')) {{ if (Test-Path $c) {{ $p = $c; break }} }} }}
 if (-not $p) {{ $p = Join-Path $env:LOCALAPPDATA 'Latch\latch-host.exe' }}
 $dir = Split-Path -Parent $p
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -170,7 +177,7 @@ if ($h -ne '{sha}') {{ Remove-Item "$p.new" -Force; throw "the download did not 
 Write-Host "Stopping the old service"
 try {{ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:47850/v1/quit -ContentType 'application/json' -Body '{{}}' -TimeoutSec 3 | Out-Null }} catch {{}}
 Start-Sleep -Milliseconds 800
-Get-Process latch-host -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process latch-host, {old_process} -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 400
 if (Test-Path $p) {{ Move-Item $p "$p.old" -Force }}
 Move-Item "$p.new" $p -Force
@@ -184,6 +191,8 @@ Start-Sleep 5
         mac_ip = mac_ip,
         port = HANDOVER_PORT,
         sha = sha256_hex.to_uppercase(),
+        old_process = legacy::WINDOWS_HOST_PROCESS,
+        old_exe = legacy::WINDOWS_HOST_EXE,
     )
 }
 
@@ -332,8 +341,23 @@ mod tests {
         let s = script(ip, &Version::new(3, 1, 0), "abcdef");
         assert!(s.contains("$src = 'http://100.64.0.20:47851'"), "{s}");
         assert!(s.contains("-ne 'ABCDEF'"), "the hash is compared uppercase");
-        assert!(s.contains("Get-Process latch-host"), "{s}");
+        // A host this old runs as BroLink: found under either name, and
+        // replaced where it is, so its firewall rules still apply.
+        assert!(s.contains("Get-Process latch-host, brolink-host"), "{s}");
+        assert!(
+            s.contains(
+                "Get-Process latch-host, brolink-host -ErrorAction SilentlyContinue | Stop-Process"
+            ),
+            "both are stopped: {s}"
+        );
+        assert!(s.contains("'BroLink\\brolink-host.exe'"), "{s}");
         assert!(s.contains("Latch\\latch-host.exe"), "{s}");
+        let found = s.find("Test-Path $c").unwrap();
+        let fresh = s.rfind("if (-not $p) { $p = Join-Path").unwrap();
+        assert!(
+            found < fresh,
+            "a new folder only when no install was found: {s}"
+        );
         assert!(s.contains("/v1/quit"), "{s}");
         assert!(s.contains("--background"), "{s}");
         assert!(!s.contains("ghp_"), "no token in the script");
