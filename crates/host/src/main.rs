@@ -29,6 +29,20 @@ struct Args {
     /// Started by an update: wait for this process to give up the port.
     #[arg(long, requires = "background")]
     replaces: Option<u32>,
+    /// Started by an update from the executable it retired: watch the new
+    /// service (this process id) and put the retired one back if it never
+    /// answers. See `update::probation`.
+    #[arg(
+        long,
+        value_name = "PID",
+        hide = true,
+        requires_all = ["background", "probation_version", "probation_exe"]
+    )]
+    probation: Option<u32>,
+    #[arg(long, hide = true)]
+    probation_version: Option<String>,
+    #[arg(long, hide = true)]
+    probation_exe: Option<std::path::PathBuf>,
     /// Give the streaming engine in DIR Latch's name and icon. Run by
     /// setup, elevated, with the engine stopped; exits non-zero with the
     /// reason on stderr.
@@ -51,6 +65,8 @@ struct Args {
 }
 
 fn main() -> Result<()> {
+    // Before anything can replace it: which file this process is.
+    let _ = service::started_from();
     let args = Args::parse();
     if let Some(dir) = &args.local_app_data {
         // Before any thread or data_dir() call; edition 2021, so set_var is safe.
@@ -58,11 +74,13 @@ fn main() -> Result<()> {
     }
     // The elevated setup helper logs with the panel; `setup.log` is the
     // script's own output, which the setup card shows.
-    init_logging(if args.background {
+    let log = if args.background {
         "service.log"
     } else {
         "panel.log"
-    });
+    };
+    init_logging(log);
+    install_panic_hook(data_dir().ok().map(|d| d.join(log)));
     // init_logging has just called data_dir(), which takes over an older
     // install's folder; the engine's config inside still names the old one.
     #[cfg(not(windows))]
@@ -73,8 +91,19 @@ fn main() -> Result<()> {
         // either way this copy runs from where it is.
         tracing::warn!("could not move into Latch.app: {e:#}");
     }
+    if let (Some(pid), Some(version), Some(exe)) =
+        (args.probation, &args.probation_version, &args.probation_exe)
+    {
+        return latch_host::update::probation(exe, pid, version).inspect_err(|e| {
+            tracing::error!("the update watcher failed: {e:#}");
+        });
+    }
     if args.background {
-        return Service::new().run_arc(args.replaces.is_some());
+        // Started by a window or a supervisor, nobody sees stderr: the
+        // reason it could not start belongs in its log.
+        return Service::new()
+            .run_arc(args.replaces.is_some())
+            .inspect_err(|e| tracing::error!("the service could not start: {e:#}"));
     }
     if args.setup {
         return run_setup();
@@ -129,6 +158,44 @@ fn run_setup() -> Result<()> {
 /// and that one target is heard from only when it is an error.
 const DEFAULT_LOG: &str = "info,wgpu_hal=error";
 
+/// Release builds abort on a panic, in any thread. Without this the reason
+/// went to stderr, which nothing keeps (a launchd agent, a Windows Run-key
+/// process), and the log simply stopped. The line is appended to `log`
+/// directly rather than through tracing, whose writer may be the very lock
+/// the panic happened under; the default hook still runs after it.
+fn install_panic_hook(log: Option<std::path::PathBuf>) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let line = panic_line(
+            latch_core::dates::now_unix(),
+            std::thread::current().name(),
+            &info.to_string(),
+        );
+        if let Some(path) = &log {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = f.write_all(line.as_bytes());
+            }
+        }
+        previous(info);
+    }));
+}
+
+/// `2026-10-17T16:46:33Z ERROR panic in thread 'main': <message and place>`,
+/// in the log's own format.
+fn panic_line(unix: u64, thread: Option<&str>, info: &str) -> String {
+    format!(
+        "{} ERROR panic in thread '{}': {}\n",
+        latch_core::dates::utc_timestamp(unix),
+        thread.unwrap_or("unnamed"),
+        info.replace('\n', " ")
+    )
+}
+
 /// Logs go to a file in the data directory: neither mode has a console.
 fn init_logging(file: &str) {
     use tracing_subscriber::EnvFilter;
@@ -148,8 +215,24 @@ fn init_logging(file: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::DEFAULT_LOG;
+    use super::{panic_line, DEFAULT_LOG};
     use tracing_subscriber::EnvFilter;
+
+    #[test]
+    fn a_panic_leaves_a_line_in_the_log() {
+        let line = panic_line(
+            1_792_258_000,
+            Some("refresh"),
+            "panicked at crates/host/src/service.rs:212:9:\nindex out of bounds",
+        );
+        assert!(line.starts_with("2026-10-17T"), "{line}");
+        assert!(
+            line.contains("panic in thread 'refresh': panicked at crates/host/src/service.rs:212:9: index out of bounds"),
+            "{line}"
+        );
+        assert!(line.ends_with('\n') && line.matches('\n').count() == 1);
+        assert!(panic_line(0, None, "x").contains("thread 'unnamed'"));
+    }
 
     /// A typo here would be silent: `EnvFilter` drops directives it cannot
     /// parse and carries on, so a broken default would quietly restore the

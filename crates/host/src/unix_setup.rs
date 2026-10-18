@@ -463,8 +463,195 @@ pub fn autostart_enabled() -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 const LAUNCH_AGENT_LABEL: &str = "com.bardbro.latch.node";
+
+/// How to start the background service when nothing answers. A copy the
+/// window starts itself has no supervisor: launchd and systemd restart
+/// only what they started, and a second copy started beside theirs loses
+/// the port race and leaves their job stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartPlan {
+    /// macOS: load the login item; its RunAtLoad starts the service.
+    Bootstrap,
+    /// macOS: start the loaded login item (nothing if it already runs).
+    Kickstart,
+    /// Linux: start the user unit, with its drop-ins' environment.
+    SystemdStart,
+    /// No login item to go through: start a copy directly.
+    Spawn,
+}
+
+/// What login item this machine has for the service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginItem {
+    None,
+    /// The launch agent's file exists; whether launchd has it loaded, and
+    /// whether it is marked disabled (`launchctl print-disabled`), which
+    /// System Settings' Login Items does and which loads nothing.
+    MacAgent {
+        loaded: bool,
+        disabled: bool,
+    },
+    /// The systemd user unit's file exists.
+    LinuxUnit,
+}
+
+pub fn start_plan(item: LoginItem) -> StartPlan {
+    match item {
+        LoginItem::None | LoginItem::MacAgent { disabled: true, .. } => StartPlan::Spawn,
+        LoginItem::MacAgent { loaded: true, .. } => StartPlan::Kickstart,
+        LoginItem::MacAgent { loaded: false, .. } => StartPlan::Bootstrap,
+        LoginItem::LinuxUnit => StartPlan::SystemdStart,
+    }
+}
+
+fn login_item() -> LoginItem {
+    #[cfg(target_os = "macos")]
+    {
+        if launch_agent_path().is_ok_and(|p| p.exists()) {
+            return LoginItem::MacAgent {
+                loaded: launch_agent_loaded(),
+                disabled: launch_agent_disabled(),
+            };
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if user_unit_path().is_ok_and(|p| p.exists()) {
+            return LoginItem::LinuxUnit;
+        }
+    }
+    LoginItem::None
+}
+
+/// Start the service through its login item. `None` when there is none to
+/// go through (or macOS has it disabled), so the caller starts a copy
+/// itself; otherwise how it went, naming what was asked.
+pub fn start_supervised() -> Option<Result<&'static str>> {
+    let item = login_item();
+    let plan = start_plan(item);
+    if let LoginItem::MacAgent { disabled: true, .. } = item {
+        tracing::warn!(
+            "macOS has Latch's login item turned off (System Settings > General > Login Items), so the service starts without it and does not come back after a restart"
+        );
+    }
+    match plan {
+        StartPlan::Spawn => None,
+        #[cfg(target_os = "macos")]
+        StartPlan::Bootstrap | StartPlan::Kickstart => Some((|| -> Result<&'static str> {
+            let uid = uid()?;
+            let args = if plan == StartPlan::Bootstrap {
+                let plist = launch_agent_path()?;
+                bootstrap_args(&uid, &plist.display().to_string())
+            } else {
+                kickstart_args(&uid)
+            };
+            anyhow::ensure!(launchctl(&args)?, "launchctl {} failed", args[0]);
+            Ok("launchd")
+        })()),
+        #[cfg(target_os = "linux")]
+        StartPlan::SystemdStart => Some((|| -> Result<&'static str> {
+            // --no-block: the window calls this before it opens, and a unit
+            // may wait for the engine before it starts.
+            anyhow::ensure!(
+                systemctl_user(&["start", "--no-block", "latch.service"])?,
+                "systemctl --user start latch.service failed"
+            );
+            Ok("systemd")
+        })()),
+        _ => None,
+    }
+}
+
+/// Whether launchd or systemd started this process, and so restarts it
+/// after a failure.
+pub fn supervised() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var("XPC_SERVICE_NAME").is_ok_and(|v| v == LAUNCH_AGENT_LABEL)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_to_string("/proc/self/cgroup").is_ok_and(|c| in_latch_unit(&c))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        false
+    }
+}
+
+/// `/proc/self/cgroup` of a process systemd runs as `latch.service`.
+#[cfg(any(target_os = "linux", test))]
+fn in_latch_unit(cgroup: &str) -> bool {
+    cgroup
+        .lines()
+        .any(|l| l.trim_end().ends_with("/latch.service"))
+}
+
+/// `launchctl kickstart` without `-k`: it starts a job that is not
+/// running and leaves one that is alone.
+#[cfg(any(target_os = "macos", test))]
+fn kickstart_args(uid: &str) -> Vec<String> {
+    vec![
+        "kickstart".into(),
+        format!("gui/{uid}/{LAUNCH_AGENT_LABEL}"),
+    ]
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn bootstrap_args(uid: &str, plist: &str) -> Vec<String> {
+    vec!["bootstrap".into(), format!("gui/{uid}"), plist.into()]
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn enable_args(uid: &str) -> Vec<String> {
+    vec!["enable".into(), format!("gui/{uid}/{LAUNCH_AGENT_LABEL}")]
+}
+
+/// Whether `launchctl print-disabled gui/<uid>` lists the launch agent as
+/// disabled ("=> disabled", or "=> true" before macOS 13).
+#[cfg(any(target_os = "macos", test))]
+fn listed_disabled(print_disabled: &str) -> bool {
+    let label = format!("\"{LAUNCH_AGENT_LABEL}\"");
+    print_disabled.lines().any(|l| {
+        l.trim().strip_prefix(&label).is_some_and(|rest| {
+            let v = rest.trim().trim_start_matches("=>").trim();
+            v == "disabled" || v == "true"
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn launch_agent_disabled() -> bool {
+    let Ok(uid) = uid() else { return false };
+    Command::new("launchctl")
+        .args(["print-disabled", &format!("gui/{uid}")])
+        .output()
+        .is_ok_and(|o| listed_disabled(&String::from_utf8_lossy(&o.stdout)))
+}
+
+#[cfg(target_os = "macos")]
+fn uid() -> Result<String> {
+    let out = Command::new("id").arg("-u").output().context("id -u")?;
+    let uid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    anyhow::ensure!(
+        out.status.success() && !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()),
+        "id -u said {uid:?}"
+    );
+    Ok(uid)
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl(args: &[String]) -> Result<bool> {
+    Ok(Command::new("launchctl")
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("run launchctl")?
+        .success())
+}
 
 #[cfg(target_os = "macos")]
 fn launch_agent_path() -> Result<PathBuf> {
@@ -536,12 +723,7 @@ pub fn adopt_legacy_bundle(background: bool) -> Result<()> {
     }
     retire_legacy_launch_agent();
     if !background {
-        let uid = Command::new("id")
-            .arg("-u")
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
+        let uid = uid().unwrap_or_default();
         // The old job, which launchd runs from the path that no longer exists.
         let _ = Command::new("launchctl")
             .args([
@@ -657,16 +839,19 @@ fn macos_launch_agent(enable: bool, exe: &Path) -> Result<()> {
     if launch_agent_loaded() {
         return Ok(());
     }
-    // RunAtLoad starts the service now. If one already answers on the port,
-    // the new copy exits 0 and launchd does not try again.
-    let loaded = Command::new("launchctl")
-        .args(["load"])
-        .arg(&path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("load Latch launch agent")?;
-    anyhow::ensure!(loaded.success(), "could not load Latch launch agent");
+    // Turning sharing on is the owner asking for the login item, so a label
+    // macOS has marked disabled is enabled first: the legacy `launchctl
+    // load` skipped such a job without a word, and the service then ran
+    // with nothing to restart it. RunAtLoad starts the service now; if one
+    // already answers on the port, the new copy exits 0 and launchd leaves
+    // it.
+    let uid = uid()?;
+    let _ = launchctl(&enable_args(&uid));
+    let _ = launchctl(&bootstrap_args(&uid, &path.display().to_string()));
+    anyhow::ensure!(
+        launch_agent_loaded(),
+        "macOS did not load Latch's login item; allow Latch in System Settings > General > Login Items"
+    );
     Ok(())
 }
 
@@ -780,6 +965,66 @@ mod tests {
         assert!(plist.contains("<string>--background</string>"));
         assert!(plist.contains("B&amp;L&apos;s &lt;app&gt;.app"), "{plist}");
         assert!(plist.contains("<key>RunAtLoad</key><true/>"));
+    }
+
+    #[test]
+    fn the_service_starts_through_its_login_item_when_there_is_one() {
+        use LoginItem::*;
+        let mac = |loaded, disabled| MacAgent { loaded, disabled };
+        assert_eq!(start_plan(mac(false, false)), StartPlan::Bootstrap);
+        // Stopped by the window (Share off then on, or Stop then Start):
+        // the job is still loaded but nothing runs.
+        assert_eq!(start_plan(mac(true, false)), StartPlan::Kickstart);
+        // Turned off in Login Items: nothing launchd would start.
+        assert_eq!(start_plan(mac(false, true)), StartPlan::Spawn);
+        assert_eq!(start_plan(mac(true, true)), StartPlan::Spawn);
+        assert_eq!(start_plan(LinuxUnit), StartPlan::SystemdStart);
+        assert_eq!(start_plan(None), StartPlan::Spawn);
+
+        let kick = kickstart_args("501");
+        assert_eq!(kick, ["kickstart", "gui/501/com.bardbro.latch.node"]);
+        assert!(
+            !kick.iter().any(|a| a == "-k"),
+            "-k would kill a service that runs"
+        );
+        assert_eq!(
+            bootstrap_args("501", "/Users/a/Library/LaunchAgents/x.plist"),
+            [
+                "bootstrap",
+                "gui/501",
+                "/Users/a/Library/LaunchAgents/x.plist"
+            ]
+        );
+        assert_eq!(
+            enable_args("501"),
+            ["enable", "gui/501/com.bardbro.latch.node"]
+        );
+    }
+
+    #[test]
+    fn a_disabled_login_item_and_a_systemd_service_are_recognised() {
+        // `launchctl print-disabled gui/501` on the Mac, 2026-10-17.
+        let listing = "disabled services = {\n\t\t\"com.apple.x\" => enabled\n\t\t\"com.bardbro.latch.node\" => disabled\n\t}\n";
+        assert!(listed_disabled(listing));
+        assert!(listed_disabled("\t\"com.bardbro.latch.node\" => true\n"));
+        assert!(!listed_disabled(
+            "\t\"com.bardbro.latch.node\" => enabled\n"
+        ));
+        assert!(!listed_disabled(
+            "\t\"com.bardbro.latch.node.extra\" => disabled\n"
+        ));
+        assert!(in_latch_unit(
+            "0::/user.slice/user-1004.slice/user@1004.service/app.slice/latch.service\n"
+        ));
+        assert!(in_latch_unit(
+            "1:name=systemd:/user.slice/user@1000.service/latch.service\n"
+        ));
+        assert!(!in_latch_unit(
+            "0::/user.slice/user-1004.slice/user@1004.service/app.slice/latch-engine.service\n"
+        ));
+        assert!(!in_latch_unit(
+            "0::/user.slice/user-1004.slice/session-3.scope\n"
+        ));
     }
 
     #[test]

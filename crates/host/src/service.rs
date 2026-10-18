@@ -45,6 +45,9 @@ const PIN_TAKEN_FOR: Duration = Duration::from_secs(30);
 /// Ticks (of 5 s) between runs of `tailscale netcheck`: it takes seconds
 /// and the network does not move often.
 const NETCHECK_TICKS: u64 = 120;
+/// The tick (of 5 s) at which a service lets go of what an update retired:
+/// ten minutes in, long after the update's watcher has finished.
+const TIDY_TICK: u64 = 120;
 
 pub struct Service {
     cfg: Mutex<HostConfig>,
@@ -73,6 +76,8 @@ pub struct Service {
     forwarded_logged: Mutex<Option<String>>,
     /// Why host.toml could not be re-read, while it cannot.
     cfg_problem: Mutex<Option<String>>,
+    /// A reinstall was noticed and handing over to it failed.
+    reinstall_tried: AtomicBool,
     /// This PC's side of the NAT story, from `tailscale netcheck`.
     nat: Mutex<Option<NatReport>>,
     nat_running: AtomicBool,
@@ -102,6 +107,7 @@ impl Service {
             tun: Mutex::new(None),
             forwarded_logged: Mutex::new(None),
             cfg_problem: Mutex::new(None),
+            reinstall_tried: AtomicBool::new(false),
             nat: Mutex::new(None),
             nat_running: AtomicBool::new(false),
             update_running: Arc::new(AtomicBool::new(false)),
@@ -173,7 +179,6 @@ impl Service {
         if let Ok(exe) = std::env::current_exe() {
             if replacing {
                 self.log("updated: the previous version has been replaced");
-                update::tidy(&exe);
             }
             self.ensure_autostart(&exe);
         }
@@ -418,6 +423,49 @@ impl Service {
                 }
                 *cur = v;
             }
+        }
+
+        if !cfg!(windows) && tick % 12 == 11 {
+            self.follow_reinstall();
+        }
+        // What an update retired is kept until the new version has served
+        // for a while: the update's watcher puts it back if it does not.
+        if tick == TIDY_TICK {
+            if let Ok(exe) = std::env::current_exe() {
+                update::tidy(&exe);
+            }
+        }
+    }
+
+    /// A Mac or Linux install replaced under a running service (a new
+    /// Latch.app copied over, a package upgrade) keeps serving the old code
+    /// until something restarts it, and the window cannot tell when the
+    /// version did not change. Restart into the new program once nobody
+    /// watches. (Windows swaps its executable through `update`.)
+    fn follow_reinstall(self: &Arc<Self>) {
+        let Some(stamp) = started_from().filter(|s| s.replaced()) else {
+            return;
+        };
+        if self.reinstall_tried.load(Ordering::Acquire) || self.someone_watching() {
+            return;
+        }
+        #[cfg(not(windows))]
+        if crate::unix_setup::supervised() {
+            // launchd and systemd restart a service that failed, from the
+            // path the new program is at.
+            self.log("Latch was reinstalled; the service restarts into the new copy");
+            std::process::exit(75);
+        }
+        // Once: a new copy that cannot start is not retried every minute.
+        self.reinstall_tried.store(true, Ordering::Release);
+        match update::hand_over(stamp.path(), update::STARTUP_GRACE) {
+            Ok(_) => {
+                self.log("Latch was reinstalled; the new copy takes over the service");
+                std::process::exit(0);
+            }
+            Err(e) => self.log(format!(
+                "Latch was reinstalled, but the new copy did not start: {e:#}"
+            )),
         }
     }
 
@@ -741,6 +789,17 @@ impl Service {
                 ),
             );
         }
+        if !self.cfg.lock().accept_updates {
+            self.log(format!(
+                "update from {from} refused: this PC takes no pushed updates (accept_updates = false in host.toml)"
+            ));
+            return Response::json(
+                403,
+                &Ack::err(
+                    "the owner of this PC has turned pushed updates off; update it at the PC",
+                ),
+            );
+        }
         if self.update_running.swap(true, Ordering::AcqRel) {
             return Response::json(409, &Ack::err("an update is already being installed"));
         }
@@ -762,15 +821,25 @@ impl Service {
         };
         match update::stage(req, &exe) {
             Ok(version) => {
+                let sha = req
+                    .header(latch_core::api::UPDATE_SHA256_HEADER)
+                    .or_else(|| req.header(latch_core::legacy::UPDATE_SHA256_HEADER))
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
                 self.log(format!(
-                    "updating to {version}: {from} sent the new Latch Host"
+                    "updating to {version}: {from} sent the new Latch Host (SHA-256 {sha})"
                 ));
                 let running = self.update_running.clone();
                 let log = self.log.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(500));
                     match update::apply(&exe) {
-                        Ok(()) => {
+                        Ok(h) => {
+                            if let Err(e) = update::start_probation(&exe, &h, &version.to_string())
+                            {
+                                tracing::warn!("{e:#}");
+                            }
                             tracing::info!("handing over to {version}");
                             std::process::exit(0);
                         }
@@ -784,7 +853,7 @@ impl Service {
             }
             Err(r) => {
                 self.update_running.store(false, Ordering::Release);
-                self.log(format!("update refused: {}", r.message()));
+                self.log(format!("update from {from} refused: {}", r.message()));
                 Response::json(r.status(), &Ack::err(r.message()))
             }
         }
@@ -1111,13 +1180,73 @@ fn starts_with_window_on(mac: bool, cfg: &HostConfig) -> bool {
     !mac || cfg.start_with_windows
 }
 
-/// Start `--background` if nothing answers on loopback.
-pub fn ensure_service_running() {
-    if service_alive() {
-        return;
+/// Start the background service if nothing answers on loopback. Through
+/// launchd or systemd when there is a login item, so it is supervised and
+/// there is only ever one; a copy of its own only where there is none (a
+/// Windows PC, or a Mac whose owner turned the login item off). A Mac that
+/// is not shared starts nothing: the service would only exit again, and a
+/// window that kept asking spawned one every four seconds for hours.
+/// Returns whether it asked for a start.
+pub fn ensure_service_running() -> bool {
+    if !starts_with_window(&HostConfig::load()) {
+        tracing::info!("not starting the background service: this Mac is not shared");
+        return false;
     }
+    if service_alive() {
+        return false;
+    }
+    #[cfg(not(windows))]
+    match crate::unix_setup::start_supervised() {
+        Some(Ok(by)) => {
+            tracing::info!("asked {by} to start the background service");
+            return true;
+        }
+        Some(Err(e)) => {
+            tracing::warn!("could not start the background service through its login item ({e:#}); starting it directly");
+        }
+        None => {}
+    }
+    spawn_service()
+}
+
+/// After an update: stop the service that answers (launchd's, or a copy an
+/// older window started) and start it again from the file now on disk.
+/// The supervisor would not restart it by itself, since /v1/quit exits 0.
+pub fn restart_service() {
+    let _ = http::request(
+        ("127.0.0.1", CONTROL_PORT),
+        "POST",
+        "/v1/quit",
+        None,
+        Duration::from_secs(2),
+    );
+    // Until it has let go of the port: a copy started while it still holds
+    // it would exit at once, and launchd would leave it at that.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while service_alive() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    ensure_service_running();
+}
+
+/// How soon after it started a copy that stops counts as one that could not
+/// start at all.
+const QUICK_EXIT: Duration = Duration::from_secs(5);
+
+/// Why the last copy this window started stopped at once, for the page.
+static QUICK_EXIT_NOTE: Mutex<Option<String>> = Mutex::new(None);
+
+/// The reason the last copy this window started stopped as soon as it
+/// started, once.
+pub fn take_quick_exit() -> Option<String> {
+    QUICK_EXIT_NOTE.lock().take()
+}
+
+/// Start a copy of `--background` as a child of this process.
+fn spawn_service() -> bool {
     let Ok(exe) = std::env::current_exe() else {
-        return;
+        return false;
     };
     let mut c = std::process::Command::new(exe);
     c.arg("--background")
@@ -1129,15 +1258,72 @@ pub fn ensure_service_running() {
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x0000_0008 | 0x0800_0000); // DETACHED_PROCESS | CREATE_NO_WINDOW
     }
+    let started = Instant::now();
     match c.spawn() {
         Ok(mut child) => {
+            let pid = child.id();
             std::thread::spawn(move || {
-                let _ = child.wait();
+                // Exit 0 at once is no failure: another copy already
+                // answered, or a Mac turned out not to be shared.
+                if let Ok(status) = child.wait() {
+                    if !status.success() && started.elapsed() < QUICK_EXIT {
+                        let why = format!(
+                            "the background service stopped as it started ({status}); its log says why"
+                        );
+                        tracing::warn!("{why}");
+                        *QUICK_EXIT_NOTE.lock() = Some(why);
+                    }
+                }
             });
-            tracing::info!("started the background service");
+            tracing::info!("launched the background service (pid {pid})");
+            true
         }
-        Err(e) => tracing::error!("could not start the background service: {e}"),
+        Err(e) => {
+            tracing::error!("could not start the background service: {e}");
+            false
+        }
     }
+}
+
+/// The program file this process started from, as it was then: to tell
+/// when an update or a reinstall has put another one at that path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExeStamp {
+    path: std::path::PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl ExeStamp {
+    fn of(path: std::path::PathBuf) -> Option<Self> {
+        let m = std::fs::metadata(&path).ok()?;
+        Some(Self {
+            len: m.len(),
+            modified: m.modified().ok(),
+            path,
+        })
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Another file sits at the path now: another size or time. `false`
+    /// while the path cannot be read (gone, or held by a virus scanner).
+    pub fn replaced(&self) -> bool {
+        Self::of(self.path.clone())
+            .is_some_and(|now| (now.len, now.modified) != (self.len, self.modified))
+    }
+}
+
+/// This process's [`ExeStamp`], taken the first time it is asked for;
+/// `main` asks first thing. The path is kept from then on: on Linux
+/// `current_exe` follows the file an update renames away.
+pub fn started_from() -> Option<&'static ExeStamp> {
+    static STARTED: std::sync::OnceLock<Option<ExeStamp>> = std::sync::OnceLock::new();
+    STARTED
+        .get_or_init(|| std::env::current_exe().ok().and_then(ExeStamp::of))
+        .as_ref()
 }
 
 /// The `Content-Type` Latch's own callers send: JSON, or the executable
@@ -1405,6 +1591,20 @@ mod tests {
         }
         svc.update_running.store(false, Ordering::Release);
         assert_eq!(svc.update(LOOPBACK, &req).status, 400);
+        assert!(!svc.update_running.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn an_owner_can_turn_pushed_updates_off() {
+        let svc = Service::new();
+        svc.cfg.lock().accept_updates = false;
+        let r = svc.update(LOOPBACK, &Request::default());
+        if cfg!(windows) {
+            assert_eq!(r.status, 403, "{}", r.body);
+            assert!(r.body.contains("turned pushed updates off"), "{}", r.body);
+        } else {
+            assert_eq!(r.status, 400, "only a Windows PC takes pushes at all");
+        }
         assert!(!svc.update_running.load(Ordering::Acquire));
     }
 

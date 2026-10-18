@@ -17,6 +17,10 @@ pub struct HostConfig {
     /// on another network cannot wake it. On by default. Explicit Sleep
     /// from the Mac or the Start menu still works.
     pub stay_awake: bool,
+    /// Take a newer `latch-host.exe` that a machine on the owner's account
+    /// sends (`/v1/update`), which is how a Mac keeps its PCs current. Off,
+    /// the PC refuses every push and is updated only at the PC itself.
+    pub accept_updates: bool,
     /// Sunshine web-UI login the host uses to accept pairing PINs. Written
     /// by the setup step, which sets the same values on Sunshine.
     pub sunshine_user: String,
@@ -29,6 +33,7 @@ impl Default for HostConfig {
             power_allowed: true,
             start_with_windows: true,
             stay_awake: true,
+            accept_updates: true,
             sunshine_user: String::new(),
             sunshine_pass: String::new(),
         }
@@ -60,6 +65,7 @@ impl HostConfig {
             disk.power_allowed = self.power_allowed;
             disk.start_with_windows = self.start_with_windows;
             disk.stay_awake = self.stay_awake;
+            disk.accept_updates = self.accept_updates;
             if self.has_creds() {
                 disk.sunshine_user = self.sunshine_user.clone();
                 disk.sunshine_pass = self.sunshine_pass.clone();
@@ -101,9 +107,12 @@ mod tests {
         assert!(c.power_allowed);
         assert!(c.start_with_windows);
         assert!(c.stay_awake);
+        assert!(c.accept_updates, "pushed updates stay on unless turned off");
         assert!(!c.has_creds());
         // An old host.toml without the field gets the default too.
         let c: HostConfig = toml::from_str("power_allowed = false").unwrap();
-        assert!(!c.power_allowed && c.start_with_windows && c.stay_awake);
+        assert!(!c.power_allowed && c.start_with_windows && c.stay_awake && c.accept_updates);
+        let c: HostConfig = toml::from_str("accept_updates = false").unwrap();
+        assert!(!c.accept_updates);
     }
 }

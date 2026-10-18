@@ -33,6 +33,11 @@ pub struct Shared {
     /// A Mac whose owner turned sharing off: it only connects to the
     /// others, so the window neither starts nor restarts the service.
     pub viewer_only: bool,
+    /// The service runs a newer Latch than this window, and this window's
+    /// own file has not been replaced: it is an older copy (a download, a
+    /// disk image) opened by hand. Relaunching it would only start the same
+    /// old file again, so it says so instead, and leaves the service alone.
+    pub stale_panel: Option<String>,
     /// Moves whenever anything above changes, so a reader can skip copying
     /// what it already has.
     pub rev: u64,
@@ -295,6 +300,13 @@ impl HostApp {
             }
             Err(e) => {
                 tracing::warn!("autostart: {e:#}");
+                if self.os == Os::Mac && on {
+                    // Not shared after all: take back what was saved above,
+                    // or the next window to open would start the service.
+                    if let Err(e) = self.cfg.save() {
+                        tracing::warn!("could not save host config: {e:#}");
+                    }
+                }
                 self.note = Some((
                     Tone::Danger,
                     format!("Couldn't change whether Latch starts at login: {e}."),
@@ -393,7 +405,20 @@ impl HostApp {
         let setup_running = shared.setup_running;
         let setup_result = shared.setup_result.clone();
         let setup_log = shared.setup_log.clone();
+        let viewer_only = shared.viewer_only;
+        let stale_panel = shared.stale_panel.clone();
         drop(shared);
+        if self.live
+            && self.os == Os::Mac
+            && viewer_only
+            && self.cfg.start_with_windows
+            && !self.dirty
+        {
+            // Another window (or a hand edit) turned sharing off. Saving any
+            // other setting from here must not turn it back on.
+            self.cfg.start_with_windows = false;
+            self.autostart = false;
+        }
         if setup_running {
             self.busy_since.get_or_insert_with(Instant::now);
             // The seconds counter under the spinner.
@@ -413,7 +438,22 @@ impl HostApp {
         if let Some((tone, text, _)) = self.note.clone() {
             ui::notice(ui, tone, &text);
         }
-        if s.version != env!("CARGO_PKG_VERSION") {
+        if let Some(path) = &stale_panel {
+            ui::notice(
+                ui,
+                Tone::Warning,
+                &format!(
+                    "This window is an older copy of Latch ({}, at {path}); the background service runs {}. Close it and open Latch from {}.",
+                    env!("CARGO_PKG_VERSION"),
+                    s.version,
+                    if self.os == Os::Windows {
+                        "the Start menu"
+                    } else {
+                        "Applications"
+                    }
+                ),
+            );
+        } else if s.version != env!("CARGO_PKG_VERSION") {
             ui::notice(
                 ui,
                 Tone::Neutral,
@@ -889,6 +929,15 @@ impl HostApp {
                 ) {
                     self.dirty = true;
                 }
+                ui::row_separator(ui);
+                if ui::toggle_row(
+                    ui,
+                    &mut self.cfg.accept_updates,
+                    "Install updates your other machines send",
+                    Some("A Mac on your Tailscale account sends this PC each new Latch and it restarts by itself. Off, update Latch here."),
+                ) {
+                    self.dirty = true;
+                }
             }
             ui::row_separator(ui);
             let mut auto = self.autostart;
@@ -1071,16 +1120,52 @@ fn update_action(service: &str, panel: &str) -> UpdateAction {
     }
 }
 
-fn relaunch_this_exe() -> bool {
-    let Ok(exe) = std::env::current_exe() else {
+/// Start the window again from the path this one started from, if an
+/// update has put a new file there. A window opened from an older copy (a
+/// download, a disk image) whose file nobody replaced would only start
+/// itself again, and that one again, once a second, forever.
+fn relaunch_if_replaced() -> bool {
+    let Some(started) = crate::service::started_from().filter(|s| s.replaced()) else {
         return false;
     };
-    std::process::Command::new(exe)
+    std::process::Command::new(started.path())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .is_ok()
+}
+
+/// When the window restarts a service that does not answer: after two
+/// failed polls (about two seconds), then after waits that double up to a
+/// minute. A service that stops as it starts (port 47850 taken by another
+/// program, a crash at start) was started again every four seconds for as
+/// long as the window stayed open. Starts over once the service answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Respawn {
+    next_at: u32,
+    wait: u32,
+}
+
+impl Respawn {
+    const LONGEST: u32 = 60;
+
+    fn new() -> Self {
+        Self {
+            next_at: 2,
+            wait: 4,
+        }
+    }
+
+    /// Whether to start the service at this count of failed polls.
+    fn due(&mut self, failures: u32) -> bool {
+        if failures < self.next_at {
+            return false;
+        }
+        self.next_at = failures + self.wait;
+        self.wait = (self.wait * 2).min(Self::LONGEST);
+        true
+    }
 }
 
 /// Poll the service every second; refresh Sunshine's client list now and
@@ -1101,6 +1186,8 @@ fn only_aged(old: &Status, new: &Status) -> bool {
 fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
     std::thread::spawn(move || {
         let mut failures = 0u32;
+        let mut respawn = Respawn::new();
+        let mut quick_exit: Option<String> = None;
         let mut tick = 0u64;
         let mut restarted_service = false;
         loop {
@@ -1115,25 +1202,36 @@ fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
             match r {
                 Ok(st) => {
                     failures = 0;
+                    respawn = Respawn::new();
+                    quick_exit = None;
                     match update_action(&st.version, env!("CARGO_PKG_VERSION")) {
                         UpdateAction::RestartService if !restarted_service => {
                             // This panel is newer than the service (an
                             // update replaced the exe; current_exe still
                             // names it). Restart once; looping on != used
                             // to kill a *newer* service every second.
+                            // Through launchd or systemd, which would not
+                            // restart a service that quit by itself.
                             restarted_service = true;
-                            let _ = http::request(
-                                ("127.0.0.1", CONTROL_PORT),
-                                "POST",
-                                "/v1/quit",
-                                None,
-                                Duration::from_secs(2),
-                            );
-                            std::thread::sleep(Duration::from_secs(1));
-                            crate::service::ensure_service_running();
+                            crate::service::restart_service();
                         }
-                        UpdateAction::RelaunchPanel if relaunch_this_exe() => {
-                            std::process::exit(0);
+                        UpdateAction::RelaunchPanel => {
+                            if relaunch_if_replaced() {
+                                std::process::exit(0);
+                            }
+                            let mut s = shared.lock();
+                            if s.stale_panel.is_none() {
+                                let path = crate::service::started_from()
+                                    .map(|e| e.path().display().to_string())
+                                    .unwrap_or_default();
+                                tracing::warn!(
+                                    "this window is Latch {} from {path}, older than the service ({}); not relaunching it",
+                                    env!("CARGO_PKG_VERSION"),
+                                    st.version
+                                );
+                                s.stale_panel = Some(path);
+                                changed = true;
+                            }
                         }
                         _ => {}
                     }
@@ -1160,19 +1258,35 @@ fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
                 }
                 Err(e) => {
                     failures += 1;
+                    if let Some(why) = crate::service::take_quick_exit() {
+                        quick_exit = Some(why);
+                    }
                     let mut s = shared.lock();
-                    let stopped_by_user =
-                        s.service_error.as_deref() == Some(STOPPED) || s.viewer_only;
+                    // An older copy of the window must not become the
+                    // service: it would point the login item at itself.
+                    let stopped_by_user = s.service_error.as_deref() == Some(STOPPED)
+                        || s.viewer_only
+                        || s.stale_panel.is_some();
                     changed |= s.status.is_some();
                     s.status = None;
                     if !stopped_by_user {
-                        let e = format!("{e}");
+                        let e = quick_exit.clone().unwrap_or_else(|| format!("{e}"));
                         changed |= s.service_error.as_deref() != Some(e.as_str());
                         s.service_error = Some(e);
                     }
                     drop(s);
-                    if failures % 4 == 2 && !stopped_by_user {
-                        crate::service::ensure_service_running();
+                    if !stopped_by_user && respawn.due(failures) {
+                        // Another window, or a hand edit, may have turned
+                        // sharing off since this one opened: the service
+                        // would only exit again.
+                        if crate::service::starts_with_window(&HostConfig::load()) {
+                            crate::service::ensure_service_running();
+                        } else {
+                            let mut s = shared.lock();
+                            s.viewer_only = true;
+                            s.service_error = Some(STOPPED.into());
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -1205,6 +1319,22 @@ mod tests {
             utf16.extend_from_slice(&c.to_le_bytes());
         }
         assert_eq!(decode_log(&utf16), "hi\n");
+    }
+
+    #[test]
+    fn a_service_that_will_not_start_is_retried_less_and_less_often() {
+        let mut r = Respawn::new();
+        let fired: Vec<u32> = (1..=400).filter(|&f| r.due(f)).collect();
+        assert_eq!(&fired[..6], [2, 6, 14, 30, 62, 122]);
+        // Then once a minute, never less often: a PC must come back.
+        assert!(
+            fired.windows(2).skip(5).all(|w| w[1] - w[0] == 60),
+            "{fired:?}"
+        );
+        // Once it answers, the next outage starts quickly again.
+        let mut r = Respawn::new();
+        assert!(!r.due(1));
+        assert!(r.due(2));
     }
 
     #[test]
