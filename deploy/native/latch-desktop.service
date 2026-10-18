@@ -3,14 +3,22 @@ Description=Latch native XFCE desktop
 Requires=latch-display.service
 After=latch-display.service
 Wants=pulseaudio.service
+# A headless desktop must never give up: instead of a start limit the
+# retries slow down (2 s, growing to 2 min; see RestartSteps below).
+StartLimitIntervalSec=0
 
 [Service]
 Environment=DISPLAY=:1
 Environment=XAUTHORITY=%t/latch.Xauthority
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 50); do xdpyinfo >/dev/null 2>&1 && exit 0; sleep 0.2; done; exit 1'
 ExecStart=/usr/bin/startxfce4
-Restart=on-failure
-RestartSec=3
+# Log Out in XFCE ends the session with status 0, which on-failure would
+# leave stopped: every later stream would show an empty screen until
+# someone started this unit over SSH. A logout brings a fresh session back.
+Restart=always
+RestartSec=2
+RestartSteps=6
+RestartMaxDelaySec=120
 
 [Install]
 WantedBy=default.target

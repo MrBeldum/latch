@@ -169,6 +169,16 @@ new public IP after a stop/start on an instance without a reserved address.
 opens the new port), then remove the old rule by hand. The relay picks the new port up
 on restart.
 
+**Updating Tailscale.** The relay is an internet-facing tailscaled, and nothing inside
+the container updates it: Compose fetches `tailscale/tailscale:latest` only when it has
+no copy at all. Re-running `./install-relay.sh` pulls the current image first and
+recreates the container only when the image changed (it prints the version it ends up
+on); `docker compose pull && docker compose up -d` does the same by hand. The state
+volume keeps the node, its address and its prefs. Streams through the relay fall back to
+DERP for the few seconds the container restarts, so do it at a quiet time, monthly or
+whenever Tailscale ships a security fix. A pinned `TS_IMAGE` is updated only by bumping
+the pin.
+
 **Turning it off:** `docker compose down`. Streams fall back to DERP by themselves.
 To keep the node but stop relaying: `docker exec latch-relay tailscale set --relay-server-port=""`.
 
@@ -183,7 +193,7 @@ To keep the node but stop relaying: `docker exec latch-relay tailscale set --rel
 | `Relay prefs NOT applied` in the logs | The node never authenticated inside `RELAY_WAIT_SECS`. Finish the login, then `docker restart latch-relay`. |
 | Node authenticates but peers still say `relay "xxx"` | The grant is missing, a peer is older than 1.86, or the UDP port is not actually reachable. Check the cloud security list, and `iptables -L INPUT --line-numbers` for a rule *above* `REJECT`. |
 | Relay node disappears after a restart | The auth key was ephemeral. Create a non-ephemeral one. |
-| `peer relay unavailable` at startup | The image is older than 1.86. Unpin or bump `TS_IMAGE`. |
+| `peer relay unavailable` at startup | The image is older than 1.86. Bump a pinned `TS_IMAGE`, or re-run `./install-relay.sh`, which pulls `latest` (an unpinned image is only fetched on a pull). |
 
 ## Files
 
@@ -194,4 +204,4 @@ To keep the node but stop relaying: `docker exec latch-relay tailscale set --rel
 | `selftest.sh` | Stub-driven regression tests for the installer's failure paths. No docker, no network, no root. |
 | `.env.example` | Every knob, no secrets. Copy to `.env`. |
 | `.env` | **Your auth key. Gitignored. Never commit it, never paste it into a shell with tracing on.** |
-| `install-relay.sh` | Idempotent installer described above. |
+| `install-relay.sh` | Idempotent installer described above. Pulls the image on every run. |
