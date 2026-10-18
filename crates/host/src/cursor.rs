@@ -119,15 +119,7 @@ fn visible_box(color: Option<&Bitmap>, mask: &Bitmap) -> Option<[i32; 4]> {
 /// Desktop app running after a viewer leaves, so a running app alone does
 /// not say a stream is on. `None` when the log says neither.
 fn viewer_connected(log: &str) -> Option<bool> {
-    log.lines().rev().find_map(|line| {
-        if line.contains("CLIENT CONNECTED") {
-            Some(true)
-        } else if line.contains("CLIENT DISCONNECTED") || line.contains("Ping Timeout") {
-            Some(false)
-        } else {
-            None
-        }
-    })
+    crate::streamer::viewer_connected_in(log)
 }
 
 /// What the guard reads and sets on Windows; a fake in the tests.
