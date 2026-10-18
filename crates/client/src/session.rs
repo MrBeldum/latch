@@ -1852,13 +1852,17 @@ mod tests {
 
     #[test]
     fn only_silence_reads_as_isnt_answering_and_cancel_stops_it() {
-        let closed = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
+        // Port 0 can never be connected to; a port freed by dropping a
+        // listener can be taken by a test running beside this one.
+        let closed: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let h = hand_off();
         let t = start(&h, closed);
-        std::thread::sleep(Duration::from_millis(300));
+        // Waited for, not slept for: Windows takes about a second to refuse
+        // a connection, retrying the SYN first.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !h.progress.lock().detail.contains("isn't answering") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert!(
             h.progress.lock().detail.contains("isn't answering"),
             "{}",
