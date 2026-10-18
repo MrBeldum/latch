@@ -121,14 +121,23 @@ if (Test-Path -LiteralPath (Join-Path $oldEngine 'sunshine.exe')) {{
                 # Again each time: one may have been started from there since.
                 Get-CimInstance Win32_Process -Filter "Name='sunshine.exe'" -ErrorAction SilentlyContinue | Where-Object {{ $_.ExecutablePath -like ($oldEngine + '\*') }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
                 Start-Sleep -Seconds ([Math]::Min($try, 2))
+                # A rename, which either happens whole or not at all. Move-Item
+                # can leave the destination folder behind when the rename
+                # fails on a held file, and the next try then moves the old
+                # engine INTO it (engine\engine).
                 try {{
-                    Move-Item -LiteralPath $oldEngine -Destination '{engine}' -ErrorAction Stop
+                    [IO.Directory]::Move($oldEngine, '{engine}')
                     $moved = $true
                     break
-                }} catch {{ Write-Output "  could not move the engine (try $try of 5): $_" }}
+                }} catch {{ Write-Output "  could not move the engine (try $try of 5): $($_.Exception.GetBaseException().Message)" }}
             }}
         }}
         if (-not $moved) {{
+            # Nothing was there before the tries; whatever one left is not an
+            # engine, and the fresh one setup installs needs the folder.
+            if (Test-Path -LiteralPath '{engine}') {{
+                Move-Item -LiteralPath '{engine}' -Destination ('{engine}.partial-' + (Get-Date -Format yyyyMMddHHmmss)) -ErrorAction SilentlyContinue
+            }}
             $retiredState = Join-Path $oldEngine 'config'
             Step "  the earlier engine stays in $oldEngine; setup installs a new one and copies its pairing state across"
         }}
@@ -196,9 +205,7 @@ mod tests {
         assert!(s.contains("Unregister-ScheduledTask"), "{s}");
         assert!(s.contains("sc.exe delete 'BroLinkStream'"), "{s}");
         assert!(
-            s.contains(
-                r"Move-Item -LiteralPath $oldEngine -Destination 'C:\Program Files\Latch\engine'"
-            ),
+            s.contains(r"[IO.Directory]::Move($oldEngine, 'C:\Program Files\Latch\engine')"),
             "{s}"
         );
         // The old folder is only emptied after it has been moved from, and
@@ -221,7 +228,7 @@ mod tests {
         let reset = s.find("$retiredState = $null").expect("reset first");
         let retry = s.find("foreach ($try in 1..5)").expect("retries");
         let kill = s[retry..].find("Stop-Process").expect("kill in the loop") + retry;
-        let mov = s.find("Move-Item -LiteralPath $oldEngine").expect("move");
+        let mov = s.find("[IO.Directory]::Move($oldEngine").expect("move");
         let kept = s
             .find("$retiredState = Join-Path $oldEngine 'config'")
             .expect("state kept for the fresh engine");
@@ -246,7 +253,7 @@ mod tests {
         let guard = s
             .find(r"if (-not (Test-Path -LiteralPath 'C:\Program Files\Latch\engine'))")
             .expect("no move onto a folder that is still there");
-        let mov = s.find("Move-Item -LiteralPath $oldEngine").expect("move");
+        let mov = s.find("[IO.Directory]::Move($oldEngine").expect("move");
         assert!(aside < guard && empty < guard && guard < mov, "{s}");
     }
 
