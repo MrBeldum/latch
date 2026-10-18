@@ -752,26 +752,14 @@ pub const SETUP_DURING_STREAM: &str = "a stream is running, so setup did not sta
 #[cfg_attr(not(windows), allow(dead_code))]
 const SETUP_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Whether the engine's log says a viewer is connected now: the last line
-/// about one is a connect. A session ends with "CLIENT DISCONNECTED", or
-/// with "<address>: Ping Timeout" and no disconnect line when the viewer
-/// just went away. The engine starts a new log each time it starts, and
-/// the caller also asks whether it is listening, so a connect left by an
-/// engine that died mid-stream does not count.
+/// Whether the engine's log says a viewer is connected now (the same reading
+/// as [`crate::streamer::viewer_connected_in`]; a log that says nothing
+/// counts as no viewer). The engine starts a new log each time it starts,
+/// and the caller also asks whether it is listening, so a connect left by
+/// an engine that died mid-stream does not count.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn viewer_in_log(log: &str) -> bool {
-    log.lines()
-        .rev()
-        .find_map(|line| {
-            if line.contains("CLIENT DISCONNECTED") || line.contains(": Ping Timeout") {
-                Some(false)
-            } else if line.contains("CLIENT CONNECTED") {
-                Some(true)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(false)
+    crate::streamer::viewer_connected_in(log).unwrap_or(false)
 }
 
 /// Whether a setup click is turned down: a viewer is connected, and this is

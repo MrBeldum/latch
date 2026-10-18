@@ -195,6 +195,10 @@ pub struct Streamer {
     /// asking for more only drops frames. A viewer asking for fewer pixels
     /// raises it in proportion.
     pub max_fps: u32,
+    /// A viewer is connected right now, from the engine's own log. A Mac
+    /// holds a host update back while it is true, instead of sending the
+    /// whole executable to be turned down. False from older hosts.
+    pub viewer: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

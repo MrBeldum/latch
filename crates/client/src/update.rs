@@ -61,6 +61,17 @@ pub struct State {
     pub rolled_back: BTreeMap<String, Version>,
     /// Hosts too old to receive `/v1/update`; told the user once.
     pub told_old: BTreeSet<String>,
+    /// Pushes in a row a host turned down because a stream ran: each one
+    /// doubles the wait before the next (see [`push_wait`]). A host from
+    /// before 4.2 says a stream runs long after the viewer left.
+    pub deferred: BTreeMap<String, u32>,
+}
+
+/// How long to wait before sending a host the same version again, after
+/// `deferred` pushes in a row were turned down for a running stream:
+/// [`PUSH_GRACE`], doubling up to an hour.
+fn push_wait(deferred: u32) -> Duration {
+    (PUSH_GRACE * 2u32.pow(deferred.min(5))).min(Duration::from_secs(3600))
 }
 
 pub fn spawn(
@@ -233,15 +244,19 @@ pub fn spawn(
                         ctx.request_repaint();
                     }
                 }
-                if !should_push(&v, rel) || streaming_to == Some(ip) {
+                // Someone is streaming from it (this Mac or another viewer):
+                // the host would turn the update down until they are done,
+                // so wait instead of sending the whole executable for that.
+                if !should_push(&v, rel) || streaming_to == Some(ip) || h.streamer.viewer {
                     continue;
                 }
                 {
                     let mut st = state.lock();
+                    let wait = push_wait(st.deferred.get(&pc.node_id).copied().unwrap_or(0));
                     let recently = st
                         .pushed
                         .get(&pc.node_id)
-                        .is_some_and(|(pv, at)| *pv == rel.version && at.elapsed() < PUSH_GRACE);
+                        .is_some_and(|(pv, at)| *pv == rel.version && at.elapsed() < wait);
                     if recently || st.rolled_back.get(&pc.node_id) == Some(&rel.version) {
                         continue;
                     }
@@ -264,6 +279,9 @@ pub fn spawn(
                 let mut st = state.lock();
                 st.pushed
                     .insert(pc.node_id.clone(), (rel.version.clone(), Instant::now()));
+                if !matches!(&outcome, Err(e) if is_deferred(e)) {
+                    st.deferred.remove(&pc.node_id);
+                }
                 match outcome {
                     Ok(()) => {
                         st.delivered.insert(pc.node_id.clone(), rel.version.clone());
@@ -273,6 +291,17 @@ pub fn spawn(
                         );
                         st.notice = Some((Tone::Info, st.message.clone()));
                         tracing::info!("sent host {} to {} ({ip})", rel.version, pc.name);
+                    }
+                    Err(e) if is_deferred(&e) => {
+                        // A host older than the `viewer` status field says so
+                        // only now; it is tried again later, less often each time.
+                        *st.deferred.entry(pc.node_id.clone()).or_default() += 1;
+                        st.message = format!(
+                            "Latch Host {} goes to {} once the stream there ends.",
+                            rel.version, pc.name
+                        );
+                        st.notice = Some((Tone::Info, st.message.clone()));
+                        tracing::info!("host update for {} deferred: {e:#}", pc.name);
                     }
                     Err(e) => {
                         st.message = format!("Could not update {}: {e}.", pc.name);
@@ -622,7 +651,7 @@ pub fn manual_update_message(
     }
     rel.is_newer_than(running).then(|| {
         format!(
-            "{name} runs Latch Host {running}, and {} is out. This Mac sends updates to Windows PCs only: install the new Latch Host on {name} by hand, the way it was set up.",
+            "{name} runs Latch Host {running}, and {} is out. This Mac sends updates to Windows PCs only: install the new Latch Host on {name} by hand, the way it was set up (a Linux machine: the release's latch-host-linux tarball).",
             rel.version
         )
     })
@@ -669,6 +698,12 @@ fn push_host(rel: &Release, token: Option<&str>, ip: Ipv4Addr) -> Result<()> {
         }
     }
     Err(last.unwrap_or_else(|| anyhow!("update failed")))
+}
+
+/// Whether a push was turned down only because someone streams from that
+/// machine right now (the host's 409), which is a wait, not a failure.
+fn is_deferred(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("a stream is running")
 }
 
 /// Whether the host at `addr` reports `want` or newer within `within`: it
@@ -742,6 +777,19 @@ pub fn ago(at: Option<Instant>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_host_that_keeps_deferring_is_asked_less_often() {
+        assert_eq!(push_wait(0), PUSH_GRACE);
+        assert_eq!(push_wait(1), PUSH_GRACE * 2);
+        assert_eq!(push_wait(2), PUSH_GRACE * 4);
+        assert_eq!(push_wait(4), Duration::from_secs(48 * 60));
+        assert_eq!(push_wait(5), Duration::from_secs(3600));
+        assert_eq!(push_wait(40), Duration::from_secs(3600));
+        let e = anyhow!("a stream is running; the update is retried after it ends");
+        assert!(is_deferred(&e));
+        assert!(!is_deferred(&anyhow!("HTTP 500")));
+    }
 
     #[test]
     fn relaunch_keeps_shell_metacharacters_in_the_path_literal() {

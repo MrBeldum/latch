@@ -8,7 +8,7 @@ use latch_core::{SUNSHINE_PORT, SUNSHINE_WEB_PORT};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Where Latch unpacks its own copy of the streaming engine. Setup
 /// installs here; an engine installed by someone else stays where it is.
@@ -179,7 +179,7 @@ fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
 #[cfg(target_os = "linux")]
 pub fn capture_size() -> Option<[u32; 2]> {
     use x11rb::connection::Connection;
-    if std::env::var_os("LATCH_DISPLAY_FOLLOWS_VIEWER").is_some_and(|v| v == "1") {
+    if display_follows_viewer() {
         return None;
     }
     let (conn, screen) = x11rb::connect(None).ok()?;
@@ -190,6 +190,40 @@ pub fn capture_size() -> Option<[u32; 2]> {
 #[cfg(not(target_os = "linux"))]
 pub fn capture_size() -> Option<[u32; 2]> {
     None
+}
+
+/// The desktop resizes itself to each viewer (`LATCH_DISPLAY_FOLLOWS_VIEWER=1`):
+/// the engine's prep command sets the size a viewer asks for, and its undo
+/// puts the idle size back when the session ends.
+pub fn display_follows_viewer() -> bool {
+    std::env::var_os("LATCH_DISPLAY_FOLLOWS_VIEWER").is_some_and(|v| v == "1")
+}
+
+/// How long a session nobody watches stays open on a desktop that follows
+/// its viewer. A viewer back within this resumes where they were; after it
+/// the session ends, so the prep command's undo puts the desktop back at its
+/// idle size instead of leaving it at the last viewer's (a 4K desktop costs
+/// every program on it, and an agent driving it, more for nothing).
+pub const UNWATCHED_CLOSE: Duration = Duration::from_secs(120);
+
+/// Whether to end an unwatched session now, and since when nobody watches.
+/// `since` is what the last call returned. Only a running app with a log
+/// that says the viewer left counts: unknown never ends anything.
+pub(crate) fn unwatched_close(
+    session: &Session,
+    since: Option<Instant>,
+    now: Instant,
+) -> (bool, Option<Instant>) {
+    if session.app_running == Some(true) && session.viewer == Some(false) {
+        let since = since.unwrap_or(now);
+        if now.duration_since(since) >= UNWATCHED_CLOSE {
+            (true, None)
+        } else {
+            (false, Some(since))
+        }
+    } else {
+        (false, None)
+    }
 }
 
 /// The frame rate the engine keeps up with here at 1080p, 0 for no known
@@ -788,6 +822,43 @@ fn parse_clients(v: &serde_json::Value) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unwatched_session_ends_only_after_the_grace_and_only_when_known() {
+        let t0 = Instant::now();
+        let left = Session {
+            app_running: Some(true),
+            viewer: Some(false),
+        };
+        // The clock starts when the viewer is first seen gone.
+        assert_eq!(unwatched_close(&left, None, t0), (false, Some(t0)));
+        let soon = t0 + Duration::from_secs(60);
+        assert_eq!(unwatched_close(&left, Some(t0), soon), (false, Some(t0)));
+        let late = t0 + UNWATCHED_CLOSE;
+        assert_eq!(unwatched_close(&left, Some(t0), late), (true, None));
+        // A viewer back, no app, or a log that says nothing: nothing ends
+        // and the clock starts again.
+        for s in [
+            Session {
+                app_running: Some(true),
+                viewer: Some(true),
+            },
+            Session {
+                app_running: Some(false),
+                viewer: Some(false),
+            },
+            Session {
+                app_running: None,
+                viewer: Some(false),
+            },
+            Session {
+                app_running: Some(true),
+                viewer: None,
+            },
+        ] {
+            assert_eq!(unwatched_close(&s, Some(t0), late), (false, None), "{s:?}");
+        }
+    }
 
     #[test]
     fn streaming_profile_replaces_caps_and_fixed_modes_without_losing_other_settings() {

@@ -94,6 +94,9 @@ pub struct Service {
     pin_taken: Mutex<Option<(String, Instant)>>,
     /// The last PIN refusal logged.
     pin_refused: Mutex<Option<String>>,
+    /// Since when a session runs with nobody watching, on a desktop that
+    /// follows its viewer (see [`streamer::unwatched_close`]).
+    unwatched_since: Mutex<Option<Instant>>,
 }
 
 impl Service {
@@ -122,11 +125,32 @@ impl Service {
             update_running: Arc::new(AtomicBool::new(false)),
             pin_taken: Mutex::new(None),
             pin_refused: Mutex::new(None),
+            unwatched_since: Mutex::new(None),
         }
     }
 
     pub fn log(&self, msg: impl Into<String>) {
         push_log(&self.log, msg.into());
+    }
+
+    /// End a session nobody has watched for [`streamer::UNWATCHED_CLOSE`]:
+    /// the engine then runs its prep command's undo, which puts a desktop
+    /// that follows its viewer back at its idle size.
+    fn end_unwatched_session(&self, cfg: &HostConfig, session: &streamer::Session) {
+        let mut since = self.unwatched_since.lock();
+        let (end, next) = streamer::unwatched_close(session, *since, Instant::now());
+        *since = next;
+        if end {
+            Api {
+                user: &cfg.sunshine_user,
+                pass: &cfg.sunshine_pass,
+            }
+            .close_app();
+            self.log(format!(
+                "nobody has watched for {} minutes: ended the session, so the desktop is back at its idle size",
+                streamer::UNWATCHED_CLOSE.as_secs() / 60
+            ));
+        }
     }
 
     /// A viewer is connected right now. A Desktop left running for the
@@ -366,6 +390,18 @@ impl Service {
             };
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
         let max_fps = streamer::max_fps(&encoder, cores);
+        // Whether someone watches, every other tick: a Mac holds a host
+        // update back while they do, and a desktop that follows its viewer
+        // goes back to its idle size once nobody has watched for a while.
+        let viewer = if running && tick.is_multiple_of(2) {
+            let session = streamer::session(install.as_ref());
+            if api_ok && streamer::display_follows_viewer() {
+                self.end_unwatched_session(&cfg, &session);
+            }
+            session.watched()
+        } else {
+            running && self.streamer.lock().viewer
+        };
         let st = Streamer {
             kind: install
                 .as_ref()
@@ -378,6 +414,7 @@ impl Service {
             audio_problem,
             capture_size,
             max_fps,
+            viewer,
         };
         {
             let mut cur = self.streamer.lock();
@@ -837,7 +874,7 @@ impl Service {
             return Response::json(
                 400,
                 &Ack::err(
-                    "only a Windows PC takes a pushed latch-host.exe; this machine updates itself",
+                    "only a Windows PC takes a pushed latch-host.exe; a Mac updates with its app, and a Linux machine installs the release's latch-host-linux tarball (deploy/native/README.md)",
                 ),
             );
         }
