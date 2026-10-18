@@ -889,8 +889,9 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(err.to_string(), "pairing cancelled");
+        // Cancelled at 300 ms; well under the 90 s the request could be held.
         assert!(
-            start.elapsed() < Duration::from_millis(1500),
+            start.elapsed() < Duration::from_secs(10),
             "{:?}",
             start.elapsed()
         );
@@ -912,8 +913,10 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(err.to_string(), "the PC refused to start pairing");
+        // At once, against the 75 s the PIN hand-off used to stand in
+        // front of it: loose enough for a loaded CI runner.
         assert!(
-            start.elapsed() < Duration::from_millis(600),
+            start.elapsed() < Duration::from_secs(10),
             "{:?}",
             start.elapsed()
         );

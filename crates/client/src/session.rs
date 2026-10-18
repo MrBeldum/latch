@@ -1791,6 +1791,20 @@ mod tests {
         std::thread::spawn(move || h.run(host))
     }
 
+    /// Wait until `done` holds, no longer than five seconds: what a test
+    /// waits for comes within milliseconds, but a loaded CI runner (or
+    /// Windows, which takes a second to refuse a connection) is slower.
+    fn soon(done: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            if Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+
     /// Wait for the hand-off thread, no longer than `within`.
     fn ends_within(t: std::thread::JoinHandle<()>, within: Duration) -> bool {
         let deadline = Instant::now() + within;
@@ -1811,15 +1825,15 @@ mod tests {
         );
         let h = hand_off();
         let t = start(&h, host);
-        std::thread::sleep(Duration::from_millis(300));
-        let detail = h.progress.lock().detail.clone();
-        assert_eq!(
-            detail,
-            "Latch on stuzha couldn't enter the PIN yet: engine says no"
+        let want = "Latch on stuzha couldn't enter the PIN yet: engine says no";
+        assert!(
+            soon(|| h.progress.lock().detail == want),
+            "{}",
+            h.progress.lock().detail
         );
         assert!(!t.is_finished(), "a passing refusal is offered again");
         h.finish();
-        assert!(ends_within(t, Duration::from_millis(300)));
+        assert!(ends_within(t, Duration::from_secs(3)));
         assert_eq!(h.progress.lock().detail, "", "the warning goes with it");
         assert!(h.refused.lock().is_none());
     }
@@ -1857,19 +1871,13 @@ mod tests {
         let closed: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let h = hand_off();
         let t = start(&h, closed);
-        // Waited for, not slept for: Windows takes about a second to refuse
-        // a connection, retrying the SYN first.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !h.progress.lock().detail.contains("isn't answering") && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
         assert!(
-            h.progress.lock().detail.contains("isn't answering"),
+            soon(|| h.progress.lock().detail.contains("isn't answering")),
             "{}",
             h.progress.lock().detail
         );
         h.progress.lock().cancel = true;
-        assert!(ends_within(t, Duration::from_millis(300)));
+        assert!(ends_within(t, Duration::from_secs(3)));
     }
 
     #[test]
