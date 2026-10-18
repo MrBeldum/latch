@@ -1053,7 +1053,7 @@ impl ClientApp {
                         None => {
                             self.notice = Some((
                                 Tone::Danger,
-                                format!("{name} is no longer reachable, so nothing was sent."),
+                                format!("Nothing was sent: {name} is offline, or no longer takes power actions from here."),
                                 Instant::now(),
                             ))
                         }

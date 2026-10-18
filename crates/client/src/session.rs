@@ -1120,20 +1120,34 @@ fn pair(client: &mut Client<'_>, pin: &str, c: &Connect, generation: u64) -> Res
     // However the handshake ended, the PIN is not offered again.
     hand_off.stop.store(true, Ordering::Relaxed);
     result.map_err(|e| {
-        if let Some(reason) = hand_off.refused.lock().take() {
-            return anyhow!("Latch on {} refused the PIN: {reason}.", t.name);
-        }
-        if e.downcast_ref::<PinNotEntered>().is_some() {
-            return match hand_off.why_not.lock().take() {
-                Some(why) => anyhow!("Pairing with {} timed out: {why}.", t.name),
-                None => anyhow!(
-                    "Pairing with {} timed out: nobody entered the PIN there.",
-                    t.name
-                ),
-            };
-        }
-        e.context(format!("Pairing with {}", t.name))
+        pairing_error(
+            e,
+            &t.name,
+            hand_off.refused.lock().take(),
+            hand_off.why_not.lock().take(),
+        )
     })
+}
+
+/// What to say when pairing with `pc` failed: Latch Host's refusal when it
+/// refused for good, why the PIN never went in when nobody entered it in
+/// time, else the handshake's own error.
+fn pairing_error(
+    e: anyhow::Error,
+    pc: &str,
+    refused: Option<String>,
+    why_not: Option<String>,
+) -> anyhow::Error {
+    if let Some(reason) = refused {
+        return anyhow!("Latch on {pc} refused the PIN: {reason}.");
+    }
+    if e.downcast_ref::<PinNotEntered>().is_some() {
+        return match why_not {
+            Some(why) => anyhow!("Pairing with {pc} timed out: {why}."),
+            None => anyhow!("Pairing with {pc} timed out: nobody entered the PIN there."),
+        };
+    }
+    e.context(format!("Pairing with {pc}"))
 }
 
 /// How long the PIN is offered to Latch Host on the PC, and how long a host
@@ -1290,7 +1304,8 @@ impl PinHandOff {
             let why = |s: String| *self.why_not.lock() = Some(s);
             match reply {
                 PinReply::Taken => {
-                    *self.why_not.lock() = None;
+                    // Should the engine still not answer, this is why.
+                    why("Latch there entered the PIN, but the streaming engine never finished pairing".into());
                     self.show(String::new());
                     return;
                 }
@@ -1657,6 +1672,46 @@ mod tests {
             pin_reply(Err(anyhow!("timed out"))),
             PinReply::Unreachable(e) if e == "timed out"
         ));
+    }
+
+    #[test]
+    fn a_failed_pairing_says_why_in_the_hosts_words() {
+        let say = |e: anyhow::Error, refused: Option<&str>, why: Option<&str>| {
+            format!(
+                "{:#}",
+                pairing_error(e, "stuzha", refused.map(Into::into), why.map(Into::into))
+            )
+        };
+        assert_eq!(
+            say(
+                anyhow!("pairing cancelled"),
+                Some("not a machine on this PC's Tailscale account"),
+                None
+            ),
+            "Latch on stuzha refused the PIN: not a machine on this PC's Tailscale account."
+        );
+        assert_eq!(
+            say(
+                anyhow!(PinNotEntered),
+                None,
+                Some("Latch there isn't answering, so it couldn't enter the PIN")
+            ),
+            "Pairing with stuzha timed out: Latch there isn't answering, so it couldn't enter the PIN."
+        );
+        assert_eq!(
+            say(anyhow!(PinNotEntered), None, None),
+            "Pairing with stuzha timed out: nobody entered the PIN there."
+        );
+        assert_eq!(
+            say(anyhow!("pairing failed at the challenge step"), None, None),
+            "Pairing with stuzha: pairing failed at the challenge step"
+        );
+        // The step and the cause, not just the cause.
+        let e = anyhow!("timed out").context("Asking stuzha to start the stream");
+        assert_eq!(
+            format!("{e:#}"),
+            "Asking stuzha to start the stream: timed out"
+        );
     }
 
     /// A Latch Host stand-in that answers every request the same way, and
