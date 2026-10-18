@@ -17,6 +17,7 @@ pub const VK_INSERT: i16 = 0x2D;
 pub const VK_DELETE: i16 = 0x2E;
 pub const VK_ESCAPE: i16 = 0x1B;
 pub const VK_TAB: i16 = 0x09;
+pub const VK_CAPITAL: i16 = 0x14;
 pub const VK_RETURN: i16 = 0x0D;
 pub const VK_SNAPSHOT: i16 = 0x2C;
 pub const VK_C: i16 = 0x43;

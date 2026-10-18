@@ -170,6 +170,12 @@ pub struct View {
     /// The other machine is a Mac: ⌘ is Command there, whatever the
     /// "Command acts as Ctrl" setting says for Windows and Linux.
     host_mac: bool,
+    /// The Mac's Caps Lock as the PC was last brought in line with it (see
+    /// [`caps_tap`]); None until the stream first has the keys.
+    caps: Option<bool>,
+    /// Caps Lock as a test sets it, in place of the Mac's.
+    #[cfg(test)]
+    caps_now: Option<bool>,
     /// A video problem to show in place of the session's, for rendering
     /// the recovery overlay without a broken capture.
     #[cfg(test)]
@@ -197,6 +203,8 @@ enum Queued {
     /// The modifiers held at the end of a frame: egui has no events for
     /// Shift, Ctrl, Option or ⌘ on their own.
     Modifiers(Modifiers),
+    /// A key pressed and let go, for one egui never reports (Caps Lock).
+    Tap(i16),
 }
 
 /// Where an event was going when it arrived.
@@ -241,6 +249,9 @@ impl Default for View {
             pasted_since_v_up: false,
             cmd_since_v_up: false,
             host_mac: false,
+            caps: None,
+            #[cfg(test)]
+            caps_now: None,
             #[cfg(test)]
             problem: None,
             #[cfg(test)]
@@ -1283,6 +1294,12 @@ impl View {
         }
         // A paste whose text has arrived goes before anything this frame.
         self.settle_paste(&link, false);
+        // Caps Lock, which egui never reports, as a tap of the PC's own.
+        let (caps, tap) = caps_tap(self.caps, self.mac_caps(), keys_to_pc);
+        self.caps = caps;
+        if tap {
+            self.dispatch(&link, Queued::Tap(input::VK_CAPITAL));
+        }
         // Ctrl+Alt is Latch's host key. It is read before the keys-to-PC
         // gate so it works even if an overlay took focus, and while it is
         // held nothing is forwarded: the PC must not see a held chord after
@@ -1376,6 +1393,11 @@ impl View {
             Queued::Modifiers(m) => {
                 self.cmd_since_v_up |= m.command;
                 self.held.modifiers(out, m, cmd_is_ctrl);
+                return;
+            }
+            Queued::Tap(vk) => {
+                self.held.key(out, vk, true);
+                self.held.key(out, vk, false);
                 return;
             }
             Queued::Event(ev, at) => (ev, at),
@@ -1529,6 +1551,15 @@ impl View {
         }
     }
 
+    /// Whether Caps Lock is on on this Mac (what a test set, in tests).
+    fn mac_caps(&self) -> Option<bool> {
+        #[cfg(test)]
+        if self.tap.is_some() {
+            return self.caps_now;
+        }
+        crate::macos::caps_lock()
+    }
+
     /// Whether ⌘ goes to the PC as Ctrl. A Mac there gets Command whatever
     /// the setting, which is about Windows and Linux.
     fn cmd_is_ctrl(&self, cfg: &ClientConfig) -> bool {
@@ -1564,6 +1595,21 @@ impl View {
 /// down, no paste came from it, and ⌘ was down since the last V.
 fn swallowed_paste(v_seen_down: bool, pasted: bool, cmd: bool) -> bool {
     !v_seen_down && !pasted && cmd
+}
+
+/// Caps Lock kept in step with the Mac's: `seen` is the Mac's state the PC
+/// was last brought in line with, `now` the Mac's. The PC's own state can't
+/// be read, so the first one seen while the stream has the keys is taken as
+/// matching; after that each change reaches the PC as one tap of Caps Lock,
+/// including one made while Latch or another app had the keys, once the
+/// stream has them again. Returns the new `seen`, and whether to tap.
+fn caps_tap(seen: Option<bool>, now: Option<bool>, keys_to_pc: bool) -> (Option<bool>, bool) {
+    match (seen, now) {
+        (_, None) => (seen, false),
+        _ if !keys_to_pc => (seen, false),
+        (None, now) => (now, false),
+        (Some(s), Some(n)) => (Some(n), s != n),
+    }
 }
 
 /// A wheel or trackpad scroll as the PC takes it, in 1/120ths of a click:
@@ -2727,7 +2773,7 @@ pub(crate) mod tests {
     // What the PC is sent: the order, the signs and the masks.
 
     use crate::input::{
-        Recorder, Sent, VK_CONTROL, VK_LWIN, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB, VK_V,
+        Recorder, Sent, VK_CAPITAL, VK_CONTROL, VK_LWIN, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB, VK_V,
     };
     use egui::{Key, PointerButton};
     use latch_stream::ffi::{BUTTON_LEFT, MODIFIER_CTRL, MODIFIER_SHIFT};
@@ -2803,6 +2849,53 @@ pub(crate) mod tests {
         h.input_mut().events.extend(events);
         h.input_mut().modifiers = end;
         h.run_steps(1);
+    }
+
+    #[test]
+    fn caps_lock_follows_the_mac_once_the_stream_has_the_keys() {
+        // Unknown on the Mac: nothing to do.
+        assert_eq!(caps_tap(None, None, true), (None, false));
+        // Not the stream's keys yet: nothing is taken as matching.
+        assert_eq!(caps_tap(None, Some(true), false), (None, false));
+        // The first state seen with the keys is the baseline.
+        assert_eq!(caps_tap(None, Some(true), true), (Some(true), false));
+        assert_eq!(caps_tap(Some(true), Some(true), true), (Some(true), false));
+        // A change is one tap; one made while Latch had the keys waits.
+        assert_eq!(caps_tap(Some(true), Some(false), true), (Some(false), true));
+        assert_eq!(
+            caps_tap(Some(false), Some(true), false),
+            (Some(false), false)
+        );
+        assert_eq!(caps_tap(Some(false), Some(true), true), (Some(true), true));
+    }
+
+    #[test]
+    fn caps_lock_on_the_mac_taps_caps_lock_on_the_pc() {
+        let (mut h, tap) = recording(View::default(), true);
+        h.state_mut().view.caps_now = Some(false);
+        frame(&mut h, vec![], Modifiers::NONE);
+        assert_eq!(tap.keys(), vec![], "the first state is the baseline");
+        h.state_mut().view.caps_now = Some(true);
+        frame(
+            &mut h,
+            vec![
+                key(Key::A, true, Modifiers::NONE),
+                key(Key::A, false, Modifiers::NONE),
+            ],
+            Modifiers::NONE,
+        );
+        assert_eq!(
+            tap.keys(),
+            vec![
+                (VK_CAPITAL, true),
+                (VK_CAPITAL, false),
+                (0x41, true),
+                (0x41, false)
+            ],
+            "Caps Lock goes before the frame's keys"
+        );
+        frame(&mut h, vec![], Modifiers::NONE);
+        assert_eq!(tap.keys(), vec![], "once per change");
     }
 
     #[test]
