@@ -30,6 +30,14 @@ egui.workspace = true
 egui-wgpu.workspace = true
 semver = "1"
 
+# The versions winit already builds on: nothing new is compiled. Used to
+# take ⌘Q and ⌘H back from the app menu during a stream, and to read the
+# pasteboard's change count.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSMenu", "NSMenuItem", "NSPasteboard", "NSResponder"] }
+objc2-foundation = { version = "0.2", features = ["NSString", "NSThread"] }
+
 [dev-dependencies]
 toml.workspace = true
 egui_kittest = { version = "0.31", features = ["wgpu", "eframe"] }

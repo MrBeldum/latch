@@ -12,12 +12,12 @@
 
 use crate::clipboard::{self, Edit};
 use crate::config::{ClientConfig, StreamSettings};
-use crate::input::{self, press_chord, Held};
+use crate::input::{self, Held, Sink};
 use crate::path::Path;
 use crate::session::Live;
 use crate::video;
 use egui::{
-    Align2, Color32, CursorIcon, Event, Frame, Id, Margin, Pos2, Rect, RichText, Vec2,
+    Align2, Color32, CursorIcon, Event, Frame, Id, Margin, Modifiers, Pos2, Rect, RichText, Vec2,
     ViewportCommand,
 };
 use latch_core::api::PowerAction;
@@ -36,6 +36,9 @@ const STATUS: f32 = 24.0;
 const TOAST_FOR: Duration = Duration::from_secs(5);
 /// How long the host-key hint stays up when a stream starts.
 const HINT_FOR: Duration = Duration::from_secs(6);
+/// How long a paste's chord, and what is typed after it, wait for its text
+/// to reach the PC before they go anyway.
+const PASTE_WAIT: Duration = Duration::from_secs(2);
 /// Each side of an overlay frame (its inner margin) and the picture it
 /// leaves visible beyond that.
 const OVERLAY_PAD: f32 = 12.0;
@@ -58,14 +61,19 @@ pub fn host_key() -> (&'static [&'static str], &'static str) {
 /// What to call the other machine in the toolbar: its power menu reads
 /// "PC" for Windows, as the lobby's messages expect.
 fn machine_noun(os: &str) -> &'static str {
-    let os = os.to_ascii_lowercase();
-    if os.starts_with("windows") {
+    if os.to_ascii_lowercase().starts_with("windows") {
         "PC"
-    } else if os.starts_with("macos") || os.starts_with("darwin") {
+    } else if is_mac_os(os) {
         "Mac"
     } else {
         "Machine"
     }
+}
+
+/// Whether Tailscale's OS string names a Mac.
+fn is_mac_os(os: &str) -> bool {
+    let os = os.to_ascii_lowercase();
+    os.starts_with("macos") || os.starts_with("darwin")
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -128,16 +136,67 @@ pub struct View {
     toasts: Vec<Toast>,
     /// When the stream started, for the host-key hint.
     hint_since: Option<Instant>,
-    /// Pastes seen through `clipboard.pastes_done()`.
-    pastes_seen: u32,
     /// Ctrl+Alt was down when capture last toggled; ignore further edges
     /// until both keys are up. `release_all` clears `Held.modifiers`, so
     /// deriving "was down" from that retriggered the toggle every frame.
     capture_chord_held: bool,
+    /// A paste whose text is still on its way to the PC.
+    pending: Option<PendingPaste>,
+    /// Where the pointer went in free mode, not yet sent.
+    moved_to: Option<Pos2>,
+    /// Since V was last let go: a paste was made, and ⌘ was down. A ⌘V
+    /// egui swallowed (the Mac's clipboard holds no text) shows only as a V
+    /// let go that the PC never saw pressed, with ⌘ seen and no paste.
+    pasted_since_v_up: bool,
+    cmd_since_v_up: bool,
+    /// The other machine is a Mac: ⌘ is Command there, whatever the
+    /// "Command acts as Ctrl" setting says for Windows and Linux.
+    host_mac: bool,
     /// A video problem to show in place of the session's, for rendering
     /// the recovery overlay without a broken capture.
     #[cfg(test)]
     problem: Option<String>,
+    /// Where input goes in tests instead of the PC, and whether the
+    /// stream counts as connected.
+    #[cfg(test)]
+    tap: Option<std::rc::Rc<input::Recorder>>,
+}
+
+/// A paste whose text is on its way to the PC's clipboard. Its chord, and
+/// everything typed or clicked after it, wait for the text; a key let go
+/// before the chord would otherwise run a command on the old line (⌘V
+/// then Return, 300 ms away from a PC in Korea).
+struct PendingPaste {
+    id: u64,
+    until: Instant,
+    queued: Vec<Queued>,
+}
+
+/// Input held back behind a paste.
+enum Queued {
+    /// An event, with where it was going when it arrived.
+    Event(Event, At),
+    /// The modifiers held at the end of a frame: egui has no events for
+    /// Shift, Ctrl, Option or ⌘ on their own.
+    Modifiers(Modifiers),
+}
+
+/// Where an event was going when it arrived.
+#[derive(Debug, Clone, Copy)]
+struct At {
+    keys_to_pc: bool,
+    over_video: bool,
+}
+
+/// What this frame's input is sent through, and what it needs to know.
+struct Link<'a, S: Sink + ?Sized> {
+    ctx: &'a egui::Context,
+    live: &'a Live,
+    cfg: &'a ClientConfig,
+    out: &'a S,
+    connected: bool,
+    video: Rect,
+    ppp: f32,
 }
 
 impl Default for View {
@@ -158,10 +217,16 @@ impl Default for View {
             poor_hinted: false,
             toasts: Vec::new(),
             hint_since: None,
-            pastes_seen: 0,
             capture_chord_held: false,
+            pending: None,
+            moved_to: None,
+            pasted_since_v_up: false,
+            cmd_since_v_up: false,
+            host_mac: false,
             #[cfg(test)]
             problem: None,
+            #[cfg(test)]
+            tap: None,
         }
     }
 }
@@ -195,9 +260,31 @@ impl View {
     /// Release everything and let the cursor go; called when the stream
     /// ends or the window loses focus.
     pub fn reset(&mut self, ctx: &egui::Context, live: Option<&Live>) {
-        if let Some(l) = live {
-            self.held.release_all(&l.input);
+        self.reset_with(ctx, live, live.map(|l| &l.input));
+    }
+
+    fn reset_with<S: Sink + ?Sized>(
+        &mut self,
+        ctx: &egui::Context,
+        live: Option<&Live>,
+        out: Option<&S>,
+    ) {
+        // A paste still waiting goes, with what was held back behind it:
+        // none of it has reached the PC, and pasting the PC's old clipboard
+        // after the user has gone would be worse than nothing.
+        if let Some(p) = self.pending.take() {
+            if let Some(l) = live {
+                l.clipboard.give_up(p.id);
+            }
         }
+        self.moved_to = None;
+        self.pasted_since_v_up = false;
+        self.cmd_since_v_up = false;
+        if let Some(out) = out {
+            self.held.release_all(out);
+        }
+        crate::macos::stream_owns_keys(false);
+        ctx.options_mut(|o| o.zoom_with_keyboard = true);
         self.set_captured(ctx, false);
         self.bar_shown = false;
         self.confirm = None;
@@ -236,6 +323,7 @@ impl View {
     pub fn show(&mut self, ctx: &egui::Context, env: &Env<'_>) -> Vec<Action> {
         let live = env.live;
         let mut actions = Vec::new();
+        self.host_mac = is_mac_os(&env.os);
         let screen = ctx.screen_rect();
         let stats = live.session.stats();
         let (vw, vh) = if stats.width > 0 {
@@ -785,8 +873,10 @@ impl View {
         }
         if cfg!(target_os = "macos") {
             ui::menu_separator(ui);
-            if ui::menu_choice(ui, "Command acts as Ctrl", cfg.cmd_is_ctrl)
-                .on_hover_text("On: Command-C, V and Z copy, paste and undo there. Off: Command is the Windows key.")
+            if self.host_mac {
+                ui::menu_note(ui, "Command is Command on another Mac.");
+            } else if ui::menu_choice(ui, "Command acts as Ctrl", cfg.cmd_is_ctrl)
+                .on_hover_text("On: Command-C, V and Z copy, paste and undo there. Off: Command is the Windows key. A Mac there always gets Command.")
                 .clicked()
             {
                 actions.push(Action::ToggleCmd);
@@ -836,7 +926,7 @@ impl View {
             && cfg.capture_mouse
         {
             actions.push(Action::MouseCapture(false));
-            self.release(ctx, live);
+            self.release(ctx, &live.input);
         }
     }
 
@@ -989,31 +1079,43 @@ impl View {
     }
 
     /// Capture the mouse and take the toolbar away: the picture is all.
-    fn grab(&mut self, ctx: &egui::Context, live: &Live) {
-        self.held.release_all(&live.input);
+    fn grab(&mut self, ctx: &egui::Context, out: &(impl Sink + ?Sized)) {
+        self.held.release_all(out);
         self.motion = (0.0, 0.0);
+        // A captured mouse sends every click to the PC, while egui still
+        // sees them at the frozen pointer: a panel, question or menu left
+        // open would take them too ("Apply and reconnect", "Restart").
+        // Closing them is Cancel.
+        self.settings = None;
+        self.confirm = None;
+        self.confirm_install = false;
+        ctx.memory_mut(|m| m.close_popup());
         self.set_captured(ctx, true);
         self.bar_shown = false;
     }
 
     /// Give the mouse back.
-    fn release(&mut self, ctx: &egui::Context, live: &Live) {
-        self.held.release_all(&live.input);
+    fn release(&mut self, ctx: &egui::Context, out: &(impl Sink + ?Sized)) {
+        self.held.release_all(out);
         self.set_captured(ctx, false);
     }
 
     /// Ctrl+Alt, the host key. From the picture it frees the mouse and
     /// drops the toolbar; from the toolbar it hides it and, when capture
     /// is on, takes the mouse back.
-    fn host_key(&mut self, ctx: &egui::Context, live: &Live, cfg: &ClientConfig) {
+    fn host_key(&mut self, ctx: &egui::Context, cfg: &ClientConfig, out: &(impl Sink + ?Sized)) {
         self.hint_since = None;
+        // Everything goes up first, whichever way this goes: while the
+        // chord is down every event is swallowed, a key let go meanwhile
+        // included, and it would stay down on the PC.
+        self.held.release_all(out);
         if self.captured || !self.bar_shown {
-            self.release(ctx, live);
+            self.release(ctx, out);
             self.bar_shown = true;
         } else {
             self.bar_shown = false;
             if cfg.capture_mouse {
-                self.grab(ctx, live);
+                self.grab(ctx, out);
             }
         }
     }
@@ -1030,7 +1132,7 @@ impl View {
         // it. The click-to-capture path stays for re-capturing after a free.
         let focused = ctx.input(|i| i.focused);
         if capture && focused {
-            self.grab(ctx, live);
+            self.grab(ctx, &live.input);
         }
         self.hint_since = Some(Instant::now());
     }
@@ -1044,7 +1146,34 @@ impl View {
         video: Rect,
         bar: Option<Rect>,
     ) {
-        let input = &live.input;
+        #[cfg(test)]
+        if let Some(tap) = self.tap.clone() {
+            let connected = tap.connected.get();
+            return self.forward(ctx, live, cfg, video, bar, &*tap, connected);
+        }
+        self.forward(
+            ctx,
+            live,
+            cfg,
+            video,
+            bar,
+            &live.input,
+            live.input.connected(),
+        );
+    }
+
+    /// [`View::input`], sending through `out`.
+    #[allow(clippy::too_many_arguments)]
+    fn forward<S: Sink + ?Sized>(
+        &mut self,
+        ctx: &egui::Context,
+        live: &Live,
+        cfg: &ClientConfig,
+        video: Rect,
+        bar: Option<Rect>,
+        out: &S,
+        connected: bool,
+    ) {
         let (events, modifiers, pointer, focused) = ctx.input(|i| {
             (
                 i.events.clone(),
@@ -1067,15 +1196,27 @@ impl View {
             overlay,
             over_overlay,
         );
-        if self.captured && !popup && !overlay {
+        // While the keys belong to the PC, egui must not hold a focus: Tab
+        // would move it to the Stats panel or a notice's button, and every
+        // key after would stay in Latch. With the toolbar up, Tab walks
+        // the toolbar and its panels as it should; before the first
+        // picture it reaches Cancel.
+        let keys_belong_to_pc = self.captured || (bar.is_none() && live.frames.seq() > 0);
+        if keys_belong_to_pc && !popup && !overlay {
             ctx.memory_mut(|m| {
                 if let Some(id) = m.focused() {
                     m.surrender_focus(id);
                 }
             });
         }
-        let keys_to_pc =
-            focused && !ctx.wants_keyboard_input() && !popup && !overlay && input.connected();
+        let keys_to_pc = focused && !ctx.wants_keyboard_input() && !popup && !overlay && connected;
+        // ⌘Q and ⌘H belong to the PC too while it has the keys, and so do
+        // ⌘+, ⌘- and ⌘0: egui would zoom Latch's own window on them while
+        // they zoomed the browser on the PC.
+        crate::macos::stream_owns_keys(keys_to_pc);
+        if ctx.options(|o| o.zoom_with_keyboard) == keys_to_pc {
+            ctx.options_mut(|o| o.zoom_with_keyboard = !keys_to_pc);
+        }
         let ppp = ctx.pixels_per_point();
         let motion_scale = {
             let stats = live.session.stats();
@@ -1090,99 +1231,62 @@ impl View {
                 ppp
             }
         };
+        let link = Link {
+            ctx,
+            live,
+            cfg,
+            out,
+            connected,
+            video,
+            ppp,
+        };
+        live.clipboard
+            .note_mac_clipboard(crate::macos::pasteboard_changes);
 
         if !focused {
-            if self.held.any_down() || self.captured {
-                self.reset(ctx, Some(live));
+            if self.held.any_down() || self.captured || self.pending.is_some() {
+                self.reset_with(ctx, Some(live), Some(out));
             }
             return;
         }
+        // A paste whose text has arrived goes before anything this frame.
+        self.settle_paste(&link, false);
         // Ctrl+Alt is Latch's host key. It is read before the keys-to-PC
         // gate so it works even if an overlay took focus, and while it is
         // held nothing is forwarded: the PC must not see a held chord after
-        // the toolbar opens (games and the Start menu react to one).
+        // the toolbar opens (games and the Start menu react to one), nor a
+        // lone Alt when Control is let go first (Windows opens the menu bar).
+        // Before the stream connects it can still free a captured mouse.
         let ctrl_alt = modifiers.ctrl && modifiers.alt;
-        if ctrl_alt {
-            if !self.capture_chord_held && input.connected() {
+        if ctrl_alt || (self.capture_chord_held && (modifiers.ctrl || modifiers.alt)) {
+            if ctrl_alt && !self.capture_chord_held && (connected || self.captured) {
                 self.capture_chord_held = true;
-                self.host_key(ctx, live, cfg);
+                self.settle_paste(&link, true);
+                if connected {
+                    self.host_key(ctx, cfg, out);
+                } else {
+                    self.release(ctx, out);
+                }
             }
             return;
         }
         self.capture_chord_held = false;
-        if keys_to_pc {
-            self.held.modifiers(input, modifiers, cfg.cmd_is_ctrl);
-            // A paste's chord releases the modifier it pressed once the text
-            // has reached the PC. If ⌘ is still held here, press it again
-            // on the PC, so ⌘V ⌘V in one hold pastes twice.
-            let done = live.clipboard.pastes_done();
-            if done != self.pastes_seen {
-                self.pastes_seen = done;
-                for vk in [input::VK_CONTROL, input::VK_LWIN] {
-                    if self.held.is_down(vk) {
-                        input.key(vk, true, self.held.mask());
-                    }
-                }
-            }
-        } else if self.held.any_down() {
-            self.held.release_all(input);
+        if !keys_to_pc && self.held.any_down() {
+            self.held.release_all(out);
         }
 
-        if (over_video || self.captured) && input.connected() {
+        if (over_video || self.captured) && connected {
             ctx.set_cursor_icon(CursorIcon::None);
         }
 
-        let mut position: Option<Pos2> = None;
+        let at = At {
+            keys_to_pc,
+            over_video,
+        };
         for ev in events {
             match ev {
-                Event::Key {
-                    physical_key,
-                    key,
-                    pressed,
-                    repeat,
-                    ..
-                } if keys_to_pc && (pressed || !repeat) => {
-                    // OS autorepeat arrives as extra Downs with `repeat`.
-                    // Sunshine does not generate them, so holding a key
-                    // would otherwise type once. Releases never repeat.
-                    if let Some(vk) = physical_key.and_then(input::vk).or_else(|| input::vk(key)) {
-                        self.held.key(input, vk, pressed);
-                    }
-                }
-                Event::Copy if keys_to_pc => {
-                    self.clipboard_chord(live, Edit::Copy, cfg);
-                    live.clipboard.poke();
-                }
-                Event::Cut if keys_to_pc => {
-                    self.clipboard_chord(live, Edit::Cut, cfg);
-                    live.clipboard.poke();
-                }
-                Event::Paste(text) if keys_to_pc => {
-                    // The Mac's text first, then the paste: the PC pastes
-                    // what was copied here, not what it had. The chord is
-                    // sent whole: by the time the text has crossed the
-                    // network a quick tap has let go of ⌘.
-                    let (keys, alone) = live.shortcuts.keys(
-                        Edit::Paste,
-                        self.clipboard_modifier(cfg),
-                        live.clipboard.pastes_to_selection(),
-                    );
-                    let mask = self.held.mask();
-                    let handle = input.clone();
-                    let text = if clipboard::worth_sending(&text) {
-                        text
-                    } else {
-                        String::new()
-                    };
-                    live.clipboard.push(text, move || {
-                        if alone {
-                            input::press_chord_alone(&handle, &keys, mask);
-                        } else {
-                            press_chord(&handle, &keys, mask);
-                        }
-                    });
-                }
-                Event::PointerMoved(p) if !self.captured && over_video => position = Some(p),
+                // The pointer is never held back behind a paste.
+                Event::PointerMoved(p) if !self.captured && over_video => self.moved_to = Some(p),
                 Event::MouseMoved(d) if self.captured => {
                     // Deltas arrive in points; the PC moves in stream pixels.
                     // Scale by the picture's size here so a hand movement
@@ -1191,67 +1295,222 @@ impl View {
                     self.motion.0 += d.x * motion_scale;
                     self.motion.1 += d.y * motion_scale;
                 }
-                Event::PointerButton {
-                    button, pressed, ..
-                } if self.captured || over_video || (!pressed && self.held.any_down()) => {
-                    // A click on the picture puts the toolbar away and, when
-                    // capture is on, takes the mouse. The click itself still
-                    // goes to the PC: what was clicked on is what was meant.
-                    if pressed && over_video && !self.captured {
-                        self.bar_shown = false;
-                        if cfg.capture_mouse {
-                            self.grab(ctx, live);
-                        }
-                    }
-                    if let Some(b) = input::button(button) {
-                        self.held.button(input, b, pressed);
-                    }
-                }
                 Event::MouseWheel { unit, delta, .. } if self.captured || over_video => {
-                    let scale = match unit {
-                        egui::MouseWheelUnit::Point => 3.0,
-                        egui::MouseWheelUnit::Line => 120.0,
-                        egui::MouseWheelUnit::Page => 1200.0,
-                    };
-                    self.scroll.0 += delta.x * scale;
-                    self.scroll.1 += delta.y * scale;
+                    let (h, v) = wheel_to_host(unit, delta);
+                    self.scroll.0 += h;
+                    self.scroll.1 += v;
                 }
-                Event::WindowFocused(false) => self.reset(ctx, Some(live)),
-                _ => {}
+                Event::WindowFocused(false) => self.reset_with(ctx, Some(live), Some(out)),
+                ev => self.dispatch(&link, Queued::Event(ev, at)),
             }
         }
-        if let Some(p) = position {
-            let x = ((p.x - video.left()) * ppp).round() as i16;
-            let y = ((p.y - video.top()) * ppp).round() as i16;
-            input.mouse_position(
-                x,
-                y,
-                (video.width() * ppp).round() as i16,
-                (video.height() * ppp).round() as i16,
-            );
+        // egui reports a modifier pressed or let go on its own only in its
+        // state at the end of the frame.
+        if keys_to_pc {
+            self.dispatch(&link, Queued::Modifiers(modifiers));
         }
-        if self.captured && (self.motion.0.abs() >= 1.0 || self.motion.1.abs() >= 1.0) {
-            let dx = self.motion.0.trunc();
-            let dy = self.motion.1.trunc();
-            self.motion.0 -= dx;
-            self.motion.1 -= dy;
-            input.mouse_move(dx as i16, dy as i16);
+        if let Some(p) = self.moved_to.take() {
+            self.send_position(&link, p);
         }
+        self.flush_motion(out);
         if self.scroll.0.abs() >= 1.0 || self.scroll.1.abs() >= 1.0 {
             let h = self.scroll.0.trunc();
             let v = self.scroll.1.trunc();
             self.scroll.0 -= h;
             self.scroll.1 -= v;
-            input.scroll(
+            out.scroll(
                 v.clamp(-32000.0, 32000.0) as i16,
                 h.clamp(-32000.0, 32000.0) as i16,
             );
         }
+        if let Some(p) = &self.pending {
+            ctx.request_repaint_after(p.until.saturating_duration_since(Instant::now()));
+        }
+    }
+
+    /// Send `item` now, or hold it behind a paste still on its way.
+    fn dispatch<S: Sink + ?Sized>(&mut self, link: &Link<'_, S>, item: Queued) {
+        match &mut self.pending {
+            Some(p) => p.queued.push(item),
+            None => self.handle(link, item),
+        }
+    }
+
+    /// Send one event to the PC, as it stood when it arrived.
+    fn handle<S: Sink + ?Sized>(&mut self, link: &Link<'_, S>, item: Queued) {
+        let out = link.out;
+        let cmd_is_ctrl = self.cmd_is_ctrl(link.cfg);
+        let (ev, at) = match item {
+            Queued::Modifiers(m) => {
+                self.cmd_since_v_up |= m.command;
+                self.held.modifiers(out, m, cmd_is_ctrl);
+                return;
+            }
+            Queued::Event(ev, at) => (ev, at),
+        };
+        match ev {
+            Event::Key {
+                physical_key,
+                key,
+                pressed,
+                repeat,
+                modifiers: m,
+            } if at.keys_to_pc && (pressed || !repeat) => {
+                // The host key never reaches the PC, even when it was
+                // pressed and let go inside one frame.
+                if m.ctrl && m.alt {
+                    return;
+                }
+                // Each key goes with the modifiers held when it was pressed:
+                // a Shift or ⌘ let go in the same frame came after it.
+                self.cmd_since_v_up |= m.command;
+                self.held.modifiers(out, m, cmd_is_ctrl);
+                // OS autorepeat arrives as extra Downs with `repeat`.
+                // Sunshine does not generate them, so holding a key
+                // would otherwise type once. Releases never repeat.
+                let Some(vk) = physical_key.and_then(input::vk).or_else(|| input::vk(key)) else {
+                    return;
+                };
+                let seen = self.held.is_down(vk);
+                if key == egui::Key::V && !pressed {
+                    let pasted = std::mem::take(&mut self.pasted_since_v_up);
+                    let cmd = std::mem::take(&mut self.cmd_since_v_up);
+                    if swallowed_paste(seen, pasted, cmd) {
+                        // A paste from an image or nothing on the Mac: the
+                        // PC pastes what it has. It goes on the key's
+                        // release, the first sign of it.
+                        self.paste(link, String::new());
+                    }
+                }
+                if !pressed && !seen {
+                    // The PC never saw it go down: egui took the press
+                    // for ⌘C, ⌘X or ⌘V, or it was let go already.
+                    return;
+                }
+                self.held.key(out, vk, pressed);
+            }
+            Event::Copy if at.keys_to_pc => {
+                self.clipboard_chord(link, Edit::Copy);
+                link.live.clipboard.poke();
+            }
+            Event::Cut if at.keys_to_pc => {
+                self.clipboard_chord(link, Edit::Cut);
+                link.live.clipboard.poke();
+            }
+            Event::Paste(text) if at.keys_to_pc => self.paste(link, text),
+            Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: m,
+            } if self.captured || at.over_video || (!pressed && self.held.any_down()) => {
+                if at.keys_to_pc && !(m.ctrl && m.alt) {
+                    self.held.modifiers(out, m, cmd_is_ctrl);
+                }
+                // The click lands where it was made: the pointer goes
+                // there first, before a capture would zero the motion.
+                if self.captured {
+                    self.flush_motion(out);
+                } else {
+                    self.moved_to = None;
+                    self.send_position(link, pos);
+                }
+                // A click on the picture puts the toolbar away and, when
+                // capture is on, takes the mouse. The click itself still
+                // goes to the PC: what was clicked on is what was meant.
+                // Not before the stream connects: the mouse would be held
+                // with no way out but the host key, over the Cancel button.
+                if pressed && at.over_video && !self.captured && link.connected {
+                    self.bar_shown = false;
+                    if link.cfg.capture_mouse {
+                        self.grab(link.ctx, out);
+                    }
+                }
+                if let Some(b) = input::button(button) {
+                    self.held.button(out, b, pressed);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The Mac's clipboard first, then the paste: the PC pastes what was
+    /// copied here, not what it had. While the text travels, the chord and
+    /// everything after it wait (see [`PendingPaste`]).
+    fn paste<S: Sink + ?Sized>(&mut self, link: &Link<'_, S>, text: String) {
+        self.pasted_since_v_up = true;
+        let text = if clipboard::worth_sending(&text) {
+            text
+        } else {
+            String::new()
+        };
+        match link
+            .live
+            .clipboard
+            .push(text, crate::macos::pasteboard_changes())
+        {
+            clipboard::Paste::Now => self.clipboard_chord(link, Edit::Paste),
+            clipboard::Paste::Wait(id) => {
+                self.pending = Some(PendingPaste {
+                    id,
+                    until: Instant::now() + PASTE_WAIT,
+                    queued: Vec::new(),
+                });
+            }
+        }
+    }
+
+    /// Press a waiting paste's chord once its text is on the PC, or `now`,
+    /// or once it has waited long enough (the PC then pastes what it has),
+    /// and send what was held back behind it, in order.
+    fn settle_paste<S: Sink + ?Sized>(&mut self, link: &Link<'_, S>, now: bool) {
+        let Some(p) = &self.pending else { return };
+        let ready = link.live.clipboard.paste_ready(p.id);
+        if !(ready || now || Instant::now() >= p.until) {
+            return;
+        }
+        let Some(p) = self.pending.take() else { return };
+        if !ready {
+            link.live.clipboard.give_up(p.id);
+        }
+        self.clipboard_chord(link, Edit::Paste);
+        for item in p.queued {
+            self.dispatch(link, item);
+        }
+    }
+
+    /// Send a pointer position in the picture, held to its edges.
+    fn send_position<S: Sink + ?Sized>(&self, link: &Link<'_, S>, p: Pos2) {
+        let (video, ppp) = (link.video, link.ppp);
+        let p = p.clamp(video.min, video.max);
+        link.out.position(
+            ((p.x - video.left()) * ppp).round() as i16,
+            ((p.y - video.top()) * ppp).round() as i16,
+            (video.width() * ppp).round() as i16,
+            (video.height() * ppp).round() as i16,
+        );
+    }
+
+    /// Send the whole pixels of captured movement, keeping the fraction.
+    fn flush_motion(&mut self, out: &(impl Sink + ?Sized)) {
+        if self.captured && (self.motion.0.abs() >= 1.0 || self.motion.1.abs() >= 1.0) {
+            let dx = self.motion.0.trunc();
+            let dy = self.motion.1.trunc();
+            self.motion.0 -= dx;
+            self.motion.1 -= dy;
+            out.motion(dx as i16, dy as i16);
+        }
+    }
+
+    /// Whether ⌘ goes to the PC as Ctrl. A Mac there gets Command whatever
+    /// the setting, which is about Windows and Linux.
+    fn cmd_is_ctrl(&self, cfg: &ClientConfig) -> bool {
+        cfg.cmd_is_ctrl && !self.host_mac
     }
 
     /// What ⌘ stands for in a clipboard shortcut.
     fn clipboard_modifier(&self, cfg: &ClientConfig) -> i16 {
-        if cfg!(target_os = "macos") && !cfg.cmd_is_ctrl {
+        if self.host_mac || (cfg!(target_os = "macos") && !cfg.cmd_is_ctrl) {
             input::VK_LWIN
         } else {
             input::VK_CONTROL
@@ -1260,18 +1519,37 @@ impl View {
 
     /// egui swallows Cmd/Ctrl+C/X/V into clipboard events; replay them as
     /// the key chord the PC expects.
-    fn clipboard_chord(&mut self, live: &Live, edit: Edit, cfg: &ClientConfig) {
-        let (keys, alone) = live.shortcuts.keys(
+    fn clipboard_chord<S: Sink + ?Sized>(&mut self, link: &Link<'_, S>, edit: Edit) {
+        let (keys, alone) = link.live.shortcuts.keys(
             edit,
-            self.clipboard_modifier(cfg),
-            live.clipboard.pastes_to_selection(),
+            self.clipboard_modifier(link.cfg),
+            link.live.clipboard.pastes_to_selection(),
         );
         if alone {
-            self.held.chord_alone(&live.input, &keys);
+            self.held.chord_alone(link.out, &keys);
         } else {
-            self.held.chord(&live.input, &keys);
+            self.held.chord(link.out, &keys);
         }
     }
+}
+
+/// Whether a V let go was a ⌘V egui swallowed: the PC never saw V go
+/// down, no paste came from it, and ⌘ was down since the last V.
+fn swallowed_paste(v_seen_down: bool, pasted: bool, cmd: bool) -> bool {
+    !v_seen_down && !pasted && cmd
+}
+
+/// A wheel or trackpad scroll as the PC takes it, in 1/120ths of a click:
+/// (horizontal, vertical). egui's +x moves the content right, which is
+/// scrolling left; Moonlight's horizontal scroll, like Windows' and
+/// Linux's, is positive to the right. Vertical agrees: +y is up.
+fn wheel_to_host(unit: egui::MouseWheelUnit, delta: Vec2) -> (f32, f32) {
+    let scale = match unit {
+        egui::MouseWheelUnit::Point => 3.0,
+        egui::MouseWheelUnit::Line => 120.0,
+        egui::MouseWheelUnit::Page => 1200.0,
+    };
+    (-delta.x * scale, delta.y * scale)
 }
 
 /// Whether a pointer in the picture should be sent to the PC. A real egui
@@ -2227,5 +2505,515 @@ pub(crate) mod tests {
                 save(h.render().unwrap(), &file_name("stream", name, size, ppp));
             }
         }
+    }
+
+    // What the PC is sent: the order, the signs and the masks.
+
+    use crate::input::{
+        Recorder, Sent, VK_CONTROL, VK_LWIN, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB, VK_V,
+    };
+    use egui::{Key, PointerButton};
+    use latch_stream::ffi::{BUTTON_LEFT, MODIFIER_CTRL, MODIFIER_SHIFT};
+    use std::rc::Rc;
+
+    const VK_T: i16 = 0x54;
+    const VK_W: i16 = 0x57;
+    const VK_Y: i16 = 0x59;
+    const VK_Z: i16 = 0x5A;
+    const CMD: Modifiers = Modifiers {
+        mac_cmd: true,
+        command: true,
+        ..Modifiers::NONE
+    };
+    const CTRL_ALT: Modifiers = Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Modifiers::NONE
+    };
+    /// On the picture, clear of the card shown before the first picture.
+    const ON_PICTURE: Pos2 = Pos2::new(20.0, 200.0);
+
+    /// A stream view at the smallest window whose input goes to a
+    /// recording instead of the PC, with the other machine running `os`.
+    fn recording_on(
+        view: View,
+        connected: bool,
+        os: &str,
+    ) -> (egui_kittest::Harness<'static, Fixture>, Rc<Recorder>) {
+        let tap = Rc::new(Recorder::default());
+        tap.connected.set(connected);
+        let view = View {
+            tap: Some(tap.clone()),
+            ..view
+        };
+        let extra = Extra {
+            os: os.into(),
+            ..Default::default()
+        };
+        let h = harness_with(Vec2::new(640.0, 420.0), 1.0, false, fixture(view, extra));
+        tap.take();
+        (h, tap)
+    }
+
+    fn recording(
+        view: View,
+        connected: bool,
+    ) -> (egui_kittest::Harness<'static, Fixture>, Rc<Recorder>) {
+        recording_on(view, connected, "windows")
+    }
+
+    fn key(key: Key, pressed: bool, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn click(pos: Pos2, pressed: bool) -> Event {
+        Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    /// One frame with these events, ending with `end` held.
+    fn frame(h: &mut egui_kittest::Harness<'_, Fixture>, events: Vec<Event>, end: Modifiers) {
+        h.input_mut().events.extend(events);
+        h.input_mut().modifiers = end;
+        h.run_steps(1);
+    }
+
+    #[test]
+    fn a_shift_let_go_in_the_same_frame_still_capitalises() {
+        let (mut h, tap) = recording(View::default(), true);
+        frame(
+            &mut h,
+            vec![
+                key(Key::T, true, Modifiers::SHIFT),
+                key(Key::T, false, Modifiers::SHIFT),
+            ],
+            Modifiers::NONE,
+        );
+        assert_eq!(
+            tap.take(),
+            [
+                Sent::Key(VK_SHIFT, true, MODIFIER_SHIFT),
+                Sent::Key(VK_T, true, MODIFIER_SHIFT),
+                Sent::Key(VK_T, false, MODIFIER_SHIFT),
+                Sent::Key(VK_SHIFT, false, 0),
+            ]
+        );
+        // A key pressed before Shift in the same frame stays lowercase.
+        frame(
+            &mut h,
+            vec![key(Key::Y, true, Modifiers::NONE)],
+            Modifiers::SHIFT,
+        );
+        assert_eq!(tap.keys(), [(VK_Y, true), (VK_SHIFT, true)]);
+    }
+
+    #[test]
+    fn command_z_with_command_let_go_in_the_same_frame_is_still_undo() {
+        let (mut h, tap) = recording(View::default(), true);
+        frame(&mut h, vec![key(Key::Z, true, CMD)], Modifiers::NONE);
+        assert_eq!(
+            tap.take(),
+            [
+                Sent::Key(VK_CONTROL, true, MODIFIER_CTRL),
+                Sent::Key(VK_Z, true, MODIFIER_CTRL),
+                Sent::Key(VK_CONTROL, false, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mac_there_gets_command_as_command() {
+        let (mut h, tap) = recording_on(View::default(), true, "macOS");
+        assert!(h.state().cfg.cmd_is_ctrl, "the default, for Windows");
+        frame(&mut h, vec![key(Key::Z, true, CMD)], CMD);
+        assert_eq!(tap.keys(), [(VK_LWIN, true), (VK_Z, true)]);
+        // Copy is the Command chord there too.
+        frame(&mut h, vec![Event::Copy], CMD);
+        assert_eq!(tap.keys(), [(input::VK_C, true), (input::VK_C, false)]);
+        assert!(is_mac_os("macOS") && is_mac_os("darwin") && is_mac_os("MacOS"));
+        assert!(!is_mac_os("windows") && !is_mac_os("linux") && !is_mac_os(""));
+    }
+
+    #[test]
+    fn command_plus_zooms_the_pc_not_latch() {
+        let (mut h, tap) = recording(View::default(), true);
+        frame(&mut h, vec![key(Key::Equals, true, CMD)], CMD);
+        // A new zoom takes effect on the next frame.
+        h.run_steps(1);
+        assert_eq!(h.ctx.zoom_factor(), 1.0);
+        assert!(tap.keys().contains(&(0xBB, true)));
+        // Without the stream's keys, egui's zoom is back.
+        h.state_mut().view.settings = Some(ClientConfig::default().stream);
+        h.run_steps(1);
+        frame(&mut h, vec![key(Key::Equals, true, CMD)], CMD);
+        h.run_steps(1);
+        assert!(h.ctx.zoom_factor() > 1.0);
+    }
+
+    #[test]
+    fn the_host_key_never_reaches_the_pc_even_inside_one_frame() {
+        let (mut h, tap) = recording(View::default(), true);
+        // Ctrl+Alt+T pressed and Alt let go before the frame was drawn.
+        frame(&mut h, vec![key(Key::T, true, CTRL_ALT)], Modifiers::CTRL);
+        let keys = tap.keys();
+        assert!(!keys.contains(&(VK_T, true)), "{keys:?}");
+        assert!(!keys.iter().any(|&(k, _)| k == VK_MENU), "{keys:?}");
+    }
+
+    #[test]
+    fn scrolling_sideways_scrolls_the_pc_the_same_way() {
+        use egui::MouseWheelUnit::{Line, Page, Point};
+        assert_eq!(wheel_to_host(Line, Vec2::new(1.0, 0.0)), (-120.0, 0.0));
+        assert_eq!(wheel_to_host(Line, Vec2::new(0.0, 1.0)), (0.0, 120.0));
+        assert_eq!(wheel_to_host(Point, Vec2::new(-2.0, -2.0)), (6.0, -6.0));
+        assert_eq!(wheel_to_host(Page, Vec2::new(0.5, 0.0)), (-600.0, 0.0));
+        let (mut h, tap) = recording(View::default(), true);
+        frame(
+            &mut h,
+            vec![
+                Event::PointerMoved(ON_PICTURE),
+                Event::MouseWheel {
+                    unit: Line,
+                    delta: Vec2::new(1.0, 0.0),
+                    modifiers: Modifiers::NONE,
+                },
+            ],
+            Modifiers::NONE,
+        );
+        let sent = tap.take();
+        assert!(sent.contains(&Sent::Scroll(0, -120)), "{sent:?}");
+    }
+
+    #[test]
+    fn a_click_goes_where_the_pointer_was_when_it_was_made() {
+        let (mut h, tap) = recording(View::default(), true);
+        h.state_mut().cfg.capture_mouse = false;
+        // 1920×1080 in 640×420: the picture is 640×360, 30 points down.
+        let elsewhere = Pos2::new(300.0, 100.0);
+        frame(
+            &mut h,
+            vec![
+                Event::PointerMoved(ON_PICTURE),
+                click(ON_PICTURE, true),
+                Event::PointerMoved(elsewhere),
+                click(elsewhere, false),
+            ],
+            Modifiers::NONE,
+        );
+        assert_eq!(
+            tap.take(),
+            [
+                Sent::Position(20, 170, 640, 360),
+                Sent::Button(BUTTON_LEFT, true),
+                Sent::Position(300, 70, 640, 360),
+                Sent::Button(BUTTON_LEFT, false),
+            ]
+        );
+        assert!(!h.state().view.captured, "free mode");
+    }
+
+    #[test]
+    fn a_captured_click_comes_after_the_movement_before_it() {
+        let view = View {
+            captured: true,
+            grabbed: true,
+            ..View::default()
+        };
+        let (mut h, tap) = recording(view, true);
+        // 1920 stream pixels across 640 points: three per point.
+        frame(
+            &mut h,
+            vec![
+                Event::MouseMoved(Vec2::new(3.5, 0.0)),
+                click(ON_PICTURE, true),
+                Event::MouseMoved(Vec2::new(1.0, 1.0)),
+            ],
+            Modifiers::NONE,
+        );
+        assert_eq!(
+            tap.take(),
+            [
+                Sent::Motion(10, 0),
+                Sent::Button(BUTTON_LEFT, true),
+                Sent::Motion(3, 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_click_that_captures_the_mouse_sends_its_position_first() {
+        let (mut h, tap) = recording(View::default(), true);
+        frame(
+            &mut h,
+            vec![Event::PointerMoved(ON_PICTURE), click(ON_PICTURE, true)],
+            Modifiers::NONE,
+        );
+        assert_eq!(
+            tap.take(),
+            [
+                Sent::Position(20, 170, 640, 360),
+                Sent::Button(BUTTON_LEFT, true),
+            ]
+        );
+        assert!(h.state().view.captured);
+    }
+
+    #[test]
+    fn a_click_before_the_stream_connects_does_not_take_the_mouse() {
+        let (mut h, tap) = recording(View::default(), false);
+        frame(
+            &mut h,
+            vec![
+                Event::PointerMoved(ON_PICTURE),
+                click(ON_PICTURE, true),
+                click(ON_PICTURE, false),
+            ],
+            Modifiers::NONE,
+        );
+        h.run_steps(1);
+        assert!(!h.state().view.captured && !h.state().view.grabbed);
+        assert!(h.query_by_label("Cancel").is_some());
+        // A capture left over from a dropped connection: the host key
+        // still lets the mouse go.
+        h.state_mut().view.captured = true;
+        frame(&mut h, vec![], CTRL_ALT);
+        assert!(!h.state().view.captured);
+        let sent = tap.take();
+        assert!(
+            !sent.iter().any(|s| matches!(s, Sent::Button(..))),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn the_host_key_lets_go_of_what_was_held() {
+        let (mut h, tap) = recording(view_with_bar(), true);
+        h.state_mut().cfg.capture_mouse = false;
+        frame(
+            &mut h,
+            vec![key(Key::W, true, Modifiers::NONE)],
+            Modifiers::NONE,
+        );
+        assert_eq!(tap.keys(), [(VK_W, true)]);
+        // The bar hides; W is let go while the chord is still down.
+        frame(&mut h, vec![key(Key::W, false, CTRL_ALT)], CTRL_ALT);
+        assert_eq!(tap.keys(), [(VK_W, false)]);
+        assert!(!h.state().view.held.any_down());
+        assert!(!h.state().view.bar_shown);
+        // Control let go before Option: no lone Option reaches the PC.
+        frame(&mut h, vec![], Modifiers::ALT);
+        frame(&mut h, vec![], Modifiers::NONE);
+        assert!(tap.keys().is_empty());
+    }
+
+    #[test]
+    fn the_host_key_never_captures_the_mouse_under_an_open_panel() {
+        let view = View {
+            settings: Some(ClientConfig::default().stream),
+            ..view_with_bar()
+        };
+        let (mut h, _tap) = recording(view, true);
+        frame(&mut h, vec![], CTRL_ALT);
+        let v = &h.state().view;
+        assert!(v.captured && !v.bar_shown);
+        assert!(v.settings.is_none(), "closed, as Cancel");
+        let view = View {
+            confirm: Some(PowerAction::Restart),
+            ..view_with_bar()
+        };
+        let (mut h, _tap) = recording(view, true);
+        frame(&mut h, vec![], CTRL_ALT);
+        assert!(h.state().view.confirm.is_none() && h.state().view.captured);
+    }
+
+    #[test]
+    fn a_paste_goes_before_what_was_typed_after_it() {
+        // Nothing to send first (an image on the Mac): at once, in order.
+        let (mut h, tap) = recording(View::default(), true);
+        frame(
+            &mut h,
+            vec![
+                Event::Paste(String::new()),
+                key(Key::Enter, true, Modifiers::NONE),
+            ],
+            Modifiers::NONE,
+        );
+        assert_eq!(
+            tap.keys(),
+            [
+                (VK_CONTROL, true),
+                (VK_V, true),
+                (VK_V, false),
+                (VK_CONTROL, false),
+                (VK_RETURN, true),
+            ]
+        );
+        // Text on its way: Return waits for it, then follows the paste.
+        let (mut h, tap) = recording(View::default(), true);
+        frame(&mut h, vec![], CMD);
+        assert_eq!(tap.keys(), [(VK_CONTROL, true)]);
+        h.state_mut().view.pending = Some(PendingPaste {
+            id: 1,
+            until: Instant::now() + Duration::from_secs(60),
+            queued: Vec::new(),
+        });
+        // ⌘ let go, then Return, while the text travels.
+        frame(&mut h, vec![], Modifiers::NONE);
+        frame(
+            &mut h,
+            vec![
+                key(Key::Enter, true, Modifiers::NONE),
+                key(Key::Enter, false, Modifiers::NONE),
+            ],
+            Modifiers::NONE,
+        );
+        assert!(tap.take().is_empty(), "nothing overtakes the paste");
+        h.state()
+            .live
+            .as_ref()
+            .unwrap()
+            .clipboard
+            .finish_for_test(1);
+        frame(&mut h, vec![], Modifiers::NONE);
+        assert_eq!(
+            tap.keys(),
+            [
+                (VK_V, true),
+                (VK_V, false),
+                (VK_CONTROL, false),
+                (VK_RETURN, true),
+                (VK_RETURN, false),
+            ]
+        );
+        assert!(h.state().view.pending.is_none());
+    }
+
+    #[test]
+    fn a_paste_that_waits_too_long_goes_once_and_losing_focus_drops_it() {
+        let (mut h, tap) = recording(View::default(), true);
+        h.state_mut().view.pending = Some(PendingPaste {
+            id: 7,
+            until: Instant::now(),
+            queued: vec![Queued::Event(
+                key(Key::Enter, true, Modifiers::NONE),
+                At {
+                    keys_to_pc: true,
+                    over_video: false,
+                },
+            )],
+        });
+        frame(&mut h, vec![], Modifiers::NONE);
+        assert_eq!(
+            tap.keys(),
+            [
+                (VK_CONTROL, true),
+                (VK_V, true),
+                (VK_V, false),
+                (VK_CONTROL, false),
+                (VK_RETURN, true),
+            ]
+        );
+        frame(&mut h, vec![], Modifiers::NONE);
+        assert_eq!(tap.keys(), [], "and only once");
+        // Focus goes while a paste waits: it goes, unsent, with what was
+        // held behind it; what the PC holds is let go.
+        h.state_mut().view.pending = Some(PendingPaste {
+            id: 8,
+            until: Instant::now() + Duration::from_secs(60),
+            queued: Vec::new(),
+        });
+        frame(
+            &mut h,
+            vec![key(Key::A, true, Modifiers::NONE)],
+            Modifiers::NONE,
+        );
+        frame(&mut h, vec![Event::WindowFocused(false)], Modifiers::NONE);
+        assert!(h.state().view.pending.is_none());
+        assert_eq!(tap.keys(), [(VK_RETURN, false)]);
+    }
+
+    #[test]
+    fn command_v_pastes_even_with_no_text_on_the_mac() {
+        // egui swallows ⌘V's press when the Mac's clipboard has no text;
+        // only the V let go shows.
+        let (mut h, tap) = recording(View::default(), true);
+        frame(&mut h, vec![], CMD);
+        assert_eq!(tap.keys(), [(VK_CONTROL, true)]);
+        frame(&mut h, vec![key(Key::V, false, CMD)], CMD);
+        assert_eq!(tap.keys(), [(VK_V, true), (VK_V, false)]);
+        // With text, the paste event comes and the V let go adds nothing.
+        frame(
+            &mut h,
+            vec![Event::Paste(String::new()), key(Key::V, false, CMD)],
+            CMD,
+        );
+        assert_eq!(tap.keys(), [(VK_V, true), (VK_V, false)]);
+        // A plain V is typed as ever.
+        frame(&mut h, vec![], Modifiers::NONE);
+        tap.take();
+        frame(
+            &mut h,
+            vec![
+                key(Key::V, true, Modifiers::NONE),
+                key(Key::V, false, Modifiers::NONE),
+            ],
+            Modifiers::NONE,
+        );
+        assert_eq!(tap.keys(), [(VK_V, true), (VK_V, false)]);
+        for (seen, pasted, cmd) in [
+            (true, false, true),
+            (false, true, true),
+            (false, false, false),
+        ] {
+            assert!(!swallowed_paste(seen, pasted, cmd));
+        }
+        assert!(swallowed_paste(false, false, true));
+    }
+
+    #[test]
+    fn tab_in_free_mode_goes_to_the_pc_with_the_stats_panel_open() {
+        let view = View {
+            stats: true,
+            ..View::default()
+        };
+        let (mut h, tap) = recording(view, true);
+        h.state_mut().cfg.capture_mouse = false;
+        h.state()
+            .live
+            .as_ref()
+            .unwrap()
+            .frames
+            .publish(latch_stream::video::Frame::default());
+        h.run_steps(2);
+        tap.take();
+        for _ in 0..3 {
+            h.press_key(Key::Tab);
+            h.run_steps(1);
+            assert!(h.ctx.memory(|m| m.focused()).is_none());
+        }
+        let tabs = tap
+            .keys()
+            .into_iter()
+            .filter(|&k| k == (VK_TAB, true))
+            .count();
+        assert_eq!(tabs, 3);
+        // Focus taken in the Stats panel while the toolbar showed goes
+        // when the toolbar does.
+        h.state_mut().view.bar_shown = true;
+        h.run_steps(2);
+        tab_to(&mut h, "Copy diagnostics");
+        h.state_mut().view.bar_shown = false;
+        h.run_steps(2);
+        assert!(h.ctx.memory(|m| m.focused()).is_none());
     }
 }
