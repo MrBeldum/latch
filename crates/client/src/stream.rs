@@ -68,6 +68,20 @@ fn machine_noun(os: &str) -> &'static str {
     }
 }
 
+/// Whether the machine's menu has anything in it: power actions its owner
+/// allows, or an update for an old host.
+fn has_power_items(env: &Env<'_>) -> bool {
+    env.power_allowed || env.old_host.is_some()
+}
+
+/// What a power action costs, said before it is sent to `pc`.
+fn power_question(action: PowerAction, pc: &str) -> String {
+    match action {
+        PowerAction::Sleep => format!("The stream ends once {pc} agrees. Asleep, it can only be woken from its own network, or through a router that forwards wake packets to it."),
+        PowerAction::Restart | PowerAction::Shutdown => format!("The stream ends once {pc} agrees. Programs there close without asking, and anything unsaved is lost."),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Disconnect,
@@ -100,6 +114,10 @@ pub struct Env<'a> {
     pub handover: Option<String>,
     /// What the PC said about a black picture, once it has answered.
     pub video_help: Option<crate::display::Help>,
+    /// Latch Host there takes power actions from this Mac.
+    pub power_allowed: bool,
+    /// Sleep is offered: something can wake the machine again.
+    pub can_sleep: bool,
 }
 
 struct Toast {
@@ -566,7 +584,7 @@ impl View {
                                     self.keys_menu(ui, live, cfg, actions);
                                     self.stats_button(ui);
                                     self.fullscreen_button(ui, env, actions);
-                                    self.power_menu(ui, env, actions);
+                                    self.power_menu(ui, env);
                                 }
                                 if ui::ghost_button(ui, "Stream settings").clicked() {
                                     self.held.release_all(&live.input);
@@ -596,10 +614,7 @@ impl View {
                         .font(theme::semibold(theme::text::TITLE))
                         .color(P.text),
                 );
-                ui::muted(
-                    ui,
-                    "The stream ends first. Programs there close without asking, and anything unsaved is lost.",
-                );
+                ui::muted(ui, power_question(action, &live.pc));
                 ui.add_space(space::XS);
                 ui.horizontal(|ui| {
                     if ui::destructive_button(ui, action.label()).clicked() {
@@ -675,8 +690,10 @@ impl View {
             self.mouse_items(ui, ctx, live, cfg, actions);
             ui::menu_label(ui, "Send keys");
             self.key_items(ui, live, cfg, actions);
-            ui::menu_label(ui, machine_noun(&env.os));
-            self.power_items(ui, env, actions);
+            if has_power_items(env) {
+                ui::menu_label(ui, machine_noun(&env.os));
+                self.power_items(ui, env);
+            }
         });
     }
 
@@ -704,24 +721,33 @@ impl View {
         }
     }
 
-    fn power_menu(&mut self, ui: &mut egui::Ui, env: &Env<'_>, actions: &mut Vec<Action>) {
-        ui::menu_button(ui, machine_noun(&env.os), |ui| {
-            self.power_items(ui, env, actions)
-        });
+    fn power_menu(&mut self, ui: &mut egui::Ui, env: &Env<'_>) {
+        if !has_power_items(env) {
+            return;
+        }
+        ui::menu_button(ui, machine_noun(&env.os), |ui| self.power_items(ui, env));
     }
 
-    fn power_items(&mut self, ui: &mut egui::Ui, env: &Env<'_>, actions: &mut Vec<Action>) {
-        if ui::menu_item(ui, "Sleep").clicked() {
-            actions.push(Action::Power(PowerAction::Sleep));
-        }
-        if ui::menu_item(ui, "Restart…").clicked() {
-            self.confirm = Some(PowerAction::Restart);
-        }
-        if ui::menu_item(ui, "Shut down…").clicked() {
-            self.confirm = Some(PowerAction::Shutdown);
+    /// Sleep, Restart and Shut down where the machine's owner allows them,
+    /// each asked about first: a slip in this menu must not end the stream
+    /// or put to sleep a machine that nothing here can wake. The stream
+    /// stays up until the machine has agreed.
+    fn power_items(&mut self, ui: &mut egui::Ui, env: &Env<'_>) {
+        if env.power_allowed {
+            if env.can_sleep && ui::menu_item(ui, "Sleep…").clicked() {
+                self.confirm = Some(PowerAction::Sleep);
+            }
+            if ui::menu_item(ui, "Restart…").clicked() {
+                self.confirm = Some(PowerAction::Restart);
+            }
+            if ui::menu_item(ui, "Shut down…").clicked() {
+                self.confirm = Some(PowerAction::Shutdown);
+            }
         }
         if let Some((running, _)) = &env.old_host {
-            ui::menu_separator(ui);
+            if env.power_allowed {
+                ui::menu_separator(ui);
+            }
             let label = format!("Update Latch Host… (runs {running})");
             if ui::menu_item_enabled(ui, env.handover.is_none(), &label)
                 .on_hover_text("Installs the newest Latch Host through this stream, so later updates arrive by themselves.")
@@ -1455,6 +1481,8 @@ pub(crate) mod tests {
         pub old_host: Option<(Version, Option<Version>)>,
         pub handover: Option<String>,
         pub video_help: Option<crate::display::Help>,
+        pub power_allowed: bool,
+        pub can_sleep: bool,
     }
 
     pub(crate) struct Fixture {
@@ -1554,6 +1582,8 @@ pub(crate) mod tests {
             old_host: extra.old_host.clone(),
             handover: extra.handover.clone(),
             video_help: extra.video_help.clone(),
+            power_allowed: extra.power_allowed,
+            can_sleep: extra.can_sleep,
         };
         view.show(ctx, &env);
     }
@@ -1604,6 +1634,8 @@ pub(crate) mod tests {
                 view_with_bar(),
                 Extra {
                     os: "windows".into(),
+                    power_allowed: true,
+                    can_sleep: true,
                     ..Default::default()
                 },
             ),
@@ -1694,7 +1726,7 @@ pub(crate) mod tests {
             h.ctx.memory(|m| m.any_popup_open()),
             "More must use egui::popup so any_popup_open is true; a Background Area would fail this"
         );
-        for item in ["Ctrl+Alt+Delete", "Stream performance", "Sleep"] {
+        for item in ["Ctrl+Alt+Delete", "Stream performance", "Sleep…"] {
             assert!(h.query_by_label(item).is_some(), "More lists {item}");
         }
         let popup_open = h.ctx.memory(|m| m.any_popup_open());
@@ -1705,6 +1737,60 @@ pub(crate) mod tests {
             h.state().view.stats,
             "click inside More is consumed by the popup, not forwarded"
         );
+    }
+
+    #[test]
+    fn power_items_follow_the_owner_and_sleep_only_where_it_can_wake() {
+        let wide = Vec2::new(1400.0, 860.0);
+        let with = |power_allowed, can_sleep, os: &str| {
+            harness_with(
+                wide,
+                1.0,
+                false,
+                fixture(
+                    view_with_bar(),
+                    Extra {
+                        os: os.into(),
+                        power_allowed,
+                        can_sleep,
+                        ..Default::default()
+                    },
+                ),
+            )
+        };
+        // The owner turned power actions off: no menu at all.
+        let h = with(false, false, "windows");
+        assert!(h.query_by_label("PC").is_none(), "an empty menu is no menu");
+        // A Linux VPS: restart and shut down, never sleep.
+        let mut h = with(true, false, "linux");
+        h.get_by_label("Machine").simulate_click();
+        h.run_steps(2);
+        assert!(h.query_by_label("Restart…").is_some());
+        assert!(h.query_by_label("Sleep…").is_none());
+        // A Windows PC: sleep too, and it asks first.
+        let mut h = with(true, true, "windows");
+        h.get_by_label("PC").simulate_click();
+        h.run_steps(2);
+        h.get_by_label("Sleep…").simulate_click();
+        h.run_steps(2);
+        assert_eq!(h.state().view.confirm, Some(PowerAction::Sleep));
+        assert!(
+            h.query_by_label_contains("woken from its own network")
+                .is_some(),
+            "the question says what sleep costs"
+        );
+        // The narrow toolbar's More menu follows the same rule.
+        let mut h = harness_with(
+            Vec2::new(640.0, 420.0),
+            1.0,
+            false,
+            fixture(view_with_bar(), Extra::default()),
+        );
+        h.get_by_label("More").simulate_click();
+        h.run_steps(2);
+        for item in ["Sleep…", "Restart…", "Shut down…"] {
+            assert!(h.query_by_label(item).is_none(), "{item}");
+        }
     }
 
     #[test]
@@ -1825,6 +1911,8 @@ pub(crate) mod tests {
         Extra {
             os: "windows".into(),
             old_host: Some((Version::new(3, 0, 0), Some(Version::new(4, 0, 2)))),
+            power_allowed: true,
+            can_sleep: true,
             ..Default::default()
         }
     }
@@ -2083,6 +2171,8 @@ pub(crate) mod tests {
         use crate::app::snapshots::{file_name, save, MATRIX, PAIR};
         let windows = || Extra {
             os: "windows".into(),
+            power_allowed: true,
+            can_sleep: true,
             ..Default::default()
         };
         for &(size, ppp) in &MATRIX {
