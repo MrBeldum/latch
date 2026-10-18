@@ -115,23 +115,63 @@ unsafe fn open() -> Result<()> {
 /// belongs to the `arboard::Clipboard` that set it: when the last one is
 /// dropped the text goes to a clipboard manager if one takes it within
 /// 100 ms, and is otherwise gone before anything on the desktop can paste
-/// it. A handle whose connection failed is replaced on the next call.
+/// it.
+///
+/// A failed handle is dropped, but on X11 that recovers nothing: arboard
+/// keeps one X connection for the whole process, and once it dies (the X
+/// server restarted under a host that kept running) every new handle is the
+/// same dead one. Only a new process gets a working clipboard, so after
+/// [`DEAD_AFTER`] failures in a row while the display itself answers, the
+/// service exits for systemd (`Restart=on-failure`) to start it again.
 #[cfg(not(windows))]
 fn with_clipboard<T>(
     f: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboard::Error>,
 ) -> Result<T> {
-    static CLIPBOARD: parking_lot::Mutex<Option<arboard::Clipboard>> =
-        parking_lot::Mutex::new(None);
+    struct Slot {
+        clipboard: Option<arboard::Clipboard>,
+        failures: u32,
+    }
+    static CLIPBOARD: parking_lot::Mutex<Slot> = parking_lot::Mutex::new(Slot {
+        clipboard: None,
+        failures: 0,
+    });
     let mut slot = CLIPBOARD.lock();
-    let clipboard = match slot.as_mut() {
+    let clipboard = match slot.clipboard.as_mut() {
         Some(c) => c,
-        None => slot.insert(arboard::Clipboard::new()?),
+        None => slot.clipboard.insert(arboard::Clipboard::new()?),
     };
     let result = f(clipboard);
-    if result.is_err() {
-        *slot = None;
+    match &result {
+        Ok(_) => slot.failures = 0,
+        Err(e) => {
+            slot.clipboard = None;
+            slot.failures = if matches!(e, arboard::Error::Unknown { .. }) {
+                slot.failures + 1
+            } else {
+                0
+            };
+            #[cfg(target_os = "linux")]
+            if connection_is_dead(slot.failures, || x11rb::connect(None).is_ok()) {
+                tracing::error!("clipboard: the X connection is gone ({e}); restarting");
+                std::process::exit(1);
+            }
+        }
     }
     Ok(result?)
+}
+
+/// Unknown errors in a row before the X connection counts as dead: one can
+/// be a passing hiccup.
+#[cfg(any(target_os = "linux", test))]
+const DEAD_AFTER: u32 = 2;
+
+/// Whether arboard's X connection is dead for good: it failed
+/// [`DEAD_AFTER`] times in a row while a fresh connection to the display
+/// works. When the display itself does not answer (X is down, or there is
+/// no X at all), restarting would not help and is not done.
+#[cfg(any(target_os = "linux", test))]
+fn connection_is_dead(failures: u32, display_answers: impl FnOnce() -> bool) -> bool {
+    failures >= DEAD_AFTER && display_answers()
 }
 
 #[cfg(not(windows))]
@@ -189,6 +229,26 @@ mod tests {
         assert_eq!(from_windows("a\r\nb\r\n"), "a\nb\n");
         assert_eq!(from_windows(&to_windows("x\ny\n")), "x\ny\n");
         assert_eq!(to_windows(""), "");
+    }
+
+    #[test]
+    fn only_repeated_failures_with_a_working_display_restart_the_service() {
+        assert!(!connection_is_dead(0, || true));
+        assert!(!connection_is_dead(DEAD_AFTER - 1, || true));
+        assert!(connection_is_dead(DEAD_AFTER, || true));
+        assert!(
+            !connection_is_dead(DEAD_AFTER + 5, || false),
+            "no display: a restart would loop"
+        );
+        let mut asked = false;
+        connection_is_dead(1, || {
+            asked = true;
+            true
+        });
+        assert!(
+            !asked,
+            "the display is only probed once the count is reached"
+        );
     }
 
     #[test]
