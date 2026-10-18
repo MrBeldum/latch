@@ -20,21 +20,33 @@ const REG_KEY: &str = r"HKLM:\SOFTWARE\MikeTheTech\VirtualDisplayDriver";
 /// Listed with every size: the default frame rate and ProMotion's.
 pub const REFRESH_RATES: [u32; 2] = [60, 120];
 
+/// The name the Virtual Display Driver's monitor reports.
+const VDD_NAME: &str = "VDD by MTT";
+
 /// Sunshine's stable ID for the Virtual Display Driver, including an
 /// inactive display. Use the latest device list, so a removed display
-/// from an older list is never selected.
+/// from an older list is never selected. Sunshine lists the devices as
+/// objects when it starts, and as `"<id> - <name>"` strings when it has
+/// recovered the display layout after a stream.
 // ponytail: Sunshine logs its display IDs; use an enumeration API if it gains one.
 pub fn output_in(log: &str) -> Option<String> {
-    let (_, list) = log.rsplit_once("Currently available ")?;
-    let json = list
-        .strip_prefix("display devices:")
-        .or_else(|| list.strip_prefix("devices:"))?;
+    let json = log
+        .rmatch_indices("Currently available ")
+        .find_map(|(at, key)| {
+            let list = &log[at + key.len()..];
+            list.strip_prefix("display devices:")
+                .or_else(|| list.strip_prefix("devices:"))
+        })?;
     let devices = serde_json::Deserializer::from_str(json.trim_start())
         .into_iter::<Vec<serde_json::Value>>()
         .next()?
         .ok()?;
     devices.iter().find_map(|d| {
-        let vdd = d["friendly_name"].as_str() == Some("VDD by MTT")
+        if let Some(entry) = d.as_str() {
+            let (id, name) = entry.split_once(" - ")?;
+            return (name == VDD_NAME && !id.is_empty()).then(|| id.to_string());
+        }
+        let vdd = d["friendly_name"].as_str() == Some(VDD_NAME)
             || (d["edid"]["manufacturer_id"].as_str() == Some("MTT")
                 && d["edid"]["product_code"].as_str() == Some("1337"));
         d["device_id"]
@@ -289,6 +301,18 @@ mod tests {
         assert_eq!(output_in(&log), None, "the old virtual display is gone");
         assert_eq!(output_in("Currently available devices:\n["), None);
         assert_eq!(output_in("no devices reported"), None);
+        // After a stream, the layout recovery lists "<id> - <name>" strings.
+        let recovered = format!(
+            "{log}\nInfo: Recovered the available display layout, but settings for an \
+             unavailable display are still pending. Will retry once devices are added or \
+             removed. Currently available devices:\n[\"{{a1}} - 27E1QA\", \"{{b2}} - VDD by MTT\"]\n"
+        );
+        assert_eq!(output_in(&recovered).as_deref(), Some("{b2}"));
+        let gone = format!("{recovered}Info: Currently available devices:\n[\"{{a1}} - 27E1QA\"]");
+        assert_eq!(output_in(&gone), None, "the latest list decides");
+        // Other text that starts the same way is not a device list.
+        let other = format!("{recovered}Info: Currently available encoders: none");
+        assert_eq!(output_in(&other).as_deref(), Some("{b2}"));
     }
 
     #[test]
