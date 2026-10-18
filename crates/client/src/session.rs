@@ -290,7 +290,29 @@ fn retired(
 }
 
 fn scan_public(pc: &Pc) -> Option<Ipv4Addr> {
-    pc.known.as_ref()?.public_ip.as_deref()?.parse().ok()
+    saved_public(pc.known.as_ref()?.public_ip.as_ref())
+}
+
+/// A saved public address, unless it is not one: older versions saved
+/// whatever address Tailscale last reached the machine on, which can be its
+/// LAN address, and a wake packet sent there goes nowhere.
+fn saved_public(s: Option<&String>) -> Option<Ipv4Addr> {
+    s?.parse()
+        .ok()
+        .filter(|ip| latch_core::tailscale::is_public_v4(*ip))
+}
+
+/// Probe every peer at once: each can take two timeouts when nothing
+/// answers, and a tailnet of a dozen machines would otherwise make one
+/// refresh of the list take half a minute.
+fn probe_all(cfg: &ClientConfig, peers: &[&tailscale::Node]) -> Vec<Pc> {
+    std::thread::scope(|s| {
+        let probes: Vec<_> = peers
+            .iter()
+            .map(|&n| s.spawn(move || probe_peer(cfg, n)))
+            .collect();
+        probes.into_iter().filter_map(|p| p.join().ok()).collect()
+    })
 }
 
 pub fn scan(cfg: &ClientConfig) -> Discovery {
@@ -318,15 +340,14 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
         };
         peers.push(&local);
     }
-    let mut pcs: Vec<Pc> = peers.into_iter().map(|n| probe_peer(cfg, n)).collect();
+    let mut pcs = probe_all(cfg, &peers);
     // A tag:relay node that also runs Latch (a VPS desktop on the same
     // box as the packet relay) belongs in the machine list too.
-    for n in st.relay_peers() {
-        let pc = probe_peer(cfg, n);
-        if pc.host.is_some() || pc.sunshine {
-            pcs.push(pc);
-        }
-    }
+    pcs.extend(
+        probe_all(cfg, &st.relay_peers())
+            .into_iter()
+            .filter(|pc| pc.host.is_some() || pc.sunshine),
+    );
     pcs.sort_by(|a, b| a.name.cmp(&b.name));
     let mut listed: BTreeSet<String> = st.peer.values().map(|n| n.id.clone()).collect();
     if std::env::var_os("LATCH_DEV_LOCAL").is_some() {
@@ -608,7 +629,7 @@ impl Target {
                 .and_then(|k| k.mac.as_deref())
                 .and_then(wake::MacAddr::parse),
             lan_ip: parse(k.and_then(|k| k.lan_ip.as_ref())),
-            public_ip: parse(k.and_then(|k| k.public_ip.as_ref())),
+            public_ip: saved_public(k.and_then(|k| k.public_ip.as_ref())),
             server_cert: k
                 .and_then(|k| k.server_cert.as_deref())
                 .and_then(latch_stream::nvhttp::unhex),
@@ -1411,6 +1432,20 @@ pub fn wake_only(pc: &Pc) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_saved_lan_address_is_not_taken_for_the_public_one() {
+        let saved = |s: &str| saved_public(Some(&s.to_string()));
+        assert_eq!(
+            saved("116.125.113.36"),
+            Some("116.125.113.36".parse().unwrap())
+        );
+        assert_eq!(saved("192.168.55.57"), None);
+        assert_eq!(saved("10.0.2.15"), None);
+        assert_eq!(saved("100.106.23.40"), None, "a Tailscale address");
+        assert_eq!(saved("not an address"), None);
+        assert_eq!(saved_public(None), None);
+    }
 
     #[test]
     fn a_desktop_running_at_another_size_is_launched_again() {
