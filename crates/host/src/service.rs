@@ -20,8 +20,8 @@ use crate::update;
 use crate::wake::{self, WakeInfo};
 use anyhow::{Context, Result};
 use latch_core::api::{
-    Ack, Clipboard, DisplayRequest, NatReport, PinRequest, PowerRequest, Status, Streamer,
-    CLIPBOARD_PATH, UPDATE_PATH,
+    Ack, Clipboard, DisplayRequest, NatReport, PinRequest, PowerAction, PowerRequest, Status,
+    Streamer, CLIPBOARD_PATH, UPDATE_PATH,
 };
 use latch_core::http::{self, Request, Response};
 use latch_core::tailscale::{self, is_tailnet_ip};
@@ -78,6 +78,8 @@ pub struct Service {
     cfg_problem: Mutex<Option<String>>,
     /// A reinstall was noticed and handing over to it failed.
     reinstall_tried: AtomicBool,
+    /// The machine is being kept from idle-sleeping (see `power::keep_awake`).
+    kept_awake: AtomicBool,
     /// This PC's side of the NAT story, from `tailscale netcheck`.
     nat: Mutex<Option<NatReport>>,
     nat_running: AtomicBool,
@@ -108,6 +110,7 @@ impl Service {
             forwarded_logged: Mutex::new(None),
             cfg_problem: Mutex::new(None),
             reinstall_tried: AtomicBool::new(false),
+            kept_awake: AtomicBool::new(false),
             nat: Mutex::new(None),
             nat_running: AtomicBool::new(false),
             update_running: Arc::new(AtomicBool::new(false)),
@@ -190,9 +193,15 @@ impl Service {
         let refresher = self.clone();
         std::thread::spawn(move || refresher.refresh_loop());
         // (refresh_loop takes the Arc so netcheck can run on its own thread.)
-        let svc = self.clone();
-        if let Err(e) = wake::listen(move |mac, from| svc.wake_packet(mac, from)) {
-            self.log(format!("not listening for wake packets: {e:#}"));
+        // Only a Windows PC learns its wake MAC (see `wake::probe`), and
+        // without one every packet is ignored: elsewhere the listener only
+        // held UDP 9 on every interface (a Mac) or failed to bind it and
+        // said so at every start (a Linux user service).
+        if wants_wake_listener() {
+            let svc = self.clone();
+            if let Err(e) = wake::listen(move |mac, from| svc.wake_packet(mac, from)) {
+                self.log(format!("not listening for wake packets: {e:#}"));
+            }
         }
         let handler = self.clone();
         let authorizer = self.clone();
@@ -237,9 +246,22 @@ impl Service {
             self.log(line);
         }
         let stay_awake = self.cfg.lock().stay_awake;
-        crate::power::keep_awake(stay_awake);
-        if tick == 0 && stay_awake {
-            self.log("keeping this PC awake so Tailscale stays reachable");
+        let awake = crate::power::keep_awake(stay_awake);
+        // Said when it starts and stops being true, and only where it is:
+        // a Linux server, or a laptop on battery, is not being kept awake.
+        if awake != self.kept_awake.swap(awake, Ordering::AcqRel) {
+            self.log(if awake {
+                format!(
+                    "keeping this {} awake while it is plugged in, so Tailscale stays reachable",
+                    if cfg!(target_os = "macos") {
+                        "Mac"
+                    } else {
+                        "PC"
+                    }
+                )
+            } else {
+                "no longer keeping this machine awake (on battery, or the setting is off)".into()
+            });
         }
 
         let ts = tailscale::status().map_err(|e| e.to_string());
@@ -978,6 +1000,20 @@ impl Service {
                 &Ack::err("the owner of this PC has turned remote power actions off"),
             );
         }
+        let action = p.action;
+        let what = action.label().to_lowercase();
+        // Refused before the stream is ended for it, and with the reason:
+        // the Mac shows an answer that is not ok as it is. (Every Mac
+        // client reads a 200's `ok`; another status only as "HTTP 409".)
+        let name = self.name.lock().clone();
+        let refused = crate::power::refusal(crate::power::kind(), action, &name).or_else(|| {
+            crate::power::logind_refuses(action)
+                .map(|answer| format!("this machine's login manager says {answer} to {what}"))
+        });
+        if let Some(why) = refused {
+            self.log(format!("{what} requested by {from}, refused: {why}"));
+            return Response::json(200, &Ack::err(why));
+        }
         if cfg.has_creds() {
             Api {
                 user: &cfg.sunshine_user,
@@ -985,16 +1021,24 @@ impl Service {
             }
             .close_app();
         }
-        self.log(format!(
-            "{} requested by {from}",
-            p.action.label().to_lowercase()
-        ));
+        self.log(format!("{what} requested by {from}"));
+        if cfg!(target_os = "macos") && action != PowerAction::Sleep {
+            // System Events answers at once, or not without someone at the
+            // Mac; either way the one who asked hears which.
+            return match crate::power::perform(action) {
+                Ok(()) => Response::json(200, &Ack::ok()),
+                Err(e) => {
+                    self.log(format!("{what} failed: {e:#}"));
+                    Response::json(200, &Ack::err(format!("{e:#}")))
+                }
+            };
+        }
         // Reply first: sleep can suspend the machine before the bytes leave.
-        let action = p.action;
+        let log = self.log.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(400));
             if let Err(e) = crate::power::perform(action) {
-                tracing::error!("{}: {e:#}", action.label());
+                push_log(&log, format!("{what} failed: {e:#}"));
             }
         });
         Response::json(200, &Ack::ok())
@@ -1153,6 +1197,12 @@ impl Owner {
 fn nat_changed(old: &NatReport, new: &NatReport) -> bool {
     (old.udp, old.ipv4, old.ipv6, old.hard, old.portmap)
         != (new.udp, new.ipv4, new.ipv6, new.hard, new.portmap)
+}
+
+/// Whether to listen for wake packets: only where `wake::probe` can find
+/// this machine's MAC to match them against, which is Windows.
+fn wants_wake_listener() -> bool {
+    cfg!(windows)
 }
 
 /// True when a service answers on loopback.
@@ -1606,6 +1656,11 @@ mod tests {
             assert_eq!(r.status, 400, "only a Windows PC takes pushes at all");
         }
         assert!(!svc.update_running.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn only_a_pc_listens_for_wake_packets() {
+        assert_eq!(wants_wake_listener(), cfg!(windows));
     }
 
     #[test]

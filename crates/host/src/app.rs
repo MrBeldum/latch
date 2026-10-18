@@ -797,10 +797,14 @@ impl HostApp {
             }
             rows.push(Kv::new("Wake-on-LAN", wake).tone(tone));
         }
-        rows.push(Kv::new(
-            "LAN address",
-            s.lan_ip.clone().unwrap_or_else(|| "None".into()),
-        ));
+        // Only Windows reports one (with its wake adapter), and there "None"
+        // is worth seeing; elsewhere it only looked like something missing.
+        if self.os == Os::Windows || s.lan_ip.is_some() {
+            rows.push(Kv::new(
+                "LAN address",
+                s.lan_ip.clone().unwrap_or_else(|| "None".into()),
+            ));
+        }
         if self.os == Os::Windows {
             let (tone, text) = match gamepad {
                 Some(true) => (Tone::Success, "Virtual controller driver installed"),
@@ -919,16 +923,25 @@ impl HostApp {
             ) {
                 self.dirty = true;
             }
-            if self.os == Os::Windows {
+            if self.os != Os::Linux {
+                // A Linux server does not idle-sleep; there it would do nothing.
+                let (title, detail) = if self.os == Os::Mac {
+                    (
+                        "Keep this Mac awake while plugged in",
+                        "Asleep, Tailscale is off too, and no other machine can wake it. Closing the lid or choosing Sleep still sleeps it.",
+                    )
+                } else {
+                    (
+                        "Keep this PC awake while plugged in",
+                        "Asleep, Tailscale is off too, so machines on other networks can't wake it. Sleep from the Start menu or another machine still works.",
+                    )
+                };
                 ui::row_separator(ui);
-                if ui::toggle_row(
-                    ui,
-                    &mut self.cfg.stay_awake,
-                    "Keep this PC awake while plugged in",
-                    Some("Asleep, Tailscale is off too, so machines on other networks can't wake it. Sleep from the Start menu or another machine still works."),
-                ) {
+                if ui::toggle_row(ui, &mut self.cfg.stay_awake, title, Some(detail)) {
                     self.dirty = true;
                 }
+            }
+            if self.os == Os::Windows {
                 ui::row_separator(ui);
                 if ui::toggle_row(
                     ui,
@@ -1408,6 +1421,7 @@ mod snapshots {
     }
 
     fn ready_status(os: &str) -> Status {
+        let windows = os == "windows";
         Status {
             app: latch_core::APP_ID.into(),
             version: env!("CARGO_PKG_VERSION").into(),
@@ -1419,13 +1433,22 @@ mod snapshots {
             os: os.into(),
             tailscale_ip: Some("100.64.0.10".into()),
             tailscale_login: Some("user@example.com".into()),
-            lan_ip: Some("192.168.1.10".into()),
-            mac: Some("02:00:00:00:00:01".into()),
-            wake_ready: Some(true),
-            wake_adapter: "Ethernet".into(),
-            wake_adapter_description: "Example NIC".into(),
-            wake_packet_age_secs: Some(42),
-            fast_startup: Some(false),
+            // Only a Windows PC reports its wake adapter.
+            lan_ip: windows.then(|| "192.168.1.10".into()),
+            mac: windows.then(|| "02:00:00:00:00:01".into()),
+            wake_ready: windows.then_some(true),
+            wake_adapter: if windows {
+                "Ethernet".into()
+            } else {
+                String::new()
+            },
+            wake_adapter_description: if windows {
+                "Example NIC".into()
+            } else {
+                String::new()
+            },
+            wake_packet_age_secs: windows.then_some(42),
+            fast_startup: windows.then_some(false),
             streamer: Streamer {
                 kind: latch_core::STREAMER_KIND.into(),
                 installed: true,
@@ -1683,8 +1706,29 @@ mod snapshots {
         assert!(h.query_by_label("Wake-on-LAN").is_none());
         assert!(h.query_by_label("Game controllers").is_none());
         assert!(
+            h.query_by_label("LAN address").is_none(),
+            "a Mac has none to show"
+        );
+        assert!(h.query_by_label_contains("Install updates").is_none());
+        assert!(
+            h.query_all_by_label("Keep this Mac awake while plugged in")
+                .next()
+                .is_some(),
+            "a shared Mac holds a power assertion while plugged in"
+        );
+        let h = build(
+            Shared {
+                status: Some(ready_status("linux")),
+                ..Default::default()
+            },
+            Os::Linux,
+            tall,
+            1.0,
+            false,
+        );
+        assert!(
             h.query_by_label_contains("Keep this").is_none(),
-            "keeping awake is Windows-only; the switch would do nothing on a Mac"
+            "a Linux server does not idle-sleep; the switch would do nothing"
         );
     }
 
