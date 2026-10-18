@@ -24,7 +24,7 @@ use parking_lot::Mutex;
 use semver::Version;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -87,6 +87,10 @@ pub fn spawn(
         let mut next = Instant::now() + FIRST_CHECK;
         let mut release: Option<Release> = None;
         let mut token = None;
+        // The last self-update that failed. It is not tried again on every
+        // tick, and one that can only fail the same way not until the
+        // release changes; the PCs get theirs meanwhile either way.
+        let mut self_failed: Option<SelfFailure> = None;
         loop {
             std::thread::sleep(TICK);
             let cfg = ClientConfig::load();
@@ -130,9 +134,13 @@ pub fn spawn(
             let rel = &rel;
 
             // This app first.
-            if rel.is_newer_than(&update::current()) && state.lock().ready.is_none() {
+            if rel.is_newer_than(&update::current())
+                && state.lock().ready.is_none()
+                && self_update_due(self_failed.as_ref(), rel, Instant::now())
+            {
                 match prepare_self(rel, token.as_deref()) {
                     Ok(Some(v)) => {
+                        self_failed = None;
                         let mut st = state.lock();
                         st.ready = Some(v.clone());
                         st.notice = Some((
@@ -150,13 +158,9 @@ pub fn spawn(
                     }
                     Err(e) => {
                         state.lock().message =
-                            format!("Could not download Latch {}: {e}.", rel.version);
+                            format!("Could not update this Mac to Latch {}: {e:#}.", rel.version);
                         tracing::warn!("self-update: {e:#}");
-                        // Try again at the next check rather than every tick.
-                        release = None;
-                        next = Instant::now() + RETRY_AFTER;
-                        ctx.request_repaint();
-                        continue;
+                        self_failed = Some(SelfFailure::new(rel, &e, Instant::now()));
                     }
                 }
                 ctx.request_repaint();
@@ -177,17 +181,16 @@ pub fn spawn(
                     }
                 };
                 if idle {
-                    match install_self(rel) {
+                    match install_self(rel, token.as_deref()) {
                         Ok(()) => relaunch(),
                         Err(e) => {
                             let mut st = state.lock();
                             st.ready = None;
                             st.notice = None;
-                            st.message = format!("Could not install Latch {v}: {e}.");
+                            st.message = format!("Could not install Latch {v}: {e:#}.");
                             tracing::error!("self-update: {e:#}");
                             progress.lock().updating = false;
-                            release = None;
-                            next = Instant::now() + RETRY_AFTER;
+                            self_failed = Some(SelfFailure::new(rel, &e, Instant::now()));
                         }
                     }
                     ctx.request_repaint();
@@ -205,7 +208,10 @@ pub fn spawn(
                     continue;
                 };
                 if !update::takes_pushed_host(&h.os) {
-                    continue; // a Mac or a container updates itself
+                    // A Mac updates with its own app; a Linux host or a
+                    // container is updated by hand, and the lobby says so
+                    // (`manual_update_message`).
+                    continue;
                 }
                 if !update::host_can_receive_update(&v) {
                     // The lobby shows this PC what to do; here, just note it.
@@ -365,84 +371,156 @@ fn run(cmd: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Download and verify the new app. `Ok(None)` when this copy is not in a
-/// bundle (a development build), which is left alone.
-fn prepare_self(rel: &Release, token: Option<&str>) -> Result<Option<Version>> {
-    if bundle_path().is_none() {
-        return Ok(None);
+/// A download that arrived whole and still cannot update this Mac. The
+/// same asset fails the same way every time, so it is not fetched again.
+#[derive(Debug)]
+struct Unusable;
+
+impl std::fmt::Display for Unusable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this release cannot update this Mac")
     }
-    let tarball = fetch_asset(rel, MAC_ASSET, token)?;
-    let unpacked = updates_dir(rel)?.join("unpacked");
-    let app = unpacked.join("Latch.app");
-    if !app.exists() {
-        let _ = std::fs::remove_dir_all(&unpacked);
-        std::fs::create_dir_all(&unpacked)?;
-        run(
-            "/usr/bin/tar",
-            &[
-                "xzf",
-                &tarball.display().to_string(),
-                "-C",
-                &unpacked.display().to_string(),
-            ],
-        )?;
-    }
-    let verified = (|| -> Result<Version> {
-        anyhow::ensure!(app.exists(), "the download holds no Latch.app");
-        run(
-            "/usr/bin/codesign",
-            &["--verify", "--deep", "--strict", &app.display().to_string()],
-        )
-        .context("the new app's signature does not verify")?;
-        let version = run(
-            "/usr/bin/plutil",
-            &[
-                "-extract",
-                "CFBundleShortVersionString",
-                "raw",
-                &app.join("Contents/Info.plist").display().to_string(),
-            ],
-        )?;
-        let version =
-            Version::parse(&version).with_context(|| format!("bundle version {version:?}"))?;
-        anyhow::ensure!(
-            version == rel.version,
-            "the download says {version}, the release {}",
-            rel.version
-        );
-        Ok(version)
-    })();
-    match verified {
-        Ok(v) => Ok(Some(v)),
-        Err(e) => {
-            // Nothing from a failed check may be found and trusted at the
-            // next attempt: fetch and unpack again from scratch.
-            let _ = std::fs::remove_dir_all(&unpacked);
-            let _ = std::fs::remove_file(&tarball);
-            Err(e)
+}
+
+/// A self-update that failed: for which release and asset, and when it may
+/// be tried again (`None`: not until the release or its asset changes).
+#[derive(Debug, Clone, PartialEq)]
+struct SelfFailure {
+    tag: String,
+    digest: Option<String>,
+    retry_at: Option<Instant>,
+}
+
+impl SelfFailure {
+    fn new(rel: &Release, e: &anyhow::Error, now: Instant) -> Self {
+        Self {
+            tag: rel.tag.clone(),
+            digest: mac_digest(rel),
+            retry_at: e
+                .downcast_ref::<Unusable>()
+                .is_none()
+                .then_some(now + RETRY_AFTER),
         }
     }
 }
 
-/// Move the verified app over this one. macOS keeps the running executable
-/// alive across the rename, so the swap is safe while we are still up.
-fn install_self(rel: &Release) -> Result<()> {
+fn mac_digest(rel: &Release) -> Option<String> {
+    rel.asset(MAC_ASSET).and_then(|a| a.sha256.clone())
+}
+
+/// Whether to try updating this Mac to `rel` now: always after nothing has
+/// failed, or for another release or a re-published asset; for the one
+/// that failed, once its wait is over, and never if it cannot work.
+fn self_update_due(failed: Option<&SelfFailure>, rel: &Release, now: Instant) -> bool {
+    match failed {
+        None => true,
+        Some(f) if f.tag != rel.tag || f.digest != mac_digest(rel) => true,
+        Some(f) => f.retry_at.is_some_and(|at| now >= at),
+    }
+}
+
+/// Download and verify the new app. `Ok(None)` when this copy is not in a
+/// bundle (a development build), which is left alone. A download that
+/// fails its checks is [`Unusable`]; a failed download is not.
+fn prepare_self(rel: &Release, token: Option<&str>) -> Result<Option<Version>> {
+    if bundle_path().is_none() {
+        return Ok(None);
+    }
+    if rel.asset(MAC_ASSET).is_none() {
+        return Err(anyhow!("release {} has no {MAC_ASSET}", rel.tag).context(Unusable));
+    }
+    let tarball = fetch_asset(rel, MAC_ASSET, token)?;
+    match prepare_in(&updates_dir(rel)?.join("unpacked"), &tarball, &rel.version) {
+        Ok(v) => Ok(Some(v)),
+        Err(e) => {
+            // It matched GitHub's digest, so fetching it again would bring
+            // the same bytes.
+            let _ = std::fs::remove_file(&tarball);
+            Err(e.context(Unusable))
+        }
+    }
+}
+
+/// Unpack `tarball` into an emptied `unpacked` and check the app in it,
+/// then empty it again: an unpacked copy is never kept to be trusted later
+/// (the install unpacks the tarball afresh).
+fn prepare_in(unpacked: &Path, tarball: &Path, want: &Version) -> Result<Version> {
+    let _ = std::fs::remove_dir_all(unpacked);
+    std::fs::create_dir_all(unpacked)?;
+    let checked = unpack_app(tarball, unpacked).and_then(|app| verify_app(&app, want));
+    let _ = std::fs::remove_dir_all(unpacked);
+    checked
+}
+
+/// Extract `Latch.app`, and nothing else in the archive, into `dir`.
+fn unpack_app(tarball: &Path, dir: &Path) -> Result<PathBuf> {
+    run(
+        "/usr/bin/tar",
+        &[
+            "xzf",
+            &tarball.display().to_string(),
+            "-C",
+            &dir.display().to_string(),
+            "Latch.app",
+        ],
+    )?;
+    Ok(dir.join("Latch.app"))
+}
+
+/// The app is there, its signature verifies, and it is the version wanted.
+fn verify_app(app: &Path, want: &Version) -> Result<Version> {
+    anyhow::ensure!(app.exists(), "the download holds no Latch.app");
+    run(
+        "/usr/bin/codesign",
+        &["--verify", "--deep", "--strict", &app.display().to_string()],
+    )
+    .context("the new app's signature does not verify")?;
+    let version = run(
+        "/usr/bin/plutil",
+        &[
+            "-extract",
+            "CFBundleShortVersionString",
+            "raw",
+            &app.join("Contents/Info.plist").display().to_string(),
+        ],
+    )?;
+    let version =
+        Version::parse(&version).with_context(|| format!("bundle version {version:?}"))?;
+    anyhow::ensure!(
+        version == *want,
+        "the download says {version}, the release {want}"
+    );
+    Ok(version)
+}
+
+/// Move the new app over this one. The release's tarball is checked
+/// against GitHub's digest again (and fetched again if the asset changed
+/// since it was prepared), unpacked straight into the staging folder beside
+/// this app and checked there: what was checked is exactly what goes in.
+/// macOS keeps the running executable alive across the rename, so the swap
+/// is safe while we are still up.
+fn install_self(rel: &Release, token: Option<&str>) -> Result<()> {
     let bundle = bundle_path().ok_or_else(|| anyhow!("not running from an app bundle"))?;
-    let new = updates_dir(rel)?.join("unpacked").join("Latch.app");
-    anyhow::ensure!(new.exists(), "nothing is downloaded");
-    replace_bundle(&bundle, &new, |new, staged| {
-        run(
-            "/usr/bin/ditto",
-            &[&new.display().to_string(), &staged.display().to_string()],
-        )
-        .map(|_| ())
+    let tarball = fetch_asset(rel, MAC_ASSET, token)?;
+    replace_bundle(&bundle, &tarball, |tarball, staged| {
+        stage_from(tarball, staged, &rel.version)
     })?;
     let _ = run(
         "/usr/bin/xattr",
         &["-dr", "com.apple.quarantine", &bundle.display().to_string()],
     );
-    let _ = std::fs::remove_dir_all(updates_dir(rel)?.join("unpacked"));
     Ok(())
+}
+
+/// Unpack the app from `tarball` as `staged` (`Latch.app` in a fresh
+/// staging folder) and check it where it lies.
+fn stage_from(tarball: &Path, staged: &Path, want: &Version) -> Result<()> {
+    let dir = staged
+        .parent()
+        .ok_or_else(|| anyhow!("the staging folder has no parent"))?;
+    let app = unpack_app(tarball, dir)?;
+    anyhow::ensure!(app == staged, "unpacked to {}", app.display());
+    verify_app(&app, want).map(|_| ())
 }
 
 /// Stage on the destination volume before moving the running app. A failed
@@ -527,6 +605,27 @@ pub fn old_host_message(name: &str, version: &Version) -> String {
     format!(
         "{name} runs Latch Host {version}, which cannot take an update over the network. Connect to it and choose PC → Update Latch Host in the toolbar: this machine installs the new version through the stream. After that, updates are automatic."
     )
+}
+
+/// What to say about a host this Mac cannot update when a newer release is
+/// out: a Linux machine or a container, whose Latch Host is installed by
+/// hand. `None` for a Windows PC (it is sent the update), a Mac (its own
+/// app updates it) and a host already on the release.
+pub fn manual_update_message(
+    name: &str,
+    os: &str,
+    running: &Version,
+    rel: &Release,
+) -> Option<String> {
+    if update::takes_pushed_host(os) || os.eq_ignore_ascii_case("macos") {
+        return None;
+    }
+    rel.is_newer_than(running).then(|| {
+        format!(
+            "{name} runs Latch Host {running}, and {} is out. This Mac sends updates to Windows PCs only: install the new Latch Host on {name} by hand, the way it was set up.",
+            rel.version
+        )
+    })
 }
 
 fn is_transient(e: &anyhow::Error) -> bool {
@@ -695,6 +794,117 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A minimal app bundle at `dir/Latch.app` that says `version` and
+    /// carries `marker`, ad-hoc signed as a release build is.
+    #[cfg(target_os = "macos")]
+    fn fake_app(dir: &Path, version: &str, marker: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let app = dir.join("Latch.app");
+        let contents = app.join("Contents");
+        std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+        std::fs::create_dir_all(contents.join("Resources")).unwrap();
+        let exe = contents.join("MacOS/Latch");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(contents.join("Resources/marker"), marker).unwrap();
+        std::fs::write(
+            contents.join("Info.plist"),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Latch</string>
+<key>CFBundleIdentifier</key><string>com.example.latch-update-test</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>{version}</string>
+</dict></plist>"#
+            ),
+        )
+        .unwrap();
+        let path = app.display().to_string();
+        run(
+            "/usr/bin/codesign",
+            &["-s", "-", "--force", "--deep", &path],
+        )
+        .unwrap();
+        app
+    }
+
+    /// A release tarball laid out as release.yml makes it.
+    #[cfg(target_os = "macos")]
+    fn tarball_of(dir: &Path, version: &str, marker: &str) -> PathBuf {
+        let src = dir.join(format!("build-{marker}"));
+        fake_app(&src, version, marker);
+        std::fs::write(src.join("README-MACOS.md"), "read me").unwrap();
+        let tarball = dir.join(format!("{marker}.tar.gz"));
+        run(
+            "/usr/bin/tar",
+            &[
+                "czf",
+                &tarball.display().to_string(),
+                "-C",
+                &src.display().to_string(),
+                "Latch.app",
+                "README-MACOS.md",
+            ],
+        )
+        .unwrap();
+        tarball
+    }
+
+    #[cfg(target_os = "macos")]
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("latch-selfup-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_app_left_unpacked_earlier_is_never_what_gets_checked() {
+        let dir = scratch();
+        let unpacked = dir.join("unpacked");
+        // An earlier build of the same tag, valid in itself, left behind.
+        fake_app(&unpacked, "9.9.9", "stale");
+        let tarball = tarball_of(&dir, "9.9.8", "fresh");
+        let want = Version::new(9, 9, 9);
+        let e = prepare_in(&unpacked, &tarball, &want).unwrap_err();
+        assert!(e.to_string().contains("says 9.9.8"), "{e:#}");
+        assert_eq!(
+            prepare_in(&unpacked, &tarball, &Version::new(9, 9, 8)).unwrap(),
+            Version::new(9, 9, 8)
+        );
+        assert!(!unpacked.exists(), "nothing unpacked is kept");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_install_checks_the_app_it_unpacks_into_the_stage() {
+        let dir = scratch();
+        let apps = dir.join("Applications");
+        let bundle = fake_app(&apps, "9.9.8", "running");
+        let tarball = tarball_of(&dir, "9.9.9", "fresh");
+        let marker =
+            |app: &Path| std::fs::read_to_string(app.join("Contents/Resources/marker")).unwrap();
+        // The wrong version: refused, and the running app is untouched.
+        let e = replace_bundle(&bundle, &tarball, |t, staged| {
+            stage_from(t, staged, &Version::new(9, 9, 7))
+        })
+        .unwrap_err();
+        assert!(format!("{e:#}").contains("says 9.9.9"), "{e:#}");
+        assert_eq!(marker(&bundle), "running");
+        assert_eq!(std::fs::read_dir(&apps).unwrap().count(), 1);
+        // The right one goes in, and only the app comes out of the archive.
+        replace_bundle(&bundle, &tarball, |t, staged| {
+            stage_from(t, staged, &Version::new(9, 9, 9))
+        })
+        .unwrap();
+        assert_eq!(marker(&bundle), "fresh");
+        assert_eq!(std::fs::read_dir(&apps).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn the_bundle_is_found_only_inside_an_app() {
         // The test binary lives in target/, not in a .app.
@@ -789,6 +999,66 @@ mod tests {
             .local_addr()
             .unwrap();
         assert!(!runs_at_least(closed, &want, Duration::ZERO));
+    }
+
+    #[test]
+    fn a_linux_host_behind_the_release_is_named_and_others_are_not() {
+        let r = rel("4.1.2");
+        let old = Version::new(4, 1, 1);
+        let msg = manual_update_message("stuzha", "linux", &old, &r).expect("a line");
+        assert!(msg.contains("stuzha") && msg.contains("4.1.1") && msg.contains("4.1.2"));
+        assert_eq!(
+            manual_update_message("stuzha", "linux", &Version::new(4, 1, 2), &r),
+            None
+        );
+        for os in ["windows", "", "macOS"] {
+            assert_eq!(manual_update_message("pc", os, &old, &r), None, "{os:?}");
+        }
+    }
+
+    fn rel_with_mac_asset(v: &str, digest: &str) -> Release {
+        Release {
+            assets: vec![latch_core::update::Asset {
+                name: MAC_ASSET.into(),
+                url: String::new(),
+                size: 1,
+                sha256: Some(digest.into()),
+            }],
+            ..rel(v)
+        }
+    }
+
+    #[test]
+    fn a_failed_self_update_waits_and_one_that_cannot_work_waits_for_a_new_asset() {
+        let now = Instant::now();
+        let r = rel_with_mac_asset("4.1.2", "aa");
+        assert!(self_update_due(None, &r, now));
+        // A download that failed: again after a while, not every tick.
+        let failed = SelfFailure::new(&r, &anyhow!("timed out"), now);
+        assert!(!self_update_due(Some(&failed), &r, now));
+        assert!(self_update_due(Some(&failed), &r, now + RETRY_AFTER));
+        // A download that can never work (it says 4.1.1 inside): not again
+        // for these bytes, at once for new ones or a new release.
+        let unusable = SelfFailure::new(
+            &r,
+            &anyhow!("the download says 4.1.1, the release 4.1.2").context(Unusable),
+            now,
+        );
+        assert!(!self_update_due(
+            Some(&unusable),
+            &r,
+            now + 100 * RETRY_AFTER
+        ));
+        assert!(self_update_due(
+            Some(&unusable),
+            &rel_with_mac_asset("4.1.2", "bb"),
+            now
+        ));
+        assert!(self_update_due(
+            Some(&unusable),
+            &rel_with_mac_asset("4.1.3", "aa"),
+            now
+        ));
     }
 
     #[test]
