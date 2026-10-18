@@ -357,7 +357,7 @@ if ($needFiles -or -not $svcUp) {{
     foreach ($need in {required}) {{
         if (-not (Test-Path (Join-Path '{engine}' $need))) {{ throw "the engine did not copy to {engine}: $need is missing" }}
     }}
-    $dir = '{engine}'
+    {restore_state}$dir = '{engine}'
     }}
     if (-not $dir) {{ $dir = '{engine}' }}
     {migrate_copy}Write-EngineConf $dir
@@ -405,6 +405,7 @@ if ($needFiles -or -not $svcUp) {{
             upstream = UPSTREAM_SERVICE,
             display = SERVICE_DISPLAY,
             repo = crate::streamer::REPO,
+            restore_state = crate::legacy::restore_retired_state_ps(crate::streamer::ENGINE_DIR),
             migrate_copy = migrate_copy,
             brand_new = if p.dry_run {
                 ""
@@ -1550,6 +1551,23 @@ system_tray = enabled
         );
         let wet = code(&script(&migrate_plan(&exe, false)));
         assert!(wet.contains("Brand-Engine $dir"), "{wet}");
+    }
+
+    #[test]
+    fn a_fresh_engine_gets_the_pairing_state_an_unmoved_old_one_kept() {
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
+        let s = code(&script(&plan(&exe, true)));
+        let retire = s
+            .find("$retiredState = $null")
+            .expect("reset by the retire step");
+        let copied = s.find("the engine did not copy to").expect("copy check");
+        let restore = s.find("if ($retiredState -and").expect("state copy");
+        let conf = s[copied..].find("Write-EngineConf $dir").expect("conf") + copied;
+        let register = s.find("New-Service").expect("register");
+        assert!(
+            retire < copied && copied < restore && restore < conf && conf < register,
+            "{s}"
+        );
     }
 
     /// The seam CI's PowerShell syntax check runs through (see
