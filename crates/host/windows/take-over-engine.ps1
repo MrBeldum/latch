@@ -28,21 +28,100 @@ function Get-ActiveRender {
     }
 }
 
-function Get-EngineProcess {
-    Get-CimInstance -ClassName Win32_Process -Filter "Name='sunshine.exe'" | Select-Object -First 1
-}
+# Session 0 has no desktop. An SSH or WinRM shell runs there, and an engine
+# started from it could neither capture the screen nor take input, so
+# nothing is stopped or started from there. Setup run that way hands the
+# engine to the signed-in user's logon task instead.
+$mySession = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+if ($mySession -eq 0) { Write-Output "NOT_INTERACTIVE"; exit 2 }
 
-function Get-EngineOwner {
-    $p = Get-EngineProcess
-    if (-not $p) { return $null }
-    $o = Invoke-CimMethod -InputObject $p -MethodName GetOwner
-    [pscustomobject]@{
-        Pid     = $p.ProcessId
-        Session = $p.SessionId
-        User    = "$($o.Domain)\$($o.User)"
+function Get-EngineProcesses {
+    Get-CimInstance -ClassName Win32_Process -Filter "Name='sunshine.exe'" | ForEach-Object {
+        $o = Invoke-CimMethod -InputObject $_ -MethodName GetOwner
+        [pscustomobject]@{
+            Pid     = $_.ProcessId
+            Session = $_.SessionId
+            User    = "$($o.Domain)\$($o.User)"
+        }
     }
 }
 
+$services = "LatchStream", "BroLinkStream"
+$me = "$env:USERDOMAIN\$env:USERNAME"
+
+# Ours is an engine this user runs in this session. Any other is foreign:
+# the service's SYSTEM copy, one left in session 0 by a setup run over SSH,
+# another user's, or one whose owner cannot be read. Callers wrap the list
+# in @(): Windows PowerShell unrolls a one-item list into a lone object,
+# which has no Count.
+function Get-ForeignEngines {
+    Get-EngineProcesses | Where-Object { $_.User -ine $me -or $_.Session -ne $mySession }
+}
+
+# A service that is Running counts even before its engine shows up: the
+# service wrapper starts the engine a few seconds after it reports Running.
+function Test-ServiceUp {
+    @($services | Where-Object { (Get-Service -Name $_ -ErrorAction SilentlyContinue).Status -eq 'Running' }).Count -gt 0
+}
+
+# Every engine is looked at, not just the first listed: an older user engine
+# listed first would otherwise hide a SYSTEM one the service started beside
+# it. $LatchForce is set by setup, which has just rewritten the engine's
+# login and settings, so even an engine of ours starts again to read them.
+$all = @(Get-EngineProcesses)
+$foreign = @(Get-ForeignEngines)
+if ($all.Count -eq 0 -or $foreign.Count -gt 0 -or (Test-ServiceUp) -or $LatchForce) {
+    foreach ($service in $services) {
+        Set-Service $service -StartupType Manual -ErrorAction SilentlyContinue
+        Stop-Service $service -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($p in $foreign) { Stop-Process -Id $p.Pid -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Seconds 2
+    # Without administrator rights (the logon task, Latch Host itself) the
+    # service and a SYSTEM engine cannot be stopped. The user's own engine
+    # is then left running rather than killed for nothing.
+    $left = @(Get-ForeignEngines)
+    if ($left.Count -gt 0) {
+        Write-Output ("STILL_RUNNING {0} pid={1}" -f $left[0].User, $left[0].Pid)
+        exit 1
+    }
+    if (Test-ServiceUp) {
+        Write-Output "STILL_RUNNING service"
+        exit 1
+    }
+    $own = @(Get-EngineProcesses)
+    if ($own.Count -gt 0) {
+        foreach ($p in $own) { Stop-Process -Id $p.Pid -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Seconds 1
+        $left = @(Get-EngineProcesses)
+        if ($left.Count -gt 0) {
+            Write-Output ("STILL_RUNNING {0} pid={1}" -f $left[0].User, $left[0].Pid)
+            exit 1
+        }
+    }
+    # The engine is a console program. Started plainly it owns a console
+    # window on the desktop being streamed, and closing that window ends
+    # the engine and with it the stream. SW_HIDE at creation keeps the
+    # console from ever showing.
+    $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [UInt16]0 }
+    $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine               = "`"$exe`" `"$conf`""
+        CurrentDirectory          = $engineDir
+        ProcessStartupInformation = $startup
+    }
+    if ($created.ReturnValue -ne 0) {
+        Write-Output ("CREATE_FAILED {0}" -f $created.ReturnValue)
+        exit 1
+    }
+    # platf::init disables Steam Speakers when they are the default; wait
+    # until that has run before putting a default back.
+    Start-Sleep -Seconds 6
+}
+
+$devices = @(Get-ActiveRender)
+if ($devices.Count -eq 0) { Write-Output "NO_ACTIVE_RENDER"; exit 0 }
+# Compiled only now: C# goes through csc, about a second of CPU, and a PC
+# with no playback device at all never needs it.
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -75,44 +154,6 @@ public static class LatchAudio {
     }
 }
 "@
-
-$me = "$env:USERDOMAIN\$env:USERNAME"
-$sun = Get-EngineOwner
-if (-not $sun -or $sun.User -ine $me) {
-    foreach ($service in "LatchStream", "BroLinkStream") {
-        Set-Service $service -StartupType Manual -ErrorAction SilentlyContinue
-        Stop-Service $service -Force -ErrorAction SilentlyContinue
-    }
-    Get-CimInstance -ClassName Win32_Process -Filter "Name='sunshine.exe'" | ForEach-Object {
-        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-    }
-    Start-Sleep -Seconds 2
-    $left = Get-EngineOwner
-    if ($left) {
-        Write-Output ("STILL_RUNNING {0} pid={1}" -f $left.User, $left.Pid)
-        exit 1
-    }
-    # The engine is a console program. Started plainly it owns a console
-    # window on the desktop being streamed, and closing that window ends
-    # the engine and with it the stream. SW_HIDE at creation keeps the
-    # console from ever showing.
-    $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [UInt16]0 }
-    $created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-        CommandLine               = "`"$exe`" `"$conf`""
-        CurrentDirectory          = $engineDir
-        ProcessStartupInformation = $startup
-    }
-    if ($created.ReturnValue -ne 0) {
-        Write-Output ("CREATE_FAILED {0}" -f $created.ReturnValue)
-        exit 1
-    }
-    # platf::init disables Steam Speakers when they are the default; wait
-    # until that has run before putting a default back.
-    Start-Sleep -Seconds 6
-}
-
-$devices = @(Get-ActiveRender)
-if ($devices.Count -eq 0) { Write-Output "NO_ACTIVE_RENDER"; exit 0 }
 $pick = $devices | Where-Object { $_.Desc -match "Steam Streaming" -or $_.Friendly -match "Steam Streaming" } | Select-Object -First 1
 if (-not $pick) { $pick = $devices | Select-Object -First 1 }
 $hr = [LatchAudio]::SetDefault($pick.Id)

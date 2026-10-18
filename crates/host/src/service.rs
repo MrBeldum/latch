@@ -358,8 +358,8 @@ impl Service {
                     if let Err(e) = streamer::start(&install) {
                         self.log(format!("streaming engine: {e:#}"));
                     }
-                } else if cfg!(windows) && !audio_problem.is_empty() {
-                    let _ = crate::audio::take_over_engine();
+                } else if cfg!(windows) {
+                    crate::audio::retry_take_over(&audio_problem);
                 }
             }
         }

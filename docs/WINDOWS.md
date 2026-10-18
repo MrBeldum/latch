@@ -18,13 +18,16 @@ streaming engine, which ships in the same zip, does the capture.
 1. Unzip the release and run `latch-host.exe`, or run `install-host.ps1`
    to copy it (and the bundled engine archive) to `%LOCALAPPDATA%\Latch`,
    add shortcuts, and register the background service to start at logon.
+   The script stops a running Latch Host to replace it and starts the
+   service again; `-NoStart` only keeps the window closed.
 2. Open the **Sharing** tab and click **Set up as administrator**. One UAC
    prompt runs a script that:
    - unpacks the bundled engine archive into
      `%ProgramFiles%\Latch\engine` (downloads that pinned release if the
-     archive is not beside the exe), and gives its executables Latch's
-     name and icon so Task Manager and the volume mixer show "Latch
-     Streaming" (their copyright and licence strings are kept);
+     archive is not beside the exe, or is not that release), and gives
+     its executables Latch's name and icon so Task Manager and the volume
+     mixer show "Latch Streaming" (their copyright and licence strings are
+     kept);
    - writes the engine's settings: tray and toasts off, web UI on loopback
      only, the PC's display switched to the size and frame rate a Mac asks
      for and put back at disconnect, no bitrate ceiling, and frames kept
@@ -47,11 +50,39 @@ streaming engine, which ships in the same zip, does the capture.
    The script's transcript is in `%LOCALAPPDATA%\Latch\setup.log` and is
    shown on the Sharing tab if something fails. Every step is idempotent;
    run setup again after fixing whatever it complained about.
+
+   Run setup at the PC, not through a stream. Windows shows the
+   administrator prompt on its secure desktop, which a stream can neither
+   show nor click, so a viewer would see a frozen picture until someone at
+   the PC answered it; setup also restarts the engine, which ends the
+   stream. While a viewer is connected the first click only says so, and a
+   second click within two minutes runs setup anyway.
 3. The Sharing tab says **Shared** with a green dot. Leave the window
    closed; the service keeps running.
 
 Advanced engine settings are not exposed anywhere in Latch: Latch
 configures the engine itself.
+
+### Over SSH
+
+An SSH (or WinRM) session runs in session 0, which has no desktop: an
+engine or a Latch Host started there could not see the screen. Both steps
+account for it when run from an administrator's SSH session:
+
+- `install-host.ps1` starts the background service in the signed-in
+  user's session through a one-off scheduled task (`LatchHostStart`, no
+  trigger; it stays registered and does nothing on its own). If nobody is
+  signed in it says so, and the Run key starts the service at the next
+  sign-in.
+- `latch-host.exe --setup-elevated --local-app-data "%LOCALAPPDATA%"`
+  installs the `LatchEngineUser` logon task for that account, stops the
+  engine service, and has the task start the engine in the signed-in
+  user's session. With nobody signed in, the `LatchStream` service keeps
+  running the engine (as SYSTEM, which streams the console) until setup
+  next runs at the PC.
+
+Check the result by streaming from the Mac: `/v1/status` saying the engine
+runs does not show which session it runs in (`/v1/display` does).
 
 ## Slow streams: the network, or the encoder
 
@@ -86,7 +117,7 @@ requests, all JSON:
 | `GET /v1/clipboard` | The clipboard as text, with Windows' clipboard sequence number |
 | `POST /v1/clipboard {"text"}` | Replaces the clipboard, so a ⌘V on the Mac pastes the Mac's text |
 | `POST /v1/update` | A new `latch-host.exe`; see Updates |
-| `GET /v1/display` | Why a capture may be black: monitors, the desktop's sampled brightness, HDR state, the engine's capture settings |
+| `GET /v1/display` | Why a capture may be black: monitors, the desktop's sampled brightness, HDR state, the engine's capture settings, which session each engine process runs in, and the engine's service under any name it has had |
 | `POST /v1/display {"advanced_color"}` | Turns the HDR (advanced colour) desktop off or on |
 
 A request is answered only if it comes from loopback or from a Tailscale

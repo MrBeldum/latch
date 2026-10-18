@@ -3,15 +3,21 @@
 //! they are the default, which leaves a PC with no other active device
 //! with no default endpoint and no sound on the stream.
 
+use std::time::{Duration, Instant};
+
+/// The logon task that runs the take-over in the signed-in user's session.
+/// Setup run from session 0 (over SSH) starts the engine through it.
+pub const ENGINE_TASK: &str = "LatchEngineUser";
+
 #[cfg(windows)]
 mod win {
+    use super::ENGINE_TASK as TASK;
     use anyhow::{bail, Context, Result};
     use std::os::windows::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    const TASK: &str = "LatchEngineUser";
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     /// The helper scripts, written into the data directory when they are
@@ -82,7 +88,9 @@ mod win {
             .unwrap_or(false)
     }
 
-    fn session_id() -> u32 {
+    /// The Windows session this process runs in; 0 is the one without a
+    /// desktop, where services and SSH shells run.
+    pub fn session_id() -> u32 {
         let mut id = 0u32;
         let _ = unsafe {
             windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(std::process::id(), &mut id)
@@ -93,7 +101,7 @@ mod win {
     /// Start the engine as the logged-on user and restore a default playback
     /// device. Safe to call often: a running user-session engine is left
     /// alone aside from putting the default back.
-    pub fn take_over_engine() -> Result<()> {
+    pub fn run_take_over() -> Result<()> {
         let script = install_helpers()?;
         if session_id() == 0 {
             let status = Command::new("schtasks")
@@ -120,9 +128,120 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{install_helpers, take_over_engine};
+pub use win::{install_helpers, session_id};
 
-#[cfg(not(windows))]
+/// Start the engine as the logged-on user (the engine is not running) and
+/// put a default playback device back. The engine starts afresh, so any
+/// backoff [`retry_take_over`] was keeping starts afresh too.
 pub fn take_over_engine() -> anyhow::Result<()> {
+    *AUDIO_RETRY.lock() = None;
+    #[cfg(windows)]
+    {
+        win::run_take_over()
+    }
+    #[cfg(not(windows))]
     Ok(())
+}
+
+/// The take-over again for a running engine whose log says it has no sound,
+/// at most as often as [`retry_due`] allows; `problem` is that complaint,
+/// and an empty one (the sound works) forgets the backoff. Each run starts
+/// PowerShell and can do nothing on a PC with no playback device at all,
+/// where the complaint never clears.
+pub fn retry_take_over(problem: &str) {
+    let mut state = AUDIO_RETRY.lock();
+    if problem.is_empty() {
+        *state = None;
+        return;
+    }
+    let now = Instant::now();
+    let Some(wait) = retry_due(state.as_ref(), problem, now) else {
+        return;
+    };
+    *state = Some(AudioRetry {
+        problem: problem.to_string(),
+        last: now,
+        wait,
+    });
+    drop(state);
+    #[cfg(windows)]
+    {
+        if let Err(e) = win::run_take_over() {
+            tracing::info!("audio take-over: {e:#}");
+        }
+    }
+}
+
+/// The first wait after a take-over that did not bring the sound back, and
+/// the longest; each run in between doubles it.
+const RETRY_FIRST: Duration = Duration::from_secs(30);
+const RETRY_CAP: Duration = Duration::from_secs(10 * 60);
+
+/// The last take-over run for an audio problem: what it was for, when, and
+/// how long to wait before the next.
+struct AudioRetry {
+    problem: String,
+    last: Instant,
+    wait: Duration,
+}
+
+static AUDIO_RETRY: parking_lot::Mutex<Option<AudioRetry>> = parking_lot::Mutex::new(None);
+
+/// Whether the take-over should run now for `problem`, and if so the wait
+/// before the one after: at once for a problem it has not run for, then
+/// after 30 s, 1, 2, 4 and 8 minutes, then every 10.
+fn retry_due(prev: Option<&AudioRetry>, problem: &str, now: Instant) -> Option<Duration> {
+    match prev {
+        Some(p) if p.problem == problem => {
+            (now.duration_since(p.last) >= p.wait).then(|| (p.wait * 2).min(RETRY_CAP))
+        }
+        _ => Some(RETRY_FIRST),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn after(prev: &AudioRetry, secs: u64) -> Instant {
+        prev.last + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn a_new_audio_problem_runs_the_take_over_at_once() {
+        let now = Instant::now();
+        assert_eq!(retry_due(None, "no sink", now), Some(RETRY_FIRST));
+        let prev = AudioRetry {
+            problem: "no sink".into(),
+            last: now,
+            wait: Duration::from_secs(480),
+        };
+        assert_eq!(
+            retry_due(Some(&prev), "no endpoint", after(&prev, 1)),
+            Some(RETRY_FIRST),
+            "a different complaint is new"
+        );
+    }
+
+    #[test]
+    fn the_same_problem_waits_out_a_backoff_that_doubles_up_to_ten_minutes() {
+        let mut prev = AudioRetry {
+            problem: "no sink".into(),
+            last: Instant::now(),
+            wait: RETRY_FIRST,
+        };
+        assert_eq!(retry_due(Some(&prev), "no sink", after(&prev, 29)), None);
+        let mut waits = vec![];
+        for _ in 0..8 {
+            let now = after(&prev, prev.wait.as_secs());
+            let wait = retry_due(Some(&prev), "no sink", now).expect("due");
+            waits.push(wait.as_secs());
+            prev = AudioRetry {
+                problem: "no sink".into(),
+                last: now,
+                wait,
+            };
+        }
+        assert_eq!(waits, [60, 120, 240, 480, 600, 600, 600, 600]);
+    }
 }
