@@ -322,10 +322,23 @@ if ($needFiles -or -not $svcUp) {{
     # footgun even when nothing else is running.
     $staging = Join-Path $env:TEMP ('latch-engine-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
-    $zip = Join-Path '{exe_dir}' '{zip}'
-    if (Test-Path $zip) {{
-        Step "Installing the streaming engine that ships with Latch"
-    }} else {{
+    # The archive beside the exe is used only when it is the pinned release.
+    # The updater replaces the exe alone, so after an engine bump the one an
+    # install left there is an older engine, and a copy cut short is no
+    # engine at all: either way the pinned download still works.
+    $zip = $null
+    $bundled = Join-Path '{exe_dir}' '{zip}'
+    if (Test-Path -LiteralPath $bundled) {{
+        $got = $null
+        try {{ $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $bundled).Hash.ToLower() }} catch {{ $got = "unreadable: $_" }}
+        if ($got -eq '{sha}') {{
+            Step "Installing the streaming engine that ships with Latch"
+            $zip = $bundled
+        }} else {{
+            Step "  the engine archive beside Latch Host is not {tag} (got $got); downloading it instead"
+        }}
+    }}
+    if (-not $zip) {{
         Step "Downloading the streaming engine {tag}"
         $json = curl.exe -sSL -A latch https://api.github.com/repos/{repo}/releases/tags/{tag}
         if ($LASTEXITCODE -ne 0) {{ throw "could not reach GitHub for engine release {tag} (curl exit $LASTEXITCODE)" }}
@@ -357,7 +370,7 @@ if ($needFiles -or -not $svcUp) {{
     foreach ($need in {required}) {{
         if (-not (Test-Path (Join-Path '{engine}' $need))) {{ throw "the engine did not copy to {engine}: $need is missing" }}
     }}
-    $dir = '{engine}'
+    {restore_state}$dir = '{engine}'
     }}
     if (-not $dir) {{ $dir = '{engine}' }}
     {migrate_copy}Write-EngineConf $dir
@@ -405,6 +418,7 @@ if ($needFiles -or -not $svcUp) {{
             upstream = UPSTREAM_SERVICE,
             display = SERVICE_DISPLAY,
             repo = crate::streamer::REPO,
+            restore_state = crate::legacy::restore_retired_state_ps(crate::streamer::ENGINE_DIR),
             migrate_copy = migrate_copy,
             brand_new = if p.dry_run {
                 ""
@@ -473,7 +487,11 @@ try {{ powercfg /deviceenablewake $wakeDevice | Out-Null }} catch {{ Write-Outpu
         & (Join-Path $dir 'sunshine.exe') --creds '{user}' '{pass}' 2>&1 | Out-Null
         Pop-Location
         Step "Restarting the streaming service"
-        Get-Service | Where-Object {{ $_.Name -match '{service_match}' }} | Restart-Service -ErrorAction SilentlyContinue
+        # Only one that runs: a restart also starts a stopped service, and
+        # after a take-over this one is stopped on purpose. Started again, it
+        # would put a SYSTEM engine beside the user's. The take-over below
+        # restarts the user's engine instead.
+        Get-Service | Where-Object {{ $_.Name -match '{service_match}' -and $_.Status -eq 'Running' }} | Restart-Service -ErrorAction SilentlyContinue
 "#,
             user = q(p.sunshine_user),
             pass = q(p.sunshine_pass),
@@ -511,6 +529,16 @@ function Brand-Engine($d) {{
     }} finally {{
         foreach ($s in $held) {{ Start-Service -Name $s -ErrorAction SilentlyContinue }}
     }}
+}}
+function Restore-ServiceEngine($why) {{
+    # A take-over stops the service before it starts the user's engine, so
+    # one that failed part way leaves no engine at all. The service's own
+    # copy runs as SYSTEM: it streams the console, which beats nothing, and
+    # Latch Host moves it to the user once setup runs at the PC again.
+    Step "  $why; the {display} service runs the engine"
+    if (Get-CimInstance Win32_Process -Filter "Name='sunshine.exe'" -ErrorAction SilentlyContinue) {{ return }}
+    Set-Service -Name '{service}' -StartupType Automatic -ErrorAction SilentlyContinue
+    Start-Service -Name '{service}' -ErrorAction SilentlyContinue
 }}
 {conceal}
 Step "Latch setup started"
@@ -582,24 +610,78 @@ exit 0
         take_over = if p.dry_run {
             String::new()
         } else {
-            // Base64 UTF-16 is the one form PowerShell takes verbatim from a
-            // command line: no quoting layer between this script and the
-            // helper, and nothing on disk a user-writable path could swap.
-            format!(
-                "        Step \"Running the streaming engine as the signed-in user\"\n        & powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {}\n",
-                encoded_command(include_str!("../windows/take-over-engine.ps1"))
-            )
+            take_over_ps()
         },
         port = CONTROL_PORT,
         exe = q(&p.exe.display().to_string()),
         tcp_rule = TCP_RULE,
         udp_rule = UDP_RULE,
+        service = SERVICE,
+        display = SERVICE_DISPLAY,
         adapter = adapter,
         virtual_display = if p.dry_run {
             String::new()
         } else {
             crate::virtual_display::setup_ps()
         },
+    )
+}
+
+/// The take-over helper as setup runs it: forced, because setup has just
+/// rewritten the engine's login and settings, which an engine of the user's
+/// that is already running would not read again.
+fn forced_take_over() -> String {
+    format!(
+        "$LatchForce = $true\n{}",
+        include_str!("../windows/take-over-engine.ps1")
+    )
+}
+
+/// The last engine step of a real setup run: the engine goes to the
+/// signed-in user. Run from that user's desktop session (the panel's UAC
+/// prompt) the helper does it directly. Run from session 0 (an SSH or
+/// WinRM shell, which has no desktop) an engine started here could neither
+/// capture nor take input, so this elevated run stops the service and every
+/// engine, and the user's logon task starts one in their session. Whatever
+/// fails on the way ends with the service's engine running, never none.
+fn take_over_ps() -> String {
+    format!(
+        r#"        if ([System.Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {{
+            if (Get-ScheduledTask -TaskName '{task}' -ErrorAction SilentlyContinue) {{
+                Step "Handing the streaming engine to the signed-in user's session"
+                foreach ($s in '{service}', '{old_service}') {{
+                    Set-Service -Name $s -StartupType Manual -ErrorAction SilentlyContinue
+                    Stop-Service -Name $s -Force -ErrorAction SilentlyContinue
+                }}
+                Get-CimInstance Win32_Process -Filter "Name='sunshine.exe'" -ErrorAction SilentlyContinue | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
+                schtasks.exe /Run /TN '{task}' | Out-Null
+                $userEngine = $null
+                $deadline = (Get-Date).AddSeconds(30)
+                while (-not $userEngine -and (Get-Date) -lt $deadline) {{
+                    Start-Sleep -Seconds 1
+                    $userEngine = Get-CimInstance Win32_Process -Filter "Name='sunshine.exe'" -ErrorAction SilentlyContinue | Where-Object {{ $_.SessionId -ne 0 }} | Select-Object -First 1
+                }}
+                if ($userEngine) {{
+                    Step "  the engine runs in session $($userEngine.SessionId)"
+                }} else {{
+                    Restore-ServiceEngine "the logon task started no engine (is anyone signed in?)"
+                }}
+            }} else {{
+                Step "Leaving the streaming engine as it is: this session has no desktop to start one in. Run setup from Latch Host at the PC to move a service engine to the signed-in user"
+            }}
+        }} else {{
+            Step "Running the streaming engine as the signed-in user"
+            # Base64 UTF-16 is the one form PowerShell takes verbatim from a
+            # command line: no quoting layer between this script and the
+            # helper, and nothing on disk a user-writable path could swap.
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {helper}
+            if ($LASTEXITCODE -ne 0) {{ Restore-ServiceEngine "the take-over failed (exit $LASTEXITCODE)" }}
+        }}
+"#,
+        task = crate::audio::ENGINE_TASK,
+        service = SERVICE,
+        old_service = crate::legacy::WINDOWS_SERVICE,
+        helper = encoded_command(&forced_take_over()),
     )
 }
 
@@ -615,6 +697,21 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        static WARNED: parking_lot::Mutex<Option<std::time::Instant>> =
+            parking_lot::Mutex::new(None);
+        let viewer = crate::streamer::running()
+            && crate::streamer::find()
+                .and_then(|i| crate::streamer::log_text(&i))
+                .is_some_and(|log| viewer_in_log(&log));
+        {
+            let now = std::time::Instant::now();
+            let mut warned = WARNED.lock();
+            if refuse_during_stream(viewer, *warned, now) {
+                *warned = Some(now);
+                anyhow::bail!(SETUP_DURING_STREAM);
+            }
+            *warned = None;
+        }
         // The logon helper lives in this user's profile and runs as this
         // user, so the unelevated panel installs it.
         let _ = crate::audio::install_helpers();
@@ -644,6 +741,48 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
         );
         Ok(())
     }
+}
+
+/// What a setup click gets while a viewer is connected. Windows shows the
+/// administrator prompt on the secure desktop, which an engine running as
+/// the user cannot capture or click, so a viewer would see the stream
+/// freeze until someone at the PC answers. The second click within
+/// [`SETUP_CONFIRM_WINDOW`] runs setup anyway.
+pub const SETUP_DURING_STREAM: &str = "a stream is running, so setup did not start: Windows asks for an administrator on this PC's own screen, which a stream can neither show nor answer, and setup restarts the streaming engine, which ends the stream. Click again within two minutes to run it anyway with someone at the PC, or run it when nobody is streaming";
+#[cfg_attr(not(windows), allow(dead_code))]
+const SETUP_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Whether the engine's log says a viewer is connected now: the last line
+/// about one is a connect. A session ends with "CLIENT DISCONNECTED", or
+/// with "<address>: Ping Timeout" and no disconnect line when the viewer
+/// just went away. The engine starts a new log each time it starts, and
+/// the caller also asks whether it is listening, so a connect left by an
+/// engine that died mid-stream does not count.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn viewer_in_log(log: &str) -> bool {
+    log.lines()
+        .rev()
+        .find_map(|line| {
+            if line.contains("CLIENT DISCONNECTED") || line.contains(": Ping Timeout") {
+                Some(false)
+            } else if line.contains("CLIENT CONNECTED") {
+                Some(true)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(false)
+}
+
+/// Whether a setup click is turned down: a viewer is connected, and this is
+/// not the second click within [`SETUP_CONFIRM_WINDOW`] of the warning.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn refuse_during_stream(
+    viewer: bool,
+    warned: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    viewer && !warned.is_some_and(|at| now.duration_since(at) < SETUP_CONFIRM_WINDOW)
 }
 
 /// Run a read-only PowerShell probe and return what it printed.
@@ -731,6 +870,13 @@ pub fn run_as_admin() -> Result<()> {
     {
         use std::os::windows::process::CommandExt;
         let exe = std::env::current_exe().context("own path")?;
+        // Over SSH or WinRM this runs in session 0, which has no desktop to
+        // start the engine in: the script hands it to the logon task, so
+        // this user needs one. From the panel the unelevated side has
+        // already installed it, for the right user (see `run`).
+        if crate::audio::session_id() == 0 {
+            let _ = crate::audio::install_helpers();
+        }
         let cfg = crate::config::HostConfig::load();
         let wake = crate::wake::probe();
         let install = crate::streamer::find();
@@ -894,7 +1040,7 @@ mod tests {
     fn encoded_command_is_base64_of_utf16le() {
         // "Hi" in UTF-16LE is 48 00 69 00.
         assert_eq!(encoded_command("Hi"), "SABpAA==");
-        let helper = encoded_command(include_str!("../windows/take-over-engine.ps1"));
+        let helper = encoded_command(&forced_take_over());
         assert!(helper.len() < 30_000, "must fit a Windows command line");
         assert!(helper
             .bytes()
@@ -1446,6 +1592,232 @@ system_tray = enabled
         assert!(
             !dry.contains("-EncodedCommand "),
             "dry-run must not take over the live engine:\n{dry}"
+        );
+        assert!(
+            s.contains(&format!(
+                "-EncodedCommand {}",
+                encoded_command(&forced_take_over())
+            )),
+            "setup forces the helper, which reloads the new login:\n{s}"
+        );
+        assert!(forced_take_over().starts_with("$LatchForce = $true\n"));
+        let after = take + "-EncodedCommand ".len() + encoded_command(&forced_take_over()).len();
+        let checked = s[after..]
+            .find("if ($LASTEXITCODE -ne 0) { Restore-ServiceEngine")
+            .expect("a failed take-over leaves the service's engine running");
+        assert!(checked < 40, "checked right after the helper:\n{s}");
+    }
+
+    #[test]
+    fn a_repair_restarts_only_a_running_service() {
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
+        let s = script(&plan(&exe, false));
+        let restart = s
+            .lines()
+            .find(|l| l.contains("Restart-Service"))
+            .expect("creds restart");
+        assert!(
+            restart.contains("-and $_.Status -eq 'Running' }"),
+            "a stopped service started again runs a SYSTEM engine beside the user's:\n{restart}"
+        );
+    }
+
+    #[test]
+    fn run_from_session_zero_the_engine_goes_to_the_logon_task_not_this_session() {
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
+        let s = code(&script(&plan(&exe, false)));
+        let guard = find_in_body(
+            &s,
+            "if ([System.Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {",
+        )
+        .expect("session 0 is told apart");
+        let task = find_in_body(
+            &s,
+            &format!(
+                "Get-ScheduledTask -TaskName '{}'",
+                crate::audio::ENGINE_TASK
+            ),
+        )
+        .expect("the logon task is looked for");
+        let stop = find_in_body(&s, "Stop-Service -Name $s -Force").expect("stop");
+        let run = find_in_body(
+            &s,
+            &format!("schtasks.exe /Run /TN '{}'", crate::audio::ENGINE_TASK),
+        )
+        .expect("the task starts the engine");
+        let wait = find_in_body(&s, "Where-Object { $_.SessionId -ne 0 }").expect("wait");
+        let fallback =
+            find_in_body(&s, "Restore-ServiceEngine \"the logon task").expect("fallback");
+        let helper = find_in_body(&s, "-EncodedCommand ").expect("helper");
+        assert!(
+            guard < task && task < stop && stop < run && run < wait && wait < fallback,
+            "the elevated run stops what the limited task cannot, then waits for its engine:\n{s}"
+        );
+        assert!(fallback < helper, "the helper is the other branch:\n{s}");
+        let restore = s
+            .find("function Restore-ServiceEngine($why) {")
+            .expect("defined in the preamble");
+        assert!(restore < guard);
+        let body = &s[restore..guard];
+        assert!(
+            body.contains("if (Get-CimInstance Win32_Process -Filter \"Name='sunshine.exe'\"")
+                && body.contains(&format!("Start-Service -Name '{SERVICE}'")),
+            "the service comes back only when no engine runs:\n{body}"
+        );
+    }
+
+    #[test]
+    fn the_helper_never_acts_from_session_zero_and_weighs_every_engine() {
+        let h = code(include_str!("../windows/take-over-engine.ps1"));
+        let not_here = h
+            .find(r#"if ($mySession -eq 0) { Write-Output "NOT_INTERACTIVE"; exit 2 }"#)
+            .expect("session 0 guard");
+        for change in [
+            "Set-Service",
+            "Stop-Service",
+            "Stop-Process",
+            "MethodName Create",
+        ] {
+            let at = h.find(change).expect(change);
+            assert!(not_here < at, "{change} before the session-0 guard:\n{h}");
+        }
+        assert!(
+            h.contains("$_.User -ine $me -or $_.Session -ne $mySession"),
+            "an engine of this user's in another session is not ours:\n{h}"
+        );
+        assert!(
+            h.contains("if ($all.Count -eq 0 -or $foreign.Count -gt 0 -or (Test-ServiceUp) -or $LatchForce)"),
+            "{h}"
+        );
+        assert!(
+            !h.contains("Select-Object -First 1\n}"),
+            "no first-listed-only owner check:\n{h}"
+        );
+        // Without rights to stop the SYSTEM engine, the user's own one stays.
+        let foreign_left = h.find("$left = @(Get-ForeignEngines)").expect("re-check");
+        let own_killed = h.find("$own = @(Get-EngineProcesses)").expect("own");
+        assert!(foreign_left < own_killed, "{h}");
+        // C# is compiled only when there is a device to set.
+        let none = h.find("NO_ACTIVE_RENDER").expect("no device exit");
+        let compile = h.find("Add-Type").expect("compile");
+        assert!(none < compile, "{h}");
+    }
+
+    #[test]
+    fn a_stale_bundled_archive_falls_back_to_the_pinned_download() {
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
+        let s = code(&script(&plan(&exe, true)));
+        let bundled = s
+            .find("$got = (Get-FileHash -Algorithm SHA256 -LiteralPath $bundled)")
+            .expect("the bundled archive is hashed first");
+        let used = s.find("$zip = $bundled").expect("used only on a match");
+        let download = s
+            .find("if (-not $zip) {")
+            .expect("download guarded by no archive");
+        let url = s.find(&format!("releases/tags/{ENGINE_TAG}")).expect("url");
+        let last = s
+            .rfind("Get-FileHash -Algorithm SHA256 -LiteralPath $zip")
+            .expect("final check");
+        let expand = s.find("Expand-Archive").expect("expand");
+        assert!(bundled < used && used < download && download < url, "{s}");
+        assert!(
+            url < last && last < expand,
+            "every archive is checked before unpacking:\n{s}"
+        );
+        assert!(
+            !s[bundled..download].contains("throw"),
+            "a wrong bundled archive is skipped, not fatal:\n{s}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_engine_gets_the_pairing_state_an_unmoved_old_one_kept() {
+        let exe = PathBuf::from(r"C:\x\latch-host.exe");
+        let s = code(&script(&plan(&exe, true)));
+        let retire = s
+            .find("$retiredState = $null")
+            .expect("reset by the retire step");
+        let copied = s.find("the engine did not copy to").expect("copy check");
+        let restore = s.find("if ($retiredState -and").expect("state copy");
+        let conf = s[copied..].find("Write-EngineConf $dir").expect("conf") + copied;
+        let register = s.find("New-Service").expect("register");
+        assert!(
+            retire < copied && copied < restore && restore < conf && conf < register,
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn a_viewer_is_connected_until_its_session_ends_either_way() {
+        assert!(!viewer_in_log(""));
+        assert!(!viewer_in_log("[x]: Info: Sunshine version: 2026.1014\n"));
+        let on = "[a]: Info: New streaming session started [active sessions: 1]\n\
+                  [b]: Info: CLIENT CONNECTED\n\
+                  [c]: Info: Opus initialized: 48 kHz, 2 channels\n";
+        assert!(viewer_in_log(on));
+        assert!(!viewer_in_log(&format!(
+            "{on}[d]: Info: CLIENT DISCONNECTED\n"
+        )));
+        // stuzha, 2026-10-17: a viewer that went away logs a timeout and no
+        // disconnect.
+        assert!(!viewer_in_log(&format!(
+            "{on}[d]: Info: 100.111.100.57: Ping Timeout\n[e]: Info: Setting default sink to: [auto_null]\n"
+        )));
+        assert!(viewer_in_log(&format!(
+            "{on}[d]: Info: 100.111.100.57: Ping Timeout\n{on}"
+        )));
+    }
+
+    #[test]
+    fn setup_during_a_stream_needs_a_second_click() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        assert!(!refuse_during_stream(false, None, now));
+        assert!(refuse_during_stream(true, None, now));
+        assert!(!refuse_during_stream(
+            true,
+            Some(now),
+            now + Duration::from_secs(30)
+        ));
+        assert!(refuse_during_stream(
+            true,
+            Some(now),
+            now + SETUP_CONFIRM_WINDOW + Duration::from_secs(1)
+        ));
+        // The panel turns an error that mentions "declined" into the UAC
+        // decline text, which would hide this one.
+        assert!(!SETUP_DURING_STREAM.to_lowercase().contains("declined"));
+    }
+
+    #[test]
+    fn install_host_brings_the_service_back_in_the_signed_in_session() {
+        let s = code(include_str!("../../../scripts/install-host.ps1"));
+        let stop = s
+            .find("Stop-Process -Force")
+            .expect("the old host is stopped");
+        let branch = s
+            .find("if ((Get-Process -Id $PID).SessionId -eq 0) {")
+            .expect("session 0 is told apart");
+        let task = &s[branch..];
+        assert!(stop < branch);
+        for need in [
+            "-LogonType Interactive",
+            "-RunLevel Limited",
+            "-ExecutionTimeLimit ([TimeSpan]::Zero)",
+            "-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
+            r#"-Execute $DestExe -Argument "--background""#,
+            "Start-ScheduledTask",
+            "/v1/status",
+        ] {
+            assert!(task.contains(need), "{need}:\n{task}");
+        }
+        assert!(!s.contains("Highest"), "the host never runs elevated:\n{s}");
+        assert!(
+            s.contains(
+                r#"} elseif ($NoStart) {
+    Start-Process -FilePath $DestExe -ArgumentList "--background""#
+            ),
+            "-NoStart still brings the service back:\n{s}"
         );
     }
 

@@ -16,7 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-RUN cargo build --release -p latch-host
+# --locked: build exactly the dependencies Cargo.lock pins and CI tested.
+RUN cargo build --locked --release -p latch-host
 
 FROM ubuntu:24.04
 ARG SUNSHINE_TAG=v2026.906.222525
@@ -43,7 +44,9 @@ RUN set -eux; \
     apt-get update && apt-get install -y --no-install-recommends /tmp/sunshine.deb \
     && rm -rf /tmp/sunshine.deb /var/lib/apt/lists/*
 
-# Optional Tailscale userspace client so this container is its own node.
+# Optional Tailscale client so this container is its own node. It runs with
+# kernel networking (see docker-compose.yml), so Latch Host sees each peer's
+# own tailnet address.
 COPY --from=docker.io/tailscale/tailscale:stable /usr/local/bin/tailscale /usr/local/bin/tailscaled /usr/local/bin/
 
 COPY --from=build /src/target/release/latch-host /usr/local/bin/latch-host

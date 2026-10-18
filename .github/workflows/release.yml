@@ -2,7 +2,8 @@ name: release
 
 # Two ways in:
 #   * workflow_dispatch: build the binaries and leave them on the run page.
-#   * a v* tag: the same binaries, published as a GitHub release.
+#   * a v* tag: the same binaries, published as a GitHub release. The tag has
+#     to be the workspace version (Cargo.toml) with a v in front.
 on:
   workflow_dispatch:
   push:
@@ -28,12 +29,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Never ship a binary whose tests were not run.
       - name: test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
       - name: build app
-        run: cargo build --release -p latch-host --target aarch64-apple-darwin
+        run: cargo build --locked --release -p latch-host --target aarch64-apple-darwin
       # bundle-macos.sh ad-hoc signs and verifies the bundle itself.
       - name: bundle
         run: bash scripts/bundle-macos.sh
+      # A Mac refuses an update whose bundle says another version than the
+      # release, deletes the download and fetches it again 15 minutes later.
+      - name: bundle version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          have="$(/usr/bin/plutil -extract CFBundleShortVersionString raw dist.noindex/Latch.app/Contents/Info.plist)"
+          [ "$have" = "${GITHUB_REF_NAME#v}" ] || { echo "::error::tag ${GITHUB_REF_NAME} but the bundle says ${have}; bump the version in Cargo.toml"; exit 1; }
       - name: package
         run: |
           cp docs/MACOS.md dist.noindex/README-MACOS.md
@@ -66,9 +74,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
       - name: build
-        run: cargo build --release -p latch-host
+        run: cargo build --locked --release -p latch-host
       - name: pin matches setup.rs
         shell: pwsh
         run: |
@@ -120,10 +128,50 @@ jobs:
             brolink-windows-x64.zip
           if-no-files-found: error
 
+  # The Linux host, for VPS desktops: both production ones are arm64, x64 is
+  # the other common kind. Built on Ubuntu 24.04 like CI, so it needs glibc
+  # 2.39 or later. The Mac does not push updates to Linux hosts; they install
+  # from here (deploy/native/README.md) and check the published SHA-256.
+  linux:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: native deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang nasm pkg-config libasound2-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - name: test
+        run: cargo test --locked --workspace
+      - name: build
+        run: cargo build --locked --release -p latch-host
+      - name: package
+        run: |
+          name="latch-host-linux-${{ matrix.arch }}"
+          mkdir -p "dist/$name"
+          cp target/release/latch-host LICENSE NOTICE "dist/$name/"
+          cp -R deploy/native "dist/$name/native"
+          tar -C dist -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          cat "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: latch-host-linux-${{ matrix.arch }}
+          path: |
+            latch-host-linux-${{ matrix.arch }}.tar.gz
+            latch-host-linux-${{ matrix.arch }}.tar.gz.sha256
+          if-no-files-found: error
+
   publish:
     # Tags only: a manual run just leaves artifacts on the run page.
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [macos, windows]
+    needs: [macos, windows, linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -132,8 +180,17 @@ jobs:
       # before it would be deleted.
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: CHANGELOG.md
+          sparse-checkout: |
+            CHANGELOG.md
+            Cargo.toml
           sparse-checkout-cone-mode: false
+      # The release is named after the tag and every program reports the
+      # workspace version: a tag pushed before the bump would publish a
+      # release no Mac can update to. Read the way bundle-macos.sh reads it.
+      - name: tag matches the workspace version
+        run: |
+          have="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          [ "$have" = "${GITHUB_REF_NAME#v}" ] || { echo "::error::tag ${GITHUB_REF_NAME} but Cargo.toml says ${have}"; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           path: artifacts

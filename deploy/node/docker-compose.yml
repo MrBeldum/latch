@@ -29,8 +29,18 @@ services:
       - node-config:/root/.config
       - node-local:/root/.local
       - node-tailscale:/var/lib/tailscale
-    # Reachable only through Tailscale userspace. Do not publish GameStream
-    # ports on the public internet.
+    # Tailscale with kernel networking: peers reach Latch Host from their own
+    # tailnet address, which is what it checks before pairing a device or
+    # answering at all. In userspace mode every peer would arrive from
+    # 127.0.0.1 and look like this machine itself. The container keeps its
+    # own network namespace, so it is still its own tailnet machine.
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    # Reachable only through Tailscale. Do not publish GameStream ports on
+    # the public internet.
     shm_size: "1gb"
 
 volumes:
