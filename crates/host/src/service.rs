@@ -82,6 +82,8 @@ pub struct Service {
     kept_awake: AtomicBool,
     /// The macOS firewall turns away connections to this program.
     firewall_blocked: AtomicBool,
+    /// macOS has the login item turned off (see `unix_setup`).
+    login_item_off: AtomicBool,
     /// This PC's side of the NAT story, from `tailscale netcheck`.
     nat: Mutex<Option<NatReport>>,
     nat_running: AtomicBool,
@@ -114,6 +116,7 @@ impl Service {
             reinstall_tried: AtomicBool::new(false),
             kept_awake: AtomicBool::new(false),
             firewall_blocked: AtomicBool::new(false),
+            login_item_off: AtomicBool::new(false),
             nat: Mutex::new(None),
             nat_running: AtomicBool::new(false),
             update_running: Arc::new(AtomicBool::new(false)),
@@ -462,6 +465,11 @@ impl Service {
                 }
                 self.firewall_blocked.store(blocked, Ordering::Release);
             }
+            let off = crate::unix_setup::login_item_disabled();
+            if off && !self.login_item_off.swap(off, Ordering::AcqRel) {
+                self.log("macOS has Latch's login item turned off, so this Mac is not shared after a restart; run setup here");
+            }
+            self.login_item_off.store(off, Ordering::Release);
         }
         // What an update retired is kept until the new version has served
         // for a while: the update's watcher puts it back if it does not.
@@ -576,6 +584,12 @@ impl Service {
         }
         if self.firewall_blocked.load(Ordering::Acquire) {
             setup.push("The macOS firewall blocks other machines from reaching Latch.".into());
+        }
+        if self.login_item_off.load(Ordering::Acquire) {
+            setup.push(
+                "macOS has Latch's login item turned off, so sharing stops at the next restart."
+                    .into(),
+            );
         }
         if *self.virtual_display.lock() == Some(false) {
             setup.push(

@@ -552,6 +552,16 @@ pub fn set_autostart(enable: bool, exe: &Path) -> Result<()> {
 pub fn register_autostart(exe: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
+        if !installed_app(exe) {
+            // A build run from a scratch folder, a disk image or App
+            // Translocation must not take the login item over: at the next
+            // login it would start that copy, or nothing once it is gone.
+            tracing::info!(
+                "not pointing the login item at {}: not an installed Latch.app",
+                exe.display()
+            );
+            return Ok(());
+        }
         write_launch_agent(exe)?;
         retire_legacy_launch_agent();
         Ok(())
@@ -735,6 +745,31 @@ fn bootstrap_args(uid: &str, plist: &str) -> Vec<String> {
 #[cfg(any(target_os = "macos", test))]
 fn enable_args(uid: &str) -> Vec<String> {
     vec!["enable".into(), format!("gui/{uid}/{LAUNCH_AGENT_LABEL}")]
+}
+
+/// Whether `exe` is the program of an app installed in /Applications or
+/// ~/Applications, the only copies the service may point the login item at
+/// by itself.
+#[cfg(any(target_os = "macos", test))]
+fn installed_app(exe: &Path) -> bool {
+    let p = exe.to_string_lossy();
+    p.contains("/Applications/")
+        && p.contains(".app/Contents/MacOS/")
+        && !p.contains("/AppTranslocation/")
+}
+
+/// The login item exists but macOS has it turned off (Login Items in
+/// System Settings, or `launchctl disable`): the Mac looks shared, and is
+/// not after the next restart. Setup turns it back on.
+pub fn login_item_disabled() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        launch_agent_path().is_ok_and(|p| p.exists()) && launch_agent_disabled()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
 }
 
 /// Whether `launchctl print-disabled gui/<uid>` lists the launch agent as
@@ -964,17 +999,17 @@ fn macos_launch_agent(enable: bool, exe: &Path) -> Result<()> {
     }
     write_launch_agent(exe)?;
     retire_legacy_launch_agent();
+    // Turning sharing on is the owner asking for the login item, so a label
+    // macOS has marked disabled is enabled: the legacy `launchctl load`
+    // skipped such a job without a word, and the service then ran with
+    // nothing to restart it, and not at all after the next login.
+    let uid = uid()?;
+    let _ = launchctl(&enable_args(&uid));
     if launch_agent_loaded() {
         return Ok(());
     }
-    // Turning sharing on is the owner asking for the login item, so a label
-    // macOS has marked disabled is enabled first: the legacy `launchctl
-    // load` skipped such a job without a word, and the service then ran
-    // with nothing to restart it. RunAtLoad starts the service now; if one
-    // already answers on the port, the new copy exits 0 and launchd leaves
-    // it.
-    let uid = uid()?;
-    let _ = launchctl(&enable_args(&uid));
+    // RunAtLoad starts the service now; if one already answers on the
+    // port, the new copy exits 0 and launchd leaves it.
     let _ = launchctl(&bootstrap_args(&uid, &path.display().to_string()));
     anyhow::ensure!(
         launch_agent_loaded(),
@@ -1126,6 +1161,24 @@ mod tests {
             enable_args("501"),
             ["enable", "gui/501/com.bardbro.latch.node"]
         );
+    }
+
+    #[test]
+    fn only_an_installed_app_takes_the_login_item_by_itself() {
+        for ok in [
+            "/Applications/Latch.app/Contents/MacOS/Latch",
+            "/Users/ada/Applications/Latch.app/Contents/MacOS/Latch",
+        ] {
+            assert!(installed_app(Path::new(ok)), "{ok}");
+        }
+        for scratch in [
+            "/Users/ada/dev/latch/dist.noindex/Latch-prev-2026-10-12.app/Contents/MacOS/Latch",
+            "/Volumes/Latch/Latch.app/Contents/MacOS/Latch",
+            "/private/var/folders/x/T/AppTranslocation/1234/d/Latch.app/Contents/MacOS/Latch",
+            "/Users/ada/dev/latch/target/release/latch-host",
+        ] {
+            assert!(!installed_app(Path::new(scratch)), "{scratch}");
+        }
     }
 
     #[test]
