@@ -4,15 +4,16 @@
 use crate::clipboard;
 use crate::config::{ClientConfig, Codec, KnownPc, StreamSettings};
 use crate::path::{self, Path};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use latch_core::api::{Ack, NatReport, PinRequest, PowerAction, PowerRequest, Status};
 use latch_core::{http, tailscale, wake, CONTROL_PORT, SUNSHINE_PORT};
+use latch_stream::nvhttp::PinNotEntered;
 use latch_stream::session::Server;
 use latch_stream::{Client, Event, FrameSlot, Identity, Input, Session, Settings};
 use parking_lot::Mutex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -63,6 +64,18 @@ impl Pc {
     pub fn power_allowed(&self) -> bool {
         self.host.as_ref().is_some_and(|h| h.power_allowed)
     }
+    /// Sleep is offered only for a Windows PC, which a wake packet brings
+    /// back. A Linux machine (a cloud VPS above all) or a Mac would stay
+    /// asleep with nothing here able to wake it.
+    pub fn can_sleep(&self) -> bool {
+        self.power_allowed() && sleep_offered(&self.os)
+    }
+}
+
+/// Whether Latch offers to put a machine with Tailscale's OS string `os`
+/// to sleep.
+pub fn sleep_offered(os: &str) -> bool {
+    os.eq_ignore_ascii_case("windows")
 }
 
 /// A tailnet node tagged `tag:relay`: a candidate peer relay, never a PC.
@@ -104,6 +117,11 @@ pub struct Discovery {
     pub relays: Vec<Relay>,
     /// Relay servers this device is granted to use, from the debug command.
     pub peer_relay_servers: PeerRelayServers,
+    /// Every node Tailscale lists on this tailnet, asleep or not, relays and
+    /// phones included; `None` when Tailscale could not say.
+    pub listed: Option<BTreeSet<String>>,
+    /// The tailnet this machine is on, when Tailscale names it.
+    pub tailnet: Option<String>,
 }
 
 /// Rescan the tailnet every few seconds and remember what each PC needs to
@@ -182,45 +200,93 @@ fn spawn_peer_relay_probe(slot: Arc<Mutex<PeerRelayServers>>) {
     });
 }
 
+/// A saved machine that has been off the tailnet this long is forgotten.
+const FORGET_AFTER: u64 = 30 * 86_400;
+
 /// Save what a scan taught about each PC: address, wake details, when it
-/// was last seen.
+/// was last seen. Forget the ones that have left the tailnet.
 fn learn(scan: &Discovery) {
     if let Err(e) = ClientConfig::update(|learned| {
-        for pc in &scan.pcs {
-            if pc.remembered {
-                continue;
-            }
-            let entry = learned.pcs.entry(pc.node_id.clone()).or_default();
-            entry.name = pc.name.clone();
-            if !pc.os.is_empty() {
-                entry.os = pc.os.clone();
-            }
-            if let Some(ip) = pc.ip {
-                entry.tailscale_ip = Some(ip.to_string());
-            }
-            if pc.online {
-                // Coarse on purpose: the file is rewritten only when this moves.
-                let now = latch_core::dates::now_unix();
-                if entry
-                    .last_seen_unix
-                    .is_none_or(|t| now.saturating_sub(t) > 600)
-                {
-                    entry.last_seen_unix = Some(now);
-                }
-            }
-            if let Some(h) = &pc.host {
-                if h.mac.is_some() {
-                    entry.mac = h.mac.clone();
-                    entry.lan_ip = h.lan_ip.clone();
-                }
-            }
-            if let Some(p) = scan_public(pc) {
-                entry.public_ip = Some(p.to_string());
-            }
-        }
+        learn_into(learned, scan, latch_core::dates::now_unix());
     }) {
         tracing::warn!("could not save what was learned: {e:#}");
     }
+}
+
+fn learn_into(learned: &mut ClientConfig, scan: &Discovery, now: u64) {
+    for pc in &scan.pcs {
+        if pc.remembered {
+            continue;
+        }
+        let entry = learned.pcs.entry(pc.node_id.clone()).or_default();
+        entry.name = pc.name.clone();
+        if !pc.os.is_empty() {
+            entry.os = pc.os.clone();
+        }
+        if let Some(ip) = pc.ip {
+            entry.tailscale_ip = Some(ip.to_string());
+        }
+        if scan.tailnet.is_some() {
+            entry.tailnet = scan.tailnet.clone();
+        }
+        if pc.online {
+            // Coarse on purpose: the file is rewritten only when this moves.
+            if entry
+                .last_seen_unix
+                .is_none_or(|t| now.saturating_sub(t) > 600)
+            {
+                entry.last_seen_unix = Some(now);
+            }
+        }
+        if let Some(h) = &pc.host {
+            if h.mac.is_some() {
+                entry.mac = h.mac.clone();
+                entry.lan_ip = h.lan_ip.clone();
+            }
+        }
+        if let Some(p) = scan_public(pc) {
+            entry.public_ip = Some(p.to_string());
+        }
+    }
+    if let Some(listed) = &scan.listed {
+        for id in retired(&learned.pcs, listed, scan.tailnet.as_deref(), now) {
+            if let Some(k) = learned.pcs.remove(&id) {
+                tracing::info!("forgot {} ({id}): it has left the tailnet", k.name);
+            }
+        }
+    }
+}
+
+/// Saved machines that have left the tailnet this machine is on: Tailscale
+/// no longer lists them (it lists every machine there, asleep or not) and
+/// nothing has seen them for [`FORGET_AFTER`]. A machine saved on another
+/// tailnet is kept for when this one goes back; one saved before tailnets
+/// were recorded counts as this tailnet's only when another saved machine
+/// is listed here. An empty listing proves nothing and forgets nothing.
+fn retired(
+    pcs: &BTreeMap<String, KnownPc>,
+    listed: &BTreeSet<String>,
+    tailnet: Option<&str>,
+    now: u64,
+) -> Vec<String> {
+    if listed.is_empty() {
+        return Vec::new();
+    }
+    let here = pcs.keys().any(|id| listed.contains(id));
+    pcs.iter()
+        .filter(|(id, k)| {
+            let ours = match (k.tailnet.as_deref(), tailnet) {
+                (Some(theirs), Some(current)) => theirs == current,
+                (Some(_), None) => false,
+                (None, _) => here,
+            };
+            !listed.contains(*id)
+                && ours
+                && k.last_seen_unix
+                    .is_none_or(|t| now.saturating_sub(t) >= FORGET_AFTER)
+        })
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 fn scan_public(pc: &Pc) -> Option<Ipv4Addr> {
@@ -262,6 +328,10 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
         }
     }
     pcs.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut listed: BTreeSet<String> = st.peer.values().map(|n| n.id.clone()).collect();
+    if std::env::var_os("LATCH_DEV_LOCAL").is_some() {
+        listed.insert("local".into());
+    }
     let relays = st
         .relay_peers()
         .into_iter()
@@ -281,6 +351,12 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
         self_ip: st.self_node.ipv4(),
         relays,
         peer_relay_servers: PeerRelayServers::default(),
+        listed: Some(listed),
+        tailnet: st
+            .current_tailnet
+            .as_ref()
+            .map(|t| t.name.clone())
+            .filter(|n| !n.is_empty()),
     }
 }
 
@@ -398,9 +474,29 @@ pub enum Step {
     },
 }
 
+impl Step {
+    /// For the log: the step, without the PIN a pairing carries.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Waking => "waking",
+            Self::Waiting => "waiting",
+            Self::Pairing { .. } => "pairing",
+            Self::Launching => "launching",
+            Self::Connecting => "connecting",
+            Self::Streaming => "streaming",
+            Self::Ended { .. } => "ended",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Progress {
     pub pc: String,
+    /// The machine's Tailscale node id; names are not unique.
+    pub node_id: String,
+    /// Its Tailscale address, which power actions are sent to.
+    pub ip: Option<Ipv4Addr>,
     pub step: Step,
     pub detail: String,
     pub since: Instant,
@@ -417,6 +513,8 @@ impl Default for Progress {
     fn default() -> Self {
         Self {
             pc: String::new(),
+            node_id: String::new(),
+            ip: None,
             step: Step::Idle,
             detail: String::new(),
             since: Instant::now(),
@@ -493,6 +591,8 @@ pub struct Target {
     /// status; see [`fit_to_host`].
     pub capture_size: Option<[u32; 2]>,
     pub max_fps: u32,
+    /// The size its Desktop was last launched at from this Mac, as saved.
+    pub desktop_size: Option<(u32, u32)>,
 }
 
 impl Target {
@@ -516,6 +616,7 @@ impl Target {
             os: pc.os.clone(),
             capture_size: pc.host.as_ref().and_then(|h| h.streamer.capture_size),
             max_fps: pc.host.as_ref().map_or(0, |h| h.streamer.max_fps),
+            desktop_size: k.and_then(|k| k.desktop_size).map(|[w, h]| (w, h)),
         })
     }
 }
@@ -559,27 +660,77 @@ fn fixed_desktop(capture_size: Option<[u32; 2]>) -> Option<(u32, u32)> {
     }
 }
 
-/// The size each PC's Desktop was last launched at from here, by node.
+/// What a stream with `settings` asks the PC for on a display of `native`
+/// pixels, after Auto has had its say and the PC's limits theirs: width,
+/// height and frame rate. A connect asks for exactly this.
+pub fn request_for(
+    settings: &StreamSettings,
+    native: (u32, u32),
+    capture_size: Option<[u32; 2]>,
+    max_fps: u32,
+) -> (u32, u32, u32) {
+    let s = path::effective(settings);
+    fit_to_host(s.resolution.pixels(native), s.fps, capture_size, max_fps)
+}
+
+/// The size each PC's Desktop was last launched at from here, by node. The
+/// same is kept in client.toml ([`KnownPc::desktop_size`]) for the next
+/// time this app opens.
 static LAUNCHED: Mutex<BTreeMap<String, (u32, u32)>> = Mutex::new(BTreeMap::new());
 
+/// Whether the PC's desktop takes the size of whoever launches it: a Linux
+/// desktop whose host reports no fixed size, where a prep command resizes
+/// the X screen at each launch. A Windows PC switches its display on a
+/// resume too, a Mac never does, and a fixed X screen cannot.
+fn follows_viewer(os: &str, capture_size: Option<[u32; 2]>) -> bool {
+    os.eq_ignore_ascii_case("linux") && fixed_desktop(capture_size).is_none()
+}
+
 /// Whether the running app has to be ended before this launch. Another app
-/// always does. The Desktop does when asked to (a broken capture) and when
-/// it may be running at another size: resuming keeps the PC's display as
-/// the launch left it, since a host's prep command (a Linux desktop
-/// resizing itself to the viewer) runs only at a launch, so a stream at a
-/// new size would be the old desktop scaled, with the mouse moving over
-/// the old one. A Desktop this Mac did not launch, or launched before it
-/// was last opened, is of unknown size.
+/// always does. The Desktop does when asked to (a broken capture), and on
+/// a desktop that follows the viewer when it may be running at another
+/// size: resuming keeps the PC's display as the launch left it, since the
+/// prep command runs only at a launch, so a stream at a new size would be
+/// the old desktop scaled, with the mouse moving over the old one. A
+/// Desktop this Mac never launched is of unknown size.
 fn must_relaunch(
     current_game: u32,
     app_id: u32,
     desktop: bool,
     restart_capture: bool,
+    follows_viewer: bool,
     launched_at: Option<(u32, u32)>,
     size: (u32, u32),
 ) -> bool {
     current_game != 0
-        && (current_game != app_id || (desktop && (restart_capture || launched_at != Some(size))))
+        && (current_game != app_id
+            || (desktop && (restart_capture || (follows_viewer && launched_at != Some(size)))))
+}
+
+/// A cancelled attempt ends the app on the PC only when it started it; one
+/// it rejoined (a game left running, a desktop someone else watches) is
+/// left as it was found, as a disconnect leaves it.
+fn ends_app_on_cancel(resumed: bool) -> bool {
+    !resumed
+}
+
+fn abandon(client: &Client<'_>, resumed: bool) {
+    if ends_app_on_cancel(resumed) {
+        let _ = client.quit();
+    }
+}
+
+/// Keep the size the PC's Desktop was launched at across restarts of this
+/// app, so the first connect afterwards resumes it rather than ending and
+/// launching it again at the same size.
+fn remember_desktop_size(node_id: &str, (w, h): (u32, u32)) {
+    if let Err(e) = ClientConfig::update(|cfg| {
+        if let Some(pc) = cfg.pcs.get_mut(node_id) {
+            pc.desktop_size = Some([w, h]);
+        }
+    }) {
+        tracing::warn!("could not save the desktop's size: {e:#}");
+    }
 }
 
 pub struct Connect {
@@ -604,6 +755,8 @@ pub fn connect(c: Connect) {
         }
         *p = Progress {
             pc: c.target.name.clone(),
+            node_id: c.target.node_id.clone(),
+            ip: Some(c.target.ip),
             generation,
             ..Default::default()
         };
@@ -621,12 +774,25 @@ pub fn connect(c: Connect) {
                 tracing::info!("cancelled: {e:#}");
                 p.set(Step::Ended { error: None }, "");
             }
-            Err(e) => p.set(
-                Step::Ended {
-                    error: Some(format!("{e}")),
-                },
-                "",
-            ),
+            Err(e) => {
+                // The step it got to, and every cause: the banner alone
+                // leaves nothing to look at afterwards.
+                tracing::warn!(
+                    "couldn't connect to {} ({}): {e:#}",
+                    c.target.name,
+                    if p.detail.is_empty() {
+                        p.step.name()
+                    } else {
+                        p.detail.as_str()
+                    }
+                );
+                p.set(
+                    Step::Ended {
+                        error: Some(format!("{e:#}")),
+                    },
+                    "",
+                )
+            }
         }
         c.ctx.request_repaint();
     });
@@ -702,6 +868,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     report(Step::Launching, "Checking pairing…".into());
     let identity = Identity::load_or_create(&latch_core::config::data_dir()?.join("identity"))?;
     let mut client = Client::new(&identity, IpAddr::V4(t.ip), t.server_cert.clone())?;
+    let asking_paired = || format!("Asking {} whether this Mac is paired", t.name);
     let mut info = match client.server_info() {
         Ok(i) => i,
         Err(e) if latch_stream::nvhttp::is_pin_mismatch(&e) => {
@@ -715,19 +882,21 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
                 tracing::warn!("could not forget the PC's old certificate: {save_error:#}");
             }
             client = Client::new(&identity, IpAddr::V4(t.ip), None)?;
-            retry(8, &c.progress, generation, || client.server_info())?
+            retry(8, &c.progress, generation, || client.server_info())
+                .with_context(asking_paired)?
         }
-        Err(_) => retry(8, &c.progress, generation, || client.server_info())?,
+        Err(e) => {
+            tracing::info!("{}: {e:#}; asking again", t.name);
+            retry(8, &c.progress, generation, || client.server_info())
+                .with_context(asking_paired)?
+        }
     };
     if !info.paired || client.server_cert().is_none() {
         let pin = format!("{:04}", rand::random::<u16>() % 10_000);
         report(Step::Pairing { pin: pin.clone() }, String::new());
-        let der = client.pair_cancellable(&pin, &latch_core::config::machine_name(), || {
-            submit_pin(t.ip, &pin, &c.progress, &c.ctx);
-            stale(&c.progress, generation)
-        })?;
+        let der = pair(&mut client, &pin, c, generation)?;
         remember_cert(&t.node_id, &t.name, &der);
-        info = client.server_info()?;
+        info = client.server_info().with_context(asking_paired)?;
         if !info.paired {
             bail!("{} did not accept the pairing", t.name);
         }
@@ -742,7 +911,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     let path = measure_path(&t.node_id, t.ip, &t.path);
     let mut settings = path::effective(&c.settings);
     let wanted = settings.resolution.pixels(c.native);
-    let (w, h, fps) = fit_to_host(wanted, settings.fps, t.capture_size, t.max_fps);
+    let (w, h, fps) = request_for(&c.settings, c.native, t.capture_size, t.max_fps);
     settings.fps = fps;
     tracing::info!(
         "path to {}: {} · {}{}",
@@ -756,7 +925,9 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         }
     );
     report(Step::Launching, "Starting the stream…".into());
-    let apps = client.app_list()?;
+    let apps = client
+        .app_list()
+        .with_context(|| format!("Asking {} what it can stream", t.name))?;
     c.progress.lock().apps = apps.iter().map(|a| a.title.clone()).collect();
     let app = apps
         .iter()
@@ -765,22 +936,32 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         .or_else(|| apps.first())
         .ok_or_else(|| anyhow!("{} offers nothing to stream", t.name))?;
     let desktop = app.title.eq_ignore_ascii_case("Desktop");
-    let launched_at = LAUNCHED.lock().get(&t.node_id).copied();
+    // Nothing on the PC has been touched yet: a cancel while the path was
+    // measured must not end what runs there.
+    if stale(&c.progress, generation) {
+        bail!("cancelled");
+    }
+    let launched_at = LAUNCHED.lock().get(&t.node_id).copied().or(t.desktop_size);
     if must_relaunch(
         info.current_game,
         app.id,
         desktop,
         c.restart_capture,
+        follows_viewer(&t.os, t.capture_size),
         launched_at,
         (w, h),
     ) {
-        client.quit()?;
+        client
+            .quit()
+            .with_context(|| format!("Stopping {}'s previous stream", t.name))?;
         let stopped = Instant::now();
         loop {
             if stale(&c.progress, generation) {
                 bail!("cancelled");
             }
-            info = client.server_info()?;
+            info = client
+                .server_info()
+                .with_context(|| format!("Asking {} whether its stream stopped", t.name))?;
             if info.current_game == 0 {
                 break;
             }
@@ -793,27 +974,37 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             std::thread::sleep(Duration::from_millis(250));
         }
     }
+    if stale(&c.progress, generation) {
+        bail!("cancelled");
+    }
+    // Rejoining what already runs there: a cancel from here on leaves it
+    // running, as a disconnect would. Only an app this attempt started is
+    // ended again.
+    let resumed = info.current_game != 0;
     let ri_key: [u8; 16] = rand::random();
     let ri_id: u32 = rand::random();
     let mut ri_iv = [0u8; 16];
     ri_iv[..4].copy_from_slice(&ri_id.to_be_bytes());
-    let rtsp = client.launch(
-        app.id,
-        w,
-        h,
-        fps,
-        settings.bitrate_kbps,
-        &ri_key,
-        ri_id,
-        info.current_game != 0,
-    )?;
+    let rtsp = client
+        .launch(
+            app.id,
+            w,
+            h,
+            fps,
+            settings.bitrate_kbps,
+            &ri_key,
+            ri_id,
+            resumed,
+        )
+        .with_context(|| format!("Asking {} to start the stream", t.name))?;
     if desktop {
         LAUNCHED.lock().insert(t.node_id.clone(), (w, h));
+        remember_desktop_size(&t.node_id, (w, h));
     }
 
     // 5. Connect.
     if stale(&c.progress, generation) {
-        let _ = client.quit();
+        abandon(&client, resumed);
         bail!("cancelled");
     }
     let hevc = wants_hevc(settings.codec, info.codec_mode_support);
@@ -843,7 +1034,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     );
     if stale(&c.progress, generation) {
         drop(session);
-        let _ = client.quit();
+        abandon(&client, resumed);
         bail!("cancelled");
     }
     let input = session.input();
@@ -900,43 +1091,257 @@ fn retry<T>(
     Err(last)
 }
 
-/// Hand the PIN to Latch Host on the PC, which types it into Sunshine. If
-/// there is no Latch Host, the PIN stays on screen for someone at the PC.
-fn submit_pin(ip: Ipv4Addr, pin: &str, progress: &Mutex<Progress>, ctx: &egui::Context) {
-    let req = PinRequest {
-        pin: pin.into(),
-        name: latch_core::config::machine_name(),
+/// Pair with the PC: the handshake on this thread, and the PIN handed to
+/// Latch Host on the PC beside its first request, on another. The
+/// handshake goes on the moment the PC answers, however the PIN got in;
+/// Cancel works throughout.
+fn pair(client: &mut Client<'_>, pin: &str, c: &Connect, generation: u64) -> Result<Vec<u8>> {
+    let t = &c.target;
+    let hand_off = Arc::new(PinHandOff::new(
+        &t.name,
+        pin,
+        c.progress.clone(),
+        generation,
+        c.ctx.clone(),
+    ));
+    let mut offered = false;
+    let result = client.pair_cancellable(pin, &latch_core::config::machine_name(), |answered| {
+        if answered {
+            hand_off.finish();
+            return false;
+        }
+        if !offered {
+            offered = true;
+            let (h, host) = (hand_off.clone(), SocketAddr::from((t.ip, CONTROL_PORT)));
+            std::thread::spawn(move || h.run(host));
+        }
+        stale(&c.progress, generation) || hand_off.refused.lock().is_some()
+    });
+    // However the handshake ended, the PIN is not offered again.
+    hand_off.stop.store(true, Ordering::Relaxed);
+    result.map_err(|e| {
+        if let Some(reason) = hand_off.refused.lock().take() {
+            return anyhow!("Latch on {} refused the PIN: {reason}.", t.name);
+        }
+        if e.downcast_ref::<PinNotEntered>().is_some() {
+            return match hand_off.why_not.lock().take() {
+                Some(why) => anyhow!("Pairing with {} timed out: {why}.", t.name),
+                None => anyhow!(
+                    "Pairing with {} timed out: nobody entered the PIN there.",
+                    t.name
+                ),
+            };
+        }
+        e.context(format!("Pairing with {}", t.name))
+    })
+}
+
+/// How long the PIN is offered to Latch Host on the PC, and how long a host
+/// that cannot log in to its engine is given to manage it (it checks again
+/// every few seconds, and lags an engine that has just started).
+const PIN_OFFER_FOR: Duration = Duration::from_secs(75);
+const ENGINE_LOGIN_GRACE: Duration = Duration::from_secs(15);
+
+/// What Latch Host on the PC made of one PIN hand-off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PinReply {
+    /// The engine has the PIN.
+    Taken,
+    /// Not taken, for a reason that can pass: the engine is not ready for
+    /// it yet, or refused it this time.
+    Retry(String),
+    /// The host cannot log in to its engine, so it cannot enter any PIN
+    /// until that is fixed (or the engine has finished starting).
+    NoEngine(String),
+    /// The host has no way to take a PIN: it is older than `/v1/pin`.
+    NoRoute,
+    /// Refused for good: this Mac may not ask, or the request is wrong.
+    Refused(String),
+    /// Nothing answered.
+    Unreachable(String),
+}
+
+/// Sort Latch Host's reply to `POST /v1/pin`. It answers every refusal with
+/// an error status and its reason in the body, so the body is read
+/// whatever the status says.
+fn pin_reply(reply: Result<http::Response>) -> PinReply {
+    let r = match reply {
+        Ok(r) => r,
+        Err(e) => return PinReply::Unreachable(format!("{e:#}")),
     };
-    // Pairing draws no spinner, so a new reason has to ask for its frame.
-    let show = |detail: String| {
-        let mut p = progress.lock();
-        if p.detail != detail {
+    let ack = r.parse::<Ack>().ok();
+    if r.status == 200 && ack.as_ref().is_some_and(|a| a.ok) {
+        return PinReply::Taken;
+    }
+    let reason = ack
+        .and_then(|a| a.error)
+        .filter(|e| !e.trim().is_empty())
+        .unwrap_or_else(|| format!("HTTP {}", r.status));
+    match r.status {
+        404 => PinReply::NoRoute,
+        400 | 403 | 422 => PinReply::Refused(reason),
+        _ if reason.starts_with("Latch cannot log in to the streaming engine") => {
+            PinReply::NoEngine(reason)
+        }
+        _ => PinReply::Retry(reason),
+    }
+}
+
+/// Handing the PIN to Latch Host on the PC, which enters it into the
+/// engine there. It runs on its own thread beside the first pairing
+/// request and stops when that request is answered (the PIN went in,
+/// however it got there), when the attempt is cancelled, when the host
+/// refuses for good, or after [`PIN_OFFER_FOR`]. Whatever stops it, the
+/// PIN stays on screen for someone at the PC until the request gives up.
+struct PinHandOff {
+    pc: String,
+    request: PinRequest,
+    progress: Arc<Mutex<Progress>>,
+    generation: u64,
+    ctx: egui::Context,
+    /// The first pairing request is over: stop offering the PIN.
+    stop: AtomicBool,
+    /// Latch Host refused the PIN for good, and why.
+    refused: Mutex<Option<String>>,
+    /// Why the PIN has not gone in through Latch Host, for the message if
+    /// nobody enters it at all.
+    why_not: Mutex<Option<String>>,
+}
+
+impl PinHandOff {
+    fn new(
+        pc: &str,
+        pin: &str,
+        progress: Arc<Mutex<Progress>>,
+        generation: u64,
+        ctx: egui::Context,
+    ) -> Self {
+        Self {
+            pc: pc.to_string(),
+            request: PinRequest {
+                pin: pin.into(),
+                name: latch_core::config::machine_name(),
+            },
+            progress,
+            generation,
+            ctx,
+            stop: AtomicBool::new(false),
+            refused: Mutex::new(None),
+            why_not: Mutex::new(None),
+        }
+    }
+
+    fn done(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) || stale(&self.progress, self.generation)
+    }
+
+    /// The first request is answered: stop, and take down any warning,
+    /// which is no longer true.
+    fn finish(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.show(String::new());
+    }
+
+    /// Pairing draws no spinner, so a new line has to ask for its frame.
+    fn show(&self, detail: String) {
+        let mut p = self.progress.lock();
+        if p.generation == self.generation && p.detail != detail {
             p.detail = detail;
             drop(p);
-            ctx.request_repaint();
+            self.ctx.request_repaint();
         }
-    };
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(75) {
-        if progress.lock().cancel {
-            return;
-        }
-        // Latch Host answers once the engine has the PIN: up to a little
-        // over half a second with an engine that holds the post open.
-        match http::post_json::<_, Ack>((ip, CONTROL_PORT), "/v1/pin", &req, Duration::from_secs(3))
-        {
-            Ok(a) if a.ok => return,
-            Ok(a) => {
-                let reason = a.error.unwrap_or_else(|| "PIN not accepted yet".into());
-                tracing::info!("PIN not accepted yet: {reason}");
-                show(reason);
+    }
+
+    /// Sleep `d` in short steps; false once it is time to stop.
+    fn wait(&self, d: Duration) -> bool {
+        let until = Instant::now() + d;
+        while Instant::now() < until {
+            if self.done() {
+                return false;
             }
-            Err(e) => {
-                tracing::info!("Latch Host did not take the PIN: {e}");
-                show("Latch on that machine isn't answering, so it can't enter the PIN. Open Latch there and set up sharing, then try again.".into());
-            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        std::thread::sleep(Duration::from_millis(800));
+        !self.done()
+    }
+
+    fn run(&self, host: SocketAddr) {
+        let pc = &self.pc;
+        let body = serde_json::to_string(&self.request).unwrap_or_default();
+        let start = Instant::now();
+        let mut pause = Duration::from_millis(800);
+        let mut no_engine_since: Option<Instant> = None;
+        let mut refusals = 0;
+        while start.elapsed() < PIN_OFFER_FOR && !self.done() {
+            // Latch Host answers once the engine has the PIN: up to a
+            // little over half a second with an engine that holds the post.
+            let reply = pin_reply(http::request(
+                host,
+                "POST",
+                "/v1/pin",
+                Some(&body),
+                Duration::from_secs(3),
+            ));
+            if self.done() {
+                return;
+            }
+            if !matches!(reply, PinReply::Refused(_)) {
+                refusals = 0;
+            }
+            let why = |s: String| *self.why_not.lock() = Some(s);
+            match reply {
+                PinReply::Taken => {
+                    *self.why_not.lock() = None;
+                    self.show(String::new());
+                    return;
+                }
+                PinReply::Retry(reason) => {
+                    tracing::info!("{pc} did not take the PIN yet: {reason}");
+                    self.show(format!(
+                        "Latch on {pc} couldn't enter the PIN yet: {reason}"
+                    ));
+                    why(format!("Latch there couldn't enter the PIN ({reason})"));
+                }
+                PinReply::NoEngine(reason) => {
+                    let since = *no_engine_since.get_or_insert_with(Instant::now);
+                    tracing::info!("{pc} did not take the PIN: {reason}");
+                    why("Latch there can't log in to its streaming engine; run setup there".into());
+                    if since.elapsed() >= ENGINE_LOGIN_GRACE {
+                        self.show(format!("Latch on {pc} can't log in to its streaming engine, so it can't enter the PIN. Run setup there, or type this PIN into the streaming engine's web page on that machine."));
+                        return;
+                    }
+                    self.show(format!(
+                        "Latch on {pc} can't log in to its streaming engine yet."
+                    ));
+                }
+                PinReply::NoRoute => {
+                    tracing::info!("{pc}: Latch Host there has no PIN route");
+                    why("Latch there is too old to enter the PIN; update it there".into());
+                    self.show(format!("Latch on {pc} is too old to enter the PIN. Type it into the streaming engine's web page on that machine, or update Latch there."));
+                    return;
+                }
+                PinReply::Refused(reason) => {
+                    // Twice in a row: a refusal can also be a moment when
+                    // the host could not ask Tailscale who this Mac is.
+                    refusals += 1;
+                    tracing::info!("{pc} refused the PIN: {reason}");
+                    if refusals >= 2 {
+                        *self.refused.lock() = Some(reason);
+                        return;
+                    }
+                }
+                PinReply::Unreachable(e) => {
+                    tracing::info!("Latch Host on {pc} did not take the PIN: {e}");
+                    self.show(format!("Latch on {pc} isn't answering, so it can't enter the PIN. Open Latch there and set up sharing, or type this PIN into the streaming engine's web page on that machine."));
+                    why("Latch there isn't answering, so it couldn't enter the PIN".into());
+                }
+            }
+            // A refusal that keeps coming costs the host two engine calls
+            // and a log line each time: ask less often as it goes on.
+            if !self.wait(pause) {
+                return;
+            }
+            pause = (pause * 2).min(Duration::from_secs(4));
+        }
     }
 }
 
@@ -996,14 +1401,16 @@ mod tests {
     fn a_desktop_running_at_another_size_is_launched_again() {
         const DESKTOP: u32 = 7;
         let p720 = (1280, 720);
+        let follows = true;
         // Nothing running: a plain launch.
-        assert!(!must_relaunch(0, DESKTOP, true, true, None, p720));
+        assert!(!must_relaunch(0, DESKTOP, true, true, follows, None, p720));
         // Launched from here at this size: resumed.
         assert!(!must_relaunch(
             DESKTOP,
             DESKTOP,
             true,
             false,
+            follows,
             Some(p720),
             p720
         ));
@@ -1014,23 +1421,361 @@ mod tests {
             DESKTOP,
             true,
             false,
+            follows,
             Some((3024, 1964)),
             p720
         ));
-        assert!(must_relaunch(DESKTOP, DESKTOP, true, false, None, p720));
+        assert!(must_relaunch(
+            DESKTOP, DESKTOP, true, false, follows, None, p720
+        ));
         // A broken capture, or another app, always.
         assert!(must_relaunch(
             DESKTOP,
             DESKTOP,
             true,
             true,
+            follows,
             Some(p720),
             p720
         ));
-        assert!(must_relaunch(9, DESKTOP, true, false, Some(p720), p720));
+        assert!(must_relaunch(
+            9,
+            DESKTOP,
+            true,
+            false,
+            follows,
+            Some(p720),
+            p720
+        ));
         // A game is never ended for a size change.
-        assert!(!must_relaunch(9, 9, false, false, None, p720));
-        assert!(!must_relaunch(9, 9, false, true, None, p720));
+        assert!(!must_relaunch(9, 9, false, false, follows, None, p720));
+        assert!(!must_relaunch(9, 9, false, true, follows, None, p720));
+        // A desktop that does not follow the viewer (Windows switches its
+        // display on a resume, a Mac and a fixed X screen never do) is not
+        // ended for its size, known or not; still for a broken capture.
+        for launched_at in [None, Some((3024, 1964))] {
+            assert!(!must_relaunch(
+                DESKTOP,
+                DESKTOP,
+                true,
+                false,
+                false,
+                launched_at,
+                p720
+            ));
+        }
+        assert!(must_relaunch(
+            DESKTOP, DESKTOP, true, true, false, None, p720
+        ));
+    }
+
+    #[test]
+    fn only_a_linux_desktop_without_a_fixed_size_follows_the_viewer() {
+        assert!(follows_viewer("linux", None));
+        assert!(follows_viewer("Linux", Some([0, 0])), "nonsense is no size");
+        assert!(!follows_viewer("linux", Some([1920, 1080])));
+        assert!(!follows_viewer("windows", None));
+        assert!(!follows_viewer("macOS", None));
+        assert!(!follows_viewer("", None), "an old host says no OS");
+    }
+
+    #[test]
+    fn a_cancel_ends_only_an_app_this_attempt_started() {
+        assert!(ends_app_on_cancel(false), "launched fresh, or relaunched");
+        assert!(!ends_app_on_cancel(true), "rejoined: left as it was found");
+    }
+
+    #[test]
+    fn the_request_depends_on_the_display_only_where_the_setting_does() {
+        use crate::config::{Quality, Resolution};
+        let (laptop, monitor) = ((3024, 1964), (2560, 1440));
+        let custom = |resolution| StreamSettings {
+            quality: Quality::Custom,
+            resolution,
+            fps: 60,
+            ..Default::default()
+        };
+        // A fixed size asks for the same whichever display the window is on.
+        let p1080 = custom(Resolution::P1080);
+        assert_eq!(
+            request_for(&p1080, laptop, None, 0),
+            request_for(&p1080, monitor, None, 0)
+        );
+        // Match screen follows the display...
+        let native = custom(Resolution::Native);
+        assert_ne!(
+            request_for(&native, laptop, None, 0),
+            request_for(&native, monitor, None, 0)
+        );
+        // ...unless the PC's fixed desktop clamps both to its own size.
+        let vps = Some([1920, 1080]);
+        assert_eq!(
+            request_for(&native, laptop, vps, 30),
+            request_for(&native, monitor, vps, 30)
+        );
+        // Auto is Match screen.
+        let auto = StreamSettings::default();
+        assert_eq!(auto.quality, Quality::Auto);
+        assert_eq!(request_for(&auto, laptop, None, 0).0, 3024);
+        assert_eq!(request_for(&auto, monitor, None, 0).0, 2560);
+    }
+
+    fn known(tailnet: Option<&str>, seen_days_ago: Option<u64>) -> KnownPc {
+        KnownPc {
+            name: "pc".into(),
+            server_cert: Some("3082".into()),
+            tailnet: tailnet.map(str::to_string),
+            last_seen_unix: seen_days_ago.map(|d| NOW - d * 86_400),
+            ..Default::default()
+        }
+    }
+
+    const NOW: u64 = 1_792_000_000;
+
+    #[test]
+    fn a_machine_that_left_the_tailnet_a_month_ago_is_forgotten() {
+        let here = Some("daniel@example.com");
+        let mut pcs = BTreeMap::new();
+        pcs.insert("hermes".to_string(), known(here, Some(90)));
+        pcs.insert("artemis".to_string(), known(None, Some(31)));
+        pcs.insert("recent".to_string(), known(here, Some(2)));
+        pcs.insert("never-seen".to_string(), known(here, None));
+        pcs.insert("work".to_string(), known(Some("work.example"), Some(400)));
+        // Hermes is listed (asleep for months, still on the tailnet); a
+        // relay listed by Tailscale but not among the PCs is listed too.
+        let listed: BTreeSet<String> = ["hermes", "relay"].map(String::from).into();
+        let gone = retired(&pcs, &listed, here, NOW);
+        assert_eq!(gone, ["artemis", "never-seen"], "{gone:?}");
+        // Nothing listed, or nothing to say it is this tailnet: nothing goes.
+        assert!(retired(&pcs, &BTreeSet::new(), here, NOW).is_empty());
+        let elsewhere: BTreeSet<String> = ["someone-else"].map(String::from).into();
+        assert_eq!(
+            retired(&pcs, &elsewhere, Some("other.example"), NOW),
+            Vec::<String>::new(),
+            "on another tailnet, this one's machines are kept"
+        );
+        // A Tailscale that names no tailnet forgets only unmarked entries,
+        // and only when a saved machine is listed.
+        assert_eq!(retired(&pcs, &listed, None, NOW), ["artemis"]);
+    }
+
+    #[test]
+    fn learning_marks_the_tailnet_and_a_failed_scan_forgets_nothing() {
+        let mut cfg = ClientConfig::default();
+        cfg.pcs.insert("artemis".into(), known(None, Some(40)));
+        cfg.pcs.insert("hermes".into(), known(None, Some(1)));
+        let hermes = Pc {
+            node_id: "hermes".into(),
+            name: "Hermes".into(),
+            ..Default::default()
+        };
+        // Tailscale down: the list is what was saved, and nothing changes.
+        let down = Discovery {
+            error: Some("Tailscale is stopped".into()),
+            pcs: remembered(&cfg),
+            ..Default::default()
+        };
+        let before = cfg.clone();
+        learn_into(&mut cfg, &down, NOW);
+        assert_eq!(cfg, before);
+        // Tailscale up: Hermes is listed and marked; artemis is not.
+        let up = Discovery {
+            pcs: vec![hermes],
+            listed: Some(["hermes".to_string()].into()),
+            tailnet: Some("daniel@example.com".into()),
+            ..Default::default()
+        };
+        learn_into(&mut cfg, &up, NOW);
+        assert_eq!(cfg.pcs.keys().collect::<Vec<_>>(), ["hermes"]);
+        assert_eq!(
+            cfg.pcs["hermes"].tailnet.as_deref(),
+            Some("daniel@example.com")
+        );
+        assert_eq!(cfg.pcs["hermes"].server_cert.as_deref(), Some("3082"));
+    }
+
+    #[test]
+    fn the_saved_desktop_size_reaches_the_target() {
+        let pc = Pc {
+            ip: Some("100.64.0.9".parse().unwrap()),
+            known: Some(KnownPc {
+                desktop_size: Some([1280, 720]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            Target::from_pc(&pc).unwrap().desktop_size,
+            Some((1280, 720))
+        );
+    }
+
+    #[test]
+    fn a_pin_reply_is_read_whatever_its_status() {
+        let reply = |status: u16, body: &str| {
+            pin_reply(Ok(http::Response {
+                status,
+                body: body.into(),
+            }))
+        };
+        let ack = |e: &str| serde_json::to_string(&Ack::err(e)).unwrap();
+        assert_eq!(
+            reply(200, &serde_json::to_string(&Ack::ok()).unwrap()),
+            PinReply::Taken
+        );
+        assert_eq!(
+            reply(
+                502,
+                &ack("pairing_id must contain exactly 32 hexadecimal characters")
+            ),
+            PinReply::Retry("pairing_id must contain exactly 32 hexadecimal characters".into())
+        );
+        assert_eq!(
+            reply(
+                502,
+                &ack("Latch cannot log in to the streaming engine on this PC; run setup there")
+            ),
+            PinReply::NoEngine(
+                "Latch cannot log in to the streaming engine on this PC; run setup there".into()
+            )
+        );
+        assert_eq!(
+            reply(403, &ack("not a machine on this PC's Tailscale account")),
+            PinReply::Refused("not a machine on this PC's Tailscale account".into())
+        );
+        assert_eq!(
+            reply(400, &ack("the PIN is four digits")),
+            PinReply::Refused("the PIN is four digits".into())
+        );
+        assert_eq!(reply(404, "not found"), PinReply::NoRoute);
+        assert_eq!(reply(502, "<html>"), PinReply::Retry("HTTP 502".into()));
+        assert_eq!(
+            reply(200, &ack("not yet")),
+            PinReply::Retry("not yet".into())
+        );
+        assert!(matches!(
+            pin_reply(Err(anyhow!("timed out"))),
+            PinReply::Unreachable(e) if e == "timed out"
+        ));
+    }
+
+    /// A Latch Host stand-in that answers every request the same way, and
+    /// counts them.
+    fn pin_host(status: u16, body: String) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = count.clone();
+        std::thread::spawn(move || {
+            http::serve_with_peer_check(
+                listener,
+                |_| true,
+                move |_, _| {
+                    n.fetch_add(1, Ordering::SeqCst);
+                    http::Response {
+                        status,
+                        body: body.clone(),
+                    }
+                },
+            )
+        });
+        (addr, count)
+    }
+
+    fn hand_off() -> Arc<PinHandOff> {
+        let progress = Arc::new(Mutex::new(Progress {
+            generation: 7,
+            ..Default::default()
+        }));
+        Arc::new(PinHandOff::new(
+            "stuzha",
+            "1234",
+            progress,
+            7,
+            egui::Context::default(),
+        ))
+    }
+
+    fn start(h: &Arc<PinHandOff>, host: SocketAddr) -> std::thread::JoinHandle<()> {
+        let h = h.clone();
+        std::thread::spawn(move || h.run(host))
+    }
+
+    /// Wait for the hand-off thread, no longer than `within`.
+    fn ends_within(t: std::thread::JoinHandle<()>, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        while !t.is_finished() {
+            if Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+
+    #[test]
+    fn a_hosts_reason_is_shown_and_the_hand_off_stops_when_told() {
+        let (host, _) = pin_host(
+            502,
+            serde_json::to_string(&Ack::err("engine says no")).unwrap(),
+        );
+        let h = hand_off();
+        let t = start(&h, host);
+        std::thread::sleep(Duration::from_millis(300));
+        let detail = h.progress.lock().detail.clone();
+        assert_eq!(
+            detail,
+            "Latch on stuzha couldn't enter the PIN yet: engine says no"
+        );
+        assert!(!t.is_finished(), "a passing refusal is offered again");
+        h.finish();
+        assert!(ends_within(t, Duration::from_millis(300)));
+        assert_eq!(h.progress.lock().detail, "", "the warning goes with it");
+        assert!(h.refused.lock().is_none());
+    }
+
+    #[test]
+    fn a_refusal_for_good_ends_the_hand_off_with_its_reason() {
+        let (host, asked) = pin_host(
+            403,
+            serde_json::to_string(&Ack::err("not a machine on this PC's Tailscale account"))
+                .unwrap(),
+        );
+        let h = hand_off();
+        let t = start(&h, host);
+        assert!(ends_within(t, Duration::from_secs(3)));
+        assert_eq!(asked.load(Ordering::SeqCst), 2, "asked twice, then no more");
+        assert_eq!(
+            h.refused.lock().as_deref(),
+            Some("not a machine on this PC's Tailscale account")
+        );
+    }
+
+    #[test]
+    fn a_taken_pin_ends_the_hand_off_at_once() {
+        let (host, asked) = pin_host(200, serde_json::to_string(&Ack::ok()).unwrap());
+        let h = hand_off();
+        assert!(ends_within(start(&h, host), Duration::from_millis(500)));
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        assert_eq!(h.progress.lock().detail, "");
+    }
+
+    #[test]
+    fn only_silence_reads_as_isnt_answering_and_cancel_stops_it() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let h = hand_off();
+        let t = start(&h, closed);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            h.progress.lock().detail.contains("isn't answering"),
+            "{}",
+            h.progress.lock().detail
+        );
+        h.progress.lock().cancel = true;
+        assert!(ends_within(t, Duration::from_millis(300)));
     }
 
     #[test]

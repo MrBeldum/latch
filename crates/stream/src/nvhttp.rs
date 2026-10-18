@@ -19,6 +19,23 @@ pub const HTTPS_PORT: u16 = 47984;
 const TIMEOUT: Duration = Duration::from_secs(6);
 /// The host holds the first pairing reply until a PIN is entered.
 const PIN_WAIT: Duration = Duration::from_secs(90);
+/// How long the host is given to register the first pairing request before
+/// anyone is asked to enter the PIN, and how often the wait looks up.
+const PIN_ASK_AFTER: Duration = Duration::from_millis(400);
+const PIN_POLL: Duration = Duration::from_millis(100);
+
+/// Nobody entered the PIN on the PC before it stopped holding the first
+/// pairing request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PinNotEntered;
+
+impl std::fmt::Display for PinNotEntered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("nobody entered the PIN on the PC in time")
+    }
+}
+
+impl std::error::Error for PinNotEntered {}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ServerInfo {
@@ -93,6 +110,9 @@ pub struct Client<'a> {
     /// Host certificate (DER) learned at pairing; `None` before.
     server_cert: Option<Vec<u8>>,
     tls: Option<Arc<rustls::ClientConfig>>,
+    /// [`HTTP_PORT`] and [`HTTPS_PORT`], except against a test's fake host.
+    http_port: u16,
+    https_port: u16,
 }
 
 impl<'a> Client<'a> {
@@ -106,7 +126,18 @@ impl<'a> Client<'a> {
             ip,
             server_cert,
             tls,
+            http_port: HTTP_PORT,
+            https_port: HTTPS_PORT,
         })
+    }
+
+    /// The same client against a fake host on other ports. Tests never bind
+    /// the real ones: a Mac sharing itself has Sunshine there.
+    #[cfg(test)]
+    fn with_ports(mut self, http: u16, https: u16) -> Self {
+        self.http_port = http;
+        self.https_port = https;
+        self
     }
 
     pub fn server_cert(&self) -> Option<&[u8]> {
@@ -127,7 +158,7 @@ impl<'a> Client<'a> {
     }
 
     fn get_http(&self, path: &str, query: &str, read_timeout: Duration) -> Result<String> {
-        let addr = SocketAddr::new(self.ip, HTTP_PORT);
+        let addr = SocketAddr::new(self.ip, self.http_port);
         let mut s = TcpStream::connect_timeout(&addr, TIMEOUT)?;
         s.set_read_timeout(Some(read_timeout))?;
         s.set_write_timeout(Some(TIMEOUT))?;
@@ -164,7 +195,7 @@ impl<'a> Client<'a> {
     }
 
     fn https_once(&self, tls: Arc<rustls::ClientConfig>, target: &str) -> Result<String> {
-        let addr = SocketAddr::new(self.ip, HTTPS_PORT);
+        let addr = SocketAddr::new(self.ip, self.https_port);
         let mut tcp = TcpStream::connect_timeout(&addr, TIMEOUT)?;
         tcp.set_read_timeout(Some(TIMEOUT))?;
         tcp.set_write_timeout(Some(TIMEOUT))?;
@@ -208,34 +239,44 @@ impl<'a> Client<'a> {
         })
     }
 
-    /// [`Client::pair_cancellable`] without the cancel, for the live tests.
+    /// [`Client::pair_cancellable`] without the cancel, for the live tests:
+    /// `pending` runs once, beside the first request, when the host is
+    /// waiting for the PIN.
     #[cfg(test)]
     pub fn pair(
         &mut self,
         pin: &str,
         device_name: &str,
-        pending: impl FnOnce(),
+        pending: impl FnOnce() + Send,
     ) -> Result<Vec<u8>> {
-        self.pair_cancellable(pin, device_name, || {
-            pending();
-            false
+        let mut pending = Some(pending);
+        std::thread::scope(|s| {
+            self.pair_cancellable(pin, device_name, |_| {
+                if let Some(p) = pending.take() {
+                    s.spawn(p);
+                }
+                false
+            })
         })
     }
 
-    /// The Moonlight pairing handshake. `pending` is called once the host is
-    /// holding our first request and waiting for someone to enter `pin` on
-    /// its side; it returns `true` to cancel, which aborts that request. On
-    /// success the host certificate is pinned for the later HTTPS calls and
-    /// returned.
+    /// The Moonlight pairing handshake. The host holds our first request
+    /// until someone enters `pin` on its side. Meanwhile `poll` is called
+    /// about every 100 ms, from a moment after that request went out, with
+    /// whether the host has answered it; the last call says `true`, and the
+    /// handshake goes on at once. Entering the PIN is the caller's business,
+    /// beside this wait, never in front of it. `poll` returns `true` to
+    /// cancel, which aborts the request while it is held. On success the
+    /// host certificate is pinned for the later HTTPS calls and returned.
     pub fn pair_cancellable(
         &mut self,
         pin: &str,
         device_name: &str,
-        pending: impl FnOnce() -> bool,
+        poll: impl FnMut(bool) -> bool,
     ) -> Result<Vec<u8>> {
         let previous_tls = self.tls.clone();
         let previous_cert = self.server_cert.clone();
-        let result = self.pair_inner(pin, device_name, pending);
+        let result = self.pair_inner(pin, device_name, poll);
         if result.is_err() {
             self.tls = previous_tls;
             self.server_cert = previous_cert;
@@ -248,7 +289,7 @@ impl<'a> Client<'a> {
         &mut self,
         pin: &str,
         device_name: &str,
-        pending: impl FnOnce() -> bool,
+        poll: impl FnMut(bool) -> bool,
     ) -> Result<Vec<u8>> {
         let salt: [u8; 16] = rand::random();
         let mut salted = salt.to_vec();
@@ -266,24 +307,17 @@ impl<'a> Client<'a> {
             );
             let ip = self.ip;
             let target = self.target("pair", &query);
-            let mut s = TcpStream::connect_timeout(&SocketAddr::new(ip, HTTP_PORT), TIMEOUT)?;
+            let mut s = TcpStream::connect_timeout(&SocketAddr::new(ip, self.http_port), TIMEOUT)?;
             let abort = s.try_clone()?;
             let handle = std::thread::spawn(move || -> Result<String> {
                 s.set_read_timeout(Some(PIN_WAIT))?;
                 s.set_write_timeout(Some(TIMEOUT))?;
-                let r = http::exchange(&mut s, "GET", &target, &ip.to_string(), "")?;
+                let r = http::exchange(&mut s, "GET", &target, &ip.to_string(), "")
+                    .map_err(held_request_error)?;
                 check(&r.body)?;
                 Ok(r.body)
             });
-            std::thread::sleep(Duration::from_millis(400));
-            if pending() {
-                let _ = abort.shutdown(std::net::Shutdown::Both);
-                let _ = handle.join();
-                bail!("pairing cancelled");
-            }
-            handle
-                .join()
-                .map_err(|_| anyhow!("pairing thread panicked"))??
+            wait_for_first_reply(handle, &abort, poll)?
         };
         if tag(&first, "paired") != Some("1") {
             bail!("the PC refused to start pairing");
@@ -411,6 +445,47 @@ impl<'a> Client<'a> {
     pub fn quit(&self) -> Result<()> {
         self.get_https("cancel", "").map(|_| ())
     }
+}
+
+/// The first pairing request's read gives up after [`PIN_WAIT`]: that is
+/// nobody entering the PIN, not a network fault.
+fn held_request_error(e: anyhow::Error) -> anyhow::Error {
+    if e.chain().any(|c| c.to_string() == "timed out") {
+        anyhow!(PinNotEntered)
+    } else {
+        e
+    }
+}
+
+/// Wait for the host's answer to the first pairing request, which it holds
+/// until the PIN is entered. From [`PIN_ASK_AFTER`] on, `poll` hears every
+/// [`PIN_POLL`] whether the answer is in (the last call says so) and may
+/// cancel the wait, which closes the connection under the held request.
+/// The request's own read timeout bounds the whole wait.
+fn wait_for_first_reply(
+    reply: std::thread::JoinHandle<Result<String>>,
+    connection: &TcpStream,
+    mut poll: impl FnMut(bool) -> bool,
+) -> Result<String> {
+    let started = std::time::Instant::now();
+    loop {
+        let answered = reply.is_finished();
+        if answered || started.elapsed() >= PIN_ASK_AFTER {
+            let cancel = poll(answered);
+            if answered {
+                break;
+            }
+            if cancel {
+                let _ = connection.shutdown(std::net::Shutdown::Both);
+                let _ = reply.join();
+                bail!("pairing cancelled");
+            }
+        }
+        std::thread::sleep(PIN_POLL);
+    }
+    reply
+        .join()
+        .map_err(|_| anyhow!("pairing thread panicked"))?
 }
 
 /// Every reply carries `status_code`; anything but 200 is an error whose
@@ -675,6 +750,183 @@ mod tests {
         assert_ne!(ct, vec![1u8; 32]);
         assert_eq!(ecb(&cipher, &ct, false), vec![1u8; 32]);
         assert_eq!(urlencode("Example Mac"), "Example%20Mac");
+    }
+
+    use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    /// One identity for every fake pairing; it plays the PC's certificate
+    /// too, which is all the first reply has to carry.
+    fn identity() -> &'static Identity {
+        static ID: std::sync::OnceLock<Identity> = std::sync::OnceLock::new();
+        ID.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!(
+                "latch-fake-pair-{}-{:08x}",
+                std::process::id(),
+                rand::random::<u32>()
+            ));
+            let id = Identity::load_or_create(&dir).unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            id
+        })
+    }
+
+    type Seen = Arc<Mutex<Vec<(String, Instant)>>>;
+
+    /// A stand-in for Sunshine's pairing port on 127.0.0.1. Each request's
+    /// target is recorded with when it arrived; `reply` answers it, taking
+    /// its time if it likes (a held first request), or says `None` to hold
+    /// the connection until the client closes it.
+    fn fake_host(reply: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> (u16, Seen) {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Seen = Arc::default();
+        let reply = Arc::new(reply);
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for mut s in listener.incoming().flatten() {
+                let (reply, log) = (reply.clone(), log.clone());
+                std::thread::spawn(move || {
+                    let Ok(Some(req)) = http::read_request(&mut s) else {
+                        return;
+                    };
+                    log.lock().push((req.path.clone(), Instant::now()));
+                    match reply(&req.path) {
+                        Some(xml) => {
+                            let _ = http::write_bytes(&mut s, 200, "text/xml", xml.as_bytes());
+                        }
+                        None => {
+                            let _ = s.read(&mut [0u8; 1]);
+                        }
+                    }
+                });
+            }
+        });
+        (port, seen)
+    }
+
+    fn arrived(seen: &Seen, phrase: &str) -> Option<Instant> {
+        seen.lock()
+            .iter()
+            .find(|(path, _)| path.contains(phrase))
+            .map(|(_, at)| *at)
+    }
+
+    const NOT_PAIRED: &str = r#"<root status_code="200"><paired>0</paired></root>"#;
+
+    fn client(port: u16) -> Client<'static> {
+        Client::new(identity(), IpAddr::from([127, 0, 0, 1]), None)
+            .unwrap()
+            .with_ports(port, port)
+    }
+
+    /// The stuzha deadlock: the PIN is entered on the PC while whatever
+    /// hands it over keeps failing. The handshake must go on as soon as
+    /// the PC answers the first request, not when the hand-off gives up.
+    #[test]
+    fn the_handshake_goes_on_as_soon_as_the_pc_answers() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let cert = hex(identity().cert_pem.as_bytes());
+        let (port, seen) = fake_host({
+            let entered = entered.clone();
+            move |path| {
+                if path.contains("phrase=getservercert") {
+                    let t = Instant::now();
+                    while !entered.load(Ordering::SeqCst) && t.elapsed() < Duration::from_secs(10) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Some(format!(
+                        r#"<root status_code="200"><paired>1</paired><plaincert>{cert}</plaincert></root>"#
+                    ))
+                } else if path.contains("clientchallenge=") {
+                    Some(NOT_PAIRED.into())
+                } else {
+                    Some(r#"<root status_code="200"/>"#.into())
+                }
+            }
+        });
+        let mut polls = Vec::new();
+        let mut entered_at = None;
+        let err = client(port)
+            .pair_cancellable("1234", "test", |answered| {
+                polls.push(answered);
+                // Someone types the PIN on the PC; the hand-off never
+                // reports success and never cancels.
+                if entered_at.is_none() {
+                    entered_at = Some(Instant::now());
+                    entered.store(true, Ordering::SeqCst);
+                }
+                false
+            })
+            .unwrap_err();
+        assert_eq!(err.to_string(), "pairing failed at the challenge step");
+        let challenged = arrived(&seen, "clientchallenge=").expect("phase 2 was attempted");
+        let waited = challenged.duration_since(entered_at.unwrap());
+        assert!(waited < Duration::from_secs(1), "phase 2 waited {waited:?}");
+        assert_eq!(polls.last(), Some(&true), "the last poll hears the answer");
+        assert!(polls[..polls.len() - 1].iter().all(|a| !a), "{polls:?}");
+        assert!(
+            arrived(&seen, "/unpair").is_some(),
+            "a failed pairing unpairs"
+        );
+    }
+
+    #[test]
+    fn cancel_ends_a_held_first_request_at_once() {
+        let (port, seen) = fake_host(|path| {
+            if path.contains("phrase=getservercert") {
+                None
+            } else {
+                Some(r#"<root status_code="200"/>"#.into())
+            }
+        });
+        let start = Instant::now();
+        let err = client(port)
+            .pair_cancellable("1234", "test", |_| {
+                start.elapsed() >= Duration::from_millis(300)
+            })
+            .unwrap_err();
+        assert_eq!(err.to_string(), "pairing cancelled");
+        assert!(
+            start.elapsed() < Duration::from_millis(1500),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(
+            arrived(&seen, "/unpair").is_some(),
+            "a cancelled pairing unpairs"
+        );
+    }
+
+    #[test]
+    fn a_refused_first_request_surfaces_at_once() {
+        let (port, _) = fake_host(|_| Some(NOT_PAIRED.into()));
+        let start = Instant::now();
+        let mut polls = Vec::new();
+        let err = client(port)
+            .pair_cancellable("1234", "test", |answered| {
+                polls.push(answered);
+                false
+            })
+            .unwrap_err();
+        assert_eq!(err.to_string(), "the PC refused to start pairing");
+        assert!(
+            start.elapsed() < Duration::from_millis(600),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(polls, [true], "the caller hears that the wait is over");
+    }
+
+    #[test]
+    fn a_held_request_that_times_out_means_nobody_entered_the_pin() {
+        let e = held_request_error(anyhow!("timed out"));
+        assert!(e.downcast_ref::<PinNotEntered>().is_some(), "{e:#}");
+        assert_eq!(e.to_string(), "nobody entered the PIN on the PC in time");
+        let e = held_request_error(anyhow!("connection closed"));
+        assert_eq!(e.to_string(), "connection closed");
     }
 }
 
