@@ -39,6 +39,18 @@ impl HostConfig {
     pub fn load() -> Self {
         latch_core::config::load(FILE)
     }
+
+    /// Read host.toml for a service that already runs on settings: an error
+    /// rather than defaults for a file that cannot be read, does not parse,
+    /// or is empty (an editor saving in place truncates it first), and the
+    /// file left alone. Defaults mean remote power on and no engine login.
+    pub fn try_load() -> anyhow::Result<Self> {
+        let path = latch_core::config::data_dir()?.join(FILE);
+        if std::fs::metadata(&path).is_ok_and(|m| m.len() == 0) {
+            anyhow::bail!("{} is empty", path.display());
+        }
+        latch_core::config::try_load(FILE)
+    }
     /// Overlay this copy's settings on the file rather than replacing it:
     /// `--setup` or a container's bootstrap may have written the engine
     /// login since this copy was loaded, and an empty login here never

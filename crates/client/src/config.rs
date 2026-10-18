@@ -385,6 +385,36 @@ mod tests {
         assert_eq!(back, c);
     }
 
+    /// A build without 720p (4.1.1, or a branch cut before it) reading a
+    /// file this one wrote: the size goes back to its default, and the
+    /// machines, their certificates and wake addresses all stay.
+    #[test]
+    fn a_size_this_build_does_not_know_keeps_the_machines() {
+        let text = "github_token = \"t\"\n\
+                    [stream]\nquality = \"Custom\"\nresolution = \"P9999\"\nfps = 90\ncodec = \"Hevc\"\n\
+                    [pcs.n1]\nname = \"Hermes\"\nmac = \"02:00:00:00:00:01\"\n\
+                    public_ip = \"116.125.113.36\"\nserver_cert = \"3082\"\n\
+                    [pcs.n2]\nname = \"stuzha\"\nlast_seen_unix = \"bad\"\n";
+        let (c, dropped): (ClientConfig, _) = latch_core::config::parse_lenient(text).unwrap();
+        assert_eq!(
+            dropped,
+            ["pcs.n2.last_seen_unix", "stream.resolution"],
+            "only what cannot be read"
+        );
+        assert_eq!(c.stream.resolution, Resolution::Native);
+        assert_eq!(c.stream.quality, Quality::Custom);
+        assert_eq!(c.stream.fps, 90);
+        assert_eq!(c.stream.codec, Codec::Hevc);
+        assert_eq!(c.github_token.as_deref(), Some("t"));
+        assert_eq!(c.pcs["n1"].server_cert.as_deref(), Some("3082"));
+        assert_eq!(c.pcs["n1"].mac.as_deref(), Some("02:00:00:00:00:01"));
+        assert_eq!(c.pcs["n1"].public_ip.as_deref(), Some("116.125.113.36"));
+        assert_eq!(c.pcs["n2"].name, "stuzha");
+        assert_eq!(c.pcs["n2"].last_seen_unix, None);
+        // Text that is not TOML at all is still an error (and set aside).
+        assert!(latch_core::config::parse_lenient::<ClientConfig>("[stream").is_err());
+    }
+
     #[test]
     fn every_preset_survives_a_reload() {
         for p in Preset::ALL {

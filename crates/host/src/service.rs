@@ -71,6 +71,8 @@ pub struct Service {
     tun: Mutex<Option<bool>>,
     /// The last line logged about a peer forwarded through loopback.
     forwarded_logged: Mutex<Option<String>>,
+    /// Why host.toml could not be re-read, while it cannot.
+    cfg_problem: Mutex<Option<String>>,
     /// This PC's side of the NAT story, from `tailscale netcheck`.
     nat: Mutex<Option<NatReport>>,
     nat_running: AtomicBool,
@@ -99,6 +101,7 @@ impl Service {
             whois_failed: Mutex::new(None),
             tun: Mutex::new(None),
             forwarded_logged: Mutex::new(None),
+            cfg_problem: Mutex::new(None),
             nat: Mutex::new(None),
             nat_running: AtomicBool::new(false),
             update_running: Arc::new(AtomicBool::new(false)),
@@ -222,7 +225,12 @@ impl Service {
 
     /// Cheap checks every tick; the slower probes on a longer cadence.
     fn refresh(self: &Arc<Self>, tick: u64) {
-        *self.cfg.lock() = HostConfig::load();
+        let prev = self.cfg.lock().clone();
+        let (cfg, line) = next_config(prev, HostConfig::try_load(), &mut self.cfg_problem.lock());
+        *self.cfg.lock() = cfg;
+        if let Some(line) = line {
+            self.log(line);
+        }
         let stay_awake = self.cfg.lock().stay_awake;
         crate::power::keep_awake(stay_awake);
         if tick == 0 && stay_awake {
@@ -949,6 +957,34 @@ pub fn describe_nat(n: &NatReport) -> String {
     }
 }
 
+/// The settings to run on after re-reading host.toml: the file's when it
+/// reads, else the last good ones, never defaults. A hand edit with a typo
+/// (or a read mid-save) used to move the file aside and run with remote
+/// power allowed and no engine login until someone noticed. Returns the
+/// line to log: once per problem, and once when it is fixed.
+fn next_config(
+    prev: HostConfig,
+    loaded: Result<HostConfig>,
+    problem: &mut Option<String>,
+) -> (HostConfig, Option<String>) {
+    match loaded {
+        Ok(cfg) => {
+            let fixed = problem
+                .take()
+                .map(|_| "host.toml reads again; using its settings".to_string());
+            (cfg, fixed)
+        }
+        Err(e) => {
+            let why = format!("{e:#}");
+            let line = (problem.as_deref() != Some(why.as_str())).then(|| {
+                format!("host.toml could not be read ({why}); keeping the settings from before")
+            });
+            *problem = Some(why);
+            (prev, line)
+        }
+    }
+}
+
 /// Who sent a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Caller {
@@ -1283,6 +1319,38 @@ mod tests {
         };
         assert_eq!(svc.handle("127.0.0.1:5".parse().unwrap(), &req).status, 200);
         assert!(svc.auth.lock().is_empty());
+    }
+
+    #[test]
+    fn a_damaged_host_toml_keeps_the_last_good_settings() {
+        let good = HostConfig {
+            power_allowed: false,
+            sunshine_user: "latch".into(),
+            sunshine_pass: "secret".into(),
+            ..Default::default()
+        };
+        let mut problem = None;
+        let (cfg, line) = next_config(
+            good.clone(),
+            Err(anyhow::anyhow!("expected `=`")),
+            &mut problem,
+        );
+        assert_eq!(cfg, good, "power stays off and the engine login stays");
+        assert!(line.unwrap().contains("expected `=`"));
+        // The same problem every 5 s is said once.
+        let (cfg, line) = next_config(cfg, Err(anyhow::anyhow!("expected `=`")), &mut problem);
+        assert_eq!(cfg, good);
+        assert_eq!(line, None);
+        // Fixed: the file's settings, and one line to say so.
+        let edited = HostConfig {
+            power_allowed: true,
+            ..good.clone()
+        };
+        let (cfg, line) = next_config(cfg, Ok(edited.clone()), &mut problem);
+        assert_eq!(cfg, edited);
+        assert!(line.is_some());
+        let (_, line) = next_config(edited.clone(), Ok(edited), &mut problem);
+        assert_eq!(line, None);
     }
 
     #[test]
