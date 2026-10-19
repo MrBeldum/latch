@@ -21,7 +21,7 @@ LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchS
 "$LSREGISTER" -u "$APP" 2>/dev/null || true
 "$LSREGISTER" -f /Applications/Latch.app 2>/dev/null || true
 rm -rf "$APP"
-# An install from before 4.1 (the app was called BroLink): stop its
+# An install from before 4.1: stop its
 # background job, drop its login item and remove its app, so only Latch is
 # left. The new app registers its own login item when it first runs.
 OLD_AGENT="gui/$(id -u)/dev.brolink.node"

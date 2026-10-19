@@ -1,4 +1,4 @@
-//! What Latch answered to before 4.1.0, when it was called BroLink.
+//! Compatibility identifiers used by versions before 4.1.0.
 //!
 //! Installed copies, other machines on the tailnet and old settings
 //! folders keep the old names for a while after an upgrade, so the code
@@ -28,8 +28,7 @@ pub fn is_own_streamer_kind(kind: &str) -> bool {
 }
 
 /// A setting from the environment under its current name, else under the
-/// old one: `LATCH_DATA_DIR`, then `BROLINK_DATA_DIR`. Unset and empty are
-/// the same.
+/// old one from before 4.1.0. Unset and empty are the same.
 pub fn env(name: &str) -> Option<OsString> {
     let current = std::env::var_os(name).filter(|v| !v.is_empty());
     current.or_else(|| {

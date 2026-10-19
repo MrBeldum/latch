@@ -71,8 +71,8 @@ const OLD_LOGIN_FILE: &str = "brolink-web.json";
 const LOGIN_FILE: &str = "latch-web.json";
 
 /// An install that an older version set up has two things in the engine's
-/// `sunshine.conf` that name it: the path of the engine login file, which is
-/// called `brolink-web.json` and sits wherever setup put it, and any path
+/// `sunshine.conf` that name it: the engine login file under its old
+/// filename wherever setup put it, and any path
 /// under the old data folder, which this copy has moved. Point both at what
 /// is there now, and rename the login file, so the engine finds the login
 /// it was set up with. Nothing happens on an install that was never moved.
@@ -494,7 +494,7 @@ fn retire_legacy_launch_agent() {
     }
 }
 
-/// A copy running from the app folder 4.0 and older used, `BroLink.app`,
+/// A copy running from the app folder 4.0 and older used
 /// moves into `Latch.app` beside it and carries on from there. The release
 /// publishes the new app under the old name as well, because a 4.0 updater
 /// installs only a folder of that name, and the first run lands here.
