@@ -20,6 +20,151 @@ const REG_KEY: &str = r"HKLM:\SOFTWARE\MikeTheTech\VirtualDisplayDriver";
 /// Listed with every size: the default frame rate and ProMotion's.
 pub const REFRESH_RATES: [u32; 2] = [60, 120];
 
+/// The name the Virtual Display Driver's monitor reports.
+const VDD_NAME: &str = "VDD by MTT";
+
+/// Sunshine's stable ID for the Virtual Display Driver, including an
+/// inactive display. Use the latest device list, so a removed display
+/// from an older list is never selected. Sunshine lists the devices as
+/// objects when it starts, and as `"<id> - <name>"` strings when it has
+/// recovered the display layout after a stream.
+// ponytail: Sunshine logs its display IDs; use an enumeration API if it gains one.
+pub fn output_in(log: &str) -> Option<String> {
+    let json = log
+        .rmatch_indices("Currently available ")
+        .find_map(|(at, key)| {
+            let list = &log[at + key.len()..];
+            list.strip_prefix("display devices:")
+                .or_else(|| list.strip_prefix("devices:"))
+        })?;
+    let devices = serde_json::Deserializer::from_str(json.trim_start())
+        .into_iter::<Vec<serde_json::Value>>()
+        .next()?
+        .ok()?;
+    devices.iter().find_map(|d| {
+        if let Some(entry) = d.as_str() {
+            let (id, name) = entry.split_once(" - ")?;
+            return (name == VDD_NAME && !id.is_empty()).then(|| id.to_string());
+        }
+        let vdd = d["friendly_name"].as_str() == Some(VDD_NAME)
+            || (d["edid"]["manufacturer_id"].as_str() == Some("MTT")
+                && d["edid"]["product_code"].as_str() == Some("1337"));
+        d["device_id"]
+            .as_str()
+            .filter(|id| vdd && !id.is_empty())
+            .map(String::from)
+    })
+}
+
+/// The engine key that picks the display a stream captures.
+const OUTPUT: &str = "output_name";
+/// The engine key for what happens to the other displays during a stream.
+const DD_OPTION: &str = "dd_configuration_option";
+/// The streamed display is the only one on while a stream runs.
+const ONLY_DISPLAY: &str = "ensure_only_display";
+/// Where the service keeps the display ID it put in [`OUTPUT`], so that ID
+/// still counts as automatic when the driver comes back with another one.
+const PICKED: &str = "capture-display";
+
+/// Which display the engine captures, as far as Latch manages it on Windows.
+#[derive(Debug, PartialEq)]
+pub struct Capture {
+    /// Engine settings to change, with their new values; empty when none need to.
+    pub conf: Vec<(&'static str, String)>,
+    /// The display ID Latch has set once `conf` is in force.
+    pub picked: Option<String>,
+}
+
+impl Capture {
+    /// `conf` as the engine-key pairs [`crate::streamer`] writes.
+    pub fn pairs(&self) -> Vec<(&str, &str)> {
+        self.conf.iter().map(|(k, v)| (*k, v.as_str())).collect()
+    }
+}
+
+/// With capture on automatic, Latch prefers the Virtual Display Driver even
+/// while a physical monitor is connected. Automatic is no display chosen
+/// in the engine (`output_name` empty), the driver's own ID `vdd`, or the ID
+/// Latch set before (`picked`): a reinstalled driver can come back with a
+/// new ID, and capture follows it. Any other display is the owner's choice
+/// and is kept; the engine settings Latch changed for its own pick go back.
+pub fn capture(current: &serde_json::Value, vdd: Option<&str>, picked: Option<&str>) -> Capture {
+    let selected = current[OUTPUT].as_str().unwrap_or_default();
+    let automatic = selected.is_empty() || Some(selected) == vdd || Some(selected) == picked;
+    let mut conf = Vec::new();
+    let picked = match (automatic, vdd) {
+        (true, Some(id)) => {
+            conf.push((OUTPUT, id.to_string()));
+            // Games already on the physical monitor must move onto the
+            // streamed display too. The engine restores the physical
+            // displays when the stream disconnects.
+            conf.push((DD_OPTION, ONLY_DISPLAY.to_string()));
+            Some(id.to_string())
+        }
+        // No device list in the log tail (a long stream pushes it out) or
+        // no driver right now: what is set stays.
+        (true, None) => picked.map(String::from),
+        (false, _) => {
+            if picked.is_some() && current[DD_OPTION] == ONLY_DISPLAY {
+                let default = crate::setup::ENGINE_CONF
+                    .iter()
+                    .find(|(k, _)| *k == DD_OPTION)
+                    .map_or("ensure_active", |(_, v)| *v);
+                conf.push((DD_OPTION, default.to_string()));
+            }
+            None
+        }
+    };
+    conf.retain(|(k, v)| current[*k].as_str() != Some(v.as_str()));
+    Capture { conf, picked }
+}
+
+/// Keep the engine capturing the virtual display while capture is on
+/// automatic (see [`capture`]); the service calls this every 30 seconds on
+/// Windows, since the driver can be installed, or get a new ID, at any
+/// time. Nothing is asked of the engine on a PC that has never had the
+/// driver. Returns a line for the service log when settings changed.
+pub fn follow(
+    api: &crate::streamer::Api,
+    install: &crate::streamer::Install,
+    data_dir: &std::path::Path,
+) -> anyhow::Result<Option<String>> {
+    let vdd = crate::streamer::log_text(install).and_then(|log| output_in(&log));
+    let file = data_dir.join(PICKED);
+    let picked = std::fs::read_to_string(&file)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if vdd.is_none() && picked.is_none() {
+        return Ok(None);
+    }
+    let Some(capture) =
+        api.follow_virtual_display(Some(install), vdd.as_deref(), picked.as_deref())?
+    else {
+        return Ok(None); // Someone may be watching: the display stays until they are done.
+    };
+    if capture.picked != picked {
+        let saved = match &capture.picked {
+            Some(id) => std::fs::write(&file, id),
+            None => std::fs::remove_file(&file),
+        };
+        if let Err(e) = saved {
+            tracing::warn!("could not save the capture display: {e}");
+        }
+    }
+    Ok((!capture.conf.is_empty()).then(|| {
+        let keys: Vec<String> = capture
+            .conf
+            .iter()
+            .map(|(k, v)| format!("{k} = {v}"))
+            .collect();
+        format!(
+            "capture display: {}; the streaming engine restarted",
+            keys.join(", ")
+        )
+    }))
+}
+
 /// Every size as a PowerShell array of `@(width,height)` pairs.
 pub fn modes_ps() -> String {
     stream_modes()
@@ -143,6 +288,96 @@ fn parse_probe(out: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_uses_the_virtual_display_from_the_latest_device_list() {
+        let list = r#"[
+            {"device_id":"physical", "friendly_name":"27E1QA", "info":{"primary":true}},
+            {"device_id":"virtual", "friendly_name":"VDD by MTT", "info":null}
+        ]"#;
+        let log = format!("Info: Currently available display devices:\n{list}\nInfo: Ready");
+        assert_eq!(output_in(&log).as_deref(), Some("virtual"));
+        let log = format!("{log}\nInfo: Currently available devices:\n[]\nInfo: Ready");
+        assert_eq!(output_in(&log), None, "the old virtual display is gone");
+        assert_eq!(output_in("Currently available devices:\n["), None);
+        assert_eq!(output_in("no devices reported"), None);
+        // After a stream, the layout recovery lists "<id> - <name>" strings.
+        let recovered = format!(
+            "{log}\nInfo: Recovered the available display layout, but settings for an \
+             unavailable display are still pending. Will retry once devices are added or \
+             removed. Currently available devices:\n[\"{{a1}} - 27E1QA\", \"{{b2}} - VDD by MTT\"]\n"
+        );
+        assert_eq!(output_in(&recovered).as_deref(), Some("{b2}"));
+        let gone = format!("{recovered}Info: Currently available devices:\n[\"{{a1}} - 27E1QA\"]");
+        assert_eq!(output_in(&gone), None, "the latest list decides");
+        // Other text that starts the same way is not a device list.
+        let other = format!("{recovered}Info: Currently available encoders: none");
+        assert_eq!(output_in(&other).as_deref(), Some("{b2}"));
+    }
+
+    #[test]
+    fn automatic_capture_selects_the_virtual_display_and_keeps_the_owners_choice() {
+        let fresh =
+            serde_json::json!({"encoder":"amdvce", "dd_configuration_option":"ensure_active"});
+        let first = capture(&fresh, Some("vdd-a"), None);
+        assert_eq!(
+            first.conf,
+            [
+                ("output_name", "vdd-a".to_string()),
+                ("dd_configuration_option", "ensure_only_display".to_string())
+            ]
+        );
+        assert_eq!(first.picked.as_deref(), Some("vdd-a"));
+
+        // In force: nothing to change, with or without the device list.
+        let set = serde_json::json!({"output_name":"vdd-a", "dd_configuration_option":"ensure_only_display"});
+        let same = capture(&set, Some("vdd-a"), Some("vdd-a"));
+        assert!(same.conf.is_empty(), "{same:?}");
+        assert_eq!(same.picked.as_deref(), Some("vdd-a"));
+        let unlisted = capture(&set, None, Some("vdd-a"));
+        assert!(unlisted.conf.is_empty(), "{unlisted:?}");
+        assert_eq!(unlisted.picked.as_deref(), Some("vdd-a"));
+
+        // Set by an earlier build that kept no record: still Latch's.
+        let adopted = capture(&set, Some("vdd-a"), None);
+        assert!(adopted.conf.is_empty());
+        assert_eq!(adopted.picked.as_deref(), Some("vdd-a"));
+
+        // A reinstalled driver with a new ID: capture follows it.
+        let moved = capture(&set, Some("vdd-b"), Some("vdd-a"));
+        assert_eq!(moved.conf, [("output_name", "vdd-b".to_string())]);
+        assert_eq!(moved.picked.as_deref(), Some("vdd-b"));
+
+        // No driver and no pick: nothing is touched.
+        let none = capture(&fresh, None, None);
+        assert_eq!(
+            none,
+            Capture {
+                conf: vec![],
+                picked: None
+            }
+        );
+    }
+
+    #[test]
+    fn an_explicit_display_is_kept_and_latchs_own_change_goes_back() {
+        let chosen = serde_json::json!({"output_name":"monitor", "dd_configuration_option":"ensure_only_display"});
+        // The owner replaced Latch's pick: only the option Latch set goes back.
+        let replaced = capture(&chosen, Some("vdd-a"), Some("vdd-a"));
+        assert_eq!(
+            replaced.conf,
+            [("dd_configuration_option", "ensure_active".to_string())]
+        );
+        assert_eq!(replaced.picked, None);
+        // Latch never picked a display here: the owner's settings stay.
+        let theirs = capture(&chosen, Some("vdd-a"), None);
+        assert!(theirs.conf.is_empty(), "{theirs:?}");
+        assert_eq!(theirs.picked, None);
+        let primary = serde_json::json!({"output_name":"monitor", "dd_configuration_option":"ensure_primary"});
+        assert!(capture(&primary, Some("vdd-a"), Some("vdd-a"))
+            .conf
+            .is_empty());
+    }
 
     #[test]
     fn the_step_lists_every_mode_keeps_the_file_and_restarts_only_on_change() {

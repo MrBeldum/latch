@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Move a native Linux node from the names Latch had before 4.1.0 (when it was
-# called BroLink) to the new ones. Run it as the user that owns the desktop,
+# Move a native Linux node from the names used before 4.1.0 to the current
+# ones. Run it as the user that owns the desktop,
 # from this directory, after putting the new latch-host at /usr/local/bin:
 #
 #   sudo install -m 0755 latch-host /usr/local/bin/latch-host
-#   bash migrate-from-brolink.sh
+#   bash migrate-legacy.sh
 #
 # It stops the old stack, swaps the user units, the display cookie name and
 # the wait script, and starts the new one. The data folder (settings,
@@ -67,7 +67,7 @@ systemctl --user enable --now latch.service
 for _ in $(seq 1 30); do
 	if status="$(curl -fsS --max-time 2 http://127.0.0.1:47850/v1/status 2>/dev/null)"; then
 		echo "$status" | python3 -c 'import json,sys; s=json.load(sys.stdin); print("app=%s version=%s name=%s streamer=%s running=%s" % (s["app"], s["version"], s["name"], s["streamer"]["kind"], s["streamer"]["running"]))'
-		echo "done. The old binary /usr/local/bin/brolink-host can be removed once this looks right."
+		echo "done. The previous host binary can be removed once this looks right."
 		exit 0
 	fi
 	sleep 2

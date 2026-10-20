@@ -116,44 +116,193 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 }
 
 /// Read `name` from the data directory; defaults when the file is missing
-/// or damaged, because refusing to start over a setting is worse than
-/// re-picking it.
-pub fn load<T: DeserializeOwned + Default>(name: &str) -> T {
+/// or cannot be read, because refusing to start over a setting is worse
+/// than re-picking it. One value this build does not understand (a choice
+/// a newer build added, a typo) costs only that value: see [`salvage`].
+pub fn load<T: DeserializeOwned + Serialize + Default>(name: &str) -> T {
     let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    load_unlocked(name)
+    read_unlocked(name).unwrap_or_else(|e| {
+        tracing::warn!("{e:#}; using defaults");
+        T::default()
+    })
 }
 
-fn load_unlocked<T: DeserializeOwned + Default>(name: &str) -> T {
-    let Ok(path) = data_dir().map(|d| d.join(name)) else {
-        return T::default();
+/// Read `name` exactly as it is: the default only when there is no file,
+/// an error for anything else, and the file left as it was. For a reader
+/// that already holds good settings and should keep them rather than take
+/// defaults over a file someone is still editing.
+pub fn try_load<T: DeserializeOwned + Default>(name: &str) -> Result<T> {
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = data_dir()?.join(name);
+    let Some(bytes) = read_bytes(&path)? else {
+        return Ok(T::default());
     };
-    match std::fs::read_to_string(&path) {
-        Ok(s) => toml::from_str(&s).unwrap_or_else(|e| {
-            tracing::warn!("{} is unreadable ({e}); using defaults", path.display());
-            let backup = path.with_extension(format!(
-                "bad-{}-{}",
-                std::process::id(),
-                TEMP_ID.fetch_add(1, Ordering::Relaxed)
-            ));
-            if let Err(error) = std::fs::rename(&path, &backup) {
-                tracing::warn!("could not preserve damaged config: {error}");
-            } else {
-                tracing::warn!("damaged config preserved at {}", backup.display());
-            }
-            T::default()
-        }),
-        Err(_) => T::default(),
+    let text =
+        String::from_utf8(bytes).with_context(|| format!("{} is not text", path.display()))?;
+    toml::from_str(&text).with_context(|| path.display().to_string())
+}
+
+/// The file's bytes; `None` when there is no file. Any other failure (no
+/// permission, a sharing violation, a disk error) is an error: that file
+/// may hold every setting, and treating it as missing would overwrite it.
+fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("could not read {}", path.display())),
     }
+}
+
+fn read_unlocked<T: DeserializeOwned + Serialize + Default>(name: &str) -> Result<T> {
+    let path = data_dir()?.join(name);
+    let Some(bytes) = read_bytes(&path)? else {
+        return Ok(T::default());
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        tracing::warn!("{} is not text; using defaults", path.display());
+        set_aside(&path, true);
+        return Ok(T::default());
+    };
+    let (value, dropped) = match parse_lenient::<T>(&text) {
+        Ok((value, dropped)) if dropped.is_empty() => return Ok(value),
+        Ok(salvaged) => salvaged,
+        Err(e) => {
+            tracing::warn!("{} is unreadable ({e:#}); using defaults", path.display());
+            set_aside(&path, true);
+            return Ok(T::default());
+        }
+    };
+    // Well-formed, but some value does not fit (one a newer build wrote, or
+    // a typo). Keep everything else, and the original beside it.
+    tracing::warn!(
+        "{}: could not read {}; using the default for {}",
+        path.display(),
+        dropped.join(", "),
+        if dropped.len() == 1 { "it" } else { "them" }
+    );
+    set_aside(&path, false);
+    if let Err(e) = save_unlocked(name, &value) {
+        tracing::warn!("could not rewrite {}: {e:#}", path.display());
+    }
+    Ok(value)
+}
+
+/// Read settings text: as a whole when it fits `T`, else what [`salvage`]
+/// keeps of it, with the keys it left out (none when it all fit). An error
+/// only when the text is not TOML at all.
+pub fn parse_lenient<T: DeserializeOwned + Serialize + Default>(
+    text: &str,
+) -> Result<(T, Vec<String>)> {
+    match toml::from_str(text) {
+        Ok(value) => Ok((value, Vec::new())),
+        Err(e) => {
+            let disk = text.parse::<toml::Table>().map_err(|_| e)?;
+            Ok(salvage(&disk))
+        }
+    }
+}
+
+/// Keep a damaged settings file as `<stem>.bad-<pid>-<n>`: moved when it is
+/// to be replaced by defaults, copied when what could be read of it is
+/// written back in its place (so there is never a moment without it).
+fn set_aside(path: &Path, moved: bool) {
+    let backup = path.with_extension(format!(
+        "bad-{}-{}",
+        std::process::id(),
+        TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let kept = if moved {
+        std::fs::rename(path, &backup)
+    } else {
+        std::fs::copy(path, &backup).map(|_| ())
+    };
+    match kept {
+        Ok(()) => tracing::warn!("damaged config preserved at {}", backup.display()),
+        Err(e) => tracing::warn!("could not preserve damaged config: {e}"),
+    }
+}
+
+/// What `T` can take from a well-formed file that, as a whole, it cannot:
+/// starting from the defaults, each key goes in whole if `T` still reads,
+/// else a table key by key, else not at all. Returns the value and the
+/// keys left out (`stream.resolution`). Every settings struct here is
+/// `#[serde(default)]`, so any part of one is still one.
+fn salvage<T: DeserializeOwned + Serialize + Default>(disk: &toml::Table) -> (T, Vec<String>) {
+    let reads = |t: &toml::Table| T::deserialize(toml::Value::Table(t.clone())).is_ok();
+    let mut good = toml::Table::try_from(T::default()).unwrap_or_default();
+    let mut dropped = Vec::new();
+    graft(&mut good, &[], disk, &reads, &mut dropped);
+    let value = T::deserialize(toml::Value::Table(good)).unwrap_or_default();
+    (value, dropped)
+}
+
+fn graft(
+    root: &mut toml::Table,
+    at: &[String],
+    disk: &toml::Table,
+    reads: &dyn Fn(&toml::Table) -> bool,
+    dropped: &mut Vec<String>,
+) {
+    for (key, value) in disk {
+        let mut path = at.to_vec();
+        path.push(key.clone());
+        let mut trial = root.clone();
+        put(&mut trial, &path, value.clone());
+        if reads(&trial) {
+            *root = trial;
+            continue;
+        }
+        if let toml::Value::Table(inner) = value {
+            // Its parts, then, into the table the default has there (or an
+            // empty one, if that much reads).
+            let mut trial = root.clone();
+            if !matches!(get(&trial, &path), Some(toml::Value::Table(_))) {
+                put(&mut trial, &path, toml::Value::Table(toml::Table::new()));
+            }
+            if reads(&trial) {
+                *root = trial;
+                graft(root, &path, inner, reads, dropped);
+                continue;
+            }
+        }
+        dropped.push(path.join("."));
+    }
+}
+
+fn get<'a>(root: &'a toml::Table, path: &[String]) -> Option<&'a toml::Value> {
+    let (last, parents) = path.split_last()?;
+    let mut table = root;
+    for key in parents {
+        table = table.get(key)?.as_table()?;
+    }
+    table.get(last)
+}
+
+/// Set `path` in `root`; its parents are tables already (see `graft`).
+fn put(root: &mut toml::Table, path: &[String], value: toml::Value) {
+    let Some((last, parents)) = path.split_last() else {
+        return;
+    };
+    let mut table = root;
+    for key in parents {
+        match table.get_mut(key).and_then(|v| v.as_table_mut()) {
+            Some(t) => table = t,
+            None => return,
+        }
+    }
+    table.insert(last.clone(), value);
 }
 
 /// Apply a read-modify-write transaction without allowing another in-process
 /// settings, discovery, or pairing writer to replace the snapshot underneath it.
+/// A file that exists but cannot be read is left alone: the edit fails
+/// rather than replace it with defaults.
 pub fn update<T: Serialize + DeserializeOwned + Default + PartialEq>(
     name: &str,
     edit: impl FnOnce(&mut T),
 ) -> Result<()> {
     let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut value: T = load_unlocked(name);
+    let mut value: T = read_unlocked(name)?;
     let before = toml::to_string(&value)?;
     edit(&mut value);
     if toml::to_string(&value)? != before {
@@ -235,6 +384,135 @@ mod tests {
     #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
     struct Cfg {
         n: u32,
+    }
+
+    #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+    enum Size {
+        Small,
+        #[default]
+        Native,
+    }
+
+    #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+    #[serde(default)]
+    struct Stream {
+        size: Size,
+        fps: u32,
+    }
+
+    #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+    #[serde(default)]
+    struct Machine {
+        name: String,
+        mac: Option<String>,
+        seen: Option<u64>,
+    }
+
+    /// The shape of client.toml: settings with an enum, and machines.
+    #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+    #[serde(default)]
+    struct Settings {
+        stream: Stream,
+        prompt: bool,
+        pcs: std::collections::BTreeMap<String, Machine>,
+    }
+
+    fn backups(stem: &str) -> Vec<PathBuf> {
+        let prefix = format!("{stem}.bad-");
+        std::fs::read_dir(data_dir().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix))
+            })
+            .collect()
+    }
+
+    /// A newer build's choice ("P720" read by a build without it) used to
+    /// cost the whole file: every pairing certificate and wake address.
+    #[test]
+    fn one_value_this_build_cannot_read_costs_only_that_value() {
+        let stem = format!("salvage-{}", std::process::id());
+        let name = format!("{stem}.toml");
+        let path = data_dir().unwrap().join(&name);
+        let text = "prompt = true\n[stream]\nsize = \"P9999\"\nfps = 45\n\
+                    [pcs.n1]\nname = \"PC\"\nmac = \"aa:bb:cc:dd:ee:ff\"\n\
+                    [pcs.n2]\nname = \"Mac\"\nseen = \"yesterday\"\n";
+        std::fs::write(&path, text).unwrap();
+        let got: Settings = load(&name);
+        assert_eq!(got.stream.size, Size::Native);
+        assert_eq!(got.stream.fps, 45);
+        assert!(got.prompt);
+        assert_eq!(got.pcs["n1"].mac.as_deref(), Some("aa:bb:cc:dd:ee:ff"));
+        assert_eq!(got.pcs["n2"].name, "Mac");
+        assert_eq!(got.pcs["n2"].seen, None, "only the bad field goes");
+        // The file now reads cleanly, and the original is kept once.
+        assert_eq!(try_load::<Settings>(&name).unwrap(), got);
+        let kept = backups(&stem);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read_to_string(&kept[0]).unwrap(), text);
+        assert_eq!(load::<Settings>(&name), got);
+        assert_eq!(backups(&stem).len(), 1, "no new copy on a clean read");
+        for p in kept {
+            std::fs::remove_file(p).unwrap();
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_strict_read_never_moves_or_defaults_a_damaged_file() {
+        let stem = format!("strict-{}", std::process::id());
+        let name = format!("{stem}.toml");
+        let path = data_dir().unwrap().join(&name);
+        assert_eq!(try_load::<Cfg>(&name).unwrap(), Cfg::default(), "missing");
+        std::fs::write(&path, "n = [oops").unwrap();
+        assert!(try_load::<Cfg>(&name).is_err());
+        std::fs::write(&path, "n = \"seven\"").unwrap();
+        assert!(try_load::<Cfg>(&name).is_err());
+        std::fs::write(&path, b"n = 1\n\xff").unwrap();
+        assert!(try_load::<Cfg>(&name).is_err());
+        assert!(path.exists(), "left where it was");
+        assert!(backups(&stem).is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_file_that_is_not_text_is_set_aside_like_junk() {
+        let stem = format!("binary-{}", std::process::id());
+        let name = format!("{stem}.toml");
+        let path = data_dir().unwrap().join(&name);
+        std::fs::write(&path, b"n = 1\n\xff").unwrap();
+        assert_eq!(load::<Cfg>(&name), Cfg::default());
+        let kept = backups(&stem);
+        assert_eq!(kept.len(), 1);
+        assert!(!path.exists());
+        for p in kept {
+            std::fs::remove_file(p).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_is_not_overwritten() {
+        use std::os::unix::fs::PermissionsExt;
+        let name = format!("locked-{}.toml", std::process::id());
+        save(&name, &Cfg { n: 7 }).unwrap();
+        let path = data_dir().unwrap().join(&name);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            // Root reads anything; nothing to show here.
+            std::fs::remove_file(path).unwrap();
+            return;
+        }
+        assert!(update::<Cfg>(&name, |c| c.n = 9).is_err());
+        assert!(try_load::<Cfg>(&name).is_err());
+        assert_eq!(load::<Cfg>(&name), Cfg::default());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(load::<Cfg>(&name), Cfg { n: 7 });
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

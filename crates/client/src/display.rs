@@ -33,6 +33,33 @@ pub struct Help {
     pub busy: bool,
 }
 
+/// Whether a stream's video problem is the black picture, the one problem
+/// the PC can be asked about. Video that never came, stopped coming or
+/// cannot be decoded is the network's doing or this Mac's.
+pub fn is_black_picture(problem: &str) -> bool {
+    problem.contains("black picture")
+}
+
+/// Whether the PC can say why its picture is black: only a Windows host
+/// reports its displays. An OS not known yet is asked anyway.
+pub fn can_explain(os: &str) -> bool {
+    os.is_empty() || os.eq_ignore_ascii_case("windows")
+}
+
+/// The answer when there is none to be had, so the notice stops saying it
+/// is asking.
+pub fn no_answer(os: &str) -> Help {
+    Help {
+        message: if can_explain(os) {
+            "The PC couldn't say why. Restarting the stream, or the PC, is the next thing to try."
+        } else {
+            "Only a Windows PC can be asked why its picture is black. Restarting the stream is the next thing to try."
+        }
+        .into(),
+        ..Default::default()
+    }
+}
+
 pub fn ask(ip: Ipv4Addr) -> Result<Value> {
     http::get_json::<Value>((ip, CONTROL_PORT), "/v1/display", REPORT_TIMEOUT)
 }
@@ -277,6 +304,32 @@ mod tests {
             h.message
         );
         assert!(!h.hdr_is_on);
+    }
+
+    #[test]
+    fn only_a_black_picture_is_asked_about_and_every_ask_ends_in_an_answer() {
+        assert!(is_black_picture("The PC is sending a black picture: the connection and the video are healthy, but every frame is blank. Asking the PC why…"));
+        for other in [
+            "Video cannot be decoded: decode failed (-12909). Try restarting the stream or selecting H.264 in Settings.",
+            "Video stopped arriving from the PC. Try restarting the stream or lowering Quality.",
+            "Connected, but no video has arrived from the PC. Check its display, or restart the stream.",
+        ] {
+            assert!(!is_black_picture(other), "{other}");
+        }
+        assert!(can_explain("windows") && can_explain(""));
+        assert!(!can_explain("linux") && !can_explain("macOS"));
+        // What a Linux or Mac host answers: nothing to go on.
+        let elsewhere = serde_json::json!({
+            "windows": {"supported": false},
+            "advanced_color": {"supported": false},
+            "sunshine": {},
+        });
+        assert_eq!(verdict(&elsewhere).message, "");
+        for os in ["windows", "linux"] {
+            let h = no_answer(os);
+            assert!(!h.message.is_empty() && !h.hdr_is_on, "{os}");
+            assert!(!h.message.contains("Asking"), "{}", h.message);
+        }
     }
 
     #[test]

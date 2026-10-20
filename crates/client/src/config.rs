@@ -195,6 +195,12 @@ pub struct KnownPc {
     pub tailscale_ip: Option<String>,
     /// When the PC was last seen online (Unix seconds).
     pub last_seen_unix: Option<u64>,
+    /// The size its Desktop was last launched at from this machine, so the
+    /// first connect after Latch reopens can rejoin it at that size.
+    pub desktop_size: Option<[u32; 2]>,
+    /// The tailnet it was seen on, so a machine is only ever forgotten for
+    /// leaving the tailnet this machine is on now.
+    pub tailnet: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -277,6 +283,13 @@ impl ClientConfig {
     /// One read-modify-write of the file, under the process-wide config lock.
     pub fn update(edit: impl FnOnce(&mut Self)) -> anyhow::Result<()> {
         latch_core::config::update(FILE, edit)
+    }
+
+    /// Forget a machine: its addresses, how to wake it, and its pairing.
+    /// One still on the tailnet is listed again, unpaired and unwakeable
+    /// until it has been seen online.
+    pub fn forget(&mut self, node_id: &str) -> bool {
+        self.pcs.remove(node_id).is_some()
     }
 
     pub fn forget_pin_on_mismatch(&mut self, node_id: &str, err: &anyhow::Error) -> bool {
@@ -385,6 +398,36 @@ mod tests {
         assert_eq!(back, c);
     }
 
+    /// A build without 720p (4.1.1, or a branch cut before it) reading a
+    /// file this one wrote: the size goes back to its default, and the
+    /// machines, their certificates and wake addresses all stay.
+    #[test]
+    fn a_size_this_build_does_not_know_keeps_the_machines() {
+        let text = "github_token = \"t\"\n\
+                    [stream]\nquality = \"Custom\"\nresolution = \"P9999\"\nfps = 90\ncodec = \"Hevc\"\n\
+                    [pcs.n1]\nname = \"Hermes\"\nmac = \"02:00:00:00:00:01\"\n\
+                    public_ip = \"116.125.113.36\"\nserver_cert = \"3082\"\n\
+                    [pcs.n2]\nname = \"stuzha\"\nlast_seen_unix = \"bad\"\n";
+        let (c, dropped): (ClientConfig, _) = latch_core::config::parse_lenient(text).unwrap();
+        assert_eq!(
+            dropped,
+            ["pcs.n2.last_seen_unix", "stream.resolution"],
+            "only what cannot be read"
+        );
+        assert_eq!(c.stream.resolution, Resolution::Native);
+        assert_eq!(c.stream.quality, Quality::Custom);
+        assert_eq!(c.stream.fps, 90);
+        assert_eq!(c.stream.codec, Codec::Hevc);
+        assert_eq!(c.github_token.as_deref(), Some("t"));
+        assert_eq!(c.pcs["n1"].server_cert.as_deref(), Some("3082"));
+        assert_eq!(c.pcs["n1"].mac.as_deref(), Some("02:00:00:00:00:01"));
+        assert_eq!(c.pcs["n1"].public_ip.as_deref(), Some("116.125.113.36"));
+        assert_eq!(c.pcs["n2"].name, "stuzha");
+        assert_eq!(c.pcs["n2"].last_seen_unix, None);
+        // Text that is not TOML at all is still an error (and set aside).
+        assert!(latch_core::config::parse_lenient::<ClientConfig>("[stream").is_err());
+    }
+
     #[test]
     fn every_preset_survives_a_reload() {
         for p in Preset::ALL {
@@ -428,5 +471,30 @@ mod tests {
         let generic = anyhow::anyhow!("invalid peer certificate: expired");
         assert!(!c.forget_pin_on_mismatch("n", &generic));
         assert_eq!(c.pcs["n"].server_cert.as_deref(), Some("3082"));
+    }
+
+    #[test]
+    fn a_forgotten_machine_takes_its_pairing_and_nothing_else() {
+        let mut c = ClientConfig::default();
+        for id in ["artemis", "stuzha"] {
+            c.pcs.insert(
+                id.into(),
+                KnownPc {
+                    name: id.into(),
+                    server_cert: Some("3082".into()),
+                    desktop_size: Some([1280, 720]),
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(c.forget("artemis"));
+        assert!(!c.forget("artemis"), "gone already");
+        assert_eq!(c.pcs.keys().collect::<Vec<_>>(), ["stuzha"]);
+        assert_eq!(c.pcs["stuzha"].server_cert.as_deref(), Some("3082"));
+        // A file without the newer fields still reads.
+        let back: ClientConfig =
+            toml::from_str("[pcs.n]\nname = \"Gaming-PC\"\nserver_cert = \"3082\"\n").unwrap();
+        assert_eq!(back.pcs["n"].desktop_size, None);
+        assert_eq!(back.pcs["n"].tailnet, None);
     }
 }

@@ -365,6 +365,12 @@ config_failed() {
 	exit 1
 }
 
+# Compose only fetches an image it does not have, so without this a relay
+# would run the tailscaled it was first installed with for good. A failed
+# pull (registry down) keeps the copy already here; up -d recreates the
+# container only when the image changed, and the state volume keeps the node.
+say "pulling the relay image"
+docker compose pull --quiet relay || warn "could not pull the relay image; starting the one already here"
 say "starting relay"
 docker compose up -d
 
@@ -399,6 +405,7 @@ echo
 docker exec "$CONTAINER" tailscale status || true
 echo
 say "RelayServerPort = $actual, read back from the node's own prefs"
+say "tailscale $(docker exec "$CONTAINER" tailscale version 2>/dev/null | head -n 1 || true)"
 docker exec "$CONTAINER" tailscale debug prefs 2>/dev/null | grep -i 'relayserverstatic' || true
 if [ -n "$FIREWALL_MISSING" ]; then
 	echo

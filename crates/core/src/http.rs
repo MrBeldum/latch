@@ -685,10 +685,10 @@ mod tests {
     fn an_address_that_refuses_is_skipped_for_the_next_one() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let open = listener.local_addr().unwrap();
-        let closed = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
+        // Port 0 can never be connected to. A port freed by dropping a
+        // listener could be: the tests run in parallel, and another one
+        // binds the next free port, often that very one.
+        let closed: SocketAddr = "127.0.0.1:0".parse().unwrap();
         std::thread::spawn(move || serve(listener, |_, _| Response::json(200, &Ack::ok())));
         let t = Duration::from_secs(2);
         let r = request(&[closed, open][..], "GET", "/", None, t).unwrap();

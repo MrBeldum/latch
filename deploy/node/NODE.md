@@ -13,7 +13,12 @@ It is not the packet relay. The relay kit stays in `deploy/relay/`.
 - Xvfb + XFCE (a virtual 1920×1080 desktop)
 - Sunshine (the same streaming engine Latch uses on Windows and macOS)
 - Latch's control service on TCP 47850
-- Optional Tailscale in userspace mode (`TS_AUTHKEY`)
+- Optional Tailscale (`TS_AUTHKEY`), with kernel networking: the compose
+  file gives the container `/dev/net/tun` and `NET_ADMIN`. Latch Host
+  decides who may pair and use the control service from each peer's own
+  tailnet address; userspace Tailscale would hand it every peer from
+  `127.0.0.1`, which it trusts as the machine itself, so the node refuses
+  to start Tailscale without the device.
 
 ## One node
 
@@ -47,12 +52,19 @@ issues a new node per `up`). Do not put `tag:relay` on these nodes.
 ## Same host as the peer relay
 
 The relay container uses host networking and `tag:relay`. A node container
-should **not** use host networking: userspace Tailscale gives it a second
-identity, so it shows up as a machine instead of being hidden as a relay.
+should **not** use host networking: its own network namespace and its own
+tailscaled give it a second identity, so it shows up as a machine instead
+of being hidden as a relay.
 
 ## Build notes
 
-The image compiles `latch-host` and installs the Ubuntu 24.04 Sunshine
+The image compiles `latch-host` (with `--locked`, from the dependencies
+`Cargo.lock` pins) and installs the Ubuntu 24.04 Sunshine
 package pinned to the same tag Windows setup uses (`v2026.906.222525`).
 The VPS in this project is aarch64; the Dockerfile picks the arm64 or
 amd64 `.deb` from `TARGETARCH`.
+
+`.dockerignore` keeps every `.env` out of the build context: the build
+stage copies the whole repository, and a layer keeps what it copied, so an
+auth key there would travel with any image built `--target build` and
+pushed or saved.

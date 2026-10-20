@@ -59,17 +59,27 @@ fn find_cli() -> Option<PathBuf> {
         })
 }
 
-/// `tailscale status --json`, the parts Latch reads.
+/// `tailscale status --json`, the parts Latch reads. Tailscale writes an
+/// empty map or list as `null` (`"Peer": null` on a machine alone in its
+/// tailnet; `Peer`, `User` and `Self.TailscaleIPs` signed out), which reads
+/// as empty here rather than failing the whole status.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct Status {
     pub backend_state: String,
-    #[serde(rename = "Self")]
+    #[serde(rename = "Self", deserialize_with = "null_as_default")]
     pub self_node: Node,
+    #[serde(deserialize_with = "null_as_default")]
     pub peer: BTreeMap<String, Node>,
+    #[serde(deserialize_with = "null_as_default")]
     pub user: BTreeMap<String, User>,
     /// The tailnet this machine is in. Absent before Tailscale 1.26.
     pub current_tailnet: Option<Tailnet>,
+    /// Whether tailscaled runs a kernel TUN device. `false` is userspace
+    /// networking (a container's tailscaled), where every tailnet peer
+    /// reaches a local service from 127.0.0.1; `None` when it does not say.
+    #[serde(rename = "TUN")]
+    pub tun: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -93,14 +103,16 @@ pub struct Node {
     pub os: String,
     #[serde(rename = "UserID")]
     pub user_id: u64,
-    #[serde(rename = "TailscaleIPs")]
+    #[serde(rename = "TailscaleIPs", deserialize_with = "null_as_default")]
     pub tailscale_ips: Vec<String>,
     pub online: bool,
-    /// The public `ip:port` of the peer's last direct path, if any.
+    /// The `ip:port` of the peer's last direct path, if any: its public
+    /// address, or its LAN address when both are on one network.
     #[serde(rename = "CurAddr")]
     pub cur_addr: String,
     /// The peer's home DERP region code ("tok", "lax"), which is where its
-    /// packets go when there is no direct path.
+    /// packets go when there is no direct path. Every peer has one, whether
+    /// or not its packets go that way.
     pub relay: String,
     /// The peer relay carrying this path, as `ip:port:vni:id`, when
     /// Tailscale found one. Empty for a direct or DERP path, and always
@@ -109,14 +121,18 @@ pub struct Node {
     #[serde(rename = "PeerRelay")]
     pub peer_relay: String,
     /// ACL tags ("tag:relay"), present only on tagged nodes.
+    #[serde(deserialize_with = "null_as_default")]
     pub tags: Vec<String>,
-    /// Traffic has flowed recently, so `cur_addr` and `relay` describe the
-    /// path in use rather than a guess.
+    /// Traffic has flowed recently, so an empty `cur_addr` means the
+    /// packets go through a relay rather than that nobody knows yet.
     pub active: bool,
     /// When this machine's node key stops working (RFC 3339), unless key
     /// expiry is disabled for it in the admin console; a zero time then.
     pub key_expiry: String,
     pub expired: bool,
+    /// A node `tailscale status` hides: it is only here because this
+    /// machine is shared out to its owner.
+    pub sharee_node: bool,
 }
 
 impl Node {
@@ -157,21 +173,56 @@ impl Node {
     pub fn is_relay(&self) -> bool {
         self.tags.iter().any(|t| t == RELAY_TAG)
     }
-    /// The peer's public IPv4 address, when Tailscale reached it directly.
+    /// An exit node of the Mullvad add-on (hundreds of them, one per
+    /// location), which is never a machine of the user's. Told apart by its
+    /// name, as the CLI does: an ordinary exit node can carry a location too.
+    pub fn is_mullvad(&self) -> bool {
+        self.dns_name
+            .trim_end_matches('.')
+            .to_ascii_lowercase()
+            .ends_with(".mullvad.ts.net")
+    }
+    /// The peer's public IPv4 address, when Tailscale reached it directly
+    /// over the internet. A direct path inside one network is a LAN address,
+    /// which says nothing about the router a wake packet must go to.
     pub fn public_ipv4(&self) -> Option<Ipv4Addr> {
-        self.cur_addr.rsplit_once(':')?.0.parse().ok()
+        let ip: Ipv4Addr = self.cur_addr.rsplit_once(':')?.0.parse().ok()?;
+        is_public_v4(ip).then_some(ip)
     }
     /// Packets reach this peer directly rather than through a DERP relay.
-    /// Unknown until traffic has flowed; `None` then.
+    /// Unknown until traffic has flowed; `None` then, even though `relay`
+    /// names a home region for every peer.
     pub fn direct(&self) -> Option<bool> {
         if !self.cur_addr.is_empty() {
             Some(true)
-        } else if self.active || !self.relay.is_empty() {
+        } else if self.active {
             Some(false)
         } else {
             None
         }
     }
+}
+
+/// An IPv4 address on the internet: not private, loopback, link-local,
+/// broadcast or multicast, and not in 100.64.0.0/10 (Tailscale's own, and
+/// carrier-grade NAT).
+pub fn is_public_v4(ip: Ipv4Addr) -> bool {
+    !(ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || is_tailnet(ip))
+}
+
+/// A JSON `null` read as the type's empty value.
+fn null_as_default<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -193,17 +244,36 @@ impl Status {
             .map(|u| u.login_name.as_str())
     }
     /// Every tailnet peer that can share a desktop: any OS, minus `tag:relay`
-    /// nodes that exist only to carry packets. Sorted by hostname.
+    /// nodes that exist only to carry packets, and the nodes `tailscale
+    /// status` itself hides (machines this one is shared out to, Mullvad's
+    /// exit nodes). Sorted by hostname.
     pub fn machine_peers(&self) -> Vec<&Node> {
-        let mut v: Vec<&Node> = self.peer.values().filter(|n| !n.is_relay()).collect();
+        let mut v: Vec<&Node> = self.listed_peers().filter(|n| !n.is_relay()).collect();
         v.sort_by(|a, b| a.host_name.cmp(&b.host_name));
         v
     }
     /// Nodes tagged `tag:relay`, any OS. Sorted by hostname like the PC list.
     pub fn relay_peers(&self) -> Vec<&Node> {
-        let mut v: Vec<&Node> = self.peer.values().filter(|n| n.is_relay()).collect();
+        let mut v: Vec<&Node> = self.listed_peers().filter(|n| n.is_relay()).collect();
         v.sort_by(|a, b| a.host_name.cmp(&b.host_name));
         v
+    }
+    /// The peers `tailscale status` lists.
+    fn listed_peers(&self) -> impl Iterator<Item = &Node> {
+        self.peer
+            .values()
+            .filter(|n| !n.sharee_node && !n.is_mullvad())
+    }
+}
+
+/// What a backend state other than "Running" means, for people.
+pub fn state_words(backend_state: &str) -> String {
+    match backend_state {
+        "" | "NoState" => "not running".into(),
+        "NeedsLogin" => "signed out".into(),
+        "NeedsMachineAuth" => "waiting for an admin to approve this machine".into(),
+        "InUseOtherUser" => "in use by another user of this computer".into(),
+        other => other.to_lowercase(),
     }
 }
 
@@ -238,14 +308,7 @@ pub fn status() -> Result<Status> {
     let out = run(Command::new(cli).args(["status", "--json"]))?;
     let st = parse_status(&out)?;
     if !st.running() {
-        bail!(
-            "Tailscale is {}",
-            if st.backend_state.is_empty() {
-                "not running".into()
-            } else {
-                st.backend_state.to_lowercase()
-            }
-        );
+        bail!("Tailscale is {}", state_words(&st.backend_state));
     }
     Ok(st)
 }
@@ -273,6 +336,32 @@ pub fn whois(ip: std::net::IpAddr) -> Result<WhoIs> {
         Duration::from_secs(2),
     )?;
     serde_json::from_str(&out).context("parse tailscale whois")
+}
+
+/// `tailscale whois` for a connection that reached this machine from
+/// `addr`, a loopback `ip:port`. Under userspace networking tailscaled
+/// relays each tailnet peer's TCP connection from loopback and remembers
+/// which peer every local port belongs to. `Ok(None)` when it knows of
+/// none: a process on this machine made the connection.
+pub fn whois_addr(addr: std::net::SocketAddr) -> Result<Option<WhoIs>> {
+    let cli = cli().ok_or_else(|| anyhow::anyhow!("Tailscale is not installed"))?;
+    let out = run_limited(
+        Command::new(cli).args(["whois", "--json", "--proto=tcp", &addr.to_string()]),
+        Duration::from_secs(2),
+    );
+    match out {
+        Ok(out) => serde_json::from_str(&out)
+            .map(Some)
+            .context("parse tailscale whois"),
+        Err(e) if no_such_peer(&e.to_string()) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The CLI's answer for an address no peer is behind: it logs
+/// "2026/10/17 16:46:33 peer not found" and exits 1.
+fn no_such_peer(err: &str) -> bool {
+    err.contains("peer not found") || err.contains("no match for")
 }
 
 /// `tailscale netcheck --format=json`, the parts that explain why a peer
@@ -303,6 +392,17 @@ pub struct NetCheck {
 }
 
 impl NetCheck {
+    /// [`NetCheck::report`] with the home relay region Tailscale itself
+    /// names (`Self.Relay` in its status), when there is one: its own name
+    /// for a region cannot fall out of date like Latch's table of ids.
+    pub fn report_near(&self, home: &str) -> crate::api::NatReport {
+        let mut r = self.report();
+        if !home.is_empty() {
+            r.derp = home.to_string();
+        }
+        r
+    }
+
     /// The summary the host puts in its status and the client shows.
     pub fn report(&self) -> crate::api::NatReport {
         crate::api::NatReport {
@@ -343,6 +443,8 @@ pub fn is_tailnet_ip(ip: IpAddr) -> bool {
 }
 
 /// The three-letter code of a DERP region, as `tailscale status` prints it.
+/// From `tailscale debug derp-map` (Tailscale 1.102, October 2026); a
+/// region added later has no code here, and its id says nothing.
 pub fn derp_code(region: i32) -> &'static str {
     match region {
         1 => "nyc",
@@ -358,20 +460,21 @@ pub fn derp_code(region: i32) -> &'static str {
         11 => "sao",
         12 => "ord",
         13 => "den",
-        14 => "jnb",
-        15 => "mia",
-        16 => "lax",
-        17 => "par",
-        18 => "mad",
-        19 => "ams",
+        14 => "ams",
+        15 => "jnb",
+        16 => "mia",
+        17 => "lax",
+        18 => "par",
+        19 => "mad",
         20 => "hkg",
         21 => "tor",
         22 => "waw",
-        23 => "nai",
+        23 => "dbi",
         24 => "hnl",
-        25 => "nue",
-        26 => "hel",
-        27 => "dbi",
+        25 => "nai",
+        26 => "nue",
+        27 => "iad",
+        28 => "hel",
         _ => "",
     }
 }
@@ -406,6 +509,7 @@ pub fn derp_city(code: &str) -> &str {
         "nue" => "Nuremberg",
         "hel" => "Helsinki",
         "dbi" => "Dubai",
+        "iad" => "Ashburn",
         other => other,
     }
 }
@@ -509,7 +613,7 @@ mod tests {
                       "UserID": 42, "TailscaleIPs": ["fd7a::2", "100.64.0.30"], "Online": true, "CurAddr": "203.0.113.5:41641",
                       "Relay": "lax", "Active": true, "KeyExpiry": "2999-03-02T23:03:00Z"},
         "nodekey:c": {"ID": "nPC1", "HostName": "Den", "DNSName": "den.example.ts.net.", "OS": "windows",
-                      "UserID": 43, "TailscaleIPs": ["100.64.0.31"], "Online": false},
+                      "UserID": 43, "TailscaleIPs": ["100.64.0.31"], "Online": false, "Relay": "sea"},
         "nodekey:d": {"ID": "nPC3", "HostName": "Gaming-PC-2", "OS": "windows", "UserID": 42,
                       "TailscaleIPs": ["100.64.0.11"], "Online": true, "CurAddr": "", "Relay": "tok", "Active": true}
       },
@@ -550,7 +654,7 @@ mod tests {
         assert!(pcs[2].key_expiry_days().unwrap() > 300_000);
         assert_eq!(pcs[0].key_expiry_days(), None);
         // Office is reached directly; Gaming-PC-2 only through the Tokyo relay;
-        // Den has not been talked to, so nobody knows.
+        // Den has not been talked to, so nobody knows, home relay or not.
         assert_eq!(pcs[2].direct(), Some(true));
         assert_eq!(pcs[1].direct(), Some(false));
         assert_eq!(pcs[1].relay, "tok");
@@ -571,13 +675,16 @@ mod tests {
         assert!(!r.portmap);
         assert_eq!(r.derp, "tok");
         let hard = parse_netcheck(
-            r#"{"UDP":true,"MappingVariesByDestIP":true,"UPnP":true,"PreferredDERP":16}"#,
+            r#"{"UDP":true,"MappingVariesByDestIP":true,"UPnP":true,"PreferredDERP":17}"#,
         )
         .unwrap();
         let r = hard.report();
         assert_eq!(r.hard, Some(true));
         assert!(r.portmap, "UPnP counts as a port mapping");
         assert_eq!(r.derp, "lax");
+        // Tailscale's own name for the home region wins over the table.
+        assert_eq!(hard.report_near("sfo").derp, "sfo");
+        assert_eq!(hard.report_near("").derp, "lax");
         assert_eq!(derp_city("lax"), "Los Angeles");
         assert_eq!(derp_city("tok"), "Tokyo");
         assert_eq!(derp_city("zzz"), "zzz");
@@ -585,6 +692,140 @@ mod tests {
         let unknown = parse_netcheck(r#"{"UDP":false}"#).unwrap();
         assert_eq!(unknown.mapping_varies_by_dest_ip, None);
         assert_eq!(unknown.report().derp, "");
+    }
+
+    /// `tailscale debug derp-map` on 1.102: the ids from 14 up moved when
+    /// Amsterdam came in, which put a Mac in Los Angeles near "Paris".
+    #[test]
+    fn derp_ids_match_tailscales_map() {
+        for (id, code) in [
+            (13, "den"),
+            (14, "ams"),
+            (15, "jnb"),
+            (16, "mia"),
+            (17, "lax"),
+            (18, "par"),
+            (19, "mad"),
+            (23, "dbi"),
+            (25, "nai"),
+            (26, "nue"),
+            (27, "iad"),
+            (28, "hel"),
+        ] {
+            assert_eq!(derp_code(id), code, "region {id}");
+            assert_ne!(derp_city(code), code, "{code} has a city");
+        }
+    }
+
+    /// Real 1.102 output keeps `null` for empty maps and lists.
+    #[test]
+    fn null_maps_and_lists_read_as_empty() {
+        // Signed in, and alone in the tailnet.
+        let alone = parse_status(
+            r#"{"BackendState":"Running","TUN":true,
+                "Self":{"ID":"n1","HostName":"pc","OS":"windows","UserID":5,
+                        "TailscaleIPs":["100.64.0.5"],"Tags":null},
+                "CurrentTailnet":{"Name":"a@b.c"},"CertDomains":null,"Peer":null,
+                "User":{"5":{"ID":5,"LoginName":"a@b.c"}}}"#,
+        )
+        .unwrap();
+        assert!(alone.running());
+        assert!(alone.machine_peers().is_empty());
+        assert_eq!(alone.self_login(), Some("a@b.c"));
+        assert_eq!(alone.self_node.ipv4(), Some("100.64.0.5".parse().unwrap()));
+        // Signed out.
+        let out = parse_status(
+            r#"{"BackendState":"NeedsLogin","TailscaleIPs":null,
+                "Self":{"ID":"","HostName":"pc","OS":"windows","UserID":0,
+                        "TailscaleIPs":null,"Addrs":[]},
+                "CurrentTailnet":null,"CertDomains":null,"Peer":null,"User":null}"#,
+        )
+        .unwrap();
+        assert!(!out.running());
+        assert_eq!(out.self_node.ipv4(), None);
+        assert_eq!(state_words(&out.backend_state), "signed out");
+        assert!(parse_status(r#"{"Self":null}"#).is_ok());
+        assert_eq!(state_words(""), "not running");
+        assert_eq!(state_words("Stopped"), "stopped");
+        assert_eq!(state_words("Starting"), "starting");
+    }
+
+    #[test]
+    fn only_an_internet_address_is_a_public_one() {
+        let at = |cur: &str| Node {
+            cur_addr: cur.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            at("203.0.113.5:41641").public_ipv4(),
+            Some("203.0.113.5".parse().unwrap())
+        );
+        assert_eq!(
+            at("116.125.113.36:41641").public_ipv4(),
+            Some("116.125.113.36".parse().unwrap())
+        );
+        // Two machines on one network go direct over the LAN.
+        for lan in [
+            "192.168.55.57:41641",
+            "10.0.0.5:41641",
+            "172.16.3.4:41641",
+            "169.254.1.1:41641",
+            "100.100.1.1:41641",
+            "127.0.0.1:41641",
+            "[2001:db8::1]:41641",
+            "",
+        ] {
+            assert_eq!(at(lan).public_ipv4(), None, "{lan}");
+        }
+    }
+
+    #[test]
+    fn an_idle_peer_has_an_unknown_path_whatever_its_home_relay() {
+        let st = parse_status(
+            r#"{"BackendState":"Running","Peer":{
+              "a": {"HostName":"stuzha","Online":true,"Active":false,"CurAddr":"","Relay":"sfo"},
+              "b": {"HostName":"hermes","Online":true,"Active":true,"CurAddr":"","Relay":"tok"},
+              "c": {"HostName":"office","Online":true,"Active":false,"CurAddr":"203.0.113.9:41641","Relay":"lax"},
+              "d": {"HostName":"pc","Online":true,"Active":false,"CurAddr":"","Relay":"lax",
+                    "PeerRelay":"100.64.0.40:40000:vni:17"}
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(st.peer["a"].direct(), None, "nothing sent yet");
+        assert_eq!(st.peer["b"].direct(), Some(false), "traffic, but relayed");
+        assert_eq!(
+            st.peer["c"].direct(),
+            Some(true),
+            "a direct path still trusted"
+        );
+        assert_eq!(st.peer["d"].direct(), None);
+    }
+
+    #[test]
+    fn mullvad_and_sharee_nodes_are_no_machines() {
+        let st = parse_status(
+            r#"{"BackendState":"Running","Peer":{
+              "a": {"HostName":"us-lax-wg-001","DNSName":"us-lax-wg-001.mullvad.ts.net.","OS":"linux",
+                    "Online":true,"ExitNodeOption":true,"Location":{"Country":"USA","City":"Los Angeles"}},
+              "b": {"HostName":"se-sto-wg-002","DNSName":"se-sto-wg-002.mullvad.ts.net.","OS":"linux",
+                    "Online":true,"ExitNodeOption":true,"ExitNode":true},
+              "c": {"HostName":"friends-laptop","DNSName":"friends-laptop.other.ts.net.","OS":"macOS",
+                    "Online":true,"ShareeNode":true},
+              "d": {"HostName":"vps","DNSName":"vps.example.ts.net.","OS":"linux","Online":true,
+                    "ExitNodeOption":true,"Location":{"Country":"USA","City":"San Jose"}},
+              "e": {"HostName":"Gaming-PC","DNSName":"gaming-pc.example.ts.net.","OS":"windows","Online":true}
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            st.machine_peers()
+                .iter()
+                .map(|n| n.host_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Gaming-PC", "vps"],
+            "an exit node of the user's own stays"
+        );
+        assert!(st.relay_peers().is_empty());
     }
 
     #[test]
@@ -738,6 +979,19 @@ mod tests {
         .unwrap();
         assert_eq!(st.current_tailnet.unwrap().name, "user@example.com");
         assert!(parse_status(SAMPLE).unwrap().current_tailnet.is_none());
+    }
+
+    #[test]
+    fn userspace_networking_is_told_from_a_kernel_tun() {
+        let st = parse_status(r#"{"BackendState":"Running","TUN":false}"#).unwrap();
+        assert_eq!(st.tun, Some(false));
+        let st = parse_status(r#"{"BackendState":"Running","TUN":true}"#).unwrap();
+        assert_eq!(st.tun, Some(true));
+        assert_eq!(parse_status(SAMPLE).unwrap().tun, None, "older versions");
+        assert!(no_such_peer("2026/10/17 16:46:33 peer not found"));
+        assert!(no_such_peer("no match for IP:port 127.0.0.1:5"));
+        assert!(!no_such_peer("tailscale timed out"));
+        assert!(!no_such_peer("failed to connect to local Tailscale daemon"));
     }
 
     #[test]

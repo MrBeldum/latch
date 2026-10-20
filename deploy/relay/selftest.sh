@@ -79,6 +79,7 @@ make_stubs() { # $1 = sandbox dir
 		        wait=${wait%\"}; wait=${wait#\"}
 		        printf 'name: latch-relay\nservices:\n  relay:\n    environment:\n      RELAY_PORT: "%s"\n      RELAY_WAIT_SECS: "%s"\n' "$port" "$wait"
 		        exit 0 ;;
+		      pull) [ "${STUB_PULL_FAIL:-}" = 1 ] && exit 1; exit 0 ;;
 		      up) echo "Container latch-relay  Started"; exit 0 ;;
 		    esac ;;
 		  volume)
@@ -102,6 +103,8 @@ make_stubs() { # $1 = sandbox dir
 		        fi; exit 0 ;;
 		      "latch-relay tailscale status")
 		        echo "100.64.0.1   latch-relay   me@   linux   -"; exit 0 ;;
+		      "latch-relay tailscale version")
+		        printf '1.104.1\n  tailscale commit: stub\n'; exit 0 ;;
 		    esac ;;
 		  inspect)
 		    cat "$STUB_DIR/started_at"; exit 0 ;;
@@ -236,6 +239,7 @@ check "exits nonzero" "$([ "$rc" -ne 0 ] && echo 0 || echo 1)"
 check "names the bad value in full, untruncated" "$(has "$d/out" "RELAY_PORT='99999999'" && echo 0 || echo 1)"
 check "no firewall rule was touched" "$(! grep -q '^ip6\?tables -[IA]' "$d/calls.log" && echo 0 || echo 1)"
 check "no container was started" "$(! has "$d/calls.log" 'compose up' && echo 0 || echo 1)"
+check "no image was pulled" "$(! has "$d/calls.log" 'compose pull' && echo 0 || echo 1)"
 
 echo "== case 2b: malformed RELAY_WAIT_SECS =="
 d=$(sandbox)
@@ -244,6 +248,7 @@ rc=0
 run_case "$d" || rc=$?
 check "exits nonzero" "$([ "$rc" -ne 0 ] && echo 0 || echo 1)"
 check "no container was started" "$(! has "$d/calls.log" 'compose up' && echo 0 || echo 1)"
+check "no image was pulled" "$(! has "$d/calls.log" 'compose pull' && echo 0 || echo 1)"
 
 echo "== case 3: authenticated node, no auth key in .env =="
 d=$(sandbox)
@@ -265,6 +270,7 @@ run_case "$d" || rc=$?
 check "exits nonzero" "$([ "$rc" -ne 0 ] && echo 0 || echo 1)"
 check "prints resume instructions" "$(has "$d/out" 'Re-run ./install-relay.sh' && echo 0 || echo 1)"
 check "no container was started" "$(! has "$d/calls.log" 'compose up' && echo 0 || echo 1)"
+check "no image was pulled" "$(! has "$d/calls.log" 'compose pull' && echo 0 || echo 1)"
 
 echo "== case 5: an ACCEPT rule exists but sits below the catch-all REJECT =="
 d=$(sandbox)
@@ -390,6 +396,26 @@ STUB_PREFS_PORT=40000 STUB_CONFIG_MARKER=FAILED STUB_AFTER_RESTART_MARKER=FAILED
 check "exits nonzero" "$([ "$rc" -ne 0 ] && echo 0 || echo 1)"
 check "restarted once, not twice" "$([ "$(cat "$d/restarts")" = 1 ] && echo 0 || echo 1)"
 check "does not print Done" "$(! has "$d/out" 'Done. Next' && echo 0 || echo 1)"
+
+echo "== case 14: the image is pulled before the relay starts =="
+d=$(sandbox)
+printf 'TS_AUTHKEY=tskey-not-a-real-key\nRELAY_PORT=40000\n' >"$d/kit/.env"
+rc=0
+STUB_PREFS_PORT=40000 run_case "$d" || rc=$?
+check "exits zero" "$([ "$rc" -eq 0 ] && echo 0 || echo 1)"
+pull_at=$(grep -n 'compose pull' "$d/calls.log" | head -n 1 | cut -d: -f1)
+up_at=$(grep -n 'compose up' "$d/calls.log" | head -n 1 | cut -d: -f1)
+check "pulls, then starts" "$([ -n "$pull_at" ] && [ -n "$up_at" ] && [ "$pull_at" -lt "$up_at" ] && echo 0 || echo 1)"
+check "says which tailscale runs" "$(has "$d/out" 'tailscale 1.104.1' && echo 0 || echo 1)"
+
+echo "== case 15: a failed pull still starts the relay =="
+d=$(sandbox)
+printf 'TS_AUTHKEY=tskey-not-a-real-key\nRELAY_PORT=40000\n' >"$d/kit/.env"
+rc=0
+STUB_PREFS_PORT=40000 STUB_PULL_FAIL=1 run_case "$d" || rc=$?
+check "exits zero" "$([ "$rc" -eq 0 ] && echo 0 || echo 1)"
+check "warns about the pull" "$(has "$d/out" 'could not pull the relay image' && echo 0 || echo 1)"
+check "starts the relay anyway" "$(has "$d/calls.log" 'compose up' && echo 0 || echo 1)"
 
 echo "== cleanup owns only its workdir =="
 check "decoy sibling still present" "$([ -f "$DECOY/keep-me" ] && echo 0 || echo 1)"

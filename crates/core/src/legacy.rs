@@ -1,4 +1,4 @@
-//! What Latch answered to before 4.1.0, when it was called BroLink.
+//! Compatibility identifiers used by versions before 4.1.0.
 //!
 //! Installed copies, other machines on the tailnet and old settings
 //! folders keep the old names for a while after an upgrade, so the code
@@ -15,6 +15,10 @@ pub const STREAMER_KIND: &str = "BroLink";
 /// The update push's headers, which a 4.0 host requires and a 4.0 Mac sends.
 pub const UPDATE_VERSION_HEADER: &str = "x-brolink-version";
 pub const UPDATE_SHA256_HEADER: &str = "x-brolink-sha256";
+/// A Windows host from 4.0 or older: its process name, and where the
+/// install script put it under `%LOCALAPPDATA%`.
+pub const WINDOWS_HOST_PROCESS: &str = "brolink-host";
+pub const WINDOWS_HOST_EXE: &str = r"BroLink\brolink-host.exe";
 
 /// Whether `app` is what a Latch node (this version or an older one) puts in
 /// `Status::app`.
@@ -28,8 +32,7 @@ pub fn is_own_streamer_kind(kind: &str) -> bool {
 }
 
 /// A setting from the environment under its current name, else under the
-/// old one: `LATCH_DATA_DIR`, then `BROLINK_DATA_DIR`. Unset and empty are
-/// the same.
+/// old one from before 4.1.0. Unset and empty are the same.
 pub fn env(name: &str) -> Option<OsString> {
     let current = std::env::var_os(name).filter(|v| !v.is_empty());
     current.or_else(|| {

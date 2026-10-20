@@ -6,6 +6,8 @@ pub mod audio;
 pub mod brand;
 pub mod clipboard;
 pub mod config;
+#[cfg(any(windows, test))]
+pub mod cursor;
 pub mod display;
 pub mod legacy;
 pub mod logfile;

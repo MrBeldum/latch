@@ -14,7 +14,21 @@ need "$ROOT/Dockerfile" "latch-host"
 need "$ROOT/Dockerfile" "ubuntu:24.04"
 need "$ROOT/Dockerfile" "v2026.906.222525"
 need "$ROOT/entrypoint.sh" "latch-host --background"
-need "$ROOT/entrypoint.sh" "userspace-networking"
+need "$ROOT/docker-compose.yml" "/dev/net/tun:/dev/net/tun"
+need "$ROOT/docker-compose.yml" "NET_ADMIN"
+need "$ROOT/entrypoint.sh" "/dev/net/tun"
+# Userspace Tailscale makes every peer look like 127.0.0.1 to Latch Host,
+# which trusts loopback as this machine.
+if grep -v '^[[:space:]]*#' "$ROOT/entrypoint.sh" | grep -q 'userspace-networking'; then
+  echo "entrypoint.sh must not run Tailscale in userspace mode" >&2
+  fail=1
+fi
+# Every .env holds a Tailscale auth key and must stay out of the build
+# context, at any depth (deploy/node/.env, deploy/relay/.env).
+REPO="$(cd "$ROOT/../.." && pwd)"
+need "$REPO/.dockerignore" '^\*\*/\.env$'
+need "$REPO/.dockerignore" '^\*\*/\.env\.\*$'
+need "$ROOT/Dockerfile" "cargo build --locked"
 need "$ROOT/entrypoint.sh" "packetsize = 1184"
 need "$ROOT/entrypoint.sh" "sw_preset = superfast"
 need "$ROOT/entrypoint.sh" "minimum_fps_target = 0"

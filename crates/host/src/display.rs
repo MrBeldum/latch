@@ -431,7 +431,9 @@ mod tests {
 
 /// Each section stands on its own: a class that is missing on this Windows
 /// build leaves one error behind instead of losing the whole report.
-#[cfg(windows)]
+// Compiled into tests everywhere, so the service names it looks for are
+// checked against setup's on a Mac too.
+#[cfg(any(windows, test))]
 const PROBE: &str = r#"
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -497,10 +499,13 @@ try {
         Select-Object ProcessId,SessionId,ExecutablePath)
 } catch { $errors['sunshine'] = $_.Exception.Message }
 
+# The engine's service under every name it has had (Latch's, the one
+# before 4.1, upstream's) and any other whose program is the engine's
+# service wrapper. PathName shows which engine folder each one runs.
 $service = @()
 try {
-    $service = @(Get-CimInstance Win32_Service -Filter "Name like '%unshine%'" -ErrorAction Stop |
-        Select-Object Name,State,StartMode,ProcessId,StartName)
+    $service = @(Get-CimInstance Win32_Service -Filter "Name='LatchStream' OR Name='BroLinkStream' OR Name like '%unshine%' OR PathName like '%sunshinesvc.exe%'" -ErrorAction Stop |
+        Select-Object Name,State,StartMode,ProcessId,StartName,PathName)
 } catch { $errors['sunshine_service'] = $_.Exception.Message }
 
 # The desktop's own brightness, as sampled numbers rather than a picture:
@@ -555,3 +560,18 @@ try {
   desktop=$desktop;
   errors=$errors} | ConvertTo-Json -Depth 6 -Compress
 "#;
+
+#[cfg(test)]
+mod probe_tests {
+    #[test]
+    fn the_probe_finds_the_engine_service_under_every_name_latch_gave_it() {
+        for name in [crate::setup::SERVICE, crate::legacy::WINDOWS_SERVICE] {
+            assert!(
+                super::PROBE.contains(&format!("Name='{name}'")),
+                "{name} is not looked for"
+            );
+        }
+        assert!(super::PROBE.contains("Name like '%unshine%'"));
+        assert!(super::PROBE.contains("PathName like '%sunshinesvc.exe%'"));
+    }
+}

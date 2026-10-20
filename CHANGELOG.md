@@ -6,6 +6,90 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- **Updates after a stream.** A Windows PC took any Desktop left running
+  after a viewer had gone for a live stream and turned down every pushed
+  update, so the Mac sent the whole exe again every three minutes. The host
+  now defers an update only while a viewer is connected (a viewer that
+  vanished, as with a Mac that slept, counts as gone), reports that in its
+  status so the Mac waits instead of uploading, and a host from before this
+  that still says no is asked less and less often (up to once an hour).
+- **Docker nodes and identity.** Under userspace Tailscale every tailnet
+  machine reached the control API from 127.0.0.1 and was trusted as the
+  local panel. Loopback connections are now checked with `tailscale whois`
+  of their port, and the node kit runs Tailscale with kernel networking.
+- **Pairing.** The Mac hands the PIN over beside the first pairing request
+  instead of in front of it, so pairing goes on the moment the PC accepts
+  the PIN, a request that fails shows its error at once, and Cancel works
+  throughout. A refusal from Latch on the PC is shown with its reason
+  instead of "isn't answering" and ends the attempt; the PIN goes to this
+  Mac's own pending pairing, never another device's.
+- **Cancelling a connection** no longer quits an app or desktop it had
+  rejoined on the PC. Connection failures are logged with every cause and
+  the banner names the step that failed.
+- **Power.** Sleep is offered only for Windows PCs and refused by hosts
+  nothing can wake (a Linux VM such as a VPS desktop, a Mac, a container),
+  every power action asks first and follows the owner's setting, the
+  stream ends only once the machine has agreed, and actions go to the
+  machine picked even when two share a name. A Mac's failed Restart or Shut
+  down is reported, and a Developer ID build carries the Apple Events
+  entitlement it needs.
+- **Stream input in order.** Keys, clicks and pastes reach the PC in the
+  order they were made: a quickly released Shift or ⌘ no longer drops off a
+  keystroke, a click lands where it was made, and keys typed right after ⌘V
+  wait for the paste. Horizontal scrolling goes the right way. ⌘Q, ⌘H and
+  ⌘+/⌘−/⌘0 reach the PC while the stream has the keys. The host key no longer
+  leaves keys stuck or sends a stray Alt, clicking the picture while
+  connecting no longer locks the mouse, and Tab reaches the PC in Free mode
+  with a panel open. A Mac at the other end gets ⌘ as Command.
+- **Clipboard.** ⌘V works when the Mac's clipboard holds an image or
+  nothing, and after copying a file or an image on the PC it pastes that
+  there instead of the Mac's older text. A paste over 32 KB says it was cut
+  and no longer overwrites the Mac's clipboard with the cut copy; text heavy
+  in quotes or newlines no longer fails to cross. On Linux the clipboard
+  works again after the X server restarts.
+- **Settings survive a bad value.** One setting a build cannot read (720p
+  read by an older build, say) no longer wipes client.toml with its pairing
+  certificates and wake addresses: only that value falls back. The service
+  keeps its last good host.toml when a hand edit has a typo.
+- **Machine list.** A machine that is away can be forgotten from its menu,
+  and one that left the tailnet over a month ago is forgotten by itself.
+  Machines are probed all at once, idle ones no longer flash "Relayed via",
+  Mullvad exit nodes are left out, the nearest relay names the right city,
+  and a LAN address (saved by older versions too) is never used as a PC's
+  public wake address. A Mac with Share this Mac off no longer reads as "the
+  background service is stopped".
+- **A desktop that follows its viewer** (a Linux VPS) ends a session nobody
+  has watched for two minutes, so its prep command's undo puts the desktop
+  back at its idle size instead of leaving it at the last viewer's 4K. The
+  Mac relaunches the Desktop for a new size only on such a desktop.
+- **Background service.** On a Mac it runs under launchd, is restarted
+  there after an update (never two copies), and its login item is turned
+  back on with sharing; the Sharing page says when the macOS firewall or a
+  disabled login item blocks it. A window no longer restarts a service that
+  exits on purpose every four seconds, an older window no longer relaunches
+  itself forever, and a self-update that never serves is rolled back to the
+  previous version, kept until the new one has proven itself. Panics are
+  written to the log. `accept_updates = false` in host.toml refuses pushed
+  updates; pushes are logged with their sender and SHA-256. The wake
+  listener and "keeping awake" claims are Windows-only (a shared Mac is now
+  really kept awake while plugged in).
+- **Windows setup.** Setup run over SSH starts the engine in the signed-in
+  user's session instead of one with no desktop, running it again no longer
+  starts the SYSTEM engine beside yours, install-host.ps1 brings the host
+  back after replacing it, a BroLink engine move retries and keeps paired
+  devices, a stale engine archive falls back to the pinned download, Set up
+  during a stream explains the administrator prompt first, and the audio
+  fix-up backs off instead of running PowerShell every 30 seconds.
+- **Light appearance.** Latch no longer quits at launch on a Mac or PC set
+  to Light. Screen readers hear dropdown names and values and can adjust
+  the Bitrate slider, Escape that closes a menu stays in Latch, a menu can
+  no longer stay stuck open, and Korean and other CJK text is drawn.
+- **Releases** include the Linux host for arm64 and x64
+  (`latch-host-linux-*.tar.gz` with SHA-256 files), are refused when the
+  tag does not match the version, and build with locked dependencies. The
+  relay kit pulls the current Tailscale image on every run, `.env` files
+  never enter image builds, and logging out of a native Linux desktop
+  starts a fresh session.
 - **Resolutions below 1080p: 900p, 720p and 540p** (1600 × 900, 1280 × 720,
   960 × 540), for a machine that encodes in software or a slow network.
   The frame-rate ceiling a small-CPU host reports (30 fps) now holds at
@@ -75,36 +159,34 @@ GitHub release notes, so each version gets a heading of the form
 
 ## 4.1.1 (2026-10-02)
 
-- Setting up a Windows PC that an earlier version had set up (when the
-  app was called BroLink) now registers the `LatchStream` service. Setup
+- Setting up a Windows PC that a version before 4.1.0 had set up now
+  registers the `LatchStream` service. Setup
   moved the engine's folder and removed the old service, but treated the
   running engine as needing nothing more, so the new service was never
   registered and the engine ran only once someone had signed in.
 
 ## 4.1.0 (2026-10-02)
 
-- **BroLink is now Latch, by Bardbro.** The app, the repository
+- **Introducing Latch, by Bardbro.** The app, the repository
   (`github.com/MrBeldum/latch`), the release files (`latch-macos-arm64.tar.gz`,
   `latch-windows-x64.zip`), the executables (`Latch.app`, `latch-host.exe`),
   the services and login items, the environment variables (`LATCH_*`) and
   bardbro.com all carry the new name, with a new logo: a square with a
   corner cut away, and a blue square in the cut. Bardbro is the
   project behind it, for cloud gaming.
-- An installed BroLink updates itself to Latch. Settings, the pairing
-  identity, paired devices and the streaming engine carry over. On a Mac
-  the app moves from `BroLink.app` to `Latch.app` the first time it runs
-  and its login item with it; on Linux `latch.service` replaces
-  `brolink.service`; on Windows the host keeps working in place, and
-  `install-host.ps1` followed by **Set up as administrator** moves it to
-  `%LOCALAPPDATA%\Latch`, the `LatchStream` service and the new firewall
-  rule names. Machines on either name still find each other, and a 4.1 Mac
-  can still update a 4.0 PC. The release also carries
-  `brolink-macos-arm64.tar.gz` and `brolink-windows-x64.zip`, which are the
-  same builds under the old file names, because a 4.0 updater looks for
-  nothing else. Everything that still says BroLink is in
+- Older installs update to Latch. Settings, the pairing identity, paired
+  devices and the streaming engine carry over. On a Mac the app moves to
+  `Latch.app` the first time it runs and its login item with it; on Linux
+  `latch.service` replaces the old service; on Windows the host keeps
+  working in place, and `install-host.ps1` followed by **Set up as
+  administrator** moves it to `%LOCALAPPDATA%\Latch`, the `LatchStream`
+  service and the new firewall rule names. Updated and older machines
+  still find each other, and a 4.1 Mac can still update a 4.0 PC. Releases
+  also include compatibility downloads under the filenames required by
+  4.0 updaters. Runtime compatibility identifiers are documented in
   `crates/core/src/legacy.rs` and `crates/host/src/legacy.rs`.
-- `LATCH_DATA_DIR` and `LATCH_GITHUB_TOKEN` replace the `BROLINK_` names,
-  which still work. The Docker node and relay read `LATCH_*`.
+- `LATCH_DATA_DIR` and `LATCH_GITHUB_TOKEN` replace the old environment
+  variable names, which still work. The Docker node and relay read `LATCH_*`.
 - The About page names Bardbro and links to bardbro.com. The accent
   colour for focus and progress is the logo's blue, where it was violet.
 - The window is redesigned around one design system, in the product

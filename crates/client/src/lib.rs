@@ -6,6 +6,7 @@ pub mod config;
 pub mod display;
 pub mod handover;
 pub mod input;
+pub mod macos;
 pub mod path;
 pub mod session;
 pub mod settings;

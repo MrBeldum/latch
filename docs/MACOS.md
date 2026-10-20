@@ -49,7 +49,8 @@ quarantine flag is how you tell macOS you fetched it deliberately.
 
 builds for `aarch64-apple-darwin` (Xcode command line tools and CMake are
 needed for the C parts), bundles `dist.noindex/Latch.app`, and installs it to
-`/Applications`. A locally built app never carries the quarantine flag.
+`/Applications`. The `.noindex` folder keeps build copies out of app search.
+A locally built app never carries the quarantine flag.
 
 ### Signing
 
@@ -117,16 +118,21 @@ the Mac cursor's position is sent 1:1 instead and nothing is captured.
 | **Keys** | Ctrl+Alt+Delete, Windows key, Alt+Tab, Escape, Print Screen; and **Command acts as Ctrl** |
 | **Stats** | The Stream performance panel: frame rate and bitrate against what was asked for, round trip, packet loss, encode, assembly, queue and decode times, and the decoder. **Copy diagnostics** puts it all on the clipboard |
 | **Full screen** | Toggle; the setting decides how a session starts |
-| **PC** (or **Mac**, **Machine**) | Sleep, Restart…, Shut down… (the latter two ask first); **Update Latch Host…** for a PC whose host is older than 3.1 |
+| **PC** (or **Mac**, **Machine**) | Sleep…, Restart…, Shut down…, each asking first, when the machine's owner allows them; Sleep only on a Windows PC, the one kind a wake packet can bring back. **Update Latch Host…** for a PC whose host is older than 3.1 |
 | **Stream settings** | The same controls as Settings: quality profile, resolution, frame rate, bitrate and codec. **Apply and reconnect** restarts the session with them in a second or two; Escape or the close button leaves them as they were |
 | **Disconnect** | End the session |
 
 On a narrow window everything but **Stream settings** and **Disconnect**
 folds into one **More** menu.
 
-Everything else on the keyboard goes to the PC as pressed. With **Command
-acts as Ctrl** on (the default), ⌘C, ⌘V, ⌘Z and the rest do on Windows what
-they do on the Mac, and ⌘ can stay held across several of them.
+Everything else on the keyboard goes to the PC as pressed, in the order it
+was pressed. With **Command acts as Ctrl** on (the default), ⌘C, ⌘V, ⌘Z and
+the rest do on Windows and Linux what they do on the Mac, and ⌘ can stay
+held across several of them; a Mac at the other end always gets ⌘ as
+Command. While the stream has the keys, ⌘Q, ⌘H and ⌘+/⌘−/⌘0 go to the PC
+too (⌘Q closes the PC's window, not Latch): quit or hide Latch from the menu
+bar or the Dock, after **Disconnect**, or while the toolbar or a panel has
+the focus. ⌘Tab and ⌘Space stay on the Mac.
 
 ### Clipboard
 
@@ -134,8 +140,11 @@ With Latch Host 3.1 or newer on the PC, the clipboard follows you both
 ways: text copied on the PC is in the Mac's clipboard a second later, and
 ⌘V on the PC pastes the text the Mac has (Latch sends it to the PC first,
 then presses Ctrl+V there). Text only, up to 32 KB; an image or a file on
-either clipboard is left alone. Short notices under the toolbar say when
-something crossed. With an older host, ⌘V pastes what the PC last copied.
+either clipboard is left alone, so ⌘V with a screenshot on the Mac's
+clipboard, or after copying a file on the PC, pastes what the PC itself last
+copied. Keys typed right after ⌘V wait for the paste to land (up to two
+seconds). Short notices under the toolbar say when something crossed. With
+an older host, ⌘V pastes what the PC last copied.
 
 A Linux machine gets ⌘C, ⌘X and ⌘V as Ctrl+Insert, Shift+Delete and
 Shift+Insert, which GTK and Qt apps, Firefox, Chromium and terminals all
@@ -206,7 +215,7 @@ it from this network (see below).
 | Codec | Auto (HEVC when both ends can), HEVC, H.264 |
 | Open streams full screen | How a session starts |
 | Capture the mouse | The toolbar's Mouse choice, remembered |
-| Command acts as Ctrl | Off makes ⌘ the Windows key (Mac only) |
+| Command acts as Ctrl | Off makes ⌘ the Windows key on Windows and Linux machines; a Mac always gets ⌘ as Command |
 | App to open | The app on the PC to launch; "Desktop" is the whole screen. The list fills in after the first connection |
 | Offer to sleep a machine after a session | Off by default. Asleep, Tailscale is off there; this Mac can only wake it from its own network |
 | Keep Latch up to date | Updates this app and the Windows PCs' Latch Host; **Check now** checks at once |

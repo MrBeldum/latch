@@ -8,6 +8,10 @@
 //! more: a machine shared in from someone else's tailnet can reach the
 //! port, but may not pair, sleep the PC, read its clipboard or push it an
 //! executable.
+//!
+//! Under userspace Tailscale (a container's tailscaled) every tailnet peer
+//! arrives from loopback too, so there loopback alone proves nothing:
+//! `tailscale whois` of the connection's own port says who is behind it.
 
 use crate::clipboard;
 use crate::config::HostConfig;
@@ -16,8 +20,8 @@ use crate::update;
 use crate::wake::{self, WakeInfo};
 use anyhow::{Context, Result};
 use latch_core::api::{
-    Ack, Clipboard, DisplayRequest, NatReport, PinRequest, PowerRequest, Status, Streamer,
-    CLIPBOARD_PATH, UPDATE_PATH,
+    Ack, Clipboard, DisplayRequest, NatReport, PinRequest, PowerAction, PowerRequest, Status,
+    Streamer, CLIPBOARD_PATH, UPDATE_PATH,
 };
 use latch_core::http::{self, Request, Response};
 use latch_core::tailscale::{self, is_tailnet_ip};
@@ -41,6 +45,9 @@ const PIN_TAKEN_FOR: Duration = Duration::from_secs(30);
 /// Ticks (of 5 s) between runs of `tailscale netcheck`: it takes seconds
 /// and the network does not move often.
 const NETCHECK_TICKS: u64 = 120;
+/// The tick (of 5 s) at which a service lets go of what an update retired:
+/// ten minutes in, long after the update's watcher has finished.
+const TIDY_TICK: u64 = 120;
 
 pub struct Service {
     cfg: Mutex<HostConfig>,
@@ -61,6 +68,22 @@ pub struct Service {
     auth: Mutex<HashMap<IpAddr, (Instant, bool)>>,
     /// The last `whois` failure logged.
     whois_failed: Mutex<Option<String>>,
+    /// Whether Tailscale here has a kernel TUN device, as last reported.
+    /// Kept when a later `status` fails: `Some(false)` (userspace) is what
+    /// makes loopback a peer's address too, and must not lapse.
+    tun: Mutex<Option<bool>>,
+    /// The last line logged about a peer forwarded through loopback.
+    forwarded_logged: Mutex<Option<String>>,
+    /// Why host.toml could not be re-read, while it cannot.
+    cfg_problem: Mutex<Option<String>>,
+    /// A reinstall was noticed and handing over to it failed.
+    reinstall_tried: AtomicBool,
+    /// The machine is being kept from idle-sleeping (see `power::keep_awake`).
+    kept_awake: AtomicBool,
+    /// The macOS firewall turns away connections to this program.
+    firewall_blocked: AtomicBool,
+    /// macOS has the login item turned off (see `unix_setup`).
+    login_item_off: AtomicBool,
     /// This PC's side of the NAT story, from `tailscale netcheck`.
     nat: Mutex<Option<NatReport>>,
     nat_running: AtomicBool,
@@ -69,6 +92,11 @@ pub struct Service {
     /// retries for it are answered without asking the engine again, which
     /// is busy with that very handshake.
     pin_taken: Mutex<Option<(String, Instant)>>,
+    /// The last PIN refusal logged.
+    pin_refused: Mutex<Option<String>>,
+    /// Since when a session runs with nobody watching, on a desktop that
+    /// follows its viewer (see [`streamer::unwatched_close`]).
+    unwatched_since: Mutex<Option<Instant>>,
 }
 
 impl Service {
@@ -85,10 +113,19 @@ impl Service {
             log: Arc::new(Mutex::new(VecDeque::new())),
             auth: Mutex::new(HashMap::new()),
             whois_failed: Mutex::new(None),
+            tun: Mutex::new(None),
+            forwarded_logged: Mutex::new(None),
+            cfg_problem: Mutex::new(None),
+            reinstall_tried: AtomicBool::new(false),
+            kept_awake: AtomicBool::new(false),
+            firewall_blocked: AtomicBool::new(false),
+            login_item_off: AtomicBool::new(false),
             nat: Mutex::new(None),
             nat_running: AtomicBool::new(false),
             update_running: Arc::new(AtomicBool::new(false)),
             pin_taken: Mutex::new(None),
+            pin_refused: Mutex::new(None),
+            unwatched_since: Mutex::new(None),
         }
     }
 
@@ -96,14 +133,31 @@ impl Service {
         push_log(&self.log, msg.into());
     }
 
-    fn session_active(&self) -> bool {
-        let cfg = self.cfg.lock().clone();
-        cfg.has_creds()
-            && Api {
+    /// End a session nobody has watched for [`streamer::UNWATCHED_CLOSE`]:
+    /// the engine then runs its prep command's undo, which puts a desktop
+    /// that follows its viewer back at its idle size.
+    fn end_unwatched_session(&self, cfg: &HostConfig, session: &streamer::Session) {
+        let mut since = self.unwatched_since.lock();
+        let (end, next) = streamer::unwatched_close(session, *since, Instant::now());
+        *since = next;
+        if end {
+            Api {
                 user: &cfg.sunshine_user,
                 pass: &cfg.sunshine_pass,
             }
-            .session_active()
+            .close_app();
+            self.log(format!(
+                "nobody has watched for {} minutes: ended the session, so the desktop is back at its idle size",
+                streamer::UNWATCHED_CLOSE.as_secs() / 60
+            ));
+        }
+    }
+
+    /// A viewer is connected right now. A Desktop left running for the
+    /// viewer to resume does not count: see [`streamer::Session`].
+    fn someone_watching(&self) -> bool {
+        let install = self.install.lock().clone();
+        streamer::session(install.as_ref()).watched()
     }
 
     pub fn run_arc(self, replacing: bool) -> Result<()> {
@@ -158,16 +212,26 @@ impl Service {
         if let Ok(exe) = std::env::current_exe() {
             if replacing {
                 self.log("updated: the previous version has been replaced");
-                update::tidy(&exe);
             }
             self.ensure_autostart(&exe);
+        }
+        // Before the first request: under userspace Tailscale every tailnet
+        // peer arrives from loopback, so that has to be known first.
+        if let Ok(st) = tailscale::status() {
+            self.note_tun(&st);
         }
         let refresher = self.clone();
         std::thread::spawn(move || refresher.refresh_loop());
         // (refresh_loop takes the Arc so netcheck can run on its own thread.)
-        let svc = self.clone();
-        if let Err(e) = wake::listen(move |mac, from| svc.wake_packet(mac, from)) {
-            self.log(format!("not listening for wake packets: {e:#}"));
+        // Only a Windows PC learns its wake MAC (see `wake::probe`), and
+        // without one every packet is ignored: elsewhere the listener only
+        // held UDP 9 on every interface (a Mac) or failed to bind it and
+        // said so at every start (a Linux user service).
+        if wants_wake_listener() {
+            let svc = self.clone();
+            if let Err(e) = wake::listen(move |mac, from| svc.wake_packet(mac, from)) {
+                self.log(format!("not listening for wake packets: {e:#}"));
+            }
         }
         let handler = self.clone();
         let authorizer = self.clone();
@@ -205,14 +269,35 @@ impl Service {
 
     /// Cheap checks every tick; the slower probes on a longer cadence.
     fn refresh(self: &Arc<Self>, tick: u64) {
-        *self.cfg.lock() = HostConfig::load();
+        let prev = self.cfg.lock().clone();
+        let (cfg, line) = next_config(prev, HostConfig::try_load(), &mut self.cfg_problem.lock());
+        *self.cfg.lock() = cfg;
+        if let Some(line) = line {
+            self.log(line);
+        }
         let stay_awake = self.cfg.lock().stay_awake;
-        crate::power::keep_awake(stay_awake);
-        if tick == 0 && stay_awake {
-            self.log("keeping this PC awake so Tailscale stays reachable");
+        let awake = crate::power::keep_awake(stay_awake);
+        // Said when it starts and stops being true, and only where it is:
+        // a Linux server, or a laptop on battery, is not being kept awake.
+        if awake != self.kept_awake.swap(awake, Ordering::AcqRel) {
+            self.log(if awake {
+                format!(
+                    "keeping this {} awake while it is plugged in, so Tailscale stays reachable",
+                    if cfg!(target_os = "macos") {
+                        "Mac"
+                    } else {
+                        "PC"
+                    }
+                )
+            } else {
+                "no longer keeping this machine awake (on battery, or the setting is off)".into()
+            });
         }
 
         let ts = tailscale::status().map_err(|e| e.to_string());
+        if let Ok(st) = &ts {
+            self.note_tun(st);
+        }
         let came_up;
         {
             let mut cur = self.tailscale.lock();
@@ -261,7 +346,7 @@ impl Service {
                         user: &cfg.sunshine_user,
                         pass: &cfg.sunshine_pass,
                     };
-                    match api.upgrade_stream_profile() {
+                    match api.upgrade_stream_profile(install.as_ref()) {
                         Ok(true) => {
                             if let Err(e) = std::fs::write(&marker, "1") {
                                 self.log(format!("could not save stream profile version: {e}"));
@@ -272,8 +357,22 @@ impl Service {
                                 "stream profile ready: match client display, constant bitrate, 60 fps"
                             });
                         }
-                        Ok(false) => {} // A running app owns the display until it ends.
+                        Ok(false) => {} // Retried once nobody watches.
                         Err(e) => self.log(format!("stream profile could not be applied: {e:#}")),
+                    }
+                } else if cfg!(windows) {
+                    // Which display the engine captures is kept current all
+                    // along: the virtual display can come or change any time.
+                    let api = Api {
+                        user: &cfg.sunshine_user,
+                        pass: &cfg.sunshine_pass,
+                    };
+                    if let Some(install) = &install {
+                        match crate::virtual_display::follow(&api, install, &dir) {
+                            Ok(Some(changed)) => self.log(changed),
+                            Ok(None) => {}
+                            Err(e) => self.log(format!("capture display could not be set: {e:#}")),
+                        }
                     }
                 }
             }
@@ -305,6 +404,18 @@ impl Service {
             };
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
         let max_fps = streamer::max_fps(&encoder, cores);
+        // Whether someone watches, every other tick: a Mac holds a host
+        // update back while they do, and a desktop that follows its viewer
+        // goes back to its idle size once nobody has watched for a while.
+        let viewer = if running && tick.is_multiple_of(2) {
+            let session = streamer::session(install.as_ref());
+            if api_ok && streamer::display_follows_viewer() {
+                self.end_unwatched_session(&cfg, &session);
+            }
+            session.watched()
+        } else {
+            running && self.streamer.lock().viewer
+        };
         let st = Streamer {
             kind: install
                 .as_ref()
@@ -317,6 +428,7 @@ impl Service {
             audio_problem,
             capture_size,
             max_fps,
+            viewer,
         };
         {
             let mut cur = self.streamer.lock();
@@ -353,13 +465,17 @@ impl Service {
         if tick.is_multiple_of(6) {
             let install = self.install.lock().clone();
             if let Some(install) = install {
+                #[cfg(windows)]
+                if let Err(e) = crate::cursor::start() {
+                    tracing::debug!("cursor bounds: {e:#}");
+                }
                 let audio_problem = self.streamer.lock().audio_problem.clone();
                 if !streamer::running() {
                     if let Err(e) = streamer::start(&install) {
                         self.log(format!("streaming engine: {e:#}"));
                     }
-                } else if cfg!(windows) && !audio_problem.is_empty() {
-                    let _ = crate::audio::take_over_engine();
+                } else if cfg!(windows) {
+                    crate::audio::retry_take_over(&audio_problem);
                 }
             }
         }
@@ -391,6 +507,64 @@ impl Service {
                 *cur = v;
             }
         }
+
+        if !cfg!(windows) && tick % 12 == 11 {
+            self.follow_reinstall();
+        }
+        #[cfg(target_os = "macos")]
+        if tick.is_multiple_of(12) {
+            if let Ok(exe) = std::env::current_exe() {
+                let blocked = crate::unix_setup::firewall_blocks(&exe);
+                if blocked && !self.firewall_blocked.swap(blocked, Ordering::AcqRel) {
+                    self.log("the macOS firewall blocks incoming connections to Latch, so other machines cannot reach this Mac; run setup here");
+                }
+                self.firewall_blocked.store(blocked, Ordering::Release);
+            }
+            let off = crate::unix_setup::login_item_disabled();
+            if off && !self.login_item_off.swap(off, Ordering::AcqRel) {
+                self.log("macOS has Latch's login item turned off, so this Mac is not shared after a restart; run setup here");
+            }
+            self.login_item_off.store(off, Ordering::Release);
+        }
+        // What an update retired is kept until the new version has served
+        // for a while: the update's watcher puts it back if it does not.
+        if tick == TIDY_TICK {
+            if let Ok(exe) = std::env::current_exe() {
+                update::tidy(&exe);
+            }
+        }
+    }
+
+    /// A Mac or Linux install replaced under a running service (a new
+    /// Latch.app copied over, a package upgrade) keeps serving the old code
+    /// until something restarts it, and the window cannot tell when the
+    /// version did not change. Restart into the new program once nobody
+    /// watches. (Windows swaps its executable through `update`.)
+    fn follow_reinstall(self: &Arc<Self>) {
+        let Some(stamp) = started_from().filter(|s| s.replaced()) else {
+            return;
+        };
+        if self.reinstall_tried.load(Ordering::Acquire) || self.someone_watching() {
+            return;
+        }
+        #[cfg(not(windows))]
+        if crate::unix_setup::supervised() {
+            // launchd and systemd restart a service that failed, from the
+            // path the new program is at.
+            self.log("Latch was reinstalled; the service restarts into the new copy");
+            std::process::exit(75);
+        }
+        // Once: a new copy that cannot start is not retried every minute.
+        self.reinstall_tried.store(true, Ordering::Release);
+        match update::hand_over(stamp.path(), update::STARTUP_GRACE) {
+            Ok(_) => {
+                self.log("Latch was reinstalled; the new copy takes over the service");
+                std::process::exit(0);
+            }
+            Err(e) => self.log(format!(
+                "Latch was reinstalled, but the new copy did not start: {e:#}"
+            )),
+        }
     }
 
     /// `tailscale netcheck` on its own thread, once at a time.
@@ -402,7 +576,11 @@ impl Service {
         std::thread::spawn(move || {
             match tailscale::netcheck() {
                 Ok(n) => {
-                    let report = n.report();
+                    let home = match &*svc.tailscale.lock() {
+                        Ok(st) => st.self_node.relay.clone(),
+                        Err(_) => String::new(),
+                    };
+                    let report = n.report_near(&home);
                     let mut cur = svc.nat.lock();
                     if cur.as_ref().is_none_or(|c| nat_changed(c, &report)) {
                         svc.log(describe_nat(&report));
@@ -459,6 +637,15 @@ impl Service {
         if wake.fast_startup == Some(true) {
             setup.push("Fast Startup is on, so the PC cannot be woken after a shutdown.".into());
         }
+        if self.firewall_blocked.load(Ordering::Acquire) {
+            setup.push("The macOS firewall blocks other machines from reaching Latch.".into());
+        }
+        if self.login_item_off.load(Ordering::Acquire) {
+            setup.push(
+                "macOS has Latch's login item turned off, so sharing stops at the next restart."
+                    .into(),
+            );
+        }
         if *self.virtual_display.lock() == Some(false) {
             setup.push(
                 "The virtual display does not list every screen size a viewer can ask for.".into(),
@@ -512,9 +699,59 @@ impl Service {
         }
     }
 
-    /// Loopback is the control panel; a tailnet peer must pass
-    /// [`Owner::admits`]. A `whois` answer is remembered for [`AUTH_TTL`],
-    /// a refusal included; a failed `whois` is not remembered.
+    fn note_tun(&self, st: &tailscale::Status) {
+        if let Some(tun) = st.tun {
+            *self.tun.lock() = Some(tun);
+        }
+    }
+
+    /// Who sent a request, once it has been read. A loopback connection is
+    /// a process on this machine, unless Tailscale runs in userspace mode:
+    /// then it may be a tailnet peer that tailscaled relayed, which must
+    /// pass [`Owner::admits`] like any other and never counts as local.
+    /// Asked after the request is read, when tailscaled has certainly
+    /// recorded which peer the connection is from (it does so only after
+    /// it has connected to this port). Never cached: every relayed peer
+    /// shares 127.0.0.1.
+    fn caller(&self, peer: SocketAddr) -> Caller {
+        if !peer.ip().is_loopback() {
+            return Caller::Peer {
+                allowed: self.authorized(peer.ip()),
+            };
+        }
+        let tun = *self.tun.lock();
+        let owner = self.tailscale.lock().as_ref().ok().map(Owner::of);
+        loopback_caller(tun, owner.as_ref(), || {
+            let found = tailscale::whois_addr(peer);
+            let line = match &found {
+                Ok(Some(w)) => Some(format!(
+                    "{} ({}) asked through userspace Tailscale{}",
+                    w.node.computed_name,
+                    w.user_profile.login_name,
+                    if owner.as_ref().is_some_and(|o| o.admits(w)) {
+                        ""
+                    } else {
+                        ": not this account, refused"
+                    }
+                )),
+                Ok(None) => None,
+                Err(e) => Some(format!("whois {peer}: {e}; refused")),
+            };
+            if let Some(line) = line {
+                let mut last = self.forwarded_logged.lock();
+                if last.as_deref() != Some(line.as_str()) {
+                    self.log(line.clone());
+                    *last = Some(line);
+                }
+            }
+            found
+        })
+    }
+
+    /// Loopback may connect (see [`Service::caller`] for what it may do);
+    /// a tailnet peer must pass [`Owner::admits`]. A `whois` answer is
+    /// remembered for [`AUTH_TTL`], a refusal included; a failed `whois` is
+    /// not remembered.
     fn authorized(&self, ip: IpAddr) -> bool {
         if ip.is_loopback() {
             return true;
@@ -593,7 +830,8 @@ impl Service {
                 &Ack::err("browser access to the control API is disabled"),
             );
         }
-        if !self.authorized(peer.ip()) {
+        let caller = self.caller(peer);
+        if !caller.allowed() {
             return Response::json(
                 403,
                 &Ack::err("not a machine on this PC's Tailscale account"),
@@ -612,12 +850,13 @@ impl Service {
                 &Ack::err("a Latch request carries JSON or an executable"),
             );
         }
-        let local = peer.ip().is_loopback();
+        // The service log and /v1/quit are for this machine's own window.
+        let local = caller == Caller::Local;
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/v1/status") => Response::json(200, &self.status(local)),
             ("GET", "/v1/display") => Response::json(200, &self.display()),
             ("POST", "/v1/display") => self.set_display(peer.ip(), req),
-            ("POST", "/v1/pin") => self.pin(req),
+            ("POST", "/v1/pin") => self.pin(peer.ip(), req),
             ("POST", "/v1/power") => self.power(peer.ip(), req),
             ("POST", p) if p == UPDATE_PATH => self.update(peer.ip(), req),
             ("GET", p) if p == CLIPBOARD_PATH => match clipboard::read() {
@@ -653,7 +892,18 @@ impl Service {
             return Response::json(
                 400,
                 &Ack::err(
-                    "only a Windows PC takes a pushed latch-host.exe; this machine updates itself",
+                    "only a Windows PC takes a pushed latch-host.exe; a Mac updates with its app, and a Linux machine installs the release's latch-host-linux tarball (deploy/native/README.md)",
+                ),
+            );
+        }
+        if !self.cfg.lock().accept_updates {
+            self.log(format!(
+                "update from {from} refused: this PC takes no pushed updates (accept_updates = false in host.toml)"
+            ));
+            return Response::json(
+                403,
+                &Ack::err(
+                    "the owner of this PC has turned pushed updates off; update it at the PC",
                 ),
             );
         }
@@ -661,7 +911,7 @@ impl Service {
             return Response::json(409, &Ack::err("an update is already being installed"));
         }
         let engine_running = self.streamer.lock().running;
-        if update::refuse_self_update(engine_running, self.session_active()) {
+        if update::refuse_self_update(engine_running, self.someone_watching()) {
             self.update_running.store(false, Ordering::Release);
             self.log("update deferred: a stream is running");
             return Response::json(
@@ -678,15 +928,25 @@ impl Service {
         };
         match update::stage(req, &exe) {
             Ok(version) => {
+                let sha = req
+                    .header(latch_core::api::UPDATE_SHA256_HEADER)
+                    .or_else(|| req.header(latch_core::legacy::UPDATE_SHA256_HEADER))
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
                 self.log(format!(
-                    "updating to {version}: {from} sent the new Latch Host"
+                    "updating to {version}: {from} sent the new Latch Host (SHA-256 {sha})"
                 ));
                 let running = self.update_running.clone();
                 let log = self.log.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(500));
                     match update::apply(&exe) {
-                        Ok(()) => {
+                        Ok(h) => {
+                            if let Err(e) = update::start_probation(&exe, &h, &version.to_string())
+                            {
+                                tracing::warn!("{e:#}");
+                            }
                             tracing::info!("handing over to {version}");
                             std::process::exit(0);
                         }
@@ -700,13 +960,13 @@ impl Service {
             }
             Err(r) => {
                 self.update_running.store(false, Ordering::Release);
-                self.log(format!("update refused: {}", r.message()));
+                self.log(format!("update from {from} refused: {}", r.message()));
                 Response::json(r.status(), &Ack::err(r.message()))
             }
         }
     }
 
-    fn pin(&self, req: &Request) -> Response {
+    fn pin(&self, from: IpAddr, req: &Request) -> Response {
         let Ok(p) = req.json::<PinRequest>() else {
             return Response::json(400, &Ack::err("expected {\"pin\",\"name\"}"));
         };
@@ -734,7 +994,7 @@ impl Service {
             user: &cfg.sunshine_user,
             pass: &cfg.sunshine_pass,
         };
-        match api.submit_pin(&p.pin, &p.name) {
+        match api.submit_pin(&p.pin, &p.name, from) {
             Ok(streamer::Pin::Paired) => {
                 self.log(format!("paired \"{}\"", p.name));
                 Response::json(200, &Ack::ok())
@@ -747,8 +1007,26 @@ impl Service {
                 ));
                 Response::json(200, &Ack::ok())
             }
+            Ok(streamer::Pin::NotYet) => {
+                // Not an error: the Mac retries within a second. A 200 with
+                // the reason is what it shows while it waits; any other
+                // status reads to it as "Latch isn't answering".
+                Response::json(
+                    200,
+                    &Ack::err(
+                        "waiting for this machine's pairing request to reach the streaming engine",
+                    ),
+                )
+            }
             Err(e) => {
-                self.log(format!("PIN from \"{}\" refused: {e:#}", p.name));
+                // The Mac retries every second for over a minute; one line
+                // per reason, not one per retry.
+                let line = format!("PIN from \"{}\" refused: {e:#}", p.name);
+                let mut last = self.pin_refused.lock();
+                if last.as_deref() != Some(line.as_str()) {
+                    self.log(line.clone());
+                    *last = Some(line);
+                }
                 Response::json(502, &Ack::err(e.to_string()))
             }
         }
@@ -807,6 +1085,20 @@ impl Service {
                 &Ack::err("the owner of this PC has turned remote power actions off"),
             );
         }
+        let action = p.action;
+        let what = action.label().to_lowercase();
+        // Refused before the stream is ended for it, and with the reason:
+        // the Mac shows an answer that is not ok as it is. (Every Mac
+        // client reads a 200's `ok`; another status only as "HTTP 409".)
+        let name = self.name.lock().clone();
+        let refused = crate::power::refusal(crate::power::kind(), action, &name).or_else(|| {
+            crate::power::logind_refuses(action)
+                .map(|answer| format!("this machine's login manager says {answer} to {what}"))
+        });
+        if let Some(why) = refused {
+            self.log(format!("{what} requested by {from}, refused: {why}"));
+            return Response::json(200, &Ack::err(why));
+        }
         if cfg.has_creds() {
             Api {
                 user: &cfg.sunshine_user,
@@ -814,16 +1106,24 @@ impl Service {
             }
             .close_app();
         }
-        self.log(format!(
-            "{} requested by {from}",
-            p.action.label().to_lowercase()
-        ));
+        self.log(format!("{what} requested by {from}"));
+        if cfg!(target_os = "macos") && action != PowerAction::Sleep {
+            // System Events answers at once, or not without someone at the
+            // Mac; either way the one who asked hears which.
+            return match crate::power::perform(action) {
+                Ok(()) => Response::json(200, &Ack::ok()),
+                Err(e) => {
+                    self.log(format!("{what} failed: {e:#}"));
+                    Response::json(200, &Ack::err(format!("{e:#}")))
+                }
+            };
+        }
         // Reply first: sleep can suspend the machine before the bytes leave.
-        let action = p.action;
+        let log = self.log.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(400));
             if let Err(e) = crate::power::perform(action) {
-                tracing::error!("{}: {e:#}", action.label());
+                push_log(&log, format!("{what} failed: {e:#}"));
             }
         });
         Response::json(200, &Ack::ok())
@@ -852,6 +1152,73 @@ pub fn describe_nat(n: &NatReport) -> String {
         format!("network: easy NAT; direct connections should work (nearest relay {city})")
     } else {
         format!("network: NAT type unknown (nearest relay {city})")
+    }
+}
+
+/// The settings to run on after re-reading host.toml: the file's when it
+/// reads, else the last good ones, never defaults. A hand edit with a typo
+/// (or a read mid-save) used to move the file aside and run with remote
+/// power allowed and no engine login until someone noticed. Returns the
+/// line to log: once per problem, and once when it is fixed.
+fn next_config(
+    prev: HostConfig,
+    loaded: Result<HostConfig>,
+    problem: &mut Option<String>,
+) -> (HostConfig, Option<String>) {
+    match loaded {
+        Ok(cfg) => {
+            let fixed = problem
+                .take()
+                .map(|_| "host.toml reads again; using its settings".to_string());
+            (cfg, fixed)
+        }
+        Err(e) => {
+            let why = format!("{e:#}");
+            let line = (problem.as_deref() != Some(why.as_str())).then(|| {
+                format!("host.toml could not be read ({why}); keeping the settings from before")
+            });
+            *problem = Some(why);
+            (prev, line)
+        }
+    }
+}
+
+/// Who sent a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Caller {
+    /// A process on this machine: its own window, or a script.
+    Local,
+    /// A tailnet machine, and whether this machine's owner admits it.
+    Peer { allowed: bool },
+}
+
+impl Caller {
+    fn allowed(self) -> bool {
+        match self {
+            Caller::Local => true,
+            Caller::Peer { allowed } => allowed,
+        }
+    }
+}
+
+/// Who is behind a loopback connection. Only with userspace networking
+/// (`TUN` false) can it be a tailnet peer; then `whois` of the connection's
+/// address says which, and an address Tailscale knows nothing about is a
+/// process on this machine. A lookup that fails admits nobody.
+fn loopback_caller(
+    tun: Option<bool>,
+    owner: Option<&Owner>,
+    whois: impl FnOnce() -> Result<Option<tailscale::WhoIs>>,
+) -> Caller {
+    if tun != Some(false) {
+        return Caller::Local;
+    }
+    match whois() {
+        Ok(None) => Caller::Local,
+        Ok(Some(w)) => Caller::Peer {
+            allowed: owner.is_some_and(|o| o.admits(&w)),
+        },
+        Err(_) => Caller::Peer { allowed: false },
     }
 }
 
@@ -917,6 +1284,12 @@ fn nat_changed(old: &NatReport, new: &NatReport) -> bool {
         != (new.udp, new.ipv4, new.ipv6, new.hard, new.portmap)
 }
 
+/// Whether to listen for wake packets: only where `wake::probe` can find
+/// this machine's MAC to match them against, which is Windows.
+fn wants_wake_listener() -> bool {
+    cfg!(windows)
+}
+
 /// True when a service answers on loopback.
 pub fn service_alive() -> bool {
     http::request(
@@ -942,13 +1315,73 @@ fn starts_with_window_on(mac: bool, cfg: &HostConfig) -> bool {
     !mac || cfg.start_with_windows
 }
 
-/// Start `--background` if nothing answers on loopback.
-pub fn ensure_service_running() {
-    if service_alive() {
-        return;
+/// Start the background service if nothing answers on loopback. Through
+/// launchd or systemd when there is a login item, so it is supervised and
+/// there is only ever one; a copy of its own only where there is none (a
+/// Windows PC, or a Mac whose owner turned the login item off). A Mac that
+/// is not shared starts nothing: the service would only exit again, and a
+/// window that kept asking spawned one every four seconds for hours.
+/// Returns whether it asked for a start.
+pub fn ensure_service_running() -> bool {
+    if !starts_with_window(&HostConfig::load()) {
+        tracing::info!("not starting the background service: this Mac is not shared");
+        return false;
     }
+    if service_alive() {
+        return false;
+    }
+    #[cfg(not(windows))]
+    match crate::unix_setup::start_supervised() {
+        Some(Ok(by)) => {
+            tracing::info!("asked {by} to start the background service");
+            return true;
+        }
+        Some(Err(e)) => {
+            tracing::warn!("could not start the background service through its login item ({e:#}); starting it directly");
+        }
+        None => {}
+    }
+    spawn_service()
+}
+
+/// After an update: stop the service that answers (launchd's, or a copy an
+/// older window started) and start it again from the file now on disk.
+/// The supervisor would not restart it by itself, since /v1/quit exits 0.
+pub fn restart_service() {
+    let _ = http::request(
+        ("127.0.0.1", CONTROL_PORT),
+        "POST",
+        "/v1/quit",
+        None,
+        Duration::from_secs(2),
+    );
+    // Until it has let go of the port: a copy started while it still holds
+    // it would exit at once, and launchd would leave it at that.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while service_alive() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    ensure_service_running();
+}
+
+/// How soon after it started a copy that stops counts as one that could not
+/// start at all.
+const QUICK_EXIT: Duration = Duration::from_secs(5);
+
+/// Why the last copy this window started stopped at once, for the page.
+static QUICK_EXIT_NOTE: Mutex<Option<String>> = Mutex::new(None);
+
+/// The reason the last copy this window started stopped as soon as it
+/// started, once.
+pub fn take_quick_exit() -> Option<String> {
+    QUICK_EXIT_NOTE.lock().take()
+}
+
+/// Start a copy of `--background` as a child of this process.
+fn spawn_service() -> bool {
     let Ok(exe) = std::env::current_exe() else {
-        return;
+        return false;
     };
     let mut c = std::process::Command::new(exe);
     c.arg("--background")
@@ -960,15 +1393,72 @@ pub fn ensure_service_running() {
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x0000_0008 | 0x0800_0000); // DETACHED_PROCESS | CREATE_NO_WINDOW
     }
+    let started = Instant::now();
     match c.spawn() {
         Ok(mut child) => {
+            let pid = child.id();
             std::thread::spawn(move || {
-                let _ = child.wait();
+                // Exit 0 at once is no failure: another copy already
+                // answered, or a Mac turned out not to be shared.
+                if let Ok(status) = child.wait() {
+                    if !status.success() && started.elapsed() < QUICK_EXIT {
+                        let why = format!(
+                            "the background service stopped as it started ({status}); its log says why"
+                        );
+                        tracing::warn!("{why}");
+                        *QUICK_EXIT_NOTE.lock() = Some(why);
+                    }
+                }
             });
-            tracing::info!("started the background service");
+            tracing::info!("launched the background service (pid {pid})");
+            true
         }
-        Err(e) => tracing::error!("could not start the background service: {e}"),
+        Err(e) => {
+            tracing::error!("could not start the background service: {e}");
+            false
+        }
     }
+}
+
+/// The program file this process started from, as it was then: to tell
+/// when an update or a reinstall has put another one at that path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExeStamp {
+    path: std::path::PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl ExeStamp {
+    fn of(path: std::path::PathBuf) -> Option<Self> {
+        let m = std::fs::metadata(&path).ok()?;
+        Some(Self {
+            len: m.len(),
+            modified: m.modified().ok(),
+            path,
+        })
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Another file sits at the path now: another size or time. `false`
+    /// while the path cannot be read (gone, or held by a virus scanner).
+    pub fn replaced(&self) -> bool {
+        Self::of(self.path.clone())
+            .is_some_and(|now| (now.len, now.modified) != (self.len, self.modified))
+    }
+}
+
+/// This process's [`ExeStamp`], taken the first time it is asked for;
+/// `main` asks first thing. The path is kept from then on: on Linux
+/// `current_exe` follows the file an update renames away.
+pub fn started_from() -> Option<&'static ExeStamp> {
+    static STARTED: std::sync::OnceLock<Option<ExeStamp>> = std::sync::OnceLock::new();
+    STARTED
+        .get_or_init(|| std::env::current_exe().ok().and_then(ExeStamp::of))
+        .as_ref()
 }
 
 /// The `Content-Type` Latch's own callers send: JSON, or the executable
@@ -1092,6 +1582,98 @@ mod tests {
         assert!(!unnamed.admits(&relay));
     }
 
+    /// A Docker node's tailscaled in userspace mode relays every tailnet
+    /// peer from 127.0.0.1: only `whois` of the port tells them apart from
+    /// the node's own processes.
+    #[test]
+    fn a_peer_relayed_through_loopback_is_judged_like_any_other() {
+        let owner = Owner {
+            user: 21,
+            tagged: false,
+            tailnet: "ada@example.com".into(),
+        };
+        let never = || -> Result<Option<tailscale::WhoIs>> { panic!("no whois needed") };
+        // A kernel TUN, or a Tailscale that does not say: loopback is local.
+        assert_eq!(
+            loopback_caller(Some(true), Some(&owner), never),
+            Caller::Local
+        );
+        assert_eq!(loopback_caller(None, Some(&owner), never), Caller::Local);
+        // Userspace: whoever whois finds behind the port.
+        let found = |id, login: &str| {
+            let w = whois(id, login);
+            move || Ok(Some(w))
+        };
+        assert_eq!(
+            loopback_caller(Some(false), Some(&owner), found(21, "ada@example.com")),
+            Caller::Peer { allowed: true },
+            "the owner's Mac may ask, but is not the local window"
+        );
+        assert_eq!(
+            loopback_caller(Some(false), Some(&owner), found(77, "bob@example.net")),
+            Caller::Peer { allowed: false }
+        );
+        assert_eq!(
+            loopback_caller(Some(false), None, found(21, "ada@example.com")),
+            Caller::Peer { allowed: false },
+            "nobody to compare with while Tailscale is down"
+        );
+        assert_eq!(
+            loopback_caller(Some(false), Some(&owner), || Ok(None)),
+            Caller::Local,
+            "no peer behind the port: a process on this machine"
+        );
+        assert_eq!(
+            loopback_caller(Some(false), Some(&owner), || anyhow::bail!("timed out")),
+            Caller::Peer { allowed: false },
+            "a failed lookup admits nobody"
+        );
+        assert!(!Caller::Peer { allowed: false }.allowed());
+        assert!(Caller::Local.allowed());
+
+        // The window keeps working, and loopback never enters the cache.
+        let svc = Service::new();
+        let req = Request {
+            method: "GET".into(),
+            path: "/v1/status".into(),
+            ..Default::default()
+        };
+        assert_eq!(svc.handle("127.0.0.1:5".parse().unwrap(), &req).status, 200);
+        assert!(svc.auth.lock().is_empty());
+    }
+
+    #[test]
+    fn a_damaged_host_toml_keeps_the_last_good_settings() {
+        let good = HostConfig {
+            power_allowed: false,
+            sunshine_user: "latch".into(),
+            sunshine_pass: "secret".into(),
+            ..Default::default()
+        };
+        let mut problem = None;
+        let (cfg, line) = next_config(
+            good.clone(),
+            Err(anyhow::anyhow!("expected `=`")),
+            &mut problem,
+        );
+        assert_eq!(cfg, good, "power stays off and the engine login stays");
+        assert!(line.unwrap().contains("expected `=`"));
+        // The same problem every 5 s is said once.
+        let (cfg, line) = next_config(cfg, Err(anyhow::anyhow!("expected `=`")), &mut problem);
+        assert_eq!(cfg, good);
+        assert_eq!(line, None);
+        // Fixed: the file's settings, and one line to say so.
+        let edited = HostConfig {
+            power_allowed: true,
+            ..good.clone()
+        };
+        let (cfg, line) = next_config(cfg, Ok(edited.clone()), &mut problem);
+        assert_eq!(cfg, edited);
+        assert!(line.is_some());
+        let (_, line) = next_config(edited.clone(), Ok(edited), &mut problem);
+        assert_eq!(line, None);
+    }
+
     #[test]
     fn browsers_and_rebound_hostnames_cannot_read_or_write_the_api() {
         let svc = Service::new();
@@ -1145,6 +1727,25 @@ mod tests {
         svc.update_running.store(false, Ordering::Release);
         assert_eq!(svc.update(LOOPBACK, &req).status, 400);
         assert!(!svc.update_running.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn an_owner_can_turn_pushed_updates_off() {
+        let svc = Service::new();
+        svc.cfg.lock().accept_updates = false;
+        let r = svc.update(LOOPBACK, &Request::default());
+        if cfg!(windows) {
+            assert_eq!(r.status, 403, "{}", r.body);
+            assert!(r.body.contains("turned pushed updates off"), "{}", r.body);
+        } else {
+            assert_eq!(r.status, 400, "only a Windows PC takes pushes at all");
+        }
+        assert!(!svc.update_running.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn only_a_pc_listens_for_wake_packets() {
+        assert_eq!(wants_wake_listener(), cfg!(windows));
     }
 
     #[test]
