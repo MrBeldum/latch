@@ -6,36 +6,34 @@ GitHub release notes, so each version gets a heading of the form
 
 ## 4.1.1 (2026-10-02)
 
-- Setting up a Windows PC that an earlier version had set up (when the
-  app was called BroLink) now registers the `LatchStream` service. Setup
+- Setting up a Windows PC that a version before 4.1.0 had set up now
+  registers the `LatchStream` service. Setup
   moved the engine's folder and removed the old service, but treated the
   running engine as needing nothing more, so the new service was never
   registered and the engine ran only once someone had signed in.
 
 ## 4.1.0 (2026-10-02)
 
-- **BroLink is now Latch, by Bardbro.** The app, the repository
+- **Introducing Latch, by Bardbro.** The app, the repository
   (`github.com/MrBeldum/latch`), the release files (`latch-macos-arm64.tar.gz`,
   `latch-windows-x64.zip`), the executables (`Latch.app`, `latch-host.exe`),
   the services and login items, the environment variables (`LATCH_*`) and
   bardbro.com all carry the new name, with a new logo: a square with a
   corner cut away, and a blue square in the cut. Bardbro is the
   project behind it, for cloud gaming.
-- An installed BroLink updates itself to Latch. Settings, the pairing
-  identity, paired devices and the streaming engine carry over. On a Mac
-  the app moves from `BroLink.app` to `Latch.app` the first time it runs
-  and its login item with it; on Linux `latch.service` replaces
-  `brolink.service`; on Windows the host keeps working in place, and
-  `install-host.ps1` followed by **Set up as administrator** moves it to
-  `%LOCALAPPDATA%\Latch`, the `LatchStream` service and the new firewall
-  rule names. Machines on either name still find each other, and a 4.1 Mac
-  can still update a 4.0 PC. The release also carries
-  `brolink-macos-arm64.tar.gz` and `brolink-windows-x64.zip`, which are the
-  same builds under the old file names, because a 4.0 updater looks for
-  nothing else. Everything that still says BroLink is in
+- Older installs update to Latch. Settings, the pairing identity, paired
+  devices and the streaming engine carry over. On a Mac the app moves to
+  `Latch.app` the first time it runs and its login item with it; on Linux
+  `latch.service` replaces the old service; on Windows the host keeps
+  working in place, and `install-host.ps1` followed by **Set up as
+  administrator** moves it to `%LOCALAPPDATA%\Latch`, the `LatchStream`
+  service and the new firewall rule names. Updated and older machines
+  still find each other, and a 4.1 Mac can still update a 4.0 PC. Releases
+  also include compatibility downloads under the filenames required by
+  4.0 updaters. Runtime compatibility identifiers are documented in
   `crates/core/src/legacy.rs` and `crates/host/src/legacy.rs`.
-- `LATCH_DATA_DIR` and `LATCH_GITHUB_TOKEN` replace the `BROLINK_` names,
-  which still work. The Docker node and relay read `LATCH_*`.
+- `LATCH_DATA_DIR` and `LATCH_GITHUB_TOKEN` replace the old environment
+  variable names, which still work. The Docker node and relay read `LATCH_*`.
 - The About page names Bardbro and links to bardbro.com. The accent
   colour for focus and progress is the logo's blue, where it was violet.
 - The window is redesigned around one design system, in the product

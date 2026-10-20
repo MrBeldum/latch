@@ -45,19 +45,17 @@ in the `input` group: Sunshine must use its XTest fallback for this Xvfb session
 Granting `/dev/uinput` access makes input go to kernel devices that Xvfb does not
 consume, resulting in visible video but no functioning mouse or keyboard.
 
-## Upgrading from BroLink (before 4.1.0)
+## Upgrading from versions before 4.1.0
 
-Latch was called BroLink until 4.1.0, and a node that was set up then has
-`brolink*.service` units, `/usr/local/bin/brolink-host`, a `brolink.Xauthority`
-cookie and `~/.local/share/brolink`. `migrate-from-brolink.sh` in this
-directory swaps the units, the cookie name and the wait script for the new
-ones and starts Latch; `latch-host` moves the data folder and the engine's
-login file itself the first time it runs, keeping the pairing and the
-Tailscale identity.
+Nodes set up before 4.1.0 use earlier names for their services, host binary,
+display cookie and data folder. `migrate-legacy.sh` in this directory swaps
+the units, cookie name and wait script for the current ones and starts
+Latch. On its first run, `latch-host` moves the data folder and the engine's
+login file, keeping the pairing and Tailscale identity.
 
 ```sh
 sudo install -m 0755 latch-host /usr/local/bin/latch-host
-bash migrate-from-brolink.sh
+bash migrate-legacy.sh
 ```
 
 ## Migration and recovery
