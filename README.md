@@ -107,24 +107,23 @@ relay, as this project's own VPS does: [deploy/native/README.md](deploy/native/R
 The packet relay (when two NATs cannot punch through) is a separate kit:
 [deploy/relay/RELAY.md](deploy/relay/RELAY.md).
 
-## Coming from BroLink
+## Upgrading from versions before 4.1.0
 
-Latch was called BroLink until 4.1.0. An installed BroLink updates itself
-to Latch and keeps its settings, its pairing and its streaming engine, and
-every machine that updates can still talk to one that has not yet.
+An older install updates to Latch and keeps its settings, pairing and
+streaming engine. Updated machines can still talk to ones that have not
+yet updated.
 
-- **Mac:** the app moves from `BroLink.app` to `Latch.app` the first time
-  it runs, and its login item with it.
+- **Mac:** the app moves to `Latch.app` the first time it runs, and its
+  login item moves with it.
 - **Windows:** the host updates in place and keeps working. To move it to
-  the new folder and names (`%LOCALAPPDATA%\Latch`, `latch-host.exe`, the
-  `LatchStream` service), run `install-host.ps1` from the new zip, then
-  **Set up as administrator** once on the **Sharing** tab.
-- **Linux:** the first start registers `latch.service` and retires
-  `brolink.service`. The files in `deploy/native/` have new names; see
-  [deploy/native/README.md](deploy/native/README.md).
+  `%LOCALAPPDATA%\Latch`, `latch-host.exe` and the `LatchStream` service,
+  run `install-host.ps1` from the new zip, then **Set up as administrator**
+  once on the **Sharing** tab.
+- **Linux:** the first start registers `latch.service` and retires the old
+  service. For a native desktop, see [deploy/native/README.md](deploy/native/README.md).
 
-The environment variables beginning `BROLINK_` are now `LATCH_`; for
-`LATCH_DATA_DIR` and `LATCH_GITHUB_TOKEN` the old names still work.
+Use `LATCH_DATA_DIR` and `LATCH_GITHUB_TOKEN` for environment overrides.
+The equivalent names from versions before 4.1.0 still work.
 
 ## Updates
 

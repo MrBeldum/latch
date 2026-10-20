@@ -47,9 +47,9 @@ jobs:
           cp docs/MACOS.md dist.noindex/README-MACOS.md
           cp LICENSE NOTICE dist.noindex/
           cd dist.noindex && tar czf latch-macos-arm64.tar.gz Latch.app README-MACOS.md LICENSE NOTICE
-      # A 4.0 updater downloads brolink-macos-arm64.tar.gz and installs the
-      # BroLink.app inside it. The same app under that folder name is what
-      # lets it update at all; on its first run it moves itself to Latch.app
+      # A 4.0 updater downloads only its original archive and app names.
+      # The same app under that folder name lets it update at all; on its
+      # first run it moves itself to Latch.app
       # and takes over the launch agent (crates/host/src/unix_setup.rs,
       # adopt_legacy_bundle). Nothing in 4.1 or later reads this asset.
       - name: package for 4.0 updaters
@@ -108,7 +108,7 @@ jobs:
             throw "engine archive is not $($env:ENGINE_TAG): expected $($env:ENGINE_SHA256), got $got"
           }
           Compress-Archive -Path dist\* -DestinationPath latch-windows-x64.zip
-      # A 4.0 Mac takes brolink-host.exe out of brolink-windows-x64.zip and
+      # A 4.0 Mac takes the host executable from its original archive and
       # sends it to each PC. The new program under the old name is what lets
       # it update the PC; nothing in 4.1 or later reads this asset.
       - name: package for 4.0 updaters

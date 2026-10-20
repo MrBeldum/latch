@@ -1,5 +1,5 @@
-//! What this host registered with the operating system before 4.1.0, when
-//! Latch was called BroLink, and how an upgraded copy retires it.
+//! What this host registered with the operating system before 4.1.0,
+//! and how an upgraded copy retires it.
 //!
 //! An upgrade by the updater swaps the program and nothing else, so the
 //! launch agent, the user unit, the Windows service, the scheduled task,
