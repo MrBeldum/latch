@@ -48,8 +48,9 @@ quarantine flag is how you tell macOS you fetched it deliberately.
 ```
 
 builds for `aarch64-apple-darwin` (Xcode command line tools and CMake are
-needed for the C parts), bundles `dist/Latch.app`, and installs it to
-`/Applications`. A locally built app never carries the quarantine flag.
+needed for the C parts), bundles `dist.noindex/Latch.app`, and installs it to
+`/Applications`. The `.noindex` folder keeps build copies out of app search.
+A locally built app never carries the quarantine flag.
 
 ### Signing
 
@@ -59,9 +60,9 @@ notarize:
 
 ```bash
 CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/bundle-macos.sh
-ditto -c -k --keepParent dist/Latch.app dist/Latch.zip
-xcrun notarytool submit dist/Latch.zip --keychain-profile "notary" --wait
-xcrun stapler staple dist/Latch.app
+ditto -c -k --keepParent dist.noindex/Latch.app dist.noindex/Latch.zip
+xcrun notarytool submit dist.noindex/Latch.zip --keychain-profile "notary" --wait
+xcrun stapler staple dist.noindex/Latch.app
 ```
 
 ## First run
@@ -117,16 +118,21 @@ the Mac cursor's position is sent 1:1 instead and nothing is captured.
 | **Keys** | Ctrl+Alt+Delete, Windows key, Alt+Tab, Escape, Print Screen; and **Command acts as Ctrl** |
 | **Stats** | The Stream performance panel: frame rate and bitrate against what was asked for, round trip, packet loss, encode, assembly, queue and decode times, and the decoder. **Copy diagnostics** puts it all on the clipboard |
 | **Full screen** | Toggle; the setting decides how a session starts |
-| **PC** (or **Mac**, **Machine**) | Sleep, Restart…, Shut down… (the latter two ask first); **Update Latch Host…** for a PC whose host is older than 3.1 |
+| **PC** (or **Mac**, **Machine**) | Sleep…, Restart…, Shut down…, each asking first, when the machine's owner allows them; Sleep only on a Windows PC, the one kind a wake packet can bring back. **Update Latch Host…** for a PC whose host is older than 3.1 |
 | **Stream settings** | The same controls as Settings: quality profile, resolution, frame rate, bitrate and codec. **Apply and reconnect** restarts the session with them in a second or two; Escape or the close button leaves them as they were |
 | **Disconnect** | End the session |
 
 On a narrow window everything but **Stream settings** and **Disconnect**
 folds into one **More** menu.
 
-Everything else on the keyboard goes to the PC as pressed. With **Command
-acts as Ctrl** on (the default), ⌘C, ⌘V, ⌘Z and the rest do on Windows what
-they do on the Mac, and ⌘ can stay held across several of them.
+Everything else on the keyboard goes to the PC as pressed, in the order it
+was pressed. With **Command acts as Ctrl** on (the default), ⌘C, ⌘V, ⌘Z and
+the rest do on Windows and Linux what they do on the Mac, and ⌘ can stay
+held across several of them; a Mac at the other end always gets ⌘ as
+Command. While the stream has the keys, ⌘Q, ⌘H and ⌘+/⌘−/⌘0 go to the PC
+too (⌘Q closes the PC's window, not Latch): quit or hide Latch from the menu
+bar or the Dock, after **Disconnect**, or while the toolbar or a panel has
+the focus. ⌘Tab and ⌘Space stay on the Mac.
 
 ### Clipboard
 
@@ -134,8 +140,34 @@ With Latch Host 3.1 or newer on the PC, the clipboard follows you both
 ways: text copied on the PC is in the Mac's clipboard a second later, and
 ⌘V on the PC pastes the text the Mac has (Latch sends it to the PC first,
 then presses Ctrl+V there). Text only, up to 32 KB; an image or a file on
-either clipboard is left alone. Short notices under the toolbar say when
-something crossed. With an older host, ⌘V pastes what the PC last copied.
+either clipboard is left alone, so ⌘V with a screenshot on the Mac's
+clipboard, or after copying a file on the PC, pastes what the PC itself last
+copied. Keys typed right after ⌘V wait for the paste to land (up to two
+seconds). Short notices under the toolbar say when something crossed. With
+an older host, ⌘V pastes what the PC last copied.
+
+A Linux machine gets ⌘C, ⌘X and ⌘V as Ctrl+Insert, Shift+Delete and
+Shift+Insert, which GTK and Qt apps, Firefox, Chromium and terminals all
+take for copy, cut and paste; Ctrl+C in a terminal would interrupt the
+running program. Latch Host there puts pasted text in the selection as
+well as the clipboard, because terminals paste the selection on
+Shift+Insert. To copy in a terminal, select the text and press ⌘C.
+
+A Linux VPS draws a desktop of one fixed size and encodes on the CPU, so
+Latch never asks it for more than that size: a larger resolution setting
+gets the desktop's own size, a smaller one (720p, say) is scaled down. On
+a machine with fewer than four cores, Latch asks for at most 30 fps at
+1080p, and more for a smaller picture in proportion to the pixels it
+saves: up to 67 fps at 720p, 43 at 900p, 120 at 540p. To get 60 fps from
+such a machine, pick 720p (or 540p) and 60 fps.
+
+## Only connecting from this Mac
+
+On a Mac, **Share this Mac** on the **Sharing** page decides whether Latch
+runs in the background so other machines can connect here. Turn it off and
+this Mac only connects to the others: the background service and the
+streaming engine stop, opening Latch no longer starts them, and nothing of
+Latch runs once its window closes. **Share this Mac** turns it back on.
 
 ### Laggy? Look at the path
 
@@ -177,13 +209,13 @@ it from this network (see below).
 | Setting | What it changes |
 |---------|-----------------|
 | Quality | **Recommended** (the default) asks for this screen's own size at 50 Mbps, on every path. **Smooth** is 1080p · 60 fps · 20 Mbps, **Balanced** match screen · 60 · 50, **Sharp** match screen · 60 · 100. **Custom** uses the rows below; changing one of them switches to it |
-| Resolution | **Match screen** is this display's own pixel size (3024×1964 on a 14" MacBook Pro), so the picture fills it exactly. **1080p**, **1440p** and **4K** are the standard 16:9 sizes, 1920×1080, 2560×1440 and 3840×2160; on a display of another shape they leave a bar above and below. The list shows the pixel size of each. The PC switches its display to the size asked for; a PC with no monitor needs a virtual display that lists that size, which setup on the PC arranges for the Virtual Display Driver |
+| Resolution | **Match screen** is this display's own pixel size (3024×1964 on a 14" MacBook Pro), so the picture fills it exactly. **540p**, **720p**, **900p**, **1080p**, **1440p** and **4K** are the standard 16:9 sizes, 960×540, 1280×720, 1600×900, 1920×1080, 2560×1440 and 3840×2160; on a display of another shape they leave a bar above and below. The sizes below 1080p are for a PC that encodes in software or a slow network: fewer pixels leave more bitrate for each and a higher frame rate. The list shows the pixel size of each. The PC switches its display to the size asked for; a PC with no monitor needs a virtual display that lists that size, which setup on the PC arranges for the Virtual Display Driver |
 | Frame rate | 30 to 240; the PC's display is switched to match when it can |
 | Bitrate | 2 to 150 Mbps; arrow keys step by 1, Shift-arrow by 10. The encoder holds this rate. Large swings mean the path is dropping packets |
 | Codec | Auto (HEVC when both ends can), HEVC, H.264 |
 | Open streams full screen | How a session starts |
 | Capture the mouse | The toolbar's Mouse choice, remembered |
-| Command acts as Ctrl | Off makes ⌘ the Windows key (Mac only) |
+| Command acts as Ctrl | Off makes ⌘ the Windows key on Windows and Linux machines; a Mac always gets ⌘ as Command |
 | App to open | The app on the PC to launch; "Desktop" is the whole screen. The list fills in after the first connection |
 | Offer to sleep a machine after a session | Off by default. Asleep, Tailscale is off there; this Mac can only wake it from its own network |
 | Keep Latch up to date | Updates this app and the Windows PCs' Latch Host; **Check now** checks at once |

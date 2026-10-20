@@ -14,6 +14,9 @@ pub struct LocalShare {
     pub setup_result: Option<Result<(), String>>,
     /// Someone stopped the background service from the Sharing page.
     pub service_stopped: bool,
+    /// The owner turned Share this Mac off: this Mac only connects to the
+    /// others, and its service is off on purpose.
+    pub viewer_only: bool,
 }
 
 pub type Slot = Arc<Mutex<LocalShare>>;

@@ -33,6 +33,11 @@ eframe.workspace = true
 [target.'cfg(not(windows))'.dependencies]
 arboard = "3"
 
+# The X screen size the engine captures (see streamer::capture_size).
+# arboard already links it on Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = "0.13"
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Devices_Display",
@@ -40,11 +45,14 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi",
     "Win32_Storage_FileSystem",
     "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_System_Power",
     "Win32_System_RemoteDesktop",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(windows)'.build-dependencies]

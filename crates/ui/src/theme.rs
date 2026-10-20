@@ -307,7 +307,20 @@ pub fn apply(ctx: &egui::Context) {
     // Popups, menus and tooltips appear and go at once: a fade would ask
     // for repaints the stream view does not want.
     style.animation_time = 0.1;
-    ctx.set_style(style);
+    // Latch has one look, dark, whatever the system's appearance. egui
+    // keeps a style per theme and picks one from the system's every frame,
+    // so on a Mac or PC in Light mode it drew with its stock light style,
+    // which has no caption or title text styles: the first caption panicked.
+    ctx.set_theme(egui::ThemePreference::Dark);
+    ctx.set_style_of(egui::Theme::Light, style.clone());
+    ctx.set_style_of(egui::Theme::Dark, style);
+    // A menu whose button is no longer drawn (the toolbar folded into More,
+    // the stream ended, the page changed) would stay open in egui's memory
+    // with nothing on screen, blocking the stream's input and Escape.
+    ctx.on_end_pass(
+        "latch.orphan_menu",
+        Arc::new(crate::widgets::close_orphan_menu),
+    );
 }
 
 fn font(bytes: &'static [u8]) -> Arc<FontData> {
@@ -377,10 +390,68 @@ fn fonts() -> FontDefinitions {
     for (family, list) in families {
         fonts.families.insert(family, list);
     }
+    // Last of all, the system's Korean and CJK font: none of the above has
+    // Hangul, so a Korean PC's error messages or an app named in Korean
+    // came out as empty boxes.
+    if let Some(bytes) = cjk_fallback() {
+        fonts
+            .font_data
+            .insert(CJK.into(), Arc::new(FontData::from_static(bytes)));
+        for list in fonts.families.values_mut() {
+            list.push(CJK.into());
+        }
+    }
     fonts
 }
 
-fn visuals() -> Visuals {
+const CJK: &str = "SystemCJK";
+
+/// The system font with Hangul and the CJK ideographs, read once per
+/// process (it is 15-20 MB) and kept; None when the machine has none of
+/// the usual ones, or the file does not parse (egui would panic on it).
+fn cjk_fallback() -> Option<&'static [u8]> {
+    static FONT: std::sync::OnceLock<Option<&'static [u8]>> = std::sync::OnceLock::new();
+    *FONT.get_or_init(|| {
+        let bytes = cjk_candidates().iter().find_map(|p| usable_font(p))?;
+        Some(&*Box::leak(bytes.into_boxed_slice()))
+    })
+}
+
+/// The font file at `path`, if egui will be able to read it.
+fn usable_font(path: &std::path::Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    ab_glyph::FontRef::try_from_slice_and_index(&bytes, 0).ok()?;
+    Some(bytes)
+}
+
+/// Where each OS keeps a font that covers Korean, first choice first. On a
+/// Mac the smaller AppleGothic comes before Apple SD Gothic Neo, whose
+/// collection of nine weights is 55 MB.
+fn cjk_candidates() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if cfg!(target_os = "macos") {
+        vec![
+            "/System/Library/Fonts/Supplemental/AppleGothic.ttf".into(),
+            "/System/Library/Fonts/AppleSDGothicNeo.ttc".into(),
+        ]
+    } else if cfg!(windows) {
+        let windir = std::env::var_os("WINDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        vec![windir.join("Fonts").join("malgun.ttf")]
+    } else {
+        [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        ]
+        .map(PathBuf::from)
+        .to_vec()
+    }
+}
+
+pub(crate) fn visuals() -> Visuals {
     let p = PALETTE;
     let mut v = Visuals::dark();
     v.override_text_color = None;
@@ -512,6 +583,57 @@ mod tests {
         }
         // The focus ring is drawn outside a control, two points clear of
         // it, so it is always seen against the background.
+    }
+
+    #[test]
+    fn a_light_mode_system_still_gets_the_dark_style() {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            // Captions use a text style only Latch's style has; egui's stock
+            // light style panicked on the first one.
+            let _ = ctx.run(
+                egui::RawInput {
+                    system_theme: Some(theme),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        crate::caption(ui, "caption");
+                        crate::small_print(ui, "small print");
+                    });
+                },
+            );
+            assert_eq!(ctx.theme(), egui::Theme::Dark);
+            assert_eq!(ctx.style().visuals.panel_fill, PALETTE.bg);
+        }
+    }
+
+    #[test]
+    fn korean_text_is_drawn_when_the_system_has_a_font_for_it() {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        let _ = ctx.run(Default::default(), |_| {});
+        let has = ctx.fonts(|f| f.has_glyphs(&FontId::proportional(14.0), "연결이 거부되었습니다"));
+        assert_eq!(has, cjk_fallback().is_some());
+        if cfg!(target_os = "macos") {
+            assert!(has, "every Mac has AppleGothic");
+        }
+    }
+
+    #[test]
+    fn a_font_file_that_does_not_parse_is_skipped() {
+        let dir = std::env::temp_dir().join(format!("latch-font-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("bad.ttf");
+        std::fs::write(&bad, b"not a font at all").unwrap();
+        assert!(usable_font(&bad).is_none());
+        assert!(usable_font(&dir.join("missing.ttf")).is_none());
+        let geist = include_bytes!("../assets/Geist-Regular.ttf");
+        let good = dir.join("good.ttf");
+        std::fs::write(&good, geist).unwrap();
+        assert_eq!(usable_font(&good).as_deref(), Some(&geist[..]));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

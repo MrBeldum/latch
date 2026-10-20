@@ -1,6 +1,13 @@
+# The node image builds from the repository root (deploy/node). Patterns
+# without **/ match only at the root, so every .env (the node's and the
+# relay's hold a Tailscale auth key) is named for any depth: none may reach
+# the build stage, whose layer keeps whatever it copies.
 target
 dist
+dist.noindex
 .git
 **/.DS_Store
-*.app
-.env
+**/*.app
+**/.env
+**/.env.*
+**/__pycache__

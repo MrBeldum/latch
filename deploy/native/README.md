@@ -25,9 +25,21 @@ The `.service` files in this directory are installed in
 ordering without conflicting with Latch's automatic registration.
 `wait-engine.py` is installed as `/usr/local/libexec/latch-wait-engine.py`.
 
+`latch-engine.service` and `latch-display.service` carry `CPUWeight=1000`:
+the encoder and the X server it copies frames from get ten times the CPU
+share of other user services, which matters on a small VPS that also runs
+agents. Latch Host keeps the engine on the Linux profile
+(`crates/host/src/setup.rs`, `LINUX_ENGINE_CONF`: no frame-rate floor,
+`superfast`) and tells viewers the X screen's size and, on fewer than four
+cores, a 30 fps ceiling.
+
 `latch.service` pulls in `latch-engine.service`,
 `latch-desktop.service`, and `latch-display.service`. PulseAudio runs as
-its standard user service. Check them as `ubuntu`:
+its standard user service. Logging out of XFCE starts a fresh session
+(`latch-desktop.service` restarts whenever it ends, retrying more slowly
+if it keeps failing); like any automatic restart of a unit the others
+require, it also restarts the engine and Latch Host, so a viewer
+reconnects. Check them as `ubuntu`:
 
 ```sh
 systemctl --user status latch latch-engine latch-desktop latch-display
@@ -44,6 +56,51 @@ The X server disables TCP and uses an authentication cookie in
 in the `input` group: Sunshine must use its XTest fallback for this Xvfb session.
 Granting `/dev/uinput` access makes input go to kernel devices that Xvfb does not
 consume, resulting in visible video but no functioning mouse or keyboard.
+
+## Installing and updating latch-host
+
+Releases publish the Linux host as `latch-host-linux-arm64.tar.gz` and
+`latch-host-linux-x64.tar.gz`, each with a `.sha256` beside it. They are built
+and tested on Ubuntu 24.04 by the release workflow, so they need glibc 2.39
+or later. The Mac pushes updates to Windows hosts only; a Linux host is
+updated by installing the next release the same way:
+
+```sh
+tag=vX.Y.Z    # the release to install
+arch=arm64    # or x64
+base=https://github.com/MrBeldum/latch/releases/download/$tag
+curl -fLO "$base/latch-host-linux-$arch.tar.gz"
+curl -fLO "$base/latch-host-linux-$arch.tar.gz.sha256"
+sha256sum -c "latch-host-linux-$arch.tar.gz.sha256"
+tar xzf "latch-host-linux-$arch.tar.gz"
+sudo install -m 0755 "latch-host-linux-$arch/latch-host" /usr/local/bin/latch-host
+systemctl --user restart latch.service
+```
+
+The archive also carries this directory as `native/`. Re-running
+`migrate-legacy.sh` from it (safe twice) reinstalls the units and
+reloads systemd, which is how a change to them (such as the desktop's
+restart policy) reaches a running node without restarting anything.
+
+## A desktop that takes the viewer's size
+
+Xvfb cannot change size, so the relay desktop is streamed at 1920x1080 (a
+smaller size the Mac asks for is that desktop scaled down). An X server that
+can resize (Xorg with the dummy driver) can instead switch to each stream's
+size: give Sunshine a `global_prep_cmd` that runs `xrandr` with
+`SUNSHINE_CLIENT_WIDTH` and `SUNSHINE_CLIENT_HEIGHT`, and set
+`LATCH_DISPLAY_FOLLOWS_VIEWER=1` in `latch.service.d/desktop.conf` so Latch
+Host stops reporting a fixed capture size. Use a mode at 60 Hz for every size
+(`xrandr --newmode` with a pixel clock of 60 x htotal x vtotal): the
+compositor and browsers draw at the mode's rate.
+
+That needs Sunshine 2026.1014 or later. Earlier ones send absolute pointer
+positions through an XTest fallback that keeps the screen size it saw at
+startup, so after a resize the pointer lands at that size's scale (twice as
+far at 540p, two thirds as far at a 3024x1964 Match screen). Relative
+movement, and a desktop that stays at its startup size, are fine with any
+version. The Mac launches the Desktop again whenever it asks for another
+size than it last did, since a prep command runs only at a launch.
 
 ## Upgrading from versions before 4.1.0
 

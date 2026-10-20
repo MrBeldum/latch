@@ -2,6 +2,12 @@
 # engine archive into %LOCALAPPDATA%\Latch, add Start Menu and Desktop
 # shortcuts, and open it. The app itself runs the one administrator step
 # (engine, firewall, Wake-on-LAN) when you click "Set up this PC".
+#
+# -NoStart leaves the window closed. The background service this stops to
+# replace the exe always comes back, in the signed-in user's session: run
+# over SSH (session 0, no desktop) it is started there through a one-off
+# scheduled task, since a copy started in the SSH session could not see the
+# desktop and ends with it.
 [CmdletBinding()]
 param(
     [string]$Exe = "",
@@ -81,6 +87,38 @@ if (Test-Path $OldDir) {
 Write-Host "Shortcut: Desktop\Latch Host.lnk"
 Write-Host "Open Latch Host and click 'Set up this PC' once."
 Write-Host "If you already ran setup from the unzipped copy, run it once more from this install so the firewall allows $DestExe."
-if (-not $NoStart) {
+if ((Get-Process -Id $PID).SessionId -eq 0) {
+    # The task runs as this user, unelevated like the Run key, in the session
+    # they are signed in to. Task Scheduler's defaults would stop the host
+    # after 72 hours, or on battery, and run it at below-normal priority.
+    $TaskName = "LatchHostStart"
+    $up = $false
+    try {
+        $action = New-ScheduledTaskAction -Execute $DestExe -Argument "--background" -WorkingDirectory $DestDir
+        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Priority 5
+        Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+        Start-ScheduledTask -TaskName $TaskName
+        foreach ($i in 1..20) {
+            Start-Sleep -Milliseconds 750
+            try {
+                Invoke-RestMethod -Uri "http://127.0.0.1:47850/v1/status" -UseBasicParsing -TimeoutSec 2 | Out-Null
+                $up = $true
+                break
+            } catch {}
+        }
+    } catch {
+        Write-Host "Could not start Latch Host in the signed-in session: $_"
+    }
+    # The task has no trigger, so left registered it never runs by itself;
+    # removing it could end the copy it just started.
+    if ($up) {
+        Write-Host "Latch Host is running in the signed-in user's session."
+    } else {
+        Write-Host "Nobody is signed in to this PC's desktop: Latch Host starts at the next sign-in."
+    }
+} elseif ($NoStart) {
+    Start-Process -FilePath $DestExe -ArgumentList "--background" -WorkingDirectory $DestDir
+} else {
     Start-Process -FilePath $DestExe -WorkingDirectory $DestDir
 }

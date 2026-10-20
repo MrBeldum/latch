@@ -42,9 +42,14 @@ pub const UPDATE_MAX_BYTES: usize = 128 * 1024 * 1024;
 pub const FIRST_UPDATE_VERSION: &str = "3.1.0";
 
 pub const CLIPBOARD_PATH: &str = "/v1/clipboard";
-/// Clipboard text longer than this is cut. It has to fit a 64 KiB request
-/// body once JSON-escaped, and nobody pastes a novel through a stream.
+/// Clipboard text longer than this is cut: nobody pastes a novel through a
+/// stream.
 pub const CLIPBOARD_MAX_BYTES: usize = 32 * 1024;
+/// ... and so is text that would be longer than this once JSON-escaped, so
+/// it fits the 64 KiB body either side accepts with room for the other
+/// fields. A quote or a newline takes two bytes there and other control
+/// characters six, so 32 KiB of them alone would not fit.
+pub const CLIPBOARD_MAX_JSON: usize = 60 * 1024;
 
 /// The PC's clipboard, as far as it is text.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,20 +61,40 @@ pub struct Clipboard {
     pub seq: u64,
     /// The text was cut to [`CLIPBOARD_MAX_BYTES`].
     pub truncated: bool,
+    /// A write also sets the X selection (PRIMARY), so Shift+Insert pastes
+    /// it in a terminal. Linux hosts newer than 4.1.1; false from any other.
+    pub selection: bool,
 }
 
 impl Clipboard {
-    /// `text` cut to the size limit on a character boundary.
+    /// `text` cut on a character boundary to [`CLIPBOARD_MAX_BYTES`], and
+    /// to [`CLIPBOARD_MAX_JSON`] once escaped.
     pub fn fit(text: &str, seq: u64) -> Self {
-        let mut end = text.len().min(CLIPBOARD_MAX_BYTES);
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
+        let (mut raw, mut escaped, mut end) = (0, 0, text.len());
+        for (i, c) in text.char_indices() {
+            let (r, e) = (c.len_utf8(), json_len(c));
+            if raw + r > CLIPBOARD_MAX_BYTES || escaped + e > CLIPBOARD_MAX_JSON {
+                end = i;
+                break;
+            }
+            raw += r;
+            escaped += e;
         }
         Self {
             text: text[..end].to_string(),
             seq,
             truncated: end < text.len(),
+            selection: false,
         }
+    }
+}
+
+/// How many bytes `c` takes inside a JSON string as serde_json writes it.
+fn json_len(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\u{08}' | '\u{0C}' | '\n' | '\r' | '\t' => 2,
+        c if (c as u32) < 0x20 => 6,
+        c => c.len_utf8(),
     }
 }
 
@@ -157,6 +182,23 @@ pub struct Streamer {
     /// with no monitor or speakers has no audio device, and Sunshine then
     /// streams silence.
     pub audio_problem: String,
+    /// The desktop the engine captures, `[width, height]`, when its size is
+    /// fixed whatever a viewer asks for: a Linux X screen. Absent when the
+    /// host matches the viewer's size itself (Windows' virtual display), and
+    /// from 4.1.1 and older hosts. A viewer asks for no more than this size:
+    /// a larger one is the same picture scaled up, blurrier and dearer to
+    /// encode; a smaller one is scaled down and cheaper.
+    pub capture_size: Option<[u32; 2]>,
+    /// The highest frame rate the engine keeps up with on this machine at
+    /// `capture_size`, or at 1920 × 1080 when that is absent; 0 when
+    /// nothing limits it. Set for software encoding on a small CPU, where
+    /// asking for more only drops frames. A viewer asking for fewer pixels
+    /// raises it in proportion.
+    pub max_fps: u32,
+    /// A viewer is connected right now, from the engine's own log. A Mac
+    /// holds a host update back while it is true, instead of sending the
+    /// whole executable to be turned down. False from older hosts.
+    pub viewer: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,6 +275,21 @@ mod tests {
     }
 
     #[test]
+    fn an_older_host_reports_no_capture_size_or_frame_rate_limit() {
+        let s: Status =
+            serde_json::from_str(r#"{"streamer":{"running":true,"encoder":"software"}}"#).unwrap();
+        assert_eq!(s.streamer.capture_size, None);
+        assert_eq!(s.streamer.max_fps, 0);
+        let mut s = s;
+        s.streamer.capture_size = Some([1920, 1080]);
+        s.streamer.max_fps = 30;
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""capture_size":[1920,1080]"#), "{json}");
+        let back: Status = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
     fn power_actions_are_lowercase_on_the_wire() {
         let r = PowerRequest {
             action: PowerAction::Shutdown,
@@ -244,6 +301,13 @@ mod tests {
         let r: PowerRequest = serde_json::from_str(r#"{"action":"sleep"}"#).unwrap();
         assert_eq!(r.action, PowerAction::Sleep);
         assert!(serde_json::from_str::<PowerRequest>(r#"{"action":"Sleep"}"#).is_err());
+    }
+
+    #[test]
+    fn an_older_hosts_clipboard_does_not_claim_the_selection() {
+        let c: Clipboard = serde_json::from_str(r#"{"text":"x","seq":1}"#).unwrap();
+        assert!(!c.selection);
+        assert!(!Clipboard::fit("x", 1).selection);
     }
 
     #[test]
@@ -264,6 +328,43 @@ mod tests {
         assert_eq!(s.nat, None);
         assert_eq!(s.streamer.encoder, "");
         assert_eq!(s.streamer.audio_problem, "");
+    }
+
+    #[test]
+    fn clipboard_text_fits_a_request_body_however_it_escapes() {
+        let body = |c: &Clipboard| serde_json::to_string(c).unwrap().len();
+        for s in [
+            "\u{1b}".repeat(CLIPBOARD_MAX_BYTES),
+            "\"".repeat(CLIPBOARD_MAX_BYTES),
+            "\n".repeat(CLIPBOARD_MAX_BYTES),
+            "a\u{1}\"é\\".repeat(20_000),
+        ] {
+            let c = Clipboard::fit(&s, u64::MAX);
+            assert!(c.truncated);
+            assert!(s.starts_with(&c.text));
+            assert!(body(&c) <= 64 * 1024, "{} bytes", body(&c));
+        }
+        // Plain text still runs to the byte limit.
+        let plain = "x".repeat(CLIPBOARD_MAX_BYTES + 10);
+        let c = Clipboard::fit(&plain, 1);
+        assert_eq!(c.text.len(), CLIPBOARD_MAX_BYTES);
+        assert!(c.truncated);
+        let exact = "x".repeat(CLIPBOARD_MAX_BYTES);
+        assert!(!Clipboard::fit(&exact, 1).truncated);
+    }
+
+    #[test]
+    fn the_escaped_length_matches_serde_json() {
+        let mut chars: Vec<char> = (0u8..128).map(char::from).collect();
+        chars.extend(['é', '€', '한', '😀', '\u{7f}', '\u{2028}']);
+        for c in chars {
+            let s = c.to_string();
+            assert_eq!(
+                json_len(c),
+                serde_json::to_string(&s).unwrap().len() - 2,
+                "{c:?}"
+            );
+        }
     }
 
     #[test]

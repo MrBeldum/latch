@@ -4,6 +4,159 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## Unreleased
+
+- **Updates after a stream.** A Windows PC took any Desktop left running
+  after a viewer had gone for a live stream and turned down every pushed
+  update, so the Mac sent the whole exe again every three minutes. The host
+  now defers an update only while a viewer is connected (a viewer that
+  vanished, as with a Mac that slept, counts as gone), reports that in its
+  status so the Mac waits instead of uploading, and a host from before this
+  that still says no is asked less and less often (up to once an hour).
+- **Docker nodes and identity.** Under userspace Tailscale every tailnet
+  machine reached the control API from 127.0.0.1 and was trusted as the
+  local panel. Loopback connections are now checked with `tailscale whois`
+  of their port, and the node kit runs Tailscale with kernel networking.
+- **Pairing.** The Mac hands the PIN over beside the first pairing request
+  instead of in front of it, so pairing goes on the moment the PC accepts
+  the PIN, a request that fails shows its error at once, and Cancel works
+  throughout. A refusal from Latch on the PC is shown with its reason
+  instead of "isn't answering" and ends the attempt; the PIN goes to this
+  Mac's own pending pairing, never another device's.
+- **Cancelling a connection** no longer quits an app or desktop it had
+  rejoined on the PC. Connection failures are logged with every cause and
+  the banner names the step that failed.
+- **Power.** Sleep is offered only for Windows PCs and refused by hosts
+  nothing can wake (a Linux VM such as a VPS desktop, a Mac, a container),
+  every power action asks first and follows the owner's setting, the
+  stream ends only once the machine has agreed, and actions go to the
+  machine picked even when two share a name. A Mac's failed Restart or Shut
+  down is reported, and a Developer ID build carries the Apple Events
+  entitlement it needs.
+- **Stream input in order.** Keys, clicks and pastes reach the PC in the
+  order they were made: a quickly released Shift or ⌘ no longer drops off a
+  keystroke, a click lands where it was made, and keys typed right after ⌘V
+  wait for the paste. Horizontal scrolling goes the right way. ⌘Q, ⌘H and
+  ⌘+/⌘−/⌘0 reach the PC while the stream has the keys. The host key no longer
+  leaves keys stuck or sends a stray Alt, clicking the picture while
+  connecting no longer locks the mouse, and Tab reaches the PC in Free mode
+  with a panel open. A Mac at the other end gets ⌘ as Command.
+- **Clipboard.** ⌘V works when the Mac's clipboard holds an image or
+  nothing, and after copying a file or an image on the PC it pastes that
+  there instead of the Mac's older text. A paste over 32 KB says it was cut
+  and no longer overwrites the Mac's clipboard with the cut copy; text heavy
+  in quotes or newlines no longer fails to cross. On Linux the clipboard
+  works again after the X server restarts.
+- **Settings survive a bad value.** One setting a build cannot read (720p
+  read by an older build, say) no longer wipes client.toml with its pairing
+  certificates and wake addresses: only that value falls back. The service
+  keeps its last good host.toml when a hand edit has a typo.
+- **Machine list.** A machine that is away can be forgotten from its menu,
+  and one that left the tailnet over a month ago is forgotten by itself.
+  Machines are probed all at once, idle ones no longer flash "Relayed via",
+  Mullvad exit nodes are left out, the nearest relay names the right city,
+  and a LAN address (saved by older versions too) is never used as a PC's
+  public wake address. A Mac with Share this Mac off no longer reads as "the
+  background service is stopped".
+- **A desktop that follows its viewer** (a Linux VPS) ends a session nobody
+  has watched for two minutes, so its prep command's undo puts the desktop
+  back at its idle size instead of leaving it at the last viewer's 4K. The
+  Mac relaunches the Desktop for a new size only on such a desktop.
+- **Background service.** On a Mac it runs under launchd, is restarted
+  there after an update (never two copies), and its login item is turned
+  back on with sharing; the Sharing page says when the macOS firewall or a
+  disabled login item blocks it. A window no longer restarts a service that
+  exits on purpose every four seconds, an older window no longer relaunches
+  itself forever, and a self-update that never serves is rolled back to the
+  previous version, kept until the new one has proven itself. Panics are
+  written to the log. `accept_updates = false` in host.toml refuses pushed
+  updates; pushes are logged with their sender and SHA-256. The wake
+  listener and "keeping awake" claims are Windows-only (a shared Mac is now
+  really kept awake while plugged in).
+- **Windows setup.** Setup run over SSH starts the engine in the signed-in
+  user's session instead of one with no desktop, running it again no longer
+  starts the SYSTEM engine beside yours, install-host.ps1 brings the host
+  back after replacing it, a BroLink engine move retries and keeps paired
+  devices, a stale engine archive falls back to the pinned download, Set up
+  during a stream explains the administrator prompt first, and the audio
+  fix-up backs off instead of running PowerShell every 30 seconds.
+- **Light appearance.** Latch no longer quits at launch on a Mac or PC set
+  to Light. Screen readers hear dropdown names and values and can adjust
+  the Bitrate slider, Escape that closes a menu stays in Latch, a menu can
+  no longer stay stuck open, and Korean and other CJK text is drawn.
+- **Releases** include the Linux host for arm64 and x64
+  (`latch-host-linux-*.tar.gz` with SHA-256 files), are refused when the
+  tag does not match the version, and build with locked dependencies. The
+  relay kit pulls the current Tailscale image on every run, `.env` files
+  never enter image builds, and logging out of a native Linux desktop
+  starts a fresh session.
+- **Resolutions below 1080p: 900p, 720p and 540p** (1600 × 900, 1280 × 720,
+  960 × 540), for a machine that encodes in software or a slow network.
+  The frame-rate ceiling a small-CPU host reports (30 fps) now holds at
+  1080p and rises in proportion for fewer pixels, so 720p gets 60 fps
+  from a two-core VPS; larger sizes keep 30. A host with a fixed desktop
+  is still never asked for more than its own size, but a smaller size is
+  now honoured (scaled down) instead of replaced by the desktop's.
+  Windows PCs on the Virtual Display Driver need **Repair setup** once so
+  the driver lists the three new sizes.
+- **A new size starts the Desktop again.** Connecting while the PC's
+  Desktop still ran from an earlier stream resumed it, and a Linux desktop
+  that resizes itself to the viewer only does so at a launch: a 540p stream
+  showed the 3024 x 1964 desktop scaled down, with captured mouse movement
+  crossing it at a third of the speed. The Mac now ends and relaunches the
+  Desktop whenever it asks for a different size than it last launched it
+  at (or does not know), and resumes it at the same size. Games and other
+  apps are never ended for this.
+- Captured mouse movement over a desktop of fixed size that the stream
+  shrinks (a 1080p VPS desktop streamed at 720p) is scaled to the
+  desktop's pixels, so it keeps the Mac's speed.
+- **Pairing with Sunshine from October 2026.** Those engines keep the PIN
+  request open until the Mac has finished the pairing handshake, and the
+  Mac only went on with it once Latch Host had answered, so pairing a new
+  Mac timed out. Latch Host now answers as soon as the engine has taken the
+  PIN, and answers the Mac's retries for that PIN without asking the
+  engine again.
+- `connect_real` (an ignored test in `crates/client/src/session.rs`)
+  connects to a machine through the window's own path at a list of sizes,
+  with optional pointer probes, typing and frame-rate sampling.
+- **Clipboard with a Linux desktop.** ⌘C, ⌘X and ⌘V reach a Linux machine
+  as Ctrl+Insert, Shift+Delete and Shift+Insert, the shortcuts GTK, Qt,
+  Firefox, Chromium and the terminals all honour. They were Ctrl+C and
+  Ctrl+V, which in a terminal interrupt the running program and type a
+  literal instead of copying and pasting. Held modifiers are let go for
+  the chord, so ⌘ held as Ctrl does not turn a paste into Ctrl+Shift+Insert.
+  Latch Host on Linux puts pasted text in the selection as well as the
+  clipboard, since xterm and the VTE terminals paste the selection on
+  Shift+Insert, and says so in `/v1/clipboard` (`selection`); against an
+  older Linux host the Mac keeps Ctrl+V for paste, which would otherwise
+  paste the terminal's last selection.
+- **A VPS desktop streams at its own size and a frame rate it can keep.**
+  Latch Host reports the X screen it captures and, when it encodes in
+  software on fewer than four cores, a 30 fps ceiling; the Mac asks for
+  exactly that. "Match screen" used to ask a 1920 × 1080 desktop for the
+  Mac's size, which Sunshine met by scaling the same pixels up (blurrier,
+  and more work for the encoder). On a two-core VPS, 60 fps desktop
+  sessions averaged 33 to 47 encoded frames a second; Sunshine took 136%
+  CPU for a still desktop at 60 fps and 78% for a busier one at 30.
+- On Linux the engine no longer holds a 60 fps floor
+  (`minimum_fps_target = 0`): X11 capture already delivers a frame every
+  interval, so the floor could only re-encode the last picture whenever a
+  frame was done early. Part of the CPU the 30 fps ceiling frees goes to
+  the `superfast` preset, whose keyframes keep text legible (QP 21 instead
+  of 38 at 20 Mbps, for 19% more encoding time a frame). Existing
+  hosts pick both up once (`stream-profile-v4`) while nothing streams,
+  checked through GameStream's `/serverinfo`, which reports the running
+  app; `/api/apps` does not.
+- The native VPS units give the engine and the X server ten times the CPU
+  share of other user services (`CPUWeight=1000`).
+- **A Mac can be only a viewer.** On a Mac, **Share this Mac** on the
+  Sharing page (stored as the old start-at-login switch) decides whether
+  Latch runs in the background. Off, opening Latch no longer starts the
+  background service or the streaming engine (a service started anyway,
+  say by an older window, exits at once), turning it off stops both, and
+  nothing of Latch runs once the window closes. Connecting to other
+  machines needs neither.
+
 ## 4.1.1 (2026-10-02)
 
 - Setting up a Windows PC that a version before 4.1.0 had set up now

@@ -18,14 +18,12 @@ if [[ -z "$BIN" ]]; then
   echo "build the app first: cargo build --release -p latch-host" >&2
   exit 1
 fi
-APP="$ROOT/dist/Latch.app"
+# Spotlight excludes .noindex folders, so this build copy stays out of app search.
+APP="$ROOT/dist.noindex/Latch.app"
 # The workspace version, so the bundle cannot drift from the binary inside it.
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-# dist/ is a staging copy. Keep Spotlight from listing it next to
-# /Applications/Latch.app.
-touch "$ROOT/dist/.metadata_never_index"
 cp "$BIN" "$APP/Contents/MacOS/Latch"
 chmod +x "$APP/Contents/MacOS/Latch"
 # The Finder/Dock icon: the ink tile with the logo knocked out, built by
@@ -53,6 +51,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
   <key>NSLocalNetworkUsageDescription</key>
   <string>Latch sends the wake-up packet to your PC over the local network.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Latch asks System Events to restart or shut down this Mac when you choose that from another machine.</string>
 </dict>
 </plist>
 PLIST
@@ -64,8 +64,21 @@ IDENTITY="${CODESIGN_IDENTITY:--}"
 if [[ "$IDENTITY" == "-" ]]; then
   codesign --force --sign "$IDENTITY" "$APP"
 else
-  # Notarization requires the hardened runtime and a secure timestamp.
-  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+  # Notarization requires the hardened runtime and a secure timestamp. The
+  # hardened runtime blocks Apple Events unless the app is entitled to send
+  # them: a shared Mac restarts and shuts down through System Events.
+  ENTITLEMENTS="$(mktemp -t latch-entitlements).plist"
+  cat > "$ENTITLEMENTS" <<'ENT'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.automation.apple-events</key><true/>
+</dict>
+</plist>
+ENT
+  codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP"
+  rm -f "$ENTITLEMENTS"
 fi
 codesign --verify --deep --strict "$APP"
 if [[ "$IDENTITY" == "-" ]]; then

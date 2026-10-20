@@ -42,6 +42,18 @@ pub fn ymd(unix: u64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// `YYYY-MM-DDTHH:MM:SSZ` (UTC) for a Unix time.
+pub fn utc_timestamp(unix: u64) -> String {
+    let secs = unix % 86_400;
+    format!(
+        "{}T{:02}:{:02}:{:02}Z",
+        ymd(unix),
+        secs / 3600,
+        secs / 60 % 60,
+        secs % 60
+    )
+}
+
 /// The date part of an RFC 3339 string such as `2027-03-02T23:03:00Z`.
 pub fn parse_ymd(s: &str) -> Option<(i64, u32, u32)> {
     let s = s.get(..10)?;
@@ -89,5 +101,11 @@ mod tests {
         assert_eq!(days_until("0001-01-01T00:00:00Z"), None);
         assert!(days_until("2999-01-01T00:00:00Z").unwrap() > 300_000);
         assert!(days_until("2001-01-01T00:00:00Z").unwrap() < 0);
+    }
+
+    #[test]
+    fn a_unix_time_reads_as_utc() {
+        assert_eq!(utc_timestamp(0), "1970-01-01T00:00:00Z");
+        assert_eq!(utc_timestamp(1_792_258_000), "2026-10-17T17:26:40Z");
     }
 }

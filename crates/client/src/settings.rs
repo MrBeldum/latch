@@ -62,16 +62,11 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
     ui::setting_row(
         ui,
         "Resolution",
-        Some("Match screen fills this display exactly. The 16:9 sizes leave bars on a display of another shape."),
+        Some("Match screen fills this display exactly. The 16:9 sizes leave bars on a display of another shape. Below 1080p, a PC that encodes in software keeps a higher frame rate."),
         |ui| {
             let mut resolution = s.resolution;
             ui::select(ui, "stream-resolution", resolution.describe(native), 200.0, |ui| {
-                for r in [
-                    Resolution::Native,
-                    Resolution::P1080,
-                    Resolution::P1440,
-                    Resolution::P2160,
-                ] {
+                for r in Resolution::ALL {
                     ui::select_option(ui, &mut resolution, r, r.describe(native));
                 }
             });

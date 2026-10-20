@@ -8,6 +8,9 @@ pub const FILE: &str = "client.toml";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Resolution {
+    P540,
+    P720,
+    P900,
     P1080,
     P1440,
     P2160,
@@ -16,12 +19,26 @@ pub enum Resolution {
 }
 
 impl Resolution {
+    /// Every choice, in the order the list shows them.
+    pub const ALL: [Resolution; 7] = [
+        Resolution::Native,
+        Resolution::P540,
+        Resolution::P720,
+        Resolution::P900,
+        Resolution::P1080,
+        Resolution::P1440,
+        Resolution::P2160,
+    ];
+
     /// This choice applied to a screen of `native` pixels: the standard
     /// 16:9 sizes are exactly that, and "Match screen" is the screen
     /// itself. See `latch_core::screens`.
     pub fn pixels(self, native: (u32, u32)) -> (u32, u32) {
-        let [p1080, p1440, p2160] = latch_core::screens::STANDARD;
+        let [p540, p720, p900, p1080, p1440, p2160] = latch_core::screens::STANDARD;
         match self {
+            Resolution::P540 => p540,
+            Resolution::P720 => p720,
+            Resolution::P900 => p900,
             Resolution::P1080 => p1080,
             Resolution::P1440 => p1440,
             Resolution::P2160 => p2160,
@@ -92,6 +109,9 @@ impl Preset {
 impl Resolution {
     pub fn label(self) -> &'static str {
         match self {
+            Resolution::P540 => "540p",
+            Resolution::P720 => "720p",
+            Resolution::P900 => "900p",
             Resolution::P1080 => "1080p",
             Resolution::P1440 => "1440p",
             Resolution::P2160 => "4K",
@@ -175,6 +195,12 @@ pub struct KnownPc {
     pub tailscale_ip: Option<String>,
     /// When the PC was last seen online (Unix seconds).
     pub last_seen_unix: Option<u64>,
+    /// The size its Desktop was last launched at from this machine, so the
+    /// first connect after Latch reopens can rejoin it at that size.
+    pub desktop_size: Option<[u32; 2]>,
+    /// The tailnet it was seen on, so a machine is only ever forgotten for
+    /// leaving the tailnet this machine is on now.
+    pub tailnet: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -259,6 +285,13 @@ impl ClientConfig {
         latch_core::config::update(FILE, edit)
     }
 
+    /// Forget a machine: its addresses, how to wake it, and its pairing.
+    /// One still on the tailnet is listed again, unpaired and unwakeable
+    /// until it has been seen online.
+    pub fn forget(&mut self, node_id: &str) -> bool {
+        self.pcs.remove(node_id).is_some()
+    }
+
     pub fn forget_pin_on_mismatch(&mut self, node_id: &str, err: &anyhow::Error) -> bool {
         if !latch_stream::nvhttp::is_pin_mismatch(err) {
             return false;
@@ -308,6 +341,9 @@ mod tests {
         assert_eq!(Resolution::P1080.pixels((3024, 1964)), (1920, 1080));
         assert_eq!(Resolution::P1440.pixels((3024, 1964)), (2560, 1440));
         assert_eq!(Resolution::P2160.pixels((1920, 1080)), (3840, 2160));
+        assert_eq!(Resolution::P900.pixels((3024, 1964)), (1600, 900));
+        assert_eq!(Resolution::P720.pixels((3024, 1964)), (1280, 720));
+        assert_eq!(Resolution::P540.pixels((3024, 1964)), (960, 540));
         assert_eq!(
             Resolution::Native.describe((3024, 1964)),
             "Match screen · 3024 × 1964"
@@ -316,13 +352,9 @@ mod tests {
             Resolution::P1080.describe((3024, 1964)),
             "1080p · 1920 × 1080"
         );
+        assert_eq!(Resolution::P720.describe((3024, 1964)), "720p · 1280 × 720");
         let modes = latch_core::screens::stream_modes();
-        for r in [
-            Resolution::P1080,
-            Resolution::P1440,
-            Resolution::P2160,
-            Resolution::Native,
-        ] {
+        for r in Resolution::ALL {
             for &screen in latch_core::screens::SCREENS {
                 assert!(
                     modes.contains(&r.pixels(screen)),
@@ -339,6 +371,8 @@ mod tests {
         let c: ClientConfig = toml::from_str("[stream]\nfps = 90\n").unwrap();
         assert_eq!(c.stream.quality, Quality::Auto);
         assert_eq!(c.stream.fps, 90);
+        let c: ClientConfig = toml::from_str("[stream]\nresolution = \"P720\"\n").unwrap();
+        assert_eq!(c.stream.resolution, Resolution::P720);
         let mut st = StreamSettings::default();
         assert_eq!(st.preset(), Some(Preset::Balanced));
         st.apply_preset(Preset::Smooth);
@@ -362,6 +396,36 @@ mod tests {
         );
         let back: ClientConfig = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
         assert_eq!(back, c);
+    }
+
+    /// A build without 720p (4.1.1, or a branch cut before it) reading a
+    /// file this one wrote: the size goes back to its default, and the
+    /// machines, their certificates and wake addresses all stay.
+    #[test]
+    fn a_size_this_build_does_not_know_keeps_the_machines() {
+        let text = "github_token = \"t\"\n\
+                    [stream]\nquality = \"Custom\"\nresolution = \"P9999\"\nfps = 90\ncodec = \"Hevc\"\n\
+                    [pcs.n1]\nname = \"Hermes\"\nmac = \"02:00:00:00:00:01\"\n\
+                    public_ip = \"116.125.113.36\"\nserver_cert = \"3082\"\n\
+                    [pcs.n2]\nname = \"stuzha\"\nlast_seen_unix = \"bad\"\n";
+        let (c, dropped): (ClientConfig, _) = latch_core::config::parse_lenient(text).unwrap();
+        assert_eq!(
+            dropped,
+            ["pcs.n2.last_seen_unix", "stream.resolution"],
+            "only what cannot be read"
+        );
+        assert_eq!(c.stream.resolution, Resolution::Native);
+        assert_eq!(c.stream.quality, Quality::Custom);
+        assert_eq!(c.stream.fps, 90);
+        assert_eq!(c.stream.codec, Codec::Hevc);
+        assert_eq!(c.github_token.as_deref(), Some("t"));
+        assert_eq!(c.pcs["n1"].server_cert.as_deref(), Some("3082"));
+        assert_eq!(c.pcs["n1"].mac.as_deref(), Some("02:00:00:00:00:01"));
+        assert_eq!(c.pcs["n1"].public_ip.as_deref(), Some("116.125.113.36"));
+        assert_eq!(c.pcs["n2"].name, "stuzha");
+        assert_eq!(c.pcs["n2"].last_seen_unix, None);
+        // Text that is not TOML at all is still an error (and set aside).
+        assert!(latch_core::config::parse_lenient::<ClientConfig>("[stream").is_err());
     }
 
     #[test]
@@ -407,5 +471,30 @@ mod tests {
         let generic = anyhow::anyhow!("invalid peer certificate: expired");
         assert!(!c.forget_pin_on_mismatch("n", &generic));
         assert_eq!(c.pcs["n"].server_cert.as_deref(), Some("3082"));
+    }
+
+    #[test]
+    fn a_forgotten_machine_takes_its_pairing_and_nothing_else() {
+        let mut c = ClientConfig::default();
+        for id in ["artemis", "stuzha"] {
+            c.pcs.insert(
+                id.into(),
+                KnownPc {
+                    name: id.into(),
+                    server_cert: Some("3082".into()),
+                    desktop_size: Some([1280, 720]),
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(c.forget("artemis"));
+        assert!(!c.forget("artemis"), "gone already");
+        assert_eq!(c.pcs.keys().collect::<Vec<_>>(), ["stuzha"]);
+        assert_eq!(c.pcs["stuzha"].server_cert.as_deref(), Some("3082"));
+        // A file without the newer fields still reads.
+        let back: ClientConfig =
+            toml::from_str("[pcs.n]\nname = \"Gaming-PC\"\nserver_cert = \"3082\"\n").unwrap();
+        assert_eq!(back.pcs["n"].desktop_size, None);
+        assert_eq!(back.pcs["n"].tailnet, None);
     }
 }

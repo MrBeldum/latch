@@ -7,7 +7,7 @@ cd "$ROOT"
 rustup target add aarch64-apple-darwin >/dev/null
 cargo build --release -p latch-host --target aarch64-apple-darwin
 bash "$ROOT/scripts/bundle-macos.sh"
-APP="$ROOT/dist/Latch.app"
+APP="$ROOT/dist.noindex/Latch.app"
 if [[ ! -d "$APP" ]]; then
   echo "bundle failed" >&2
   exit 1
@@ -15,8 +15,7 @@ fi
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 rm -rf /Applications/Latch.app
 cp -R "$APP" /Applications/Latch.app
-# The staging bundle in dist/ would otherwise appear as a second Latch
-# in Spotlight and Launchpad. Unregister it; the real app is in /Applications.
+# Unregister the staging copy; the installed app is in /Applications.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 "$LSREGISTER" -u "$APP" 2>/dev/null || true
 "$LSREGISTER" -f /Applications/Latch.app 2>/dev/null || true

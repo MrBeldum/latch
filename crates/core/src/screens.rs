@@ -3,8 +3,18 @@
 //! 16:9 sizes, and a PC whose only display is virtual can only switch to a
 //! size that display lists. Setup on the PC lists these.
 
-/// The standard sizes behind the quality choices: 1080p, 1440p and 4K.
-pub const STANDARD: [(u32, u32); 3] = [(1920, 1080), (2560, 1440), (3840, 2160)];
+/// The standard sizes behind the quality choices, smallest first: 540p,
+/// 720p and 900p for a PC that cannot encode many pixels quickly (software
+/// encoding on a small CPU) or a network that cannot carry them, then
+/// 1080p, 1440p and 4K.
+pub const STANDARD: [(u32, u32); 6] = [
+    (960, 540),
+    (1280, 720),
+    (1600, 900),
+    (1920, 1080),
+    (2560, 1440),
+    (3840, 2160),
+];
 
 /// Native pixel sizes of Apple displays since 2015, then the common
 /// external monitors. Points times the native scale factor, whatever
