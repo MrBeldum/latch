@@ -452,21 +452,61 @@ impl Api<'_> {
         if s.app_running == Some(true) {
             self.close_app();
         }
-        self.call("POST", "/api/config", Some(&desired.to_string()))?;
+        self.apply_config(&desired)?;
+        Ok(true)
+    }
+
+    /// Keep the engine on the display [`crate::virtual_display::capture`]
+    /// picks, without interrupting a running app. Only the keys it names
+    /// are written, so engine settings the owner chose stay. `vdd` is the
+    /// Virtual Display Driver's ID from the engine's log, `picked` the ID
+    /// Latch set before. `None` while someone may be watching; otherwise what is now in
+    /// force.
+    pub fn follow_virtual_display(
+        &self,
+        install: Option<&Install>,
+        vdd: Option<&str>,
+        picked: Option<&str>,
+    ) -> Result<Option<crate::virtual_display::Capture>> {
+        if session(install).maybe_watched() {
+            return Ok(None);
+        }
+        let current = self.call("GET", "/api/config", None)?;
+        let capture = crate::virtual_display::capture(&current, vdd, picked);
+        if !capture.conf.is_empty() {
+            let desired = stream_profile(&current, &capture.pairs())?;
+            // The restart would end a stream that started since the check
+            // above; a Desktop left for a viewer to resume is closed first,
+            // as in upgrade_stream_profile, so its undo commands run.
+            let s = session(install);
+            if s.maybe_watched() {
+                return Ok(None);
+            }
+            if s.app_running == Some(true) {
+                self.close_app();
+            }
+            self.apply_config(&desired)?;
+        }
+        Ok(Some(capture))
+    }
+
+    /// Save `config` as the engine's settings and wait for it to come back
+    /// from the restart that puts them in force.
+    fn apply_config(&self, config: &serde_json::Value) -> Result<()> {
+        self.call("POST", "/api/config", Some(&config.to_string()))?;
         // Sunshine closes this HTTP connection as it restarts.
         let _ = self.raw("POST", "/api/restart");
         std::thread::sleep(Duration::from_secs(1));
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             if self.ok() {
-                break;
+                return Ok(());
             }
             if std::time::Instant::now() >= deadline {
                 bail!("streaming engine did not return after applying the display profile");
             }
             std::thread::sleep(Duration::from_millis(500));
         }
-        Ok(true)
     }
 
     /// Accept the PIN the Mac is pairing with. Sunshine says no until the
@@ -882,6 +922,22 @@ mod tests {
             profile
         );
         assert!(stream_profile(&serde_json::Value::Null, crate::setup::ENGINE_CONF).is_err());
+    }
+
+    #[test]
+    fn the_capture_display_alone_leaves_every_other_engine_setting() {
+        // Engine settings the owner chose in its own web UI.
+        let owners = serde_json::json!({"status":true, "platform":"windows", "output_name":"",
+            "nvenc_twopass":"disabled", "minimum_fps_target":"30"});
+        let capture = crate::virtual_display::capture(&owners, Some("vdd"), None);
+        let profile = stream_profile(&owners, &capture.pairs()).unwrap();
+        assert_eq!(profile["output_name"], "vdd");
+        assert_eq!(profile["dd_configuration_option"], "ensure_only_display");
+        assert_eq!(profile["nvenc_twopass"], "disabled");
+        assert_eq!(profile["minimum_fps_target"], "30");
+        assert!(profile.get("platform").is_none());
+        let again = crate::virtual_display::capture(&profile, Some("vdd"), Some("vdd"));
+        assert_eq!(stream_profile(&profile, &again.pairs()).unwrap(), profile);
     }
 
     #[test]

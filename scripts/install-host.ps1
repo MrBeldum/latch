@@ -32,7 +32,7 @@ if (-not $Exe -or -not (Test-Path $Exe)) {
 }
 
 $DestDir = Join-Path $env:LOCALAPPDATA "Latch"
-# Where versions before 4.1 installed (they were called BroLink). Their
+# Where versions before 4.1 installed. Their
 # settings, pairing identity and engine archive come across, and the folder
 # goes once this one is in place.
 $OldDir = Join-Path $env:LOCALAPPDATA "BroLink"
@@ -49,7 +49,7 @@ if ((Test-Path $OldDir) -and -not (Test-Path (Join-Path $DestDir "host.toml"))) 
     New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
     Get-ChildItem -LiteralPath $OldDir -Force | Where-Object { $_.Name -notmatch '\.exe(\.old|\.new)?$' } |
         ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $DestDir -Recurse -Force }
-    Write-Host "Settings carried over from $OldDir"
+    Write-Host "Settings carried over from the previous install."
 }
 New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
 Copy-Item $Exe $DestExe -Force
@@ -81,7 +81,7 @@ New-ItemProperty -Path $Run -Name "LatchHost" -Value "`"$DestExe`" --background"
 
 if (Test-Path $OldDir) {
     Remove-Item -LiteralPath $OldDir -Recurse -Force -ErrorAction SilentlyContinue
-    if (Test-Path $OldDir) { Write-Host "Could not remove $OldDir completely; it is safe to delete." }
+    if (Test-Path $OldDir) { Write-Host "Could not remove the previous install folder completely; it is safe to delete." }
 }
 
 Write-Host "Shortcut: Desktop\Latch Host.lnk"

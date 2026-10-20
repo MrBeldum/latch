@@ -171,6 +171,30 @@ driver was installed after setup, choose **Run setup again** on the Sharing
 tab; its setup list says when sizes are missing. Installing a display does not require pairing the
 Mac again.
 
+With capture set to automatic, Latch prefers the Virtual Display Driver
+even while a physical monitor is connected. During a stream the virtual
+display is the only active display, so games follow its requested size;
+the engine restores the physical displays when the stream disconnects.
+A driver reinstalled under a new ID is followed. A capture display chosen
+in the engine's own settings is kept, and the display option Latch set for
+the virtual display goes back to setup's; after setup, Latch changes no
+other engine setting. Standard 1080p, 1440p and 4K streams are 16:9 and
+leave bars on a taller Mac screen; **Match screen** uses the Mac's aspect
+ratio.
+
+While a viewer is connected and the session uses a single display, Latch
+keeps a custom game cursor visible in the picture. A cursor whose visible
+pixels sit to the right of or below a transparent hotspot would otherwise
+disappear at the bottom or right edge; Latch stops it where its nearest
+visible pixel is still on screen. A cursor drawn at its hotspot, like every
+standard Windows pointer and most game cursors, still reaches the last
+pixel, so edge scrolling and controls at the edge keep working. The bounds
+follow changes in resolution and cursor shape, respect the game's own
+confinement, and release when the game hides its cursor for camera control
+or the viewer disconnects. The check runs as a windowless process beside
+Latch in the desktop session, without elevation; a Latch started over SSH
+runs it through a user task, `LatchCursorUser`.
+
 ## Using an engine you installed yourself
 
 Latch streams through whichever compatible engine is already on the PC

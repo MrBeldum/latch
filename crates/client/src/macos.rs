@@ -7,7 +7,8 @@
 //! place in the menu but lose their shortcuts.
 //!
 //! And the pasteboard's change count, which tells whether the Mac's
-//! clipboard has changed since the PC last copied something.
+//! clipboard has changed since the PC last copied something. And whether
+//! Caps Lock is on: egui has neither a key nor a modifier for it.
 //!
 //! Elsewhere both do nothing.
 
@@ -34,7 +35,7 @@ fn equivalent(item: Item, stream_owns_keys: bool) -> &'static str {
 mod imp {
     use super::{equivalent, Item};
     use objc2::sel;
-    use objc2_app_kit::{NSApplication, NSPasteboard};
+    use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSPasteboard};
     use objc2_foundation::{MainThreadMarker, NSString};
     use std::cell::Cell;
 
@@ -79,6 +80,13 @@ mod imp {
         // its change count.
         Some(unsafe { NSPasteboard::generalPasteboard().changeCount() })
     }
+
+    pub fn caps_lock() -> Option<bool> {
+        // SAFETY: a class getter for the modifier keys' state right now,
+        // usable from any thread.
+        let flags = unsafe { NSEvent::modifierFlags_class() };
+        Some(flags.contains(NSEventModifierFlags::NSEventModifierFlagCapsLock))
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -86,6 +94,10 @@ mod imp {
     pub fn stream_owns_keys(_owned: bool) {}
 
     pub fn pasteboard_changes() -> Option<isize> {
+        None
+    }
+
+    pub fn caps_lock() -> Option<bool> {
         None
     }
 }
@@ -100,6 +112,11 @@ pub fn stream_owns_keys(owned: bool) {
 /// None where there is no such count.
 pub fn pasteboard_changes() -> Option<isize> {
     imp::pasteboard_changes()
+}
+
+/// Whether Caps Lock is on on this Mac. None where that is not known.
+pub fn caps_lock() -> Option<bool> {
+    imp::caps_lock()
 }
 
 #[cfg(test)]
@@ -118,5 +135,11 @@ mod tests {
         // Off the main thread (as here) it does nothing, and says so safely.
         stream_owns_keys(true);
         stream_owns_keys(false);
+    }
+
+    #[test]
+    fn caps_lock_is_known_on_a_mac() {
+        // Read through the window server, from any thread.
+        assert_eq!(caps_lock().is_some(), cfg!(target_os = "macos"));
     }
 }

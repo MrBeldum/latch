@@ -170,6 +170,12 @@ pub struct View {
     /// The other machine is a Mac: ⌘ is Command there, whatever the
     /// "Command acts as Ctrl" setting says for Windows and Linux.
     host_mac: bool,
+    /// The Mac's Caps Lock as the PC was last brought in line with it (see
+    /// [`caps_tap`]); None until the stream first has the keys.
+    caps: Option<bool>,
+    /// Caps Lock as a test sets it, in place of the Mac's.
+    #[cfg(test)]
+    caps_now: Option<bool>,
     /// A video problem to show in place of the session's, for rendering
     /// the recovery overlay without a broken capture.
     #[cfg(test)]
@@ -197,13 +203,15 @@ enum Queued {
     /// The modifiers held at the end of a frame: egui has no events for
     /// Shift, Ctrl, Option or ⌘ on their own.
     Modifiers(Modifiers),
+    /// A key pressed and let go, for one egui never reports (Caps Lock).
+    Tap(i16),
 }
 
 /// Where an event was going when it arrived.
 #[derive(Debug, Clone, Copy)]
 struct At {
     keys_to_pc: bool,
-    over_video: bool,
+    over_stream: bool,
 }
 
 /// What this frame's input is sent through, and what it needs to know.
@@ -241,6 +249,9 @@ impl Default for View {
             pasted_since_v_up: false,
             cmd_since_v_up: false,
             host_mac: false,
+            caps: None,
+            #[cfg(test)]
+            caps_now: None,
             #[cfg(test)]
             problem: None,
             #[cfg(test)]
@@ -330,7 +341,7 @@ impl View {
             };
             ctx.send_viewport_cmd(ViewportCommand::CursorGrab(grab));
             // The cursor is hidden through `set_cursor_icon(None)` alone,
-            // every frame the pointer is on the picture. A
+            // every frame the pointer is in the stream viewport. A
             // `CursorVisible(true)` here would show it behind egui's
             // back: egui only re-applies an icon when it changes, so the
             // Mac cursor would stay on top of the PC's until the pointer
@@ -374,7 +385,7 @@ impl View {
                         ),
                     ));
                 }
-                if bottom_gap >= STATUS || self.stats {
+                if self.stats {
                     self.status_line(ui, screen, video, env, &stats, bottom_gap >= STATUS);
                 }
             });
@@ -548,6 +559,10 @@ impl View {
                     ui.add_space(space::SM);
                     let rows = [
                         Kv::new("Resolution", format!("{} × {}", stats.width, stats.height)),
+                        Kv::new(
+                            "Requested resolution",
+                            format!("{} × {}", live.requested.0, live.requested.1),
+                        ),
                         Kv::new(
                             "Frame rate",
                             format!("{:.1} of {} fps", stats.fps, live.requested.2),
@@ -1215,8 +1230,10 @@ impl View {
             ctx.layer_id_at(p)
                 .is_some_and(|layer| layer.order > egui::Order::Background)
         });
-        let over_video = pointer_on_stream(
-            pointer.is_some_and(|p| video.contains(p)),
+        // The black bars are part of the stream too. Only Latch's controls
+        // should take the pointer away from the remote machine.
+        let over_stream = pointer_on_stream(
+            pointer.is_some_and(|p| ctx.screen_rect().contains(p)),
             over_bar,
             popup,
             overlay,
@@ -1277,6 +1294,12 @@ impl View {
         }
         // A paste whose text has arrived goes before anything this frame.
         self.settle_paste(&link, false);
+        // Caps Lock, which egui never reports, as a tap of the PC's own.
+        let (caps, tap) = caps_tap(self.caps, self.mac_caps(), keys_to_pc);
+        self.caps = caps;
+        if tap {
+            self.dispatch(&link, Queued::Tap(input::VK_CAPITAL));
+        }
         // Ctrl+Alt is Latch's host key. It is read before the keys-to-PC
         // gate so it works even if an overlay took focus, and while it is
         // held nothing is forwarded: the PC must not see a held chord after
@@ -1301,18 +1324,18 @@ impl View {
             self.held.release_all(out);
         }
 
-        if (over_video || self.captured) && connected {
+        if (over_stream || self.captured) && connected {
             ctx.set_cursor_icon(CursorIcon::None);
         }
 
         let at = At {
             keys_to_pc,
-            over_video,
+            over_stream,
         };
         for ev in events {
             match ev {
                 // The pointer is never held back behind a paste.
-                Event::PointerMoved(p) if !self.captured && over_video => self.moved_to = Some(p),
+                Event::PointerMoved(p) if !self.captured && over_stream => self.moved_to = Some(p),
                 Event::MouseMoved(d) if self.captured => {
                     // Deltas arrive in points; the PC moves in stream pixels.
                     // Scale by the picture's size here so a hand movement
@@ -1321,7 +1344,7 @@ impl View {
                     self.motion.0 += d.x * motion_scale;
                     self.motion.1 += d.y * motion_scale;
                 }
-                Event::MouseWheel { unit, delta, .. } if self.captured || over_video => {
+                Event::MouseWheel { unit, delta, .. } if self.captured || over_stream => {
                     let (h, v) = wheel_to_host(unit, delta);
                     self.scroll.0 += h;
                     self.scroll.1 += v;
@@ -1370,6 +1393,11 @@ impl View {
             Queued::Modifiers(m) => {
                 self.cmd_since_v_up |= m.command;
                 self.held.modifiers(out, m, cmd_is_ctrl);
+                return;
+            }
+            Queued::Tap(vk) => {
+                self.held.key(out, vk, true);
+                self.held.key(out, vk, false);
                 return;
             }
             Queued::Event(ev, at) => (ev, at),
@@ -1429,7 +1457,7 @@ impl View {
                 button,
                 pressed,
                 modifiers: m,
-            } if self.captured || at.over_video || (!pressed && self.held.any_down()) => {
+            } if self.captured || at.over_stream || (!pressed && self.held.any_down()) => {
                 if at.keys_to_pc && !(m.ctrl && m.alt) {
                     self.held.modifiers(out, m, cmd_is_ctrl);
                 }
@@ -1446,7 +1474,7 @@ impl View {
                 // goes to the PC: what was clicked on is what was meant.
                 // Not before the stream connects: the mouse would be held
                 // with no way out but the host key, over the Cancel button.
-                if pressed && at.over_video && !self.captured && link.connected {
+                if pressed && at.over_stream && !self.captured && link.connected {
                     self.bar_shown = false;
                     if link.cfg.capture_mouse {
                         self.grab(link.ctx, out);
@@ -1505,16 +1533,11 @@ impl View {
         }
     }
 
-    /// Send a pointer position in the picture, held to its edges.
+    /// Send a pointer position in the picture: over the black bars, the
+    /// nearest pixel of the picture (see [`mouse_position_in_video`]).
     fn send_position<S: Sink + ?Sized>(&self, link: &Link<'_, S>, p: Pos2) {
-        let (video, ppp) = (link.video, link.ppp);
-        let p = p.clamp(video.min, video.max);
-        link.out.position(
-            ((p.x - video.left()) * ppp).round() as i16,
-            ((p.y - video.top()) * ppp).round() as i16,
-            (video.width() * ppp).round() as i16,
-            (video.height() * ppp).round() as i16,
-        );
+        let (x, y, width, height) = mouse_position_in_video(p, link.video, link.ppp);
+        link.out.position(x, y, width, height);
     }
 
     /// Send the whole pixels of captured movement, keeping the fraction.
@@ -1526,6 +1549,15 @@ impl View {
             self.motion.1 -= dy;
             out.motion(dx as i16, dy as i16);
         }
+    }
+
+    /// Whether Caps Lock is on on this Mac (what a test set, in tests).
+    fn mac_caps(&self) -> Option<bool> {
+        #[cfg(test)]
+        if self.tap.is_some() {
+            return self.caps_now;
+        }
+        crate::macos::caps_lock()
     }
 
     /// Whether ⌘ goes to the PC as Ctrl. A Mac there gets Command whatever
@@ -1565,6 +1597,21 @@ fn swallowed_paste(v_seen_down: bool, pasted: bool, cmd: bool) -> bool {
     !v_seen_down && !pasted && cmd
 }
 
+/// Caps Lock kept in step with the Mac's: `seen` is the Mac's state the PC
+/// was last brought in line with, `now` the Mac's. The PC's own state can't
+/// be read, so the first one seen while the stream has the keys is taken as
+/// matching; after that each change reaches the PC as one tap of Caps Lock,
+/// including one made while Latch or another app had the keys, once the
+/// stream has them again. Returns the new `seen`, and whether to tap.
+fn caps_tap(seen: Option<bool>, now: Option<bool>, keys_to_pc: bool) -> (Option<bool>, bool) {
+    match (seen, now) {
+        (_, None) => (seen, false),
+        _ if !keys_to_pc => (seen, false),
+        (None, now) => (now, false),
+        (Some(s), Some(n)) => (Some(n), s != n),
+    }
+}
+
 /// A wheel or trackpad scroll as the PC takes it, in 1/120ths of a click:
 /// (horizontal, vertical). egui's +x moves the content right, which is
 /// scrolling left; Moonlight's horizontal scroll, like Windows' and
@@ -1578,17 +1625,32 @@ fn wheel_to_host(unit: egui::MouseWheelUnit, delta: Vec2) -> (f32, f32) {
     (-delta.x * scale, delta.y * scale)
 }
 
-/// Whether a pointer in the picture should be sent to the PC. A real egui
+/// Free mouse mode maps the bars to the nearest pixel in the picture.
+fn mouse_position_in_video(p: Pos2, video: Rect, ppp: f32) -> (i16, i16, i16, i16) {
+    let width = ((video.width() * ppp).round() as i16).max(2);
+    let height = ((video.height() * ppp).round() as i16).max(2);
+    // Rect's far edges are inclusive, but pixels are zero-based. Moonlight
+    // sends width - 1 and height - 1 as the coordinate limits on the wire.
+    let x = ((p.x - video.left()) * ppp)
+        .round()
+        .clamp(0.0, f32::from(width - 1)) as i16;
+    let y = ((p.y - video.top()) * ppp)
+        .round()
+        .clamp(0.0, f32::from(height - 1)) as i16;
+    (x, y, width, height)
+}
+
+/// Whether a pointer in the stream viewport should be sent to the PC. A real egui
 /// popup (More) sets `popup`; a hand-rolled `Area` at `Order::Background`
 /// would not, and clicks would leak through.
 fn pointer_on_stream(
-    in_video: bool,
+    in_viewport: bool,
     over_bar: bool,
     popup: bool,
     overlay: bool,
     over_overlay: bool,
 ) -> bool {
-    in_video && !over_bar && !popup && !overlay && !over_overlay
+    in_viewport && !over_bar && !popup && !overlay && !over_overlay
 }
 
 /// Whether `host_version` is too old for `/v1/update`, with the release
@@ -1692,6 +1754,9 @@ pub(crate) mod tests {
             16.0 / 9.0,
         );
         assert_eq!(tall.width(), 800.0);
+        let matched = fit(screen, 3024.0 / 1964.0);
+        assert!((matched.height() - screen.height()).abs() < 0.1);
+        assert!((matched.width() - screen.width()).abs() < 0.1);
     }
 
     #[test]
@@ -1742,6 +1807,92 @@ pub(crate) mod tests {
             pointer_on_stream(true, false, false, false, false),
             "a Background Area would leave popup=false and leak the click"
         );
+    }
+
+    #[test]
+    fn clicks_in_letterbox_and_pillarbox_bars_capture_the_mouse() {
+        for (size, points) in [
+            (
+                Vec2::new(1920.0, 1440.0),
+                [Pos2::new(960.0, 90.0), Pos2::new(960.0, 1350.0)],
+            ),
+            (
+                Vec2::new(2400.0, 1080.0),
+                [Pos2::new(120.0, 600.0), Pos2::new(2280.0, 600.0)],
+            ),
+        ] {
+            let video = fit(Rect::from_min_size(Pos2::ZERO, size), 16.0 / 9.0);
+            for p in points {
+                assert!(!video.contains(p), "the regression must hit a black bar");
+                // Connected: a click before the stream connects takes nothing.
+                let tap = std::rc::Rc::new(crate::input::Recorder::default());
+                tap.connected.set(true);
+                let view = View {
+                    tap: Some(tap.clone()),
+                    ..view_with_bar()
+                };
+                let extra = Extra {
+                    os: "windows".into(),
+                    ..Default::default()
+                };
+                let mut h = harness_with(size, 1.0, false, fixture(view, extra));
+                h.input_mut().events.extend([
+                    Event::PointerMoved(p),
+                    Event::PointerButton {
+                        pos: p,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                h.run_steps(1);
+                assert!(h.state().view.captured, "black bar at {p} must capture");
+                assert!(!h.state().view.bar_shown);
+                assert!(h.state().view.held.any_down(), "click must reach the PC");
+                h.input_mut()
+                    .events
+                    .push(Event::MouseMoved(Vec2::new(3.25, -3.25)));
+                h.run_steps(1);
+                assert!(h.state().view.captured);
+                assert_eq!(
+                    h.state().view.motion,
+                    (0.25, -0.25),
+                    "raw movement must continue in the bars"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mouse_coordinates_stop_at_the_last_pixel_on_every_edge() {
+        for size in [Vec2::new(1512.0, 982.0), Vec2::new(2400.0, 1080.0)] {
+            let screen = Rect::from_min_size(Pos2::new(17.0, 33.0), size);
+            let video = fit(screen, 16.0 / 9.0);
+            for ppp in [1.0, 1.5, 2.0] {
+                let width = (video.width() * ppp).round() as i16;
+                let height = (video.height() * ppp).round() as i16;
+                for (p, expected) in [
+                    (video.min, (0, 0)),
+                    (video.max, (width - 1, height - 1)),
+                    (Pos2::new(video.right(), video.top()), (width - 1, 0)),
+                    (Pos2::new(video.left(), video.bottom()), (0, height - 1)),
+                    (screen.min - Vec2::splat(100.0), (0, 0)),
+                    (screen.max + Vec2::splat(100.0), (width - 1, height - 1)),
+                ] {
+                    let (x, y, w, h) = mouse_position_in_video(p, video, ppp);
+                    assert_eq!((x, y), expected, "{size}, scale {ppp}, point {p}");
+                    assert_eq!((w, h), (width, height));
+                }
+                let (x, y, _, _) = mouse_position_in_video(video.center(), video, ppp);
+                assert_eq!(
+                    (x, y),
+                    (
+                        (width as f32 / 2.0).round() as i16,
+                        (height as f32 / 2.0).round() as i16
+                    )
+                );
+            }
+        }
     }
 
     #[test]
@@ -2084,6 +2235,28 @@ pub(crate) mod tests {
         );
         assert_no_overlap(&bar_control_rects(&h));
         crate::app::snapshots::assert_fits(&h, 1400.0);
+    }
+
+    #[test]
+    fn stats_toggle_controls_the_bottom_line_with_and_without_letterboxing() {
+        for size in [Vec2::new(1920.0, 1200.0), Vec2::new(1920.0, 1080.0)] {
+            let mut h = harness(size);
+            let line_visible = |h: &egui_kittest::Harness<'_, Fixture>| {
+                h.output().shapes.iter().any(|s| {
+                    matches!(&s.shape, egui::Shape::Text(t) if t.galley.job.text.contains("/60 fps"))
+                })
+            };
+            assert!(!line_visible(&h), "stats start hidden at {size}");
+            h.get_by_label("Stats").simulate_click();
+            h.run_steps(3);
+            assert!(line_visible(&h), "Stats shows the bottom line at {size}");
+            h.get_by_label("Hide stats").simulate_click();
+            h.run_steps(3);
+            assert!(
+                !line_visible(&h),
+                "Hide stats removes the bottom line at {size}"
+            );
+        }
     }
 
     #[test]
@@ -2600,7 +2773,7 @@ pub(crate) mod tests {
     // What the PC is sent: the order, the signs and the masks.
 
     use crate::input::{
-        Recorder, Sent, VK_CONTROL, VK_LWIN, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB, VK_V,
+        Recorder, Sent, VK_CAPITAL, VK_CONTROL, VK_LWIN, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB, VK_V,
     };
     use egui::{Key, PointerButton};
     use latch_stream::ffi::{BUTTON_LEFT, MODIFIER_CTRL, MODIFIER_SHIFT};
@@ -2676,6 +2849,53 @@ pub(crate) mod tests {
         h.input_mut().events.extend(events);
         h.input_mut().modifiers = end;
         h.run_steps(1);
+    }
+
+    #[test]
+    fn caps_lock_follows_the_mac_once_the_stream_has_the_keys() {
+        // Unknown on the Mac: nothing to do.
+        assert_eq!(caps_tap(None, None, true), (None, false));
+        // Not the stream's keys yet: nothing is taken as matching.
+        assert_eq!(caps_tap(None, Some(true), false), (None, false));
+        // The first state seen with the keys is the baseline.
+        assert_eq!(caps_tap(None, Some(true), true), (Some(true), false));
+        assert_eq!(caps_tap(Some(true), Some(true), true), (Some(true), false));
+        // A change is one tap; one made while Latch had the keys waits.
+        assert_eq!(caps_tap(Some(true), Some(false), true), (Some(false), true));
+        assert_eq!(
+            caps_tap(Some(false), Some(true), false),
+            (Some(false), false)
+        );
+        assert_eq!(caps_tap(Some(false), Some(true), true), (Some(true), true));
+    }
+
+    #[test]
+    fn caps_lock_on_the_mac_taps_caps_lock_on_the_pc() {
+        let (mut h, tap) = recording(View::default(), true);
+        h.state_mut().view.caps_now = Some(false);
+        frame(&mut h, vec![], Modifiers::NONE);
+        assert_eq!(tap.keys(), vec![], "the first state is the baseline");
+        h.state_mut().view.caps_now = Some(true);
+        frame(
+            &mut h,
+            vec![
+                key(Key::A, true, Modifiers::NONE),
+                key(Key::A, false, Modifiers::NONE),
+            ],
+            Modifiers::NONE,
+        );
+        assert_eq!(
+            tap.keys(),
+            vec![
+                (VK_CAPITAL, true),
+                (VK_CAPITAL, false),
+                (0x41, true),
+                (0x41, false)
+            ],
+            "Caps Lock goes before the frame's keys"
+        );
+        frame(&mut h, vec![], Modifiers::NONE);
+        assert_eq!(tap.keys(), vec![], "once per change");
     }
 
     #[test]
@@ -2998,7 +3218,7 @@ pub(crate) mod tests {
                 key(Key::Enter, true, Modifiers::NONE),
                 At {
                     keys_to_pc: true,
-                    over_video: false,
+                    over_stream: false,
                 },
             )],
         });

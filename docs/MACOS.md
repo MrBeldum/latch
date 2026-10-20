@@ -49,7 +49,8 @@ quarantine flag is how you tell macOS you fetched it deliberately.
 
 builds for `aarch64-apple-darwin` (Xcode command line tools and CMake are
 needed for the C parts), bundles `dist.noindex/Latch.app`, and installs it to
-`/Applications`. A locally built app never carries the quarantine flag.
+`/Applications`. The `.noindex` folder keeps build copies out of app search.
+A locally built app never carries the quarantine flag.
 
 ### Signing
 
