@@ -45,6 +45,16 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSError", "NSObject", "NSString"] }
+objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "SCShareableContent", "SCStream", "objc2-core-graphics", "block2", "dispatch2", "objc2-core-foundation", "objc2-core-media"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFDictionary", "CFNumber", "CFString", "CFCGTypes"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime", "CMSampleBuffer", "CMFormatDescription", "CMBlockBuffer", "objc2-core-audio-types", "objc2-core-video"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVPixelBuffer", "CVBuffer", "CVImageBuffer", "CVPixelBufferIOSurface"] }
+dispatch2 = "0.3"
+
 [dev-dependencies]
 # The loopback test runs a real viewer against this engine.
 latch-stream.workspace = true
