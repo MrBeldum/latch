@@ -42,6 +42,23 @@ fn retire_engine() -> Result<()> {
             fs::remove_file(file)?;
         }
     }
+    // Latch 4's drop-ins tied latch.service to the engine unit and waited
+    // for its port; left in place, the service would require a unit that
+    // no longer exists and never start. The owner's other lines stay.
+    let dropins = dirs_home()?.join(".config/systemd/user/latch.service.d");
+    if let Ok(entries) = fs::read_dir(&dropins) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "conf") {
+                if let Ok(text) = fs::read_to_string(&path) {
+                    let kept = without_engine_lines(&text);
+                    if kept != text {
+                        fs::write(&path, kept)?;
+                    }
+                }
+            }
+        }
+    }
     let _ = systemctl_user(&["daemon-reload"]);
     let old = dirs_home()?.join(".config/sunshine");
     if old.exists() {
@@ -52,6 +69,20 @@ fn retire_engine() -> Result<()> {
         fs::remove_dir_all(engine)?;
     }
     Ok(())
+}
+
+/// A drop-in's text without the lines that tied the service to Latch 4's
+/// engine unit or waited for the engine.
+#[cfg(any(target_os = "linux", test))]
+fn without_engine_lines(text: &str) -> String {
+    text.lines()
+        .filter(|l| {
+            !(l.contains("latch-engine.service")
+                || l.contains("brolink-engine.service")
+                || l.contains("wait-engine.py"))
+        })
+        .map(|l| format!("{l}\n"))
+        .collect()
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -774,6 +805,17 @@ fn dirs_home() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn upgrading_drops_only_the_engine_lines_from_a_drop_in() {
+        let latch4 = "[Unit]\nRequires=latch-engine.service\nAfter=latch-engine.service\n\n[Service]\nEnvironment=DISPLAY=:1\nEnvironment=LATCH_DISPLAY_FOLLOWS_VIEWER=1\nExecStartPre=/usr/bin/python3 /usr/local/libexec/latch-wait-engine.py\nRestart=on-failure\n";
+        let kept = without_engine_lines(latch4);
+        assert_eq!(
+            kept,
+            "[Unit]\n\n[Service]\nEnvironment=DISPLAY=:1\nEnvironment=LATCH_DISPLAY_FOLLOWS_VIEWER=1\nRestart=on-failure\n"
+        );
+        assert_eq!(without_engine_lines(&kept), kept, "a second run changes nothing");
+    }
+
     use super::*;
 
     #[test]
