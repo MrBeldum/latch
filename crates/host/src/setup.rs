@@ -60,6 +60,12 @@ $setupFailed = $false
 Step "Latch setup started"
 {retire}
 Step "Opening TCP and UDP {port} to the tailnet for Latch"
+# The first time a new latch-host.exe listens, Windows asks whether to allow
+# it; unanswered (nobody at the PC, an install over SSH) that becomes a pair
+# of inbound Block rules for the program, and a Block rule wins over every
+# Allow below. Only rules for this very executable are removed.
+$latchExe = '{exe}'
+Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | Where-Object {{ $_.Program -ieq $latchExe }} | Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {{ $_.Action -eq 'Block' -and $_.Direction -eq 'Inbound' }} | Remove-NetFirewallRule -ErrorAction SilentlyContinue
 foreach ($rule in 'Latch Host', 'Latch Media') {{ netsh advfirewall firewall delete rule name="$rule" | Out-Null }}
 netsh advfirewall firewall add rule name="Latch Host" dir=in action=allow protocol=TCP localport={port} remoteip=100.64.0.0/10 program='{exe}' | Out-Null
 if ($LASTEXITCODE -ne 0) {{ $setupFailed = $true }}
@@ -402,6 +408,21 @@ mod tests {
             "'--setup-elevated', '--local-app-data', '\"C:\\Users\\Ada Lovelace\"'"
         );
         assert!(run_value(Path::new("C:/a b/latch-host.exe")).starts_with('\"'));
+    }
+
+    #[test]
+    fn setup_lifts_windows_block_rules_for_this_executable_only() {
+        let s = script(&Plan {
+            exe: Path::new("C:\\Users\\O'Brien\\latch-host.exe"),
+            adapter: "",
+            adapter_description: "",
+        });
+        assert!(s.contains("$latchExe = 'C:\\Users\\O''Brien\\latch-host.exe'"), "{s}");
+        assert!(s.contains("$_.Program -ieq $latchExe"));
+        assert!(s.contains("$_.Action -eq 'Block' -and $_.Direction -eq 'Inbound'"));
+        let lift = s.find("Remove-NetFirewallRule").unwrap();
+        let allow = s.find("add rule name=\"Latch Host\"").unwrap();
+        assert!(lift < allow, "block rules go before the allow rules are added");
     }
 
     #[test]
