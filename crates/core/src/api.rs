@@ -199,6 +199,10 @@ pub struct Streamer {
     /// holds a host update back while it is true, instead of sending the
     /// whole executable to be turned down. False from older hosts.
     pub viewer: bool,
+    /// The Latch stream protocol this host speaks (`docs/PROTOCOL.md`); 0
+    /// from a Latch 4 host, which speaks only GameStream to Sunshine.
+    #[serde(default)]
+    pub protocol: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
