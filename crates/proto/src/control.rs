@@ -123,24 +123,73 @@ pub enum Message {
 
 /// Writes one message (`u32 length | u8 type | JSON`).
 pub fn write_message(w: &mut impl Write, message: &Message) -> std::io::Result<()> {
-    let _ = (w, message);
-    todo!()
+    let (kind, payload) = match message {
+        Message::Accept(v) => (1, serde_json::to_vec(v)),
+        Message::End(v) => (2, serde_json::to_vec(v)),
+        Message::Keepalive => (3, Ok(b"{}".to_vec())),
+        Message::Notice(v) => (4, serde_json::to_vec(v)),
+        Message::Report(v) => (5, serde_json::to_vec(v)),
+        Message::Unknown(t) => (*t, Ok(b"{}".to_vec())),
+    };
+    let payload = payload.map_err(std::io::Error::other)?;
+    if payload.len() + 1 > MAX_MESSAGE {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    w.write_all(&((payload.len() + 1) as u32).to_le_bytes())?;
+    w.write_all(&[kind])?;
+    w.write_all(&payload)
 }
 
 /// Reads one message. A length over [`MAX_MESSAGE`] or a payload that is
 /// not the type's JSON is `InvalidData`.
 pub fn read_message(r: &mut impl Read) -> std::io::Result<Message> {
-    let _ = r;
-    todo!()
+    let mut len = [0; 4];
+    r.read_exact(&mut len)?;
+    let len = u32::from_le_bytes(len) as usize;
+    if !(1..=MAX_MESSAGE).contains(&len) {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    let mut bytes = vec![0; len];
+    r.read_exact(&mut bytes)?;
+    let invalid = |e| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
+    Ok(match bytes[0] {
+        1 => Message::Accept(serde_json::from_slice(&bytes[1..]).map_err(invalid)?),
+        2 => Message::End(serde_json::from_slice(&bytes[1..]).map_err(invalid)?),
+        3 => {
+            let _: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_slice(&bytes[1..]).map_err(invalid)?;
+            Message::Keepalive
+        }
+        4 => Message::Notice(serde_json::from_slice(&bytes[1..]).map_err(invalid)?),
+        5 => Message::Report(serde_json::from_slice(&bytes[1..]).map_err(invalid)?),
+        t => Message::Unknown(t),
+    })
 }
 
 /// 16 random bytes as 32 lowercase hex digits, and back.
 pub fn token_hex(token: &[u8; 16]) -> String {
-    let _ = token;
-    todo!()
+    const HEX: &[u8] = b"0123456789abcdef";
+    let mut s = String::with_capacity(32);
+    for &b in token {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 15) as usize] as char);
+    }
+    s
 }
 
 pub fn token_from_hex(s: &str) -> Option<[u8; 16]> {
-    let _ = s;
-    todo!()
+    if s.len() != 32 {
+        return None;
+    }
+    let mut out = [0; 16];
+    for (i, pair) in s.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+        let digit = |c: u8| match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        };
+        out[i] = digit(pair[0])? * 16 + digit(pair[1])?;
+    }
+    Some(out)
 }

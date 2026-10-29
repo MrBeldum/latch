@@ -10,18 +10,60 @@ pub const GROUP: u32 = 4;
 /// [`GROUP`] of them.
 pub struct AudioPacketizer {
     session: u32,
+    seq: u32,
+    parity: Vec<u8>,
 }
 
 impl AudioPacketizer {
     pub fn new(session: u32) -> Self {
-        Self { session }
+        Self {
+            session,
+            seq: 0,
+            parity: Vec::new(),
+        }
     }
 
     /// Calls `emit` with the packet for `payload` and, when it ends a group,
     /// the group's parity packet after it.
     pub fn packetize(&mut self, pts: u32, payload: &[u8], emit: impl FnMut(&[u8])) {
-        let _ = (pts, payload, emit, self.session);
-        todo!()
+        if payload.len() > u16::MAX as usize {
+            return;
+        }
+        let mut emit = emit;
+        let mut buf = Vec::new();
+        crate::wire::write_audio(
+            &mut buf,
+            self.session,
+            &AudioPacket {
+                parity: false,
+                seq: self.seq,
+                pts,
+                payload,
+            },
+        );
+        emit(&buf);
+        let mut coded = Vec::with_capacity(payload.len() + 2);
+        coded.extend((payload.len() as u16).to_le_bytes());
+        coded.extend(payload);
+        self.parity.resize(self.parity.len().max(coded.len()), 0);
+        for (a, b) in self.parity.iter_mut().zip(coded) {
+            *a ^= b;
+        }
+        if self.seq % GROUP == GROUP - 1 {
+            crate::wire::write_audio(
+                &mut buf,
+                self.session,
+                &AudioPacket {
+                    parity: true,
+                    seq: self.seq.wrapping_sub(GROUP - 1),
+                    pts,
+                    payload: &self.parity,
+                },
+            );
+            emit(&buf);
+            self.parity.clear();
+        }
+        self.seq = self.seq.wrapping_add(1);
     }
 }
 
@@ -42,25 +84,128 @@ pub enum AudioOut {
 /// end of its group has arrived.
 pub struct AudioReceiver {
     session: u32,
+    next: Option<u32>,
+    frames: std::collections::HashMap<u32, (u32, Vec<u8>)>,
+    parity: std::collections::HashMap<u32, Vec<u8>>,
+    latest: Option<u32>,
+    stats: (u64, u64, u64),
 }
 
 impl AudioReceiver {
     pub fn new(session: u32) -> Self {
-        Self { session }
+        Self {
+            session,
+            next: None,
+            frames: Default::default(),
+            parity: Default::default(),
+            latest: None,
+            stats: (0, 0, 0),
+        }
     }
 
     pub fn push(&mut self, packet: &AudioPacket<'_>, now: Instant) {
-        let _ = (packet, now, self.session);
-        todo!()
+        let _ = (now, self.session);
+        let next = *self.next.get_or_insert(packet.seq);
+        if crate::video::before(packet.seq, next.wrapping_sub(GROUP - 1)) {
+            return;
+        }
+        if packet.parity {
+            if packet.seq.wrapping_sub(next) > 64 && crate::video::before(next, packet.seq) {
+                return;
+            }
+            if !packet.seq.is_multiple_of(GROUP) {
+                return;
+            }
+            self.parity
+                .entry(packet.seq)
+                .or_insert_with(|| packet.payload.to_vec());
+        } else {
+            if crate::video::before(packet.seq, next) || packet.seq.wrapping_sub(next) > 64 {
+                return;
+            }
+            if self.frames.contains_key(&packet.seq) {
+                return;
+            }
+            self.frames
+                .insert(packet.seq, (packet.pts, packet.payload.to_vec()));
+            self.stats.0 += 1;
+            if self
+                .latest
+                .is_none_or(|n| crate::video::before(n, packet.seq))
+            {
+                self.latest = Some(packet.seq);
+            }
+        }
+        self.rebuild(packet.seq - packet.seq % GROUP);
     }
 
+    fn rebuild(&mut self, group: u32) {
+        let Some(parity) = self.parity.get(&group) else {
+            return;
+        };
+        let missing: Vec<_> = (0..GROUP)
+            .map(|i| group.wrapping_add(i))
+            .filter(|s| !self.frames.contains_key(s))
+            .collect();
+        if missing.len() != 1 {
+            return;
+        }
+        let mut data = parity.clone();
+        for i in 0..GROUP {
+            if let Some((_, payload)) = self.frames.get(&group.wrapping_add(i)) {
+                let mut coded = Vec::new();
+                coded.extend((payload.len() as u16).to_le_bytes());
+                coded.extend(payload);
+                for (a, b) in data.iter_mut().zip(coded) {
+                    *a ^= b;
+                }
+            }
+        }
+        if data.len() < 2 {
+            return;
+        }
+        let len = u16::from_le_bytes([data[0], data[1]]) as usize;
+        if len > data.len() - 2 {
+            return;
+        }
+        let seq = missing[0];
+        let pts = (0..GROUP)
+            .find_map(|i| {
+                let n = group.wrapping_add(i);
+                self.frames
+                    .get(&n)
+                    .map(|(p, _)| p.wrapping_add(seq.wrapping_sub(n).wrapping_mul(10_000)))
+            })
+            .unwrap_or(0);
+        self.frames.insert(seq, (pts, data[2..2 + len].to_vec()));
+        self.stats.1 += 1;
+    }
     /// The next packet in order, or the next one given up on.
     pub fn pop(&mut self) -> Option<AudioOut> {
-        todo!()
+        let seq = self.next?;
+        self.frames
+            .retain(|&n, _| !crate::video::before(n, seq.wrapping_sub(GROUP)));
+        self.parity
+            .retain(|&n, _| !crate::video::before(n, seq.wrapping_sub(GROUP)));
+        let group = seq - seq % GROUP;
+        if let Some((pts, payload)) = self.frames.get(&seq).cloned() {
+            self.next = Some(seq.wrapping_add(1));
+            return Some(AudioOut::Frame { seq, pts, payload });
+        }
+        if self.parity.contains_key(&group)
+            || self
+                .latest
+                .is_some_and(|n| !crate::video::before(n, group.wrapping_add(GROUP + 1)))
+        {
+            self.next = Some(seq.wrapping_add(1));
+            self.stats.2 += 1;
+            return Some(AudioOut::Missing { seq });
+        }
+        None
     }
 
     /// Counters: packets received, rebuilt from parity, given up on.
     pub fn stats(&self) -> (u64, u64, u64) {
-        todo!()
+        self.stats
     }
 }
