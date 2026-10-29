@@ -45,12 +45,80 @@ fn retire_engine() -> Result<()> {
     let _ = systemctl_user(&["daemon-reload"]);
     let old = dirs_home()?.join(".config/sunshine");
     if old.exists() {
-        fs::remove_dir_all(old)?;
+        retire_legacy_sunshine(&old)?;
     }
     let engine = latch_core::config::data_dir()?.join("engine");
     if engine.exists() {
         fs::remove_dir_all(engine)?;
     }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn is_latch4_sunshine(dir: &Path) -> bool {
+    if dir.join("latch-web.json").exists() || dir.join("brolink-web.json").exists() {
+        return true;
+    }
+    if let Ok(apps) = fs::read_to_string(dir.join("apps.json")) {
+        if apps.contains("desktop.png") {
+            return true;
+        }
+    }
+    if let Ok(conf) = fs::read_to_string(dir.join("sunshine.conf")) {
+        if conf.contains("latch-web.json") || conf.contains("brolink-web.json") {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn dated_backup_path(dir: &Path) -> PathBuf {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let stamp = format_date(now);
+    let name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("sunshine");
+    let mut candidate = dir.with_file_name(format!("{name}.bak-{stamp}"));
+    let mut counter = 1;
+    while candidate.exists() {
+        candidate = dir.with_file_name(format!("{name}.bak-{stamp}-{counter}"));
+        counter += 1;
+    }
+    candidate
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn format_date(secs: u64) -> String {
+    let mut days = secs / 86400;
+    let rem_secs = secs % 86400;
+    let hours = rem_secs / 3600;
+    let mins = (rem_secs % 3600) / 60;
+    let s = rem_secs % 60;
+    days += 719468;
+    let era = days / 146097;
+    let doe = days - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}{m:02}{d:02}-{hours:02}{mins:02}{s:02}")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn retire_legacy_sunshine(old: &Path) -> Result<()> {
+    if !is_latch4_sunshine(old) {
+        return Ok(());
+    }
+    let backup = dated_backup_path(old);
+    fs::rename(old, backup).context("move legacy sunshine configuration to backup")?;
     Ok(())
 }
 
@@ -827,6 +895,76 @@ mod tests {
             script.ends_with("with administrator privileges"),
             "{script}"
         );
+    }
+    #[test]
+    fn non_latch_sunshine_is_left_alone_and_latch_sunshine_is_backed_up() {
+        let tmp = std::env::temp_dir().join(format!("latch-test-sunshine-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        // 1. Non-Latch Sunshine: regular user sunshine with steam and default config
+        let user_sunshine = tmp.join("user_sunshine");
+        fs::create_dir_all(&user_sunshine).unwrap();
+        fs::write(
+            user_sunshine.join("sunshine.conf"),
+            "port = 47989\nencoder = nvenc\n",
+        )
+        .unwrap();
+        fs::write(
+            user_sunshine.join("apps.json"),
+            r#"{"apps":[{"name":"Steam"}]}"#,
+        )
+        .unwrap();
+
+        assert!(!is_latch4_sunshine(&user_sunshine));
+        retire_legacy_sunshine(&user_sunshine).unwrap();
+        assert!(
+            user_sunshine.exists(),
+            "non-Latch sunshine directory must be left alone"
+        );
+        assert!(user_sunshine.join("apps.json").exists());
+
+        // 2. Latch 4 Sunshine: identified by latch-web.json
+        let latch_sunshine = tmp.join("latch_sunshine");
+        fs::create_dir_all(&latch_sunshine).unwrap();
+        fs::write(
+            latch_sunshine.join("sunshine.conf"),
+            "origin_web_ui_allowed = pc\n",
+        )
+        .unwrap();
+        fs::write(latch_sunshine.join("latch-web.json"), "{}").unwrap();
+
+        assert!(is_latch4_sunshine(&latch_sunshine));
+        retire_legacy_sunshine(&latch_sunshine).unwrap();
+        assert!(
+            !latch_sunshine.exists(),
+            "Latch 4 sunshine directory must be moved aside"
+        );
+        let backups: Vec<_> = fs::read_dir(&tmp)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("latch_sunshine.bak-")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "exactly one backup directory created");
+        assert!(backups[0].path().join("latch-web.json").exists());
+
+        // 3. Latch 4 Sunshine: identified by apps.json with desktop.png
+        let latch_sunshine_apps = tmp.join("latch_sunshine_apps");
+        fs::create_dir_all(&latch_sunshine_apps).unwrap();
+        fs::write(
+            latch_sunshine_apps.join("apps.json"),
+            r#"{"apps":[{"name":"Desktop","image-path":"desktop.png"}]}"#,
+        )
+        .unwrap();
+        assert!(is_latch4_sunshine(&latch_sunshine_apps));
+        retire_legacy_sunshine(&latch_sunshine_apps).unwrap();
+        assert!(!latch_sunshine_apps.exists());
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }
 

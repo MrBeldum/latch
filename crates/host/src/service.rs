@@ -199,7 +199,9 @@ impl Service {
                 Err(e) => return Err(e).context(format!("bind TCP {CONTROL_PORT}")),
             }
         };
-        crate::prep::migrate()?;
+        if let Err(e) = crate::prep::migrate() {
+            self.log(format!("migrating legacy configuration: {e:#}"));
+        }
         *self.cfg.lock() = HostConfig::load();
         let owner = Arc::downgrade(&self);
         let log = self.log.clone();
@@ -244,9 +246,17 @@ impl Service {
         }
         let handler = self.clone();
         let authorizer = self.clone();
-        http::serve_with_peer_check(
+        let body_authorizer = self.clone();
+        http::serve_with_auth(
             listener,
             move |peer| authorizer.authorized(peer.ip()),
+            move |peer, path, _headers, _len| {
+                if path == UPDATE_PATH {
+                    body_authorizer.caller(peer).allowed()
+                } else {
+                    false
+                }
+            },
             move |peer, req| handler.handle(peer, req),
         );
         Ok(())
@@ -693,7 +703,16 @@ impl Service {
             ("GET", "/v1/status") => Response::json(200, &self.status(local)),
             ("GET", "/v1/display") => Response::json(200, &self.display()),
             ("POST", "/v1/display") => self.set_display(peer.ip(), req),
-            ("POST", p) if p == control::PATH => self.stream(peer, req),
+            ("POST", p) if p == control::PATH => {
+                if local {
+                    Response::json(
+                        403,
+                        &Ack::err("streaming sessions may only be started by an authorized Tailscale peer"),
+                    )
+                } else {
+                    self.stream(peer, req)
+                }
+            }
             ("POST", "/v1/power") => self.power(peer.ip(), req),
             ("POST", p) if p == UPDATE_PATH => self.update(peer.ip(), req),
             ("GET", p) if p == CLIPBOARD_PATH => match clipboard::read() {
@@ -992,7 +1011,7 @@ fn loopback_caller(
     owner: Option<&Owner>,
     whois: impl FnOnce() -> Result<Option<tailscale::WhoIs>>,
 ) -> Caller {
-    if tun != Some(false) {
+    if tun == Some(true) {
         return Caller::Local;
     }
     match whois() {
@@ -1380,36 +1399,36 @@ mod tests {
             loopback_caller(Some(true), Some(&owner), never),
             Caller::Local
         );
-        assert_eq!(loopback_caller(None, Some(&owner), never), Caller::Local);
-        // Userspace: whoever whois finds behind the port.
         let found = |id, login: &str| {
             let w = whois(id, login);
             move || Ok(Some(w))
         };
-        assert_eq!(
-            loopback_caller(Some(false), Some(&owner), found(21, "ada@example.com")),
-            Caller::Peer { allowed: true },
-            "the owner's Mac may ask, but is not the local window"
-        );
-        assert_eq!(
-            loopback_caller(Some(false), Some(&owner), found(77, "bob@example.net")),
-            Caller::Peer { allowed: false }
-        );
-        assert_eq!(
-            loopback_caller(Some(false), None, found(21, "ada@example.com")),
-            Caller::Peer { allowed: false },
-            "nobody to compare with while Tailscale is down"
-        );
-        assert_eq!(
-            loopback_caller(Some(false), Some(&owner), || Ok(None)),
-            Caller::Local,
-            "no peer behind the port: a process on this machine"
-        );
-        assert_eq!(
-            loopback_caller(Some(false), Some(&owner), || anyhow::bail!("timed out")),
-            Caller::Peer { allowed: false },
-            "a failed lookup admits nobody"
-        );
+        for tun_state in [Some(false), None] {
+            assert_eq!(
+                loopback_caller(tun_state, Some(&owner), found(21, "ada@example.com")),
+                Caller::Peer { allowed: true },
+                "the owner's Mac may ask, but is not the local window"
+            );
+            assert_eq!(
+                loopback_caller(tun_state, Some(&owner), found(77, "bob@example.net")),
+                Caller::Peer { allowed: false }
+            );
+            assert_eq!(
+                loopback_caller(tun_state, None, found(21, "ada@example.com")),
+                Caller::Peer { allowed: false },
+                "nobody to compare with while Tailscale is down"
+            );
+            assert_eq!(
+                loopback_caller(tun_state, Some(&owner), || Ok(None)),
+                Caller::Local,
+                "no peer behind the port: a process on this machine"
+            );
+            assert_eq!(
+                loopback_caller(tun_state, Some(&owner), || anyhow::bail!("timed out")),
+                Caller::Peer { allowed: false },
+                "a failed lookup admits nobody"
+            );
+        }
         assert!(!Caller::Peer { allowed: false }.allowed());
         assert!(Caller::Local.allowed());
 
@@ -1564,24 +1583,32 @@ mod tests {
     fn stream_and_power_validate_their_bodies() {
         let svc = Service::new();
         let local: SocketAddr = "127.0.0.1:5".parse().unwrap();
+        let peer_addr: SocketAddr = "100.64.0.5:5".parse().unwrap();
+        svc.auth
+            .lock()
+            .insert(peer_addr.ip(), (Instant::now(), true));
         let post = |path: &str, body: &str| Request {
             method: "POST".into(),
             path: path.into(),
             headers: json_header(),
             body: body.into(),
         };
-        assert_eq!(svc.handle(local, &post(control::PATH, "{}")).status, 400);
+        assert_eq!(svc.handle(local, &post(control::PATH, "{}")).status, 403);
+        assert_eq!(
+            svc.handle(peer_addr, &post(control::PATH, "{}")).status,
+            400
+        );
         let mut bad = post(control::PATH, "not json");
         bad.headers
             .push(("upgrade".into(), control::UPGRADE.into()));
-        assert_eq!(svc.handle(local, &bad).status, 400);
+        assert_eq!(svc.handle(peer_addr, &bad).status, 400);
         assert_eq!(
             svc.handle("192.168.1.11:5".parse().unwrap(), &bad).status,
             403
         );
         bad.headers.retain(|(key, _)| key != "upgrade");
         bad.headers.push(("upgrade".into(), "other/1".into()));
-        assert_eq!(svc.handle(local, &bad).status, 400);
+        assert_eq!(svc.handle(peer_addr, &bad).status, 400);
         assert_eq!(
             svc.handle(local, &post("/v1/power", r#"{"action":"nap"}"#))
                 .status,
@@ -1766,5 +1793,42 @@ mod tests {
             },
         );
         assert_eq!(r.status, 403);
+    }
+
+    #[test]
+    fn stream_route_refuses_plain_local_and_admits_tailnet_or_userspace_peer() {
+        let svc = Service::new();
+        let local: SocketAddr = "127.0.0.1:5".parse().unwrap();
+        let req = Request {
+            method: "POST".into(),
+            path: control::PATH.into(),
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: b"{}".to_vec(),
+        };
+
+        // Plain local connection is refused with 403 Forbidden
+        let r = svc.handle(local, &req);
+        assert_eq!(
+            r.status, 403,
+            "plain local caller must not start stream: {}",
+            r.body
+        );
+
+        // Unauthorized tailnet peer is refused with 403 Forbidden
+        let peer: SocketAddr = "100.64.0.10:5".parse().unwrap();
+        let r = svc.handle(peer, &req);
+        assert_eq!(
+            r.status, 403,
+            "unauthorized tailnet peer must not start stream"
+        );
+
+        // Authorized tailnet peer is admitted (passes caller check and reaches body validation -> 400)
+        svc.auth.lock().insert(peer.ip(), (Instant::now(), true));
+        let r = svc.handle(peer, &req);
+        assert_eq!(
+            r.status, 400,
+            "authorized tailnet peer is admitted: {}",
+            r.body
+        );
     }
 }

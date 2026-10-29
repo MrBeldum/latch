@@ -6,7 +6,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Larger bodies are refused; nothing Latch sends comes close, except the
 /// host executable on [`crate::api::UPDATE_PATH`], which has its own limit.
@@ -141,10 +141,57 @@ impl Response {
     }
 }
 
+struct DeadlineStream<'a> {
+    stream: &'a mut TcpStream,
+    deadline: Option<Instant>,
+}
+
+impl<'a> DeadlineStream<'a> {
+    fn new(stream: &'a mut TcpStream, deadline: Instant) -> Self {
+        Self {
+            stream,
+            deadline: Some(deadline),
+        }
+    }
+
+    fn clear_deadline(&mut self) {
+        self.deadline = None;
+    }
+}
+
+impl<'a> Read for DeadlineStream<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(deadline) = self.deadline {
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(std::io::Error::new(ErrorKind::TimedOut, "timed out"));
+            }
+            let remaining = deadline - now;
+            let _ = self.stream.set_read_timeout(Some(remaining));
+        }
+        self.stream.read(buf)
+    }
+}
+
 /// Read one request from `stream`. `None` for an empty connection (a port
 /// scan, a health probe) so the caller can drop it quietly.
 pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
-    let mut reader = BufReader::new(stream);
+    let mut deadline_stream = DeadlineStream::new(stream, Instant::now() + IDLE_TIMEOUT);
+    match read_request_from(&mut deadline_stream, |_, _, _| true)? {
+        Some(Ok(req)) => Ok(Some(req)),
+        Some(Err(resp)) => bail!("HTTP {}: {}", resp.status, resp.body),
+        None => Ok(None),
+    }
+}
+
+fn read_request_from<B>(
+    deadline_stream: &mut DeadlineStream<'_>,
+    allow_large_body: B,
+) -> Result<Option<std::result::Result<Request, Response>>>
+where
+    B: FnOnce(&str, &[(String, String)], u64) -> bool,
+{
+    let mut reader = BufReader::new(deadline_stream);
     let mut remaining = MAX_HEADER;
     let Some(line) = read_line(&mut reader, &mut remaining)? else {
         return Ok(None);
@@ -165,12 +212,28 @@ pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
     if content_length > max_body(&path) as u64 {
         bail!("body too large ({content_length} bytes)");
     }
+    reader.get_mut().clear_deadline();
+
     if content_length > MAX_BODY as u64 {
+        if !allow_large_body(&path, &headers, content_length) {
+            return Ok(Some(Err(Response::json(
+                403,
+                &crate::api::Ack::err("not a machine on this PC's Tailscale account"),
+            ))));
+        }
         reader
             .get_mut()
+            .stream
             .set_read_timeout(Some(UPDATE_BODY_TIMEOUT))
             .map_err(io_err)?;
+    } else {
+        reader
+            .get_mut()
+            .stream
+            .set_read_timeout(Some(IDLE_TIMEOUT))
+            .map_err(io_err)?;
     }
+
     // Grow only as bytes arrive; an untrusted size must not reserve the
     // entire update allowance before the sender transmits its body.
     let mut body = Vec::new();
@@ -181,12 +244,12 @@ pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
     if received as u64 != content_length {
         bail!("connection closed inside the body");
     }
-    Ok(Some(Request {
+    Ok(Some(Ok(Request {
         method,
         path,
         headers,
         body,
-    }))
+    })))
 }
 
 /// A reply with an arbitrary body: a file, a script.
@@ -252,8 +315,25 @@ where
     A: Fn(SocketAddr) -> bool + Send + Sync + 'static,
     F: Fn(SocketAddr, &Request) -> Response + Send + Sync + 'static,
 {
+    serve_with_auth(
+        listener,
+        authorize,
+        |_, path, _, _| path == crate::api::UPDATE_PATH,
+        handler,
+    );
+}
+
+/// Like [`serve_with_peer_check`], but runs `allow_body` after reading the
+/// request head and before reading or buffering a large body (over `MAX_BODY`).
+pub fn serve_with_auth<A, B, F>(listener: TcpListener, authorize: A, allow_body: B, handler: F)
+where
+    A: Fn(SocketAddr) -> bool + Send + Sync + 'static,
+    B: Fn(SocketAddr, &str, &[(String, String)], u64) -> bool + Send + Sync + 'static,
+    F: Fn(SocketAddr, &Request) -> Response + Send + Sync + 'static,
+{
     let handler = std::sync::Arc::new(handler);
     let authorize = std::sync::Arc::new(authorize);
+    let allow_body = std::sync::Arc::new(allow_body);
     let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for conn in listener.incoming() {
         let Ok(mut stream) = conn else { continue };
@@ -263,6 +343,7 @@ where
         };
         let handler = handler.clone();
         let authorize = authorize.clone();
+        let allow_body = allow_body.clone();
         std::thread::spawn(move || {
             let _slot = slot;
             let _ = stream.set_read_timeout(Some(IDLE_TIMEOUT));
@@ -278,13 +359,20 @@ where
                 );
                 return;
             }
-            let resp = match read_request(&mut stream) {
-                Ok(Some(req)) => handler(peer, &req),
-                Ok(None) => return,
-                Err(e) => Response::json(
-                    400,
-                    &serde_json::json!({ "ok": false, "error": e.to_string() }),
-                ),
+            let resp = {
+                let mut deadline_stream =
+                    DeadlineStream::new(&mut stream, Instant::now() + IDLE_TIMEOUT);
+                match read_request_from(&mut deadline_stream, |path, headers, len| {
+                    allow_body(peer, path, headers, len)
+                }) {
+                    Ok(Some(Ok(req))) => handler(peer, &req),
+                    Ok(Some(Err(forbidden))) => forbidden,
+                    Ok(None) => return,
+                    Err(e) => Response::json(
+                        400,
+                        &serde_json::json!({ "ok": false, "error": e.to_string() }),
+                    ),
+                }
             };
             if let (101, Some(takeover)) = (resp.status, &resp.takeover) {
                 switch(stream, takeover);
@@ -917,5 +1005,51 @@ mod tests {
         .unwrap()
         .unwrap_err();
         assert_eq!(refused.status, 404);
+    }
+
+    #[test]
+    fn head_deadline_times_out_slow_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut deadline_stream =
+                DeadlineStream::new(&mut stream, Instant::now() + Duration::from_millis(50));
+            let res = read_request_from(&mut deadline_stream, |_, _, _| true);
+            tx.send(res.is_err()).unwrap();
+        });
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.write_all(b"GET /").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = s.write_all(b" HTTP/1.1\r\n\r\n");
+        assert!(rx.recv_timeout(Duration::from_secs(2)).unwrap());
+    }
+
+    #[test]
+    fn large_update_body_rejected_for_unauthorized_callers() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            serve_with_auth(
+                listener,
+                |_| true,
+                |_peer, _path, _headers, _len| false,
+                |_, _| Response::json(200, &Ack::ok()),
+            );
+        });
+        let body = vec![0x4du8; 100 * 1024];
+        let r = request_with(
+            addr,
+            "POST",
+            crate::api::UPDATE_PATH,
+            &[("X-Latch-Version", "3.1.0")],
+            &body,
+            Duration::from_secs(5),
+        );
+        match r {
+            Ok(resp) => assert_eq!(resp.status, 403),
+            Err(e) => assert!(e.to_string().contains("403") || e.to_string().contains("closed")),
+        }
     }
 }
