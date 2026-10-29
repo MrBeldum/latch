@@ -52,7 +52,11 @@ impl From<Error> for CodecError {
 }
 
 #[derive(Clone, Debug)]
-struct Frame { picture: Yuv420, poc: i64, epoch: u64 }
+struct Frame {
+    picture: Yuv420,
+    poc: i64,
+    epoch: u64,
+}
 
 #[derive(Clone, Copy)]
 struct Limits {
@@ -79,13 +83,20 @@ pub struct Decoder {
 
 impl Decoder {
     pub fn new() -> Self {
-        Self { engine: engine::Decoder::new(Limits::default()), output: None, poc: None }
+        Self {
+            engine: engine::Decoder::new(Limits::default()),
+            output: None,
+            poc: None,
+        }
     }
 
     /// Decodes every slice in one Annex B access unit, then publishes the
     /// complete visible picture. An error invalidates references so loss
     /// cannot silently propagate into later P pictures.
-    pub fn decode(&mut self, access_unit: &[u8]) -> std::result::Result<Option<&Yuv420>, CodecError> {
+    pub fn decode(
+        &mut self,
+        access_unit: &[u8],
+    ) -> std::result::Result<Option<&Yuv420>, CodecError> {
         if access_unit.len() > self.engine.max_input() {
             self.engine.invalidate();
             return Err(CodecError::Invalid("access unit exceeds 64 MiB"));
@@ -106,7 +117,9 @@ impl Decoder {
 
     /// POC of the last returned picture, for callers that elect to display
     /// reordered P-only test streams. Latch publishes pictures immediately.
-    pub fn picture_order(&self) -> Option<(u64, i64)> { self.poc }
+    pub fn picture_order(&self) -> Option<(u64, i64)> {
+        self.poc
+    }
 
     /// Forgets parameter sets and reference pictures when switching streams.
     pub fn reset(&mut self) {
@@ -115,5 +128,7 @@ impl Decoder {
 }
 
 impl Default for Decoder {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

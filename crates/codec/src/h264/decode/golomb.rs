@@ -48,13 +48,17 @@ impl<'a> Br<'a> {
     /// also be completely empty or all-zero.
     pub(crate) fn no_more_rbsp_data(&self) -> bool {
         let rem = self.remaining();
-        rem == 0 || (rem <= 8 && self.peek(rem).is_ok_and(|v| v == 1 << (rem-1)))
+        rem == 0 || (rem <= 8 && self.peek(rem).is_ok_and(|v| v == 1 << (rem - 1)))
     }
 
     pub(crate) fn trailing_bits(&mut self) -> Result<()> {
-        if self.remaining() > 8 || !self.bit()? { return Err(Error::BadValue("rbsp_stop_one_bit")); }
+        if self.remaining() > 8 || !self.bit()? {
+            return Err(Error::BadValue("rbsp_stop_one_bit"));
+        }
         let n = self.remaining();
-        if self.bits(n)? != 0 { return Err(Error::BadValue("rbsp_alignment_zero_bit")); }
+        if self.bits(n)? != 0 {
+            return Err(Error::BadValue("rbsp_alignment_zero_bit"));
+        }
         Ok(())
     }
 
@@ -67,17 +71,20 @@ impl<'a> Br<'a> {
         if n > self.remaining() {
             return Err(Error::truncated("peek bits", n, self.remaining()));
         }
-        if n == 0 { return Ok(0); }
+        if n == 0 {
+            return Ok(0);
+        }
         let start = self.pos / 8;
         let offset = self.pos % 8;
         if offset + n <= 16 {
-            let word = (u32::from(self.data[start]) << 8) | u32::from(self.data.get(start+1).copied().unwrap_or(0));
-            return Ok((word >> (16-offset-n)) & ((1u32 << n)-1));
+            let word = (u32::from(self.data[start]) << 8)
+                | u32::from(self.data.get(start + 1).copied().unwrap_or(0));
+            return Ok((word >> (16 - offset - n)) & ((1u32 << n) - 1));
         }
         let mut bytes = [0u8; 8];
-        let count = (offset+n).div_ceil(8);
-        bytes[..count].copy_from_slice(&self.data[start..start+count]);
-        Ok(((u64::from_be_bytes(bytes) >> (64-offset-n)) & ((1u64 << n)-1)) as u32)
+        let count = (offset + n).div_ceil(8);
+        bytes[..count].copy_from_slice(&self.data[start..start + count]);
+        Ok(((u64::from_be_bytes(bytes) >> (64 - offset - n)) & ((1u64 << n) - 1)) as u32)
     }
 
     /// Reads `n` bits (`n <= 32`), first stream bit = result MSB.
@@ -89,8 +96,10 @@ impl<'a> Br<'a> {
 
     /// Reads one bit.
     pub(crate) fn bit(&mut self) -> Result<bool> {
-        if self.remaining() == 0 { return Err(Error::BadValue("truncated bit")); }
-        let bit = self.data[self.pos/8] & (0x80 >> (self.pos%8)) != 0;
+        if self.remaining() == 0 {
+            return Err(Error::BadValue("truncated bit"));
+        }
+        let bit = self.data[self.pos / 8] & (0x80 >> (self.pos % 8)) != 0;
         self.pos += 1;
         Ok(bit)
     }
@@ -107,10 +116,14 @@ impl<'a> Br<'a> {
     /// than 31 (code_num above `u32::MAX`), which no H.264 field permits.
     pub(crate) fn ue(&mut self) -> Result<u32> {
         let n = self.remaining().min(32);
-        if n == 0 { return Err(Error::BadValue("truncated ue(v)")); }
-        let window = self.peek(n)? << (32-n);
+        if n == 0 {
+            return Err(Error::BadValue("truncated ue(v)"));
+        }
+        let window = self.peek(n)? << (32 - n);
         let zeros = window.leading_zeros() as usize;
-        if zeros >= n { return Err(Error::BadValue("truncated or oversized ue(v)")); }
+        if zeros >= n {
+            return Err(Error::BadValue("truncated or oversized ue(v)"));
+        }
         self.pos += zeros + 1;
         let suffix = if zeros == 0 { 0 } else { self.bits(zeros)? };
         Ok((1u64 << zeros) as u32 - 1 + suffix)

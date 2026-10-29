@@ -11,7 +11,7 @@
 //! and idc 2 additionally skips edges that sit on slice boundaries.
 
 use super::mb::MbState;
-use super::tables::{ALPHA_TABLE, BETA_TABLE, TC0_TABLE, block_index};
+use super::tables::{block_index, ALPHA_TABLE, BETA_TABLE, TC0_TABLE};
 use std::vec::Vec;
 
 /// Boundary strengths for one MB: vertical edges at luma x = {0,4,8,12}
@@ -26,23 +26,57 @@ struct BsMap {
 /// Boundary strengths follow 8.7.2.1 on the luma 4x4 grid. Slice
 /// boundaries affect availability only when the controlling slice uses idc 2.
 fn compute_bs(cur: &MbState, mb_a: Option<&MbState>, mb_b: Option<&MbState>) -> BsMap {
-    let mut result = BsMap { v: [[0;4];4], h: [[0;4];4] };
-    if cur.disable_deblock_idc == 1 { return result; }
+    let mut result = BsMap {
+        v: [[0; 4]; 4],
+        h: [[0; 4]; 4],
+    };
+    if cur.disable_deblock_idc == 1 {
+        return result;
+    }
     for dir in 0..2 {
         for edge in 0..4 {
-            let other = if edge == 0 { if dir == 0 { mb_a } else { mb_b } } else { Some(cur) };
-            let Some(p) = other else { continue; };
-            if edge == 0 && cur.disable_deblock_idc == 2 && p.slice_id != cur.slice_id { continue; }
+            let other = if edge == 0 {
+                if dir == 0 {
+                    mb_a
+                } else {
+                    mb_b
+                }
+            } else {
+                Some(cur)
+            };
+            let Some(p) = other else {
+                continue;
+            };
+            if edge == 0 && cur.disable_deblock_idc == 2 && p.slice_id != cur.slice_id {
+                continue;
+            }
             for k in 0..4 {
-                let (q_idx,p_idx) = if dir == 0 { (block_index(edge,k),block_index((edge+3)%4,k)) } else { (block_index(k,edge),block_index(k,(edge+3)%4)) };
+                let (q_idx, p_idx) = if dir == 0 {
+                    (block_index(edge, k), block_index((edge + 3) % 4, k))
+                } else {
+                    (block_index(k, edge), block_index(k, (edge + 3) % 4))
+                };
                 let strength = if cur.mb_type.is_intra() || p.mb_type.is_intra() {
-                    if edge == 0 { 4 } else { 3 }
-                } else if cur.nz[q_idx] != 0 || p.nz[p_idx] != 0 { 2 }
-                else if cur.ref_idx[q_idx] != p.ref_idx[p_idx]
-                    || (i32::from(cur.mv[q_idx][0])-i32::from(p.mv[p_idx][0])).abs() >= 4
-                    || (i32::from(cur.mv[q_idx][1])-i32::from(p.mv[p_idx][1])).abs() >= 4 { 1 }
-                else { 0 };
-                if dir == 0 { result.v[edge][k] = strength; } else { result.h[edge][k] = strength; }
+                    if edge == 0 {
+                        4
+                    } else {
+                        3
+                    }
+                } else if cur.nz[q_idx] != 0 || p.nz[p_idx] != 0 {
+                    2
+                } else if cur.ref_idx[q_idx] != p.ref_idx[p_idx]
+                    || (i32::from(cur.mv[q_idx][0]) - i32::from(p.mv[p_idx][0])).abs() >= 4
+                    || (i32::from(cur.mv[q_idx][1]) - i32::from(p.mv[p_idx][1])).abs() >= 4
+                {
+                    1
+                } else {
+                    0
+                };
+                if dir == 0 {
+                    result.v[edge][k] = strength;
+                } else {
+                    result.h[edge][k] = strength;
+                }
             }
         }
     }
@@ -50,7 +84,9 @@ fn compute_bs(cur: &MbState, mb_a: Option<&MbState>, mb_b: Option<&MbState>) -> 
 }
 
 /// the filtered p0..p2 / q0..q2 as `(p', q')` with 3 valid entries.
-fn clip3(low: i32, high: i32, value: i32) -> i32 { value.clamp(low, high) }
+fn clip3(low: i32, high: i32, value: i32) -> i32 {
+    value.clamp(low, high)
+}
 
 #[inline(always)]
 fn filter_set(
@@ -126,21 +162,28 @@ fn filter_v_edge(
     off_b: i32,
     chroma: bool,
 ) {
-    if bs.iter().all(|&b| b == 0) { return; }
+    if bs.iter().all(|&b| b == 0) {
+        return;
+    }
     let qp_av = (i32::from(qp_p) + i32::from(qp_q) + 1) >> 1;
-    let index_a = (qp_av+off_a).clamp(0,51) as usize;
+    let index_a = (qp_av + off_a).clamp(0, 51) as usize;
     let alpha = i32::from(ALPHA_TABLE[index_a]);
-    let beta = i32::from(BETA_TABLE[(qp_av+off_b).clamp(0,51) as usize]);
-    if alpha == 0 || beta == 0 { return; }
+    let beta = i32::from(BETA_TABLE[(qp_av + off_b).clamp(0, 51) as usize]);
+    if alpha == 0 || beta == 0 {
+        return;
+    }
     for (k, &b) in bs.iter().enumerate() {
         if b == 0 {
             continue;
         }
         let y = y0 + k;
         let row = &mut plane[y * stride..y * stride + stride];
-        if (i32::from(row[x-1])-i32::from(row[x])).abs() >= alpha
-            || (i32::from(row[x-2])-i32::from(row[x-1])).abs() >= beta
-            || (i32::from(row[x+1])-i32::from(row[x])).abs() >= beta { continue; }
+        if (i32::from(row[x - 1]) - i32::from(row[x])).abs() >= alpha
+            || (i32::from(row[x - 2]) - i32::from(row[x - 1])).abs() >= beta
+            || (i32::from(row[x + 1]) - i32::from(row[x])).abs() >= beta
+        {
+            continue;
+        }
         let p: [i32; 4] = [
             i32::from(row[x - 1]),
             i32::from(row[x - 2]),
@@ -180,19 +223,28 @@ fn filter_h_edge(
     off_b: i32,
     chroma: bool,
 ) {
-    if bs.iter().all(|&b| b == 0) { return; }
+    if bs.iter().all(|&b| b == 0) {
+        return;
+    }
     let qp_av = (i32::from(qp_p) + i32::from(qp_q) + 1) >> 1;
-    let index_a = (qp_av+off_a).clamp(0,51) as usize;
+    let index_a = (qp_av + off_a).clamp(0, 51) as usize;
     let alpha = i32::from(ALPHA_TABLE[index_a]);
-    let beta = i32::from(BETA_TABLE[(qp_av+off_b).clamp(0,51) as usize]);
-    if alpha == 0 || beta == 0 { return; }
+    let beta = i32::from(BETA_TABLE[(qp_av + off_b).clamp(0, 51) as usize]);
+    if alpha == 0 || beta == 0 {
+        return;
+    }
     for (k, &b) in bs.iter().enumerate() {
         if b == 0 {
             continue;
         }
         let x = x0 + k;
         let px = |dy: i32| i32::from(plane[(y as i32 + dy) as usize * stride + x]);
-        if (px(-1)-px(0)).abs() >= alpha || (px(-2)-px(-1)).abs() >= beta || (px(1)-px(0)).abs() >= beta { continue; }
+        if (px(-1) - px(0)).abs() >= alpha
+            || (px(-2) - px(-1)).abs() >= beta
+            || (px(1) - px(0)).abs() >= beta
+        {
+            continue;
+        }
         let p: [i32; 4] = [px(-1), px(-2), px(-3), px(-4)];
         let q: [i32; 4] = [px(0), px(1), px(2), px(3)];
         let (po, qo) = filter_set(&p, &q, b, index_a, alpha, beta, chroma);
@@ -336,10 +388,10 @@ pub(crate) fn filter_frame(
             for (plane, qpc) in [(&mut *cb, &qpcb), (&mut *cr, &qpcr)] {
                 for e in 0..2usize {
                     let lx = e * 2; // luma edge index 0 or 2
-                    // Chroma sample row r of this edge coincides with
-                    // luma rows 2r..2r+1 => luma bS band r/2 of luma
-                    // edge `lx` (spec 8.7.2.4; ffmpeg hands the luma
-                    // edge's own 4-entry bS array to edgecv).
+                                    // Chroma sample row r of this edge coincides with
+                                    // luma rows 2r..2r+1 => luma bS band r/2 of luma
+                                    // edge `lx` (spec 8.7.2.4; ffmpeg hands the luma
+                                    // edge's own 4-entry bS array to edgecv).
                     let x = mb_x * 8 + e * 4;
                     let mut qp_p = [0u8; 4];
                     if e == 0 {
@@ -416,4 +468,3 @@ pub(crate) fn filter_frame(
         }
     }
 }
-

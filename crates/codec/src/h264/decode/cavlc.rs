@@ -75,45 +75,79 @@ const fn lookup(lens: &[u8], bits: &[u8]) -> [u16; TABLE_SIZE] {
     while symbol < lens.len() {
         let length = lens[symbol] as usize;
         if length > 0 && length <= LOOKAHEAD {
-            let start = (bits[symbol] as usize) << (LOOKAHEAD-length);
-            let end = start + (1 << (LOOKAHEAD-length));
+            let start = (bits[symbol] as usize) << (LOOKAHEAD - length);
+            let end = start + (1 << (LOOKAHEAD - length));
             let mut i = start;
-            while i < end { table[i] = ((symbol as u16) << 5) | length as u16; i += 1; }
+            while i < end {
+                table[i] = ((symbol as u16) << 5) | length as u16;
+                i += 1;
+            }
         }
         symbol += 1;
     }
     table
 }
 
-static COEFF_FAST: [[u16; TABLE_SIZE];3] = [lookup(&COEFF_TOKEN_LENS[0],&COEFF_TOKEN_BITS[0]), lookup(&COEFF_TOKEN_LENS[1],&COEFF_TOKEN_BITS[1]), lookup(&COEFF_TOKEN_LENS[2],&COEFF_TOKEN_BITS[2])];
-static CHROMA_FAST: [u16; TABLE_SIZE] = lookup(&CHROMA_DC_COEFF_TOKEN_LENS,&CHROMA_DC_COEFF_TOKEN_BITS);
-static ZERO_FAST: [[u16; TABLE_SIZE];15] = {
-    let mut tables = [[0;TABLE_SIZE];15]; let mut i=0;
-    while i<15 { tables[i]=lookup(&TOTAL_ZEROS_LENS[i], &TOTAL_ZEROS_BITS[i]); i+=1; } tables
+static COEFF_FAST: [[u16; TABLE_SIZE]; 3] = [
+    lookup(&COEFF_TOKEN_LENS[0], &COEFF_TOKEN_BITS[0]),
+    lookup(&COEFF_TOKEN_LENS[1], &COEFF_TOKEN_BITS[1]),
+    lookup(&COEFF_TOKEN_LENS[2], &COEFF_TOKEN_BITS[2]),
+];
+static CHROMA_FAST: [u16; TABLE_SIZE] =
+    lookup(&CHROMA_DC_COEFF_TOKEN_LENS, &CHROMA_DC_COEFF_TOKEN_BITS);
+static ZERO_FAST: [[u16; TABLE_SIZE]; 15] = {
+    let mut tables = [[0; TABLE_SIZE]; 15];
+    let mut i = 0;
+    while i < 15 {
+        tables[i] = lookup(&TOTAL_ZEROS_LENS[i], &TOTAL_ZEROS_BITS[i]);
+        i += 1;
+    }
+    tables
 };
-static CHROMA_ZERO_FAST: [[u16; TABLE_SIZE];3] = {
-    let mut tables = [[0;TABLE_SIZE];3]; let mut i=0;
-    while i<3 { tables[i]=lookup(&CHROMA_DC_TOTAL_ZEROS_LENS[i], &CHROMA_DC_TOTAL_ZEROS_BITS[i]); i+=1; } tables
+static CHROMA_ZERO_FAST: [[u16; TABLE_SIZE]; 3] = {
+    let mut tables = [[0; TABLE_SIZE]; 3];
+    let mut i = 0;
+    while i < 3 {
+        tables[i] = lookup(
+            &CHROMA_DC_TOTAL_ZEROS_LENS[i],
+            &CHROMA_DC_TOTAL_ZEROS_BITS[i],
+        );
+        i += 1;
+    }
+    tables
 };
-static RUN_FAST: [[u16; TABLE_SIZE];7] = {
-    let mut tables = [[0;TABLE_SIZE];7]; let mut i=0;
-    while i<7 { tables[i]=lookup(&RUN_BEFORE_LENS[i], &RUN_BEFORE_BITS[i]); i+=1; } tables
+static RUN_FAST: [[u16; TABLE_SIZE]; 7] = {
+    let mut tables = [[0; TABLE_SIZE]; 7];
+    let mut i = 0;
+    while i < 7 {
+        tables[i] = lookup(&RUN_BEFORE_LENS[i], &RUN_BEFORE_BITS[i]);
+        i += 1;
+    }
+    tables
 };
 
 /// A short-prefix lookup handles common codes; the original tables also
 /// cover long escape codes and truncated input without speculative reads.
 fn vlc(br: &mut Br<'_>, lens: &[u8], bits: &[u8], fast: &[u16; TABLE_SIZE]) -> Result<usize> {
     let n = LOOKAHEAD.min(br.remaining());
-    if n == 0 { return Err(Error::BadValue("truncated VLC")); }
-    let entry = fast[(br.peek(n)? as usize) << (LOOKAHEAD-n)];
+    if n == 0 {
+        return Err(Error::BadValue("truncated VLC"));
+    }
+    let entry = fast[(br.peek(n)? as usize) << (LOOKAHEAD - n)];
     let length = (entry & 31) as usize;
-    if length > 0 && length <= n { br.bits(length)?; return Ok((entry >> 5) as usize); }
+    if length > 0 && length <= n {
+        br.bits(length)?;
+        return Ok((entry >> 5) as usize);
+    }
     let n = lens.iter().copied().max().unwrap_or(0) as usize;
     let n = n.min(br.remaining());
     let window = br.peek(n)?;
-    for (symbol, (&length,&code)) in lens.iter().zip(bits).enumerate() {
+    for (symbol, (&length, &code)) in lens.iter().zip(bits).enumerate() {
         let length = length as usize;
-        if length > 0 && length <= n && window >> (n-length) == u32::from(code) { br.bits(length)?; return Ok(symbol); }
+        if length > 0 && length <= n && window >> (n - length) == u32::from(code) {
+            br.bits(length)?;
+            return Ok(symbol);
+        }
     }
     Err(Error::BadValue("unrecognised CAVLC prefix"))
 }
@@ -122,7 +156,12 @@ fn vlc(br: &mut Br<'_>, lens: &[u8], bits: &[u8], fast: &[u16; TABLE_SIZE]) -> R
 /// chroma-DC table. Returns `(total_coeff, trailing_ones)`.
 fn coeff_token(br: &mut Br<'_>, nc: i32) -> Result<(u8, u8)> {
     if nc < 0 {
-        let idx = vlc(br, &CHROMA_DC_COEFF_TOKEN_LENS, &CHROMA_DC_COEFF_TOKEN_BITS, &CHROMA_FAST)?;
+        let idx = vlc(
+            br,
+            &CHROMA_DC_COEFF_TOKEN_LENS,
+            &CHROMA_DC_COEFF_TOKEN_BITS,
+            &CHROMA_FAST,
+        )?;
         return Ok(((idx / 4) as u8, (idx % 4) as u8));
     }
     if nc >= 8 {
@@ -145,7 +184,12 @@ fn coeff_token(br: &mut Br<'_>, nc: i32) -> Result<(u8, u8)> {
         2 | 3 => 1,
         _ => 2,
     };
-    let idx = vlc(br, &COEFF_TOKEN_LENS[table], &COEFF_TOKEN_BITS[table], &COEFF_FAST[table])?;
+    let idx = vlc(
+        br,
+        &COEFF_TOKEN_LENS[table],
+        &COEFF_TOKEN_BITS[table],
+        &COEFF_FAST[table],
+    )?;
     Ok(((idx / 4) as u8, (idx % 4) as u8))
 }
 
@@ -264,7 +308,11 @@ pub(crate) fn decode_block(br: &mut Br<'_>, nc: i32, kind: BlockKind) -> Result<
                 &TOTAL_ZEROS_BITS[total - 1][..],
             ),
         };
-        let fast = if kind == BlockKind::ChromaDc { &CHROMA_ZERO_FAST[total-1] } else { &ZERO_FAST[total-1] };
+        let fast = if kind == BlockKind::ChromaDc {
+            &CHROMA_ZERO_FAST[total - 1]
+        } else {
+            &ZERO_FAST[total - 1]
+        };
         let idx = vlc(br, lens, bits, fast)?;
         if idx > max_coeff - total {
             return Err(Error::BadValue("h264 CAVLC: total_zeros out of range"));
@@ -280,7 +328,12 @@ pub(crate) fn decode_block(br: &mut Br<'_>, nc: i32, kind: BlockKind) -> Result<
         let run_before = if zeros > 0 {
             let row = (zeros - 1).min(6);
 
-            vlc(br, &RUN_BEFORE_LENS[row], &RUN_BEFORE_BITS[row], &RUN_FAST[row])?
+            vlc(
+                br,
+                &RUN_BEFORE_LENS[row],
+                &RUN_BEFORE_BITS[row],
+                &RUN_FAST[row],
+            )?
         } else {
             0
         };

@@ -15,7 +15,7 @@
 //! builds. Wrapping keeps the behaviour deterministic instead of
 //! panicking; the conformance tests pin the legal-input exactness.
 
-use super::tables::{LEVEL_SCALE_4X4, QP_DIV6, QP_MOD6, scale_class};
+use super::tables::{scale_class, LEVEL_SCALE_4X4, QP_DIV6, QP_MOD6};
 use super::{Error, Result};
 
 /// 4x4 inverse transform input/output block (`i32` per spec working

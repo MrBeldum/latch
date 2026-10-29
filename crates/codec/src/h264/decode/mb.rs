@@ -42,7 +42,6 @@ pub(crate) enum MbType {
     P8x8Ref0,
     /// P_Skip (never parsed as an mb_type; produced by the skip run).
     PSkip,
-
 }
 
 impl MbType {
@@ -83,8 +82,6 @@ impl MbType {
             _ => Err(Error::BadValue("P-slice mb_type over 30")),
         }
     }
-
-
 }
 
 /// Sub-macroblock types: P_8x8's four codes (spec Table 7-17) and
@@ -100,7 +97,6 @@ pub(crate) enum SubMbType {
     S4x8,
     /// P_L0_4x4.
     S4x4,
-
 }
 
 impl SubMbType {
@@ -124,7 +120,6 @@ impl SubMbType {
             SubMbType::S8x4 => ([(2, 1), (2, 1), (0, 0), (0, 0)], 2),
             SubMbType::S4x8 => ([(1, 2), (1, 2), (0, 0), (0, 0)], 2),
             SubMbType::S4x4 => ([(1, 1); 4], 4),
-
         }
     }
 }
@@ -178,7 +173,6 @@ pub(crate) struct MbState {
     /// (2 bits) as parsed: `cbp = chroma<<4 | luma` — the CABAC
     /// `coded_block_pattern` context and ffmpeg's `cbp_table` layout.
     pub cbp: u8,
-
 }
 
 impl MbState {
@@ -228,7 +222,11 @@ pub(crate) struct MbMap {
 impl MbMap {
     /// Index of the left neighbour MB (mbAddrA), if any.
     pub(crate) fn mb_a(self) -> Option<usize> {
-        if self.x > 0 { Some(self.idx - 1) } else { None }
+        if self.x > 0 {
+            Some(self.idx - 1)
+        } else {
+            None
+        }
     }
     /// Index of the top neighbour MB (mbAddrB), if any.
     pub(crate) fn mb_b(self) -> Option<usize> {
@@ -316,4 +314,3 @@ pub(crate) fn intra4x4_neighbours(blk: usize) -> [BlockRef; 4] {
     let d = map(xi - 1, yi - 1);
     [a, b, c, d]
 }
-

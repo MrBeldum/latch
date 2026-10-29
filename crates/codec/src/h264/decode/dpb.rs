@@ -13,8 +13,8 @@
 //! (refused at parse).
 
 use super::slice::SliceHeader;
-use std::vec::Vec;
 use super::{Error, Result};
+use std::vec::Vec;
 
 /// One reference picture in the DPB: planes + PicNum/POC bookkeeping
 /// and the colocation data B-slice direct prediction needs.
@@ -93,39 +93,80 @@ impl Dpb {
     /// is decoded. `cur` is the just-finished frame (already in `refs`
     /// via [`push`]).
     pub(crate) fn apply_marking(
-        &mut self, h: &SliceHeader, frame_num: u32, nal_ref_idc: u8,
+        &mut self,
+        h: &SliceHeader,
+        frame_num: u32,
+        nal_ref_idc: u8,
     ) -> Result<Option<u32>> {
-        if nal_ref_idc == 0 { return Ok(None); }
+        if nal_ref_idc == 0 {
+            return Ok(None);
+        }
         self.set_pic_nums(frame_num);
         let mut current_long_term = None;
         if h.idr_marking.1 {
-            self.refs.clear(); self.max_long_term_idx = Some(0); current_long_term = Some(0);
+            self.refs.clear();
+            self.max_long_term_idx = Some(0);
+            current_long_term = Some(0);
         } else if h.adaptive_marking {
             for m in &h.mmco {
-                let target = (i64::from(frame_num) - i64::from(m.difference_of_pic_nums)).rem_euclid(i64::from(self.max_frame_num)) as u32;
+                let target = (i64::from(frame_num) - i64::from(m.difference_of_pic_nums))
+                    .rem_euclid(i64::from(self.max_frame_num)) as u32;
                 match m.op {
                     1 => {
-                        let pos = self.refs.iter().position(|r| r.long_term.is_none() && r.frame_num == target).ok_or(Error::MissingReference)?;
+                        let pos = self
+                            .refs
+                            .iter()
+                            .position(|r| r.long_term.is_none() && r.frame_num == target)
+                            .ok_or(Error::MissingReference)?;
                         self.refs.remove(pos);
                     }
                     2 => {
-                        let pos = self.refs.iter().position(|r| r.long_term == Some(m.long_term_pic_num)).ok_or(Error::MissingReference)?;
+                        let pos = self
+                            .refs
+                            .iter()
+                            .position(|r| r.long_term == Some(m.long_term_pic_num))
+                            .ok_or(Error::MissingReference)?;
                         self.refs.remove(pos);
                     }
                     3 => {
-                        if self.max_long_term_idx.is_none_or(|max| m.long_term_frame_idx > max) { return Err(Error::BadValue("MMCO long-term index exceeds maximum")); }
-                        self.refs.retain(|r| r.long_term != Some(m.long_term_frame_idx));
-                        let r = self.refs.iter_mut().find(|r| r.long_term.is_none() && r.frame_num == target).ok_or(Error::MissingReference)?;
+                        if self
+                            .max_long_term_idx
+                            .is_none_or(|max| m.long_term_frame_idx > max)
+                        {
+                            return Err(Error::BadValue("MMCO long-term index exceeds maximum"));
+                        }
+                        self.refs
+                            .retain(|r| r.long_term != Some(m.long_term_frame_idx));
+                        let r = self
+                            .refs
+                            .iter_mut()
+                            .find(|r| r.long_term.is_none() && r.frame_num == target)
+                            .ok_or(Error::MissingReference)?;
                         r.long_term = Some(m.long_term_frame_idx);
                     }
                     4 => {
                         self.max_long_term_idx = m.max_long_term_frame_idx.checked_sub(1);
-                        self.refs.retain(|r| r.long_term.is_none_or(|idx| self.max_long_term_idx.is_some_and(|max| idx <= max)));
+                        self.refs.retain(|r| {
+                            r.long_term.is_none_or(|idx| {
+                                self.max_long_term_idx.is_some_and(|max| idx <= max)
+                            })
+                        });
                     }
-                    5 => { self.refs.clear(); self.max_long_term_idx = None; }
+                    5 => {
+                        self.refs.clear();
+                        self.max_long_term_idx = None;
+                    }
                     6 => {
-                        if self.max_long_term_idx.is_none_or(|max| m.long_term_frame_idx > max) { return Err(Error::BadValue("MMCO current long-term index exceeds maximum")); }
-                        self.refs.retain(|r| r.long_term != Some(m.long_term_frame_idx));
+                        if self
+                            .max_long_term_idx
+                            .is_none_or(|max| m.long_term_frame_idx > max)
+                        {
+                            return Err(Error::BadValue(
+                                "MMCO current long-term index exceeds maximum",
+                            ));
+                        }
+                        self.refs
+                            .retain(|r| r.long_term != Some(m.long_term_frame_idx));
                         current_long_term = Some(m.long_term_frame_idx);
                     }
                     _ => return Err(Error::BadValue("MMCO operation")),
@@ -134,7 +175,9 @@ impl Dpb {
         } else {
             self.make_room()?;
         }
-        if self.refs.len() >= self.max_refs { return Err(Error::BadValue("reference marking exceeds DPB")); }
+        if self.refs.len() >= self.max_refs {
+            return Err(Error::BadValue("reference marking exceeds DPB"));
+        }
         Ok(current_long_term)
     }
 
@@ -142,14 +185,22 @@ impl Dpb {
     /// but evicts only the oldest short-term FrameNumWrap.
     pub(crate) fn make_room(&mut self) -> Result<()> {
         if self.refs.len() >= self.max_refs {
-            let oldest = self.refs.iter().enumerate().filter(|(_, r)| r.long_term.is_none()).min_by_key(|(_,r)| r.pic_num).map(|(i,_)| i).ok_or(Error::BadValue("DPB has no short-term picture to evict"))?;
+            let oldest = self
+                .refs
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.long_term.is_none())
+                .min_by_key(|(_, r)| r.pic_num)
+                .map(|(i, _)| i)
+                .ok_or(Error::BadValue("DPB has no short-term picture to evict"))?;
             self.refs.remove(oldest);
         }
         Ok(())
     }
 
     pub(crate) fn gap(&mut self, frame_num: u32) -> Result<()> {
-        self.set_pic_nums(frame_num); self.make_room()?;
+        self.set_pic_nums(frame_num);
+        self.make_room()?;
         self.push(frame_num, 0, Vec::new(), Vec::new(), Vec::new(), 0);
         Ok(())
     }
@@ -182,11 +233,7 @@ impl Dpb {
     /// the slice's reordering commands (spec 8.2.4.2 + 8.2.4.3.1).
     ///
     /// Returns indices into `self.refs` in list order.
-    pub(crate) fn ref_list0(
-        &mut self,
-        h: &SliceHeader,
-        frame_num: u32,
-    ) -> Result<Vec<usize>> {
+    pub(crate) fn ref_list0(&mut self, h: &SliceHeader, frame_num: u32) -> Result<Vec<usize>> {
         self.set_pic_nums(frame_num);
         // Short-term first (spec 8.2.4.2.1/8.2.4.2.3), long-term after:
         // P slices order the short-term set by PicNum descending, B
@@ -236,21 +283,39 @@ impl Dpb {
             return Ok(());
         }
         let mut pred = i64::from(frame_num);
-        for (index, &(idc,val)) in cmds.iter().enumerate() {
-            if index >= cap { return Err(Error::BadValue("reference-list modification count")); }
+        for (index, &(idc, val)) in cmds.iter().enumerate() {
+            if index >= cap {
+                return Err(Error::BadValue("reference-list modification count"));
+            }
             let slot = match idc {
                 0 | 1 => {
-                    let difference=i64::from(val)+1;
-                    if difference > i64::from(self.max_frame_num) { return Err(Error::BadValue("reference-list difference")); }
-                    pred = (if idc==0 { pred-difference } else { pred+difference }).rem_euclid(i64::from(self.max_frame_num));
-                    self.refs.iter().position(|r| r.long_term.is_none() && r.frame_num==pred as u32)
+                    let difference = i64::from(val) + 1;
+                    if difference > i64::from(self.max_frame_num) {
+                        return Err(Error::BadValue("reference-list difference"));
+                    }
+                    pred = (if idc == 0 {
+                        pred - difference
+                    } else {
+                        pred + difference
+                    })
+                    .rem_euclid(i64::from(self.max_frame_num));
+                    self.refs
+                        .iter()
+                        .position(|r| r.long_term.is_none() && r.frame_num == pred as u32)
                 }
-                2 => self.refs.iter().position(|r| r.long_term==Some(val)),
+                2 => self.refs.iter().position(|r| r.long_term == Some(val)),
                 _ => return Err(Error::BadValue("reference-list modification operation")),
-            }.ok_or(Error::MissingReference)?;
-            order.insert(index,slot);
-            let mut tail = index+1;
-            while tail < order.len() { if order[tail]==slot { order.remove(tail); } else { tail+=1; } }
+            }
+            .ok_or(Error::MissingReference)?;
+            order.insert(index, slot);
+            let mut tail = index + 1;
+            while tail < order.len() {
+                if order[tail] == slot {
+                    order.remove(tail);
+                } else {
+                    tail += 1;
+                }
+            }
             order.truncate(cap);
         }
         Ok(())

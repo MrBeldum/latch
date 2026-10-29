@@ -70,7 +70,9 @@ pub(crate) fn parse(payload: &[u8]) -> Result<Pps> {
         return Err(Error::BadValue("pps references sps id over 31"));
     }
     let cabac = b.bit()?;
-    if cabac { return Err(Error::Unsupported("CABAC")); }
+    if cabac {
+        return Err(Error::Unsupported("CABAC"));
+    }
     let bottom_field_pic_order = b.bit()?;
     let num_slice_groups = b.ue()? + 1;
     if num_slice_groups > 1 {
@@ -83,9 +85,17 @@ pub(crate) fn parse(payload: &[u8]) -> Result<Pps> {
     }
     let weighted_pred = b.bit()?;
     let weighted_bipred_idc = b.bits(2)?;
-    if weighted_pred || weighted_bipred_idc != 0 { return Err(Error::Unsupported("weighted prediction")); }
-    let pic_init_qp = b.se()?.checked_add(26).ok_or(Error::BadValue("initial QP"))?;
-    let pic_init_qs = b.se()?.checked_add(26).ok_or(Error::BadValue("initial QS"))?;
+    if weighted_pred || weighted_bipred_idc != 0 {
+        return Err(Error::Unsupported("weighted prediction"));
+    }
+    let pic_init_qp = b
+        .se()?
+        .checked_add(26)
+        .ok_or(Error::BadValue("initial QP"))?;
+    let pic_init_qs = b
+        .se()?
+        .checked_add(26)
+        .ok_or(Error::BadValue("initial QS"))?;
     if !(0..=51).contains(&pic_init_qp) || !(0..=51).contains(&pic_init_qs) {
         return Err(Error::BadValue("pic_init_qp/qs out of range"));
     }
@@ -104,7 +114,9 @@ pub(crate) fn parse(payload: &[u8]) -> Result<Pps> {
     let mut transform_8x8_mode = false;
     if !b.no_more_rbsp_data() {
         transform_8x8_mode = b.bit()?;
-        if transform_8x8_mode { return Err(Error::Unsupported("transform_8x8")); }
+        if transform_8x8_mode {
+            return Err(Error::Unsupported("transform_8x8"));
+        }
         let scaling_matrix = b.bit()?;
         if scaling_matrix {
             // Custom scaling lists change the quantisation tables; the

@@ -8,26 +8,22 @@
 //! CABAC and data partitioning surface as [`Error::Unsupported`];
 //! malformed streams surface as [`Error`] instead of panicking.
 
-
 use super::cavlc::{self, BlockKind};
 use super::deblock;
 use super::dpb::Dpb;
 use super::golomb::Br;
 use super::inter;
 use super::intra::{self, NbSamples};
-use super::mb::{MbMap, MbState, MbType, Nb, SubMbType, intra4x4_neighbours};
+use super::mb::{intra4x4_neighbours, MbMap, MbState, MbType, Nb, SubMbType};
 use super::nal::{self, Nal};
 use super::pps::{self, Pps};
 use super::slice::{self, Mmco, SliceHeader, SliceType};
 use super::sps::{self, Sps};
-use super::tables::{
-    CAVLC_SCAN_8X8, CBP_INTER, CBP_INTRA, QPC_TABLE, block_index,
-    block_xy,
-};
+use super::tables::{block_index, block_xy, CAVLC_SCAN_8X8, CBP_INTER, CBP_INTRA, QPC_TABLE};
 use super::transform;
+use super::{Error, Result};
 use super::{Frame, Limits};
 use std::vec::Vec;
-use super::{Error, Result};
 
 /// Coded planes of one in-progress picture. Luma stride `w`, chroma
 /// stride `w/2`; both full-macroblock aligned.
@@ -150,10 +146,16 @@ impl Decoder {
         }
     }
 
-    pub(super) fn max_input(&self) -> usize { self.limits.max_input }
+    pub(super) fn max_input(&self) -> usize {
+        self.limits.max_input
+    }
 
     pub(super) fn invalidate(&mut self) {
-        self.dpb.flush(); self.pic = None; self.frames.clear(); self.frame_pocs.clear(); self.need_idr = true;
+        self.dpb.flush();
+        self.pic = None;
+        self.frames.clear();
+        self.frame_pocs.clear();
+        self.need_idr = true;
     }
 
     /// Top-level POC derivation (spec 8.2.1): wraps the type-specific
@@ -186,9 +188,18 @@ impl Decoder {
         if nals.is_empty() {
             return Err(Error::BadValue("h264 stream with no NAL units"));
         }
-        let old_sps = self.sps_table.clone(); let old_pps = self.pps_table.clone();
-        let result = (|| { for n in &nals { self.nal(n)?; } self.end_of_stream() })();
-        if result.is_err() { self.sps_table = old_sps; self.pps_table = old_pps; }
+        let old_sps = self.sps_table.clone();
+        let old_pps = self.pps_table.clone();
+        let result = (|| {
+            for n in &nals {
+                self.nal(n)?;
+            }
+            self.end_of_stream()
+        })();
+        if result.is_err() {
+            self.sps_table = old_sps;
+            self.pps_table = old_pps;
+        }
         result
     }
 
@@ -231,15 +242,32 @@ impl Decoder {
     fn slice_nal(&mut self, n: &Nal<'_>, idr: bool) -> Result<()> {
         let rbsp = nal::rbsp(n.payload)?;
         let mut peek = Br::new(&rbsp);
-        peek.ue()?; let kind = peek.ue()?;
-        if self.need_idr && matches!(kind,0|5) { return Err(Error::MissingReference); }
+        peek.ue()?;
+        let kind = peek.ue()?;
+        if self.need_idr && matches!(kind, 0 | 5) {
+            return Err(Error::MissingReference);
+        }
         let pid = peek.ue()? as usize;
-        let pps = self.pps_table.get(pid).and_then(Option::as_ref).ok_or(Error::BadValue("unknown PPS"))?.clone();
-        let sps = self.sps_table.get(pps.sps_id as usize).and_then(Option::as_ref).ok_or(Error::BadValue("unknown SPS"))?.clone();
+        let pps = self
+            .pps_table
+            .get(pid)
+            .and_then(Option::as_ref)
+            .ok_or(Error::BadValue("unknown PPS"))?
+            .clone();
+        let sps = self
+            .sps_table
+            .get(pps.sps_id as usize)
+            .and_then(Option::as_ref)
+            .ok_or(Error::BadValue("unknown SPS"))?
+            .clone();
         let mut br = Br::new(&rbsp);
         let h = slice::parse_header(&mut br, idr, n.ref_idc, &sps, &pps)?;
-        if h.redundant_pic_cnt > 0 { return Ok(()); }
-        if self.need_idr && !idr { return Err(Error::MissingReference); }
+        if h.redundant_pic_cnt > 0 {
+            return Ok(());
+        }
+        if self.need_idr && !idr {
+            return Err(Error::MissingReference);
+        }
         self.slice_seq = self.slice_seq.wrapping_add(1);
         let slice_id = self.slice_seq;
 
@@ -254,7 +282,8 @@ impl Decoder {
                     || p.first_header.delta_poc_bottom != h.delta_poc_bottom
                     || p.first_header.delta_poc0 != h.delta_poc0
                     || p.first_header.delta_poc1 != h.delta_poc1
-                    || p.sps.width_mbs != sps.width_mbs || p.sps.height_mbs != sps.height_mbs
+                    || p.sps.width_mbs != sps.width_mbs
+                    || p.sps.height_mbs != sps.height_mbs
                     || p.sps.crop != sps.crop
                     || (h.first_mb == 0 && p.mbs[0].slice_id != u32::MAX)
                     || (idr && p.idr && p.idr_pic_id != h.idr_pic_id)
@@ -265,8 +294,13 @@ impl Decoder {
             let modulus = 1u32 << sps.log2_max_frame_num;
             let mut next = (self.prev_frame_num + 1) % modulus;
             if h.frame_num != self.prev_frame_num && h.frame_num != next {
-                if !sps.gaps_in_frame_num_allowed { return Err(Error::MissingReference); }
-                while next != h.frame_num { self.dpb.gap(next)?; next = (next + 1) % modulus; }
+                if !sps.gaps_in_frame_num_allowed {
+                    return Err(Error::MissingReference);
+                }
+                while next != h.frame_num {
+                    self.dpb.gap(next)?;
+                    next = (next + 1) % modulus;
+                }
             }
         }
         let cur_poc = if new_pic {
@@ -279,7 +313,11 @@ impl Decoder {
             if idr {
                 self.need_idr = false;
                 self.prev_frame_num = 0;
-                self.dpb.reset(1u32 << sps.log2_max_frame_num, sps.max_num_ref_frames, self.limits.max_refs);
+                self.dpb.reset(
+                    1u32 << sps.log2_max_frame_num,
+                    sps.max_num_ref_frames,
+                    self.limits.max_refs,
+                );
                 // IDR flushes the DPB unless the header asks for
                 // long-term keeping (spec 8.2.5.1).
                 if !h.idr_marking.0 {
@@ -314,9 +352,7 @@ impl Decoder {
         }
 
         let ref_order: Vec<usize> = if h.slice_type != SliceType::I {
-            let order = self
-                .dpb
-                .ref_list0(&h, h.frame_num)?;
+            let order = self.dpb.ref_list0(&h, h.frame_num)?;
             if order.is_empty() || self.dpb.refs.is_empty() {
                 return Err(Error::MissingReference);
             }
@@ -336,7 +372,11 @@ impl Decoder {
         slice_data(pic, &mut br, &mut cx, &self.dpb, &rbsp)?;
         for m in pic.mbs.iter_mut().filter(|m| m.slice_id == slice_id) {
             for (i, &r) in m.ref_idx.iter().enumerate() {
-                m.deblock_refs[i] = if r == 255 { 255 } else { *ref_order.get(r as usize).ok_or(Error::MissingReference)? as u8 };
+                m.deblock_refs[i] = if r == 255 {
+                    255
+                } else {
+                    *ref_order.get(r as usize).ok_or(Error::MissingReference)? as u8
+                };
             }
         }
         Ok(())
@@ -351,9 +391,13 @@ impl Decoder {
         let sps = &pic.sps;
         let wm = sps.width_mbs as usize;
         let hm = sps.height_mbs as usize;
-        if pic.mbs.iter().any(|m| m.slice_id == u32::MAX) { return Err(Error::BadValue("incomplete picture")); }
+        if pic.mbs.iter().any(|m| m.slice_id == u32::MAX) {
+            return Err(Error::BadValue("incomplete picture"));
+        }
         let mut mbs = pic.mbs;
-        for m in &mut mbs { m.ref_idx = m.deblock_refs; }
+        for m in &mut mbs {
+            m.ref_idx = m.deblock_refs;
+        }
         let mut buf = pic.buf;
 
         deblock::filter_frame(
@@ -373,7 +417,6 @@ impl Decoder {
             // Colocation data for future B-slice temporal direct
             // prediction: the picture's own L0/L1 lists (as frame_nums)
             // plus per-MB mv/ref snapshots.
-    
 
             // Synthesised header carrying the picture's deferred
             // marking — `apply_marking` reads only these fields.
@@ -398,10 +441,18 @@ impl Decoder {
                 offset_a: 0,
                 offset_b: 0,
             };
-            let long_term = self.dpb.apply_marking(&stub, pic.frame_num, pic.nal_ref_idc)?;
+            let long_term = self
+                .dpb
+                .apply_marking(&stub, pic.frame_num, pic.nal_ref_idc)?;
             let mmco5 = pic.marking.2.iter().any(|m| m.op == 5);
-            let slot = self.dpb.push(if mmco5 { 0 } else { pic.frame_num },
-                if mmco5 { 0 } else { pic.poc }, buf.y.clone(), buf.cb.clone(), buf.cr.clone(), buf.w);
+            let slot = self.dpb.push(
+                if mmco5 { 0 } else { pic.frame_num },
+                if mmco5 { 0 } else { pic.poc },
+                buf.y.clone(),
+                buf.cb.clone(),
+                buf.cr.clone(),
+                buf.w,
+            );
             self.dpb.refs[slot].long_term = long_term;
             // MMCO op 5 (spec 8.2.5.4.6): re-base POC — the just-
             // finished picture becomes the wrap reference.
@@ -420,8 +471,12 @@ impl Decoder {
         }
         self.frame_pocs.push((self.poc_epoch, pic.poc));
         let mut frame = crop_frame(sps, buf)?;
-        frame.poc = pic.poc; frame.epoch = self.poc_epoch as u64; self.frames.push(frame);
-        if pic.marking.2.iter().any(|m| m.op == 5) { self.poc_epoch += 1; }
+        frame.poc = pic.poc;
+        frame.epoch = self.poc_epoch as u64;
+        self.frames.push(frame);
+        if pic.marking.2.iter().any(|m| m.op == 5) {
+            self.poc_epoch += 1;
+        }
         Ok(())
     }
 
@@ -532,27 +587,71 @@ fn compute_poc(
 /// `frame_cropping_*_offset` values already scaled to frame units;
 /// chroma offsets are `offset` samples in each halved plane.
 fn crop_frame(sps: &Sps, mut buf: FrameBuf) -> Result<Frame> {
-    let x = sps.crop[0] as usize * 2; let y = sps.crop[2] as usize * 2;
-    let w = buf.w.checked_sub((sps.crop[0] as usize+sps.crop[1] as usize)*2).ok_or(Error::BadValue("crop width"))?;
-    let h = buf.h.checked_sub((sps.crop[2] as usize+sps.crop[3] as usize)*2).ok_or(Error::BadValue("crop height"))?;
-    if w == 0 || h == 0 { return Err(Error::BadValue("empty crop")); }
+    let x = sps.crop[0] as usize * 2;
+    let y = sps.crop[2] as usize * 2;
+    let w = buf
+        .w
+        .checked_sub((sps.crop[0] as usize + sps.crop[1] as usize) * 2)
+        .ok_or(Error::BadValue("crop width"))?;
+    let h = buf
+        .h
+        .checked_sub((sps.crop[2] as usize + sps.crop[3] as usize) * 2)
+        .ok_or(Error::BadValue("crop height"))?;
+    if w == 0 || h == 0 {
+        return Err(Error::BadValue("empty crop"));
+    }
     let mut picture = if x == 0 && y == 0 {
-        let padded_h = h.div_ceil(16)*16;
-        buf.y.truncate(buf.w*padded_h); buf.cb.truncate(buf.w*padded_h/4); buf.cr.truncate(buf.w*padded_h/4);
-        crate::Yuv420 { width: w as u32, height: h as u32, y_stride: buf.w, c_stride: buf.w/2, y: buf.y, u: buf.cb, v: buf.cr }
+        let padded_h = h.div_ceil(16) * 16;
+        buf.y.truncate(buf.w * padded_h);
+        buf.cb.truncate(buf.w * padded_h / 4);
+        buf.cr.truncate(buf.w * padded_h / 4);
+        crate::Yuv420 {
+            width: w as u32,
+            height: h as u32,
+            y_stride: buf.w,
+            c_stride: buf.w / 2,
+            y: buf.y,
+            u: buf.cb,
+            v: buf.cr,
+        }
     } else {
-        let mut output = crate::Yuv420::new(w as u32,h as u32);
-        for (dst,src,stride,sw,sh,sx,sy,ss) in [
-            (&mut output.y,&buf.y,output.y_stride,w,h,x,y,buf.w),
-            (&mut output.u,&buf.cb,output.c_stride,w/2,h/2,x/2,y/2,buf.w/2),
-            (&mut output.v,&buf.cr,output.c_stride,w/2,h/2,x/2,y/2,buf.w/2),
+        let mut output = crate::Yuv420::new(w as u32, h as u32);
+        for (dst, src, stride, sw, sh, sx, sy, ss) in [
+            (&mut output.y, &buf.y, output.y_stride, w, h, x, y, buf.w),
+            (
+                &mut output.u,
+                &buf.cb,
+                output.c_stride,
+                w / 2,
+                h / 2,
+                x / 2,
+                y / 2,
+                buf.w / 2,
+            ),
+            (
+                &mut output.v,
+                &buf.cr,
+                output.c_stride,
+                w / 2,
+                h / 2,
+                x / 2,
+                y / 2,
+                buf.w / 2,
+            ),
         ] {
-            for (row,d) in dst.chunks_mut(stride).take(sh).enumerate() { let start=(sy+row)*ss+sx; d[..sw].copy_from_slice(&src[start..start+sw]); }
+            for (row, d) in dst.chunks_mut(stride).take(sh).enumerate() {
+                let start = (sy + row) * ss + sx;
+                d[..sw].copy_from_slice(&src[start..start + sw]);
+            }
         }
         output
     };
     picture.pad_edges();
-    Ok(Frame { picture, poc: 0, epoch: 0 })
+    Ok(Frame {
+        picture,
+        poc: 0,
+        epoch: 0,
+    })
 }
 
 /// The macroblock-layer loop of `slice_data` (spec 7.3.4).
@@ -563,7 +662,9 @@ fn slice_data(
     dpb: &Dpb,
     _rbsp: &[u8],
 ) -> Result<()> {
-    if cx.pps.cabac { return Err(Error::Unsupported("CABAC")); }
+    if cx.pps.cabac {
+        return Err(Error::Unsupported("CABAC"));
+    }
     let wm = cx.sps.width_mbs as usize;
     let total = (cx.sps.width_mbs * sps_height(cx)) as usize;
     let mut mb_idx = cx.h.first_mb as usize;
@@ -577,7 +678,9 @@ fn slice_data(
                 if mb_idx >= total {
                     return Err(Error::BadValue("mb_skip_run past picture"));
                 }
-                if pic.mbs[mb_idx].slice_id != u32::MAX { return Err(Error::BadValue("overlapping slices")); }
+                if pic.mbs[mb_idx].slice_id != u32::MAX {
+                    return Err(Error::BadValue("overlapping slices"));
+                }
                 p_skip(pic, cx, dpb, mb_idx, wm)?;
                 mb_idx += 1;
             }
@@ -585,7 +688,9 @@ fn slice_data(
                 break;
             }
         }
-        if mb_idx >= total || pic.mbs[mb_idx].slice_id != u32::MAX { return Err(Error::BadValue("overlapping slices")); }
+        if mb_idx >= total || pic.mbs[mb_idx].slice_id != u32::MAX {
+            return Err(Error::BadValue("overlapping slices"));
+        }
         mb_decode(pic, br, cx, dpb, mb_idx, wm)?;
         mb_idx += 1;
         if mb_idx >= total || br.no_more_rbsp_data() {
@@ -724,7 +829,11 @@ fn mb_decode(
                         mpm
                     } else {
                         let rem = br.bits(3)? as u8;
-                        if rem < mpm { rem } else { rem + 1 }
+                        if rem < mpm {
+                            rem
+                        } else {
+                            rem + 1
+                        }
                     };
                     for i in 0..4 {
                         let (bx, by) = block_xy(g + i);
@@ -743,7 +852,11 @@ fn mb_decode(
                         mpm
                     } else {
                         let rem = br.bits(3)? as u8;
-                        if rem < mpm { rem } else { rem + 1 }
+                        if rem < mpm {
+                            rem
+                        } else {
+                            rem + 1
+                        }
                     };
                     let _ = (blk, r);
                     m.i4x4_modes[r] = mode;
@@ -866,8 +979,7 @@ fn mb_decode(
     let dct8x8_allowed = cx.pps.transform_8x8_mode
         && !matches!(mb_type, MbType::I16x16 { .. } | MbType::IPcm)
         && !sub_blocks_8x8
-        && (sub_direct_allowed_8x8 || cx.sps.direct_8x8_inference)
-        ;
+        && (sub_direct_allowed_8x8 || cx.sps.direct_8x8_inference);
     let t8x8 = dct8x8_allowed && cbp_luma > 0 && !mb_type.is_intra() && br.bit()?;
 
     // Intra keeps the I_8x8 flag read during mb_pred (ffmpeg
@@ -993,7 +1105,10 @@ fn mb_decode(
             }
             for plane in [&mut pic.buf.cb, &mut pic.buf.cr] {
                 for row in 0..8 {
-                    for x in 0..8 { let o = (py0/2+row)*(pic.buf.w/2)+px0/2+x; plane[o] = br.byte()?; }
+                    for x in 0..8 {
+                        let o = (py0 / 2 + row) * (pic.buf.w / 2) + px0 / 2 + x;
+                        plane[o] = br.byte()?;
+                    }
                 }
             }
             m.nz = [16; 24];
@@ -1088,10 +1203,7 @@ fn mb_decode(
             // Inter: per partition MVP + MC, then residual add.
             for &(x4, y4, w4, h4, ref_idx, mvd) in &inter_parts {
                 let mvp = mvp_l0_parts(&pic.mbs, Some(&m), map, x4, y4, w4, h4, ref_idx);
-                let mv = [
-                    mvp[0].wrapping_add(mvd[0]),
-                    mvp[1].wrapping_add(mvd[1]),
-                ];
+                let mv = [mvp[0].wrapping_add(mvd[0]), mvp[1].wrapping_add(mvd[1])];
                 for yy in y4..y4 + h4 {
                     for xx in x4..x4 + w4 {
                         let b = block_index(xx, yy);
@@ -1154,8 +1266,10 @@ fn mb_decode(
 /// `mvd` clamped to the representable quarter-pel range (a hostile
 /// `se()` can produce values far beyond i16).
 fn clamp_mvd(mvd: [i32; 2]) -> Result<[i16; 2]> {
-    Ok([i16::try_from(mvd[0]).map_err(|_| Error::BadValue("horizontal motion difference"))?,
-        i16::try_from(mvd[1]).map_err(|_| Error::BadValue("vertical motion difference"))?])
+    Ok([
+        i16::try_from(mvd[0]).map_err(|_| Error::BadValue("horizontal motion difference"))?,
+        i16::try_from(mvd[1]).map_err(|_| Error::BadValue("vertical motion difference"))?,
+    ])
 }
 
 /// Chroma reconstruction shared by all MB types: intra MBs predict
@@ -1247,11 +1361,10 @@ fn mc_partition(
         .ref_order
         .get(ri)
         .ok_or(Error::BadValue("ref_idx past active list"))?;
-    let rf = dpb
-        .refs
-        .get(ref_slot)
-        .ok_or(Error::MissingReference)?;
-    if rf.width != buf.w || rf.y.len() != buf.w * buf.h { return Err(Error::MissingReference); }
+    let rf = dpb.refs.get(ref_slot).ok_or(Error::MissingReference)?;
+    if rf.width != buf.w || rf.y.len() != buf.w * buf.h {
+        return Err(Error::MissingReference);
+    }
     let mut luma = [0u8; 256];
     inter::mc_luma(
         &rf.y,
@@ -1306,7 +1419,11 @@ enum Plane {
 
 impl Plane {
     fn chroma(c: usize) -> Plane {
-        if c == 0 { Plane::Cb } else { Plane::Cr }
+        if c == 0 {
+            Plane::Cb
+        } else {
+            Plane::Cr
+        }
     }
     /// Index into `MbState::nz` / the in-flight accumulator.
     fn nz_idx(self, blk: usize) -> usize {
@@ -1856,4 +1973,3 @@ fn gather_luma8x8(buf: &FrameBuf, mbs: &[MbState], map: MbMap, g: usize, pps: &P
     };
     nb
 }
-
