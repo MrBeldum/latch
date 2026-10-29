@@ -107,6 +107,24 @@ const RUN_BITS: [[u8; 16]; 7] = [
 ];
 
 pub(super) fn write(bits: &mut Bits, coeff: &[i32], nc: i32) -> u8 {
+    if coeff.iter().all(|&v| v == 0) {
+        let (len, code) = if nc < 0 {
+            (CHROMA_DC_COEFF_TOKEN_LEN[0], CHROMA_DC_COEFF_TOKEN_BITS[0])
+        } else {
+            let tab = if nc < 2 {
+                0
+            } else if nc < 4 {
+                1
+            } else if nc < 8 {
+                2
+            } else {
+                3
+            };
+            (COEFF_TOKEN_LEN[tab][0], COEFF_TOKEN_BITS[tab][0])
+        };
+        bits.put(code as u32, len as usize);
+        return 0;
+    }
     let mut levels = [0i32; 16];
     let mut positions = [0usize; 16];
     let mut count = 0;

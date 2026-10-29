@@ -8,7 +8,7 @@ use latch_codec::{
 use std::{
     env,
     fs::File,
-    io::{Read, Write},
+    io::{BufReader, Read, Write},
     time::Instant,
 };
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = if input.is_empty() {
         None
     } else {
-        Some(File::open(input)?)
+        Some(BufReader::new(File::open(input)?))
     };
     let mut e = Encoder::new(EncoderConfig {
         width,
@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bitrate_kbps: kbps,
         threads,
     })?;
-    e.set_subpixel_refinement(get("--subpel", "no") != "no");
+    e.set_subpixel_refinement(get("--subpel", "yes") != "no");
     let metrics = get("--metrics", "yes") != "no";
     let mut millis = 0.;
     let mut bytes = 0usize;
@@ -102,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{kind},{width},{height},{frames},{threads},{kbps},{:.3},{:.3},{:.3},{:.3},{:.2},{:.2},{:.3}",millis/frames as f64,bytes as f64*8.*fps as f64/frames as f64/1000.,psnr,max_frame as f64*8.*fps as f64/(kbps as f64*1000.),skips as f64*100./(frames as f64*width.div_ceil(16) as f64*height.div_ceil(16) as f64),qps as f64/frames as f64,e.achieved_bitrate_kbps());
     Ok(())
 }
-fn read_frame(input: &mut File, width: u32, height: u32) -> std::io::Result<Yuv420> {
+fn read_frame(input: &mut impl Read, width: u32, height: u32) -> std::io::Result<Yuv420> {
     let mut p = Yuv420::new(width, height);
     for (plane, stride, n) in [
         (&mut p.y, p.y_stride, 1),

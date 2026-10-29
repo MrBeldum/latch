@@ -29,6 +29,17 @@ fn class(i: usize) -> usize {
     (i & 1) + ((i >> 2) & 1)
 }
 pub(super) fn forward(input: [i32; 16]) -> [i32; 16] {
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { neon::forward(input) }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        forward_scalar(input)
+    }
+}
+#[cfg_attr(not(test), allow(dead_code))]
+fn forward_scalar(input: [i32; 16]) -> [i32; 16] {
     let mut tmp = [0; 16];
     let mut out = [0; 16];
     for y in 0..4 {
@@ -55,13 +66,117 @@ pub(super) fn forward(input: [i32; 16]) -> [i32; 16] {
 }
 pub(super) fn quant(value: i32, qp: u8, index: usize, intra: bool, extra: u32) -> i32 {
     let shift = 15 + qp as u32 / 6 + extra;
-    let bias = (1 << shift) / if intra { 3 } else { 6 };
+    let bias = if intra {
+        1 << (shift - 1)
+    } else {
+        (1 << shift) / 6
+    };
     value.signum() * ((value.abs() * MF[(qp % 6) as usize][class(index)] + bias) >> shift)
 }
 pub(super) fn dequant(value: i32, qp: u8, index: usize) -> i32 {
     value * V[(qp % 6) as usize][class(index)] * (1 << (qp / 6))
 }
+pub(super) struct Quantizer {
+    mf: [[i32; 4]; 2],
+    scales: [[i32; 4]; 2],
+    shift: i32,
+    bias: i32,
+    cutoff: i32,
+}
+impl Quantizer {
+    pub(super) fn new(qp: u8, intra: bool, suppression: u8) -> Self {
+        let shift = 15 + qp as i32 / 6;
+        Self {
+            mf: std::array::from_fn(|r| {
+                std::array::from_fn(|x| MF[(qp % 6) as usize][class(r * 4 + x)])
+            }),
+            scales: std::array::from_fn(|r| {
+                std::array::from_fn(|x| V[(qp % 6) as usize][class(r * 4 + x)] * (1 << (qp / 6)))
+            }),
+            shift,
+            bias: if intra {
+                1 << (shift - 1)
+            } else {
+                (1 << shift) / 6
+            },
+            cutoff: 1 << suppression,
+        }
+    }
+    pub(super) fn apply(&self, input: [i32; 16]) -> ([i32; 16], [i32; 16]) {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            use std::arch::aarch64::*;
+            let mut q = [0; 16];
+            let mut dq = [0; 16];
+            for row in 0..4 {
+                let i = row * 4;
+                let value = vld1q_s32(input.as_ptr().add(i));
+                let magnitude = vshlq_s32(
+                    vaddq_s32(
+                        vmulq_s32(vabsq_s32(value), vld1q_s32(self.mf[row & 1].as_ptr())),
+                        vdupq_n_s32(self.bias),
+                    ),
+                    vdupq_n_s32(-self.shift),
+                );
+                let magnitude = vreinterpretq_s32_u32(vandq_u32(
+                    vreinterpretq_u32_s32(magnitude),
+                    vcgeq_s32(magnitude, vdupq_n_s32(self.cutoff)),
+                ));
+                let signed = vbslq_s32(
+                    vcltq_s32(value, vdupq_n_s32(0)),
+                    vnegq_s32(magnitude),
+                    magnitude,
+                );
+                vst1q_s32(q.as_mut_ptr().add(i), signed);
+                vst1q_s32(
+                    dq.as_mut_ptr().add(i),
+                    vmulq_s32(signed, vld1q_s32(self.scales[row & 1].as_ptr())),
+                );
+            }
+            (q, dq)
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let q = std::array::from_fn(|i| {
+                let magnitude =
+                    (input[i].abs() * self.mf[(i / 4) & 1][i % 4] + self.bias) >> self.shift;
+                if magnitude < self.cutoff {
+                    0
+                } else {
+                    input[i].signum() * magnitude
+                }
+            });
+            let dq = std::array::from_fn(|i| q[i] * self.scales[(i / 4) & 1][i % 4]);
+            (q, dq)
+        }
+    }
+}
+#[cfg_attr(not(test), allow(dead_code))]
+fn quantize_scalar(
+    input: [i32; 16],
+    qp: u8,
+    intra: bool,
+    suppression: u8,
+) -> ([i32; 16], [i32; 16]) {
+    let q = std::array::from_fn(|i| suppress(quant(input[i], qp, i, intra, 0), suppression));
+    let dq = std::array::from_fn(|i| dequant(q[i], qp, i));
+    (q, dq)
+}
 pub(super) fn inverse(input: [i32; 16]) -> [i32; 16] {
+    if input[1..].iter().all(|&v| v == 0) {
+        return [(input[0] + 32) >> 6; 16];
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { neon::inverse(input) }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        inverse_scalar(input)
+    }
+}
+#[cfg_attr(not(test), allow(dead_code))]
+fn inverse_scalar(input: [i32; 16]) -> [i32; 16] {
     let mut tmp = [0; 16];
     let mut out = [0; 16];
     for y in 0..4 {
@@ -91,9 +206,7 @@ pub(super) fn block(
     stride: usize,
     offset: usize,
     pred: &[u8; 16],
-    qp: u8,
-    intra: bool,
-    suppression: u8,
+    quantizer: &Quantizer,
 ) -> ([i32; 16], [u8; 16]) {
     let mut input = [0; 16];
     for y in 0..4 {
@@ -101,12 +214,13 @@ pub(super) fn block(
             input[y * 4 + x] = src[offset + y * stride + x] as i32 - pred[y * 4 + x] as i32;
         }
     }
+    if input == [0; 16] {
+        return ([0; 16], *pred);
+    }
     let transformed = forward(input);
-    let mut q = [0; 16];
-    let mut dq = [0; 16];
-    for i in 0..16 {
-        q[i] = suppress(quant(transformed[i], qp, i, intra, 0), suppression);
-        dq[i] = dequant(q[i], qp, i);
+    let (q, dq) = quantizer.apply(transformed);
+    if q == [0; 16] {
+        return (q, *pred);
     }
     let residual = inverse(dq);
     let mut rec = [0; 16];
@@ -131,6 +245,17 @@ pub(super) fn satd(a: &[u8], stride: usize, offset: usize, pred: &[u8; 16]) -> u
         .div_ceil(2)
 }
 pub(super) fn hadamard(v: [i32; 16]) -> [i32; 16] {
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { neon::hadamard(v) }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        hadamard_scalar(v)
+    }
+}
+#[cfg_attr(not(test), allow(dead_code))]
+fn hadamard_scalar(v: [i32; 16]) -> [i32; 16] {
     let mut t = [0; 16];
     let mut o = [0; 16];
     for y in 0..4 {
@@ -184,4 +309,133 @@ pub(super) fn luma_dc_inverse(v: [i32; 16], qp: u8) -> [i32; 16] {
             (value + (1 << (1 - qp / 6))) >> (2 - qp / 6)
         }
     })
+}
+
+// AArch64 guarantees NEON. All arithmetic stays in i32, including high-QP inverse coefficients.
+#[cfg(target_arch = "aarch64")]
+mod neon {
+    use std::arch::aarch64::*;
+    #[inline]
+    unsafe fn transpose(v: [int32x4_t; 4]) -> [int32x4_t; 4] {
+        let a = vtrn1q_s32(v[0], v[1]);
+        let b = vtrn2q_s32(v[0], v[1]);
+        let c = vtrn1q_s32(v[2], v[3]);
+        let d = vtrn2q_s32(v[2], v[3]);
+        [
+            vcombine_s32(vget_low_s32(a), vget_low_s32(c)),
+            vcombine_s32(vget_low_s32(b), vget_low_s32(d)),
+            vcombine_s32(vget_high_s32(a), vget_high_s32(c)),
+            vcombine_s32(vget_high_s32(b), vget_high_s32(d)),
+        ]
+    }
+    #[inline]
+    unsafe fn forward_pass(v: [int32x4_t; 4]) -> [int32x4_t; 4] {
+        let a = vaddq_s32(v[0], v[3]);
+        let b = vaddq_s32(v[1], v[2]);
+        let c = vsubq_s32(v[1], v[2]);
+        let d = vsubq_s32(v[0], v[3]);
+        [
+            vaddq_s32(a, b),
+            vaddq_s32(vshlq_n_s32::<1>(d), c),
+            vsubq_s32(a, b),
+            vsubq_s32(d, vshlq_n_s32::<1>(c)),
+        ]
+    }
+    #[inline]
+    unsafe fn inverse_pass(v: [int32x4_t; 4]) -> [int32x4_t; 4] {
+        let a = vaddq_s32(v[0], v[2]);
+        let b = vsubq_s32(v[0], v[2]);
+        let c = vsubq_s32(vshrq_n_s32::<1>(v[1]), v[3]);
+        let d = vaddq_s32(v[1], vshrq_n_s32::<1>(v[3]));
+        [
+            vaddq_s32(a, d),
+            vaddq_s32(b, c),
+            vsubq_s32(b, c),
+            vsubq_s32(a, d),
+        ]
+    }
+    #[inline]
+    unsafe fn hadamard_pass(v: [int32x4_t; 4]) -> [int32x4_t; 4] {
+        let a = vaddq_s32(v[0], v[3]);
+        let b = vaddq_s32(v[1], v[2]);
+        let c = vsubq_s32(v[1], v[2]);
+        let d = vsubq_s32(v[0], v[3]);
+        [
+            vaddq_s32(a, b),
+            vaddq_s32(d, c),
+            vsubq_s32(a, b),
+            vsubq_s32(d, c),
+        ]
+    }
+    pub(super) unsafe fn hadamard(input: [i32; 16]) -> [i32; 16] {
+        let rows = std::array::from_fn(|i| vld1q_s32(input.as_ptr().add(i * 4)));
+        let rows = hadamard_pass(transpose(hadamard_pass(transpose(rows))));
+        let mut out = [0; 16];
+        for (i, row) in rows.into_iter().enumerate() {
+            vst1q_s32(out.as_mut_ptr().add(i * 4), row);
+        }
+        out
+    }
+    pub(super) unsafe fn forward(input: [i32; 16]) -> [i32; 16] {
+        let rows = std::array::from_fn(|i| vld1q_s32(input.as_ptr().add(i * 4)));
+        let rows = forward_pass(transpose(forward_pass(transpose(rows))));
+        let mut out = [0; 16];
+        for (i, row) in rows.into_iter().enumerate() {
+            vst1q_s32(out.as_mut_ptr().add(i * 4), row);
+        }
+        out
+    }
+    pub(super) unsafe fn inverse(input: [i32; 16]) -> [i32; 16] {
+        let rows = std::array::from_fn(|i| vld1q_s32(input.as_ptr().add(i * 4)));
+        let rows = inverse_pass(transpose(inverse_pass(transpose(rows))));
+        let mut out = [0; 16];
+        for (i, row) in rows.into_iter().enumerate() {
+            vst1q_s32(
+                out.as_mut_ptr().add(i * 4),
+                vshrq_n_s32::<6>(vaddq_s32(row, vdupq_n_s32(32))),
+            );
+        }
+        out
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn quantization_matches_scalar() {
+        let mut seed = 33u32;
+        for qp in 0..=51 {
+            for intra in [false, true] {
+                for suppression in 0..=10 {
+                    let input = std::array::from_fn(|_| {
+                        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                        (seed >> 16) as i32 % 16321 - 8160
+                    });
+                    assert_eq!(
+                        Quantizer::new(qp, intra, suppression).apply(input),
+                        quantize_scalar(input, qp, intra, suppression)
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn transforms_match_scalar() {
+        let mut seed = 7u32;
+        for _ in 0..10000 {
+            let residual = std::array::from_fn(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (seed >> 16) as i32 % 511 - 255
+            });
+            assert_eq!(forward(residual), forward_scalar(residual));
+            assert_eq!(hadamard(residual), hadamard_scalar(residual));
+            let coefficients = residual.map(|v| v * 4096);
+            assert_eq!(inverse(coefficients), inverse_scalar(coefficients));
+        }
+        for dc in [-32768, -33, -32, -1, 0, 1, 31, 32, 32768] {
+            let mut c = [0; 16];
+            c[0] = dc;
+            assert_eq!(inverse(c), inverse_scalar(c));
+        }
+    }
 }

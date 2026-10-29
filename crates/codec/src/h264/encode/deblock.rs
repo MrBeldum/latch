@@ -66,16 +66,30 @@ const TC: [[i32; 4]; 52] = [
 ];
 fn pixel(p: &mut [u8], q: usize, step: usize, bs: usize, qp: usize, chroma: bool) {
     let at = |i: isize| p[(q as isize + i * step as isize) as usize] as i32;
-    let (p0, p1, p2, p3) = (at(-1), at(-2), at(-3), at(-4));
-    let (q0, q1, q2, q3) = (at(0), at(1), at(2), at(3));
     let (a, b) = (ALPHA[qp], BETA[qp]);
-    if (p0 - q0).abs() >= a || (p1 - p0).abs() >= b || (q1 - q0).abs() >= b {
+    let (p0, q0) = (at(-1), at(0));
+    if (p0 - q0).abs() >= a {
         return;
     }
+    let (p1, q1) = (at(-2), at(1));
+    if (p1 - p0).abs() >= b || (q1 - q0).abs() >= b {
+        return;
+    }
+    let (p2, q2) = (at(-3), at(2));
+    let strong = bs == 4 && !chroma && (p0 - q0).abs() < (a >> 2) + 2;
+    let p3 = if strong && (p2 - p0).abs() < b {
+        at(-4)
+    } else {
+        0
+    };
+    let q3 = if strong && (q2 - q0).abs() < b {
+        at(3)
+    } else {
+        0
+    };
     let mut set =
         |i: isize, v: i32| p[(q as isize + i * step as isize) as usize] = v.clamp(0, 255) as u8;
     if bs == 4 {
-        let strong = !chroma && (p0 - q0).abs() < (a >> 2) + 2;
         if strong && (p2 - p0).abs() < b {
             set(-1, (p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3);
             set(-2, (p2 + p1 + p0 + q0 + 2) >> 2);
