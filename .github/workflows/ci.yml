@@ -86,6 +86,10 @@ jobs:
           targets: aarch64-apple-darwin
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # FFmpeg decodes the VideoToolbox encoder's output in the tests: an
+      # independent decoder, never part of Latch.
+      - name: ffmpeg for the encoder tests
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install ffmpeg
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: test

@@ -98,17 +98,30 @@ fn nal_types(bytes: &[u8], hevc: bool) -> Vec<u8> {
         })
         .collect()
 }
-fn roundtrip(codec: Codec) {
-    let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
-    assert!(
-        Command::new("/opt/homebrew/bin/ffmpeg")
+/// FFmpeg, the independent decoder these tests check against: from PATH
+/// or Homebrew's usual place.
+fn ffmpeg() -> Option<std::path::PathBuf> {
+    [
+        "ffmpeg",
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+    ]
+    .into_iter()
+    .map(std::path::PathBuf::from)
+    .find(|p| {
+        Command::new(p)
             .arg("-version")
             .output()
-            .unwrap()
-            .status
-            .success(),
-        "FFmpeg is required for independent encoder verification"
-    );
+            .is_ok_and(|o| o.status.success())
+    })
+}
+
+fn roundtrip(codec: Codec) {
+    let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(ffmpeg) = ffmpeg() else {
+        eprintln!("no ffmpeg on this machine; skipping the independent decode of {codec:?}");
+        return;
+    };
     let config = VideoConfig {
         width: WIDTH as u32,
         height: HEIGHT as u32,
@@ -163,7 +176,7 @@ fn roundtrip(codec: Codec) {
         sources.extend(source);
     }
     drop(file);
-    let output = Command::new("/opt/homebrew/bin/ffmpeg")
+    let output = Command::new(&ffmpeg)
         .args(["-v", "error", "-y", "-threads", "1", "-i"])
         .arg(&stream)
         .args(["-pix_fmt", "nv12", "-f", "rawvideo"])

@@ -147,20 +147,18 @@ pub trait Decoder: Send {
 
 /// What this machine decodes, best first. HEVC and H.264 High need the
 /// platform's decoder; `latch-codec` decodes Constrained Baseline anywhere.
+///
+/// A Windows viewer asks for Constrained Baseline only: Media Foundation's
+/// decoder is used when it works, and when it gives no picture the stream
+/// carries on in `latch-codec` without the host noticing (see
+/// [`Fallback`]). Media Foundation has not been seen decoding on real
+/// hardware yet; a High-profile stream would leave no way out.
 pub fn decodable() -> Vec<Codec> {
     #[cfg(target_os = "macos")]
     {
         vec![Codec::Hevc, Codec::H264High, Codec::H264Baseline]
     }
-    #[cfg(windows)]
-    {
-        if mediafoundation::MfDecoder::new().is_ok() {
-            vec![Codec::H264High, Codec::H264Baseline]
-        } else {
-            vec![Codec::H264Baseline]
-        }
-    }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(not(target_os = "macos"))]
     {
         vec![Codec::H264Baseline]
     }
@@ -172,6 +170,9 @@ pub fn new_decoder(codec: Codec) -> Result<Box<dyn Decoder>> {
     #[cfg(target_os = "macos")]
     {
         match videotoolbox::VideoToolbox::new(codec == Codec::Hevc) {
+            Ok(d) if codec == Codec::H264Baseline => {
+                return Ok(Box::new(Fallback::new(Box::new(d))));
+            }
             Ok(d) => return Ok(Box::new(d)),
             Err(e) if codec == Codec::H264Baseline => {
                 tracing::warn!("VideoToolbox: {e:#}; decoding in software");
@@ -181,19 +182,92 @@ pub fn new_decoder(codec: Codec) -> Result<Box<dyn Decoder>> {
     }
     #[cfg(windows)]
     {
-        if codec != Codec::Hevc {
+        if codec == Codec::H264Baseline {
             match mediafoundation::MfDecoder::new() {
-                Ok(d) => return Ok(Box::new(MediaFoundation(d))),
-                Err(e) if codec == Codec::H264Baseline => {
-                    tracing::warn!("Media Foundation: {e:#}; decoding in software");
-                }
-                Err(e) => return Err(e),
+                Ok(d) => return Ok(Box::new(Fallback::new(Box::new(MediaFoundation(d))))),
+                Err(e) => tracing::warn!("Media Foundation: {e:#}; decoding in software"),
             }
         }
     }
     match codec {
         Codec::H264Baseline => Ok(Box::new(software::Software::new())),
         other => anyhow::bail!("this machine cannot decode {}", other.name()),
+    }
+}
+
+/// Access units a platform decoder may take without giving a picture or
+/// while failing before the stream moves to `latch-codec`. A hardware
+/// decoder holds a frame or two at most; ten is a decoder that does not
+/// work here.
+const PROBATION: u32 = 10;
+
+/// A platform decoder for a Constrained Baseline stream, with `latch-codec`
+/// behind it: if the platform's decoder gives no picture for its first
+/// [`PROBATION`] access units, or fails on them, every access unit from the
+/// next keyframe on goes to `latch-codec` instead. Once the platform's
+/// decoder has given a picture it is trusted, and its errors are the
+/// stream's (a lost reference, say), as with any decoder.
+pub struct Fallback {
+    platform: Option<Box<dyn Decoder>>,
+    software: Option<software::Software>,
+    proven: bool,
+    tries: u32,
+}
+
+impl Fallback {
+    pub fn new(platform: Box<dyn Decoder>) -> Self {
+        Self {
+            platform: Some(platform),
+            software: None,
+            proven: false,
+            tries: 0,
+        }
+    }
+}
+
+impl Decoder for Fallback {
+    fn decode(&mut self, annexb: &[u8], idr: bool, spare: Option<Frame>) -> Result<Option<Frame>> {
+        if let Some(platform) = self.platform.as_mut() {
+            let result = platform.decode(annexb, idr, spare);
+            if self.proven {
+                return result;
+            }
+            match result {
+                Ok(Some(frame)) => {
+                    self.proven = true;
+                    return Ok(Some(frame));
+                }
+                Ok(None) | Err(_) => {
+                    self.tries += 1;
+                    if self.tries < PROBATION {
+                        return result;
+                    }
+                    tracing::warn!(
+                        "{} gave no picture for {} access units; decoding in software",
+                        platform.name(),
+                        self.tries
+                    );
+                    self.platform = None;
+                    self.software = Some(software::Software::new());
+                    if !idr {
+                        // Software needs a keyframe to start from; the
+                        // session asks for one when this fails.
+                        anyhow::bail!("switching to software decoding; waiting for a keyframe");
+                    }
+                }
+            }
+        }
+        match self.software.as_mut() {
+            Some(software) => software.decode(annexb, idr, None),
+            None => Ok(None),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match &self.platform {
+            Some(platform) => platform.name(),
+            None => "Latch H.264 (software)",
+        }
     }
 }
 
@@ -255,6 +329,60 @@ fn nal_units(data: &[u8]) -> Vec<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A platform decoder that takes everything and shows nothing.
+    struct Silent;
+
+    impl Decoder for Silent {
+        fn decode(&mut self, _: &[u8], _: bool, _: Option<Frame>) -> Result<Option<Frame>> {
+            Ok(None)
+        }
+
+        fn name(&self) -> &'static str {
+            "silent"
+        }
+    }
+
+    #[test]
+    fn a_platform_decoder_that_shows_nothing_hands_over_to_software() {
+        let mut encoder = latch_codec::h264::Encoder::new(latch_codec::h264::EncoderConfig {
+            width: 64,
+            height: 64,
+            fps: 30,
+            bitrate_kbps: 1_000,
+            threads: 1,
+        })
+        .unwrap();
+        let mut picture = latch_codec::Yuv420::new(64, 64);
+        picture.y.fill(200);
+        let mut idr = Vec::new();
+        encoder.encode(&picture, true, &mut idr).unwrap();
+        let mut decoder = Fallback::new(Box::new(Silent));
+        for _ in 1..PROBATION {
+            assert!(decoder.decode(&idr, true, None).unwrap().is_none());
+            assert_eq!(decoder.name(), "silent");
+        }
+        let frame = decoder
+            .decode(&idr, true, None)
+            .unwrap()
+            .expect("software's picture");
+        assert_eq!((frame.width, frame.height), (64, 64));
+        assert!(frame.y[0].abs_diff(200) <= 2);
+        assert_eq!(decoder.name(), "Latch H.264 (software)");
+    }
+
+    #[test]
+    fn a_switch_mid_stream_waits_for_a_keyframe() {
+        let mut decoder = Fallback::new(Box::new(Silent));
+        for _ in 1..PROBATION {
+            assert!(decoder
+                .decode(&[0, 0, 1, 0x41], false, None)
+                .unwrap()
+                .is_none());
+        }
+        assert!(decoder.decode(&[0, 0, 1, 0x41], false, None).is_err());
+        assert_eq!(decoder.name(), "Latch H.264 (software)");
+    }
 
     #[test]
     fn black_detection_checks_visible_pixels_and_both_ranges() {
