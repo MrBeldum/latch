@@ -25,9 +25,13 @@ use std::sync::mpsc;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-/// Short still-screen repeats also bound keyframe-request latency while
-/// next() waits for damage; pipelines still enforce the configured fps.
-const IDLE_REPEAT: Duration = Duration::from_millis(25);
+/// A still screen still gets a nearly empty frame this often, so a viewer
+/// notices a lost last frame and the stream never looks dead. It also bounds
+/// how long a keyframe request waits while next() waits for the screen to
+/// change: on a still screen a 100 ms wait shows nothing new. Measured on a
+/// 2-core ARM host at 720p: about 3% of a core; every 25 ms cost a Mac
+/// viewer 2.5 times the CPU for nothing it could see.
+const IDLE_REPEAT: Duration = Duration::from_millis(100);
 const KEEPALIVE: Duration = Duration::from_secs(1);
 /// A viewer heard from neither over TCP nor UDP for this long is gone.
 const SILENT: Duration = Duration::from_secs(10);
