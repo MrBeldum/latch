@@ -18,9 +18,18 @@ pub const MOD_META: u8 = 8;
 pub const MAX_TEXT: usize = 64;
 /// How often unacknowledged events are sent again.
 pub const RESEND: Duration = Duration::from_millis(20);
-/// Unacknowledged events kept at most; beyond this, new relative mouse
-/// moves are dropped first, then the oldest events.
+/// Soft cap: once reached, incoming pointer motion updates the newest
+/// queued event of the same kind (relative deltas sum saturating; absolute
+/// positions replace). If there is no such event, only the new motion is
+/// dropped. Its sequence is unchanged: an already applied event is deduped
+/// by the host, so an update can lose motion but cannot apply input twice.
+/// Never discard an older unacknowledged event: it may be an unfilled gap.
 pub const MAX_UNACKED: usize = 1024;
+/// Non-motion events may exceed the soft cap up to this limit, far beyond
+/// human typing during the session's ten-second silence timeout. At this
+/// hard cap only new events are refused, without assigning a sequence.
+/// The receiver uses the same window so it can retain the whole backlog.
+pub const HARD_MAX_UNACKED: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -189,6 +198,7 @@ pub struct InputSender {
     next: u32,
     queue: VecDeque<(u32, Event, bool)>,
     last_send: Option<Instant>,
+    changed: bool,
 }
 
 impl InputSender {
@@ -198,12 +208,14 @@ impl InputSender {
             next: 0,
             queue: Default::default(),
             last_send: None,
+            changed: false,
         }
     }
 
     /// Queues an event. Text longer than [`MAX_TEXT`] is split at character
     /// boundaries. A relative move right after another not yet sent is
-    /// merged into it (saturating).
+    /// merged into it if the sum fits; see [`MAX_UNACKED`] for the overflow
+    /// policy when the queue is full.
     pub fn push(&mut self, event: Event) {
         if let Event::Text(text) = &event {
             if text.is_empty() {
@@ -227,11 +239,9 @@ impl InputSender {
                 if let (Some(a), Some(b)) = (x.checked_add(dx), y.checked_add(dy)) {
                     *x = a;
                     *y = b;
+                    self.changed = true;
                     return;
                 }
-            }
-            if self.queue.len() >= MAX_UNACKED {
-                return;
             }
             self.enqueue(Event::MouseMove { dx, dy });
         } else {
@@ -241,10 +251,41 @@ impl InputSender {
 
     fn enqueue(&mut self, event: Event) {
         if self.queue.len() >= MAX_UNACKED {
-            self.queue.pop_front();
+            match event {
+                Event::MouseMove { dx, dy } => {
+                    if let Some((_, Event::MouseMove { dx: x, dy: y }, _)) = self
+                        .queue
+                        .iter_mut()
+                        .rev()
+                        .find(|(_, event, _)| matches!(event, Event::MouseMove { .. }))
+                    {
+                        *x = x.saturating_add(dx);
+                        *y = y.saturating_add(dy);
+                        self.changed = true;
+                    }
+                    return;
+                }
+                Event::MousePosition { .. } => {
+                    if let Some((_, queued, _)) = self
+                        .queue
+                        .iter_mut()
+                        .rev()
+                        .find(|(_, event, _)| matches!(event, Event::MousePosition { .. }))
+                    {
+                        *queued = event;
+                        self.changed = true;
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if self.queue.len() >= HARD_MAX_UNACKED {
+            return;
         }
         self.queue.push_back((self.next, event, false));
         self.next = self.next.wrapping_add(1);
+        self.changed = true;
     }
 
     /// From an `InputAck`: every event before `next` arrived.
@@ -258,36 +299,34 @@ impl InputSender {
             .is_some_and(|(seq, _, _)| crate::video::before(*seq, next))
         {
             self.queue.pop_front();
+            self.changed = true;
         }
     }
 
     /// Writes an `Input` datagram into `out` and returns true when one is
-    /// due: there are events never sent, or unacknowledged ones last sent
-    /// [`RESEND`] ago or more.
+    /// due: the queue changed, or unacknowledged events were last sent
+    /// [`RESEND`] ago or more. Always starts at the oldest unacknowledged
+    /// event; an acknowledgement makes room for the next batch at once.
     pub fn poll(&mut self, now: Instant, out: &mut Vec<u8>) -> bool {
         if self.queue.is_empty() {
             return false;
         }
-        // First priority: any events that have never been sent.
-        if let Some(start) = self.queue.iter().position(|x| !x.2) {
-            let events: Vec<Event> = self.queue.range(start..).map(|x| x.1.clone()).collect();
-            let count = crate::wire::write_input(out, self.session, self.queue[start].0, &events);
-            for entry in self.queue.range_mut(start..).take(count) {
-                entry.2 = true;
-            }
-            self.last_send = Some(now);
-            return count > 0;
-        }
-        // All unacknowledged events were sent at least once: check resend timer.
-        if self
-            .last_send
-            .is_some_and(|t| now.saturating_duration_since(t) < RESEND)
+        if !self.changed
+            && self
+                .last_send
+                .is_some_and(|t| now.saturating_duration_since(t) < RESEND)
         {
             return false;
         }
-        let events: Vec<Event> = self.queue.iter().map(|x| x.1.clone()).collect();
+        let events: Vec<Event> = self.queue.iter().take(255).map(|x| x.1.clone()).collect();
         let count = crate::wire::write_input(out, self.session, self.queue[0].0, &events);
+        for entry in self.queue.iter_mut().take(count) {
+            entry.2 = true;
+        }
         self.last_send = Some(now);
+        // An unsent tail beyond this datagram must not make `while poll()`
+        // spin on the same oldest batch while waiting for its acknowledgement.
+        self.changed = false;
         count > 0
     }
 
@@ -296,7 +335,7 @@ impl InputSender {
     pub fn next_deadline(&self) -> Option<Instant> {
         if self.queue.is_empty() {
             None
-        } else if self.queue.iter().any(|x| !x.2) {
+        } else if self.changed {
             self.last_send
         } else {
             self.last_send.map(|t| t + RESEND)
@@ -325,7 +364,7 @@ impl InputReceiver {
     /// Takes the events of one `Input` datagram (numbered from `first`),
     /// calls `apply` for each event now in order, and returns the `next`
     /// to acknowledge. Events after a gap are kept (at most
-    /// [`MAX_UNACKED`]) until the gap is filled.
+    /// [`HARD_MAX_UNACKED`]) until the gap is filled.
     pub fn receive(
         &mut self,
         first: u32,
@@ -335,7 +374,7 @@ impl InputReceiver {
         for (i, event) in events.into_iter().enumerate() {
             let seq = first.wrapping_add(i as u32);
             let offset = seq.wrapping_sub(self.next);
-            if offset < MAX_UNACKED as u32 {
+            if offset < HARD_MAX_UNACKED as u32 {
                 self.pending.entry(seq).or_insert(event);
             }
         }

@@ -218,7 +218,6 @@ pub struct Reassembler {
     pending: std::collections::HashMap<u32, Pending>,
     next: Option<u32>,
     waiting: bool,
-    started: bool,
     last: Option<u32>,
     stats: ReassemblyStats,
 }
@@ -229,8 +228,7 @@ impl Reassembler {
             session,
             pending: Default::default(),
             next: None,
-            waiting: true,
-            started: false,
+            waiting: false,
             last: None,
             stats: Default::default(),
         }
@@ -326,12 +324,11 @@ impl Reassembler {
             {
                 let frame = self.pending.remove(&next)?;
                 self.next = Some(next.wrapping_add(1));
-                if self.waiting && !frame.keyframe {
+                if (self.last.is_none() || self.waiting) && !frame.keyframe {
                     self.stats.frames_skipped += 1;
                     continue;
                 }
                 self.waiting = false;
-                self.started = true;
                 self.last = Some(next);
                 self.stats.frames_delivered += 1;
                 let mut data = Vec::with_capacity(frame.len);
@@ -349,10 +346,9 @@ impl Reassembler {
                     assembly: frame.complete?.saturating_duration_since(frame.first),
                 }));
             }
-            let timeout = self
-                .pending
-                .get(&next)
-                .is_some_and(|f| now.saturating_duration_since(f.first) >= FRAME_TIMEOUT);
+            let timeout = self.pending.values().any(|f| {
+                f.complete.is_none() && now.saturating_duration_since(f.first) >= FRAME_TIMEOUT
+            });
             let later = self.pending.iter().any(|(&n, f)| {
                 before(next, n)
                     && f.complete
@@ -372,9 +368,6 @@ impl Reassembler {
                 }
             }
             self.next = Some(next.wrapping_add(1));
-            if !self.started {
-                continue;
-            }
             self.waiting = true;
             self.stats.frames_lost += 1;
             return Some(Reassembled::Lost { frame: next });
@@ -387,9 +380,10 @@ impl Reassembler {
         let next = self.next?;
         let timeout = self
             .pending
-            .get(&next)
+            .values()
             .filter(|f| f.complete.is_none())
-            .map(|f| f.first + FRAME_TIMEOUT);
+            .map(|f| f.first + FRAME_TIMEOUT)
+            .min();
         let later = self
             .pending
             .iter()

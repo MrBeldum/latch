@@ -5,6 +5,9 @@ use std::time::Instant;
 
 /// Packets per parity group.
 pub const GROUP: u32 = 4;
+/// Largest coded frame, leaving room for the audio header and parity's
+/// two-byte payload length.
+pub const MAX_PAYLOAD: usize = crate::MAX_DATAGRAM - 16 - 2;
 
 /// Numbers encoded audio frames and sends a parity packet after every
 /// [`GROUP`] of them.
@@ -24,10 +27,12 @@ impl AudioPacketizer {
     }
 
     /// Calls `emit` with the packet for `payload` and, when it ends a group,
-    /// the group's parity packet after it.
-    pub fn packetize(&mut self, pts: u32, payload: &[u8], emit: impl FnMut(&[u8])) {
-        if payload.len() > u16::MAX as usize {
-            return;
+    /// the group's parity packet after it. Returns false if `payload`
+    /// exceeds [`MAX_PAYLOAD`]; emits nothing and leaves the sequence and
+    /// parity unchanged in that case.
+    pub fn packetize(&mut self, pts: u32, payload: &[u8], emit: impl FnMut(&[u8])) -> bool {
+        if payload.len() > MAX_PAYLOAD {
+            return false;
         }
         let mut emit = emit;
         let mut buf = Vec::new();
@@ -64,6 +69,7 @@ impl AudioPacketizer {
             self.parity.clear();
         }
         self.seq = self.seq.wrapping_add(1);
+        true
     }
 }
 
@@ -81,7 +87,9 @@ pub enum AudioOut {
 /// Puts audio packets in order and rebuilds a lost one from its group's
 /// parity. A missing packet is given up on when its group's parity has
 /// arrived without rebuilding it, or when a packet two or more past the
-/// end of its group has arrived.
+/// end of its group has arrived. After a gap beyond the 64-packet window,
+/// jumps to the arriving packet's group start and clears stale state,
+/// rather than playing a long backlog of concealment or stalling forever.
 pub struct AudioReceiver {
     session: u32,
     next: Option<u32>,
@@ -105,17 +113,23 @@ impl AudioReceiver {
 
     pub fn push(&mut self, packet: &AudioPacket<'_>, now: Instant) {
         let _ = (now, self.session);
-        let next = *self.next.get_or_insert(packet.seq);
+        if packet.parity && !packet.seq.is_multiple_of(GROUP) {
+            return;
+        }
+        let mut next = *self.next.get_or_insert(packet.seq);
         if crate::video::before(packet.seq, next.wrapping_sub(GROUP - 1)) {
             return;
         }
+        if crate::video::before(next, packet.seq) && packet.seq.wrapping_sub(next) > 64 {
+            let group = packet.seq - packet.seq % GROUP;
+            self.stats.2 += group.wrapping_sub(next) as u64;
+            next = group;
+            self.next = Some(next);
+            self.frames.clear();
+            self.parity.clear();
+            self.latest = None;
+        }
         if packet.parity {
-            if packet.seq.wrapping_sub(next) > 64 && crate::video::before(next, packet.seq) {
-                return;
-            }
-            if !packet.seq.is_multiple_of(GROUP) {
-                return;
-            }
             self.parity
                 .entry(packet.seq)
                 .or_insert_with(|| packet.payload.to_vec());

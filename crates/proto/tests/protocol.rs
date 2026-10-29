@@ -523,6 +523,7 @@ fn test_4_audio_5_pct_loss() {
     let num_packets = 1000;
     let mut sent_payloads = HashMap::new();
     let mut now = Instant::now();
+    let mut outputs = Vec::new();
 
     for i in 0..num_packets {
         let pts = i * 10_000;
@@ -533,6 +534,16 @@ fn test_4_audio_5_pct_loss() {
             link.send(now, buf);
         });
         now += Duration::from_millis(10);
+        // Consume audio as it arrives, as the player does. Holding ten
+        // seconds in the receiver would deliberately exceed its window.
+        for dg in link.receive(now) {
+            if let Ok(Datagram::Audio { packet, .. }) = wire::parse(&dg) {
+                receiver.push(&packet, now);
+                while let Some(out) = receiver.pop() {
+                    outputs.push(out);
+                }
+            }
+        }
     }
 
     // Drain link
@@ -541,12 +552,14 @@ fn test_4_audio_5_pct_loss() {
         for dg in link.receive(now) {
             if let Ok(Datagram::Audio { packet, .. }) = wire::parse(&dg) {
                 receiver.push(&packet, now);
+                while let Some(out) = receiver.pop() {
+                    outputs.push(out);
+                }
             }
         }
     }
 
     // Pop all outputs from receiver
-    let mut outputs = Vec::new();
     while let Some(out) = receiver.pop() {
         outputs.push(out);
     }

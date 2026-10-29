@@ -83,7 +83,7 @@ type byte and the payload and is at most 65 536. Payloads are JSON objects.
 | `width`, `height`, `fps` | u32 | what will actually be sent |
 | `bitrate_kbps` | u32 | what the encoder was set to |
 | `encoder` | string | e.g. `"VideoToolbox HEVC"`, `"Media Foundation H.264 (NVIDIA)"`, `"Latch software H.264"` |
-| `audio` | object or null | `{"rate": 48000, "channels": 2, "frame_samples": 480, "codec": "lpcm-rice"}`; null when there is none |
+| `audio` | object or null | `{"rate": 48000, "channels": 2, "frame_samples": 240, "codec": "lpcm-rice"}`; null when there is none |
 | `audio_problem` | string | why there is no audio, when `audio` is null |
 
 Either side sends `Keepalive` when it has sent nothing for one second. A
@@ -172,8 +172,9 @@ Cauchy generator matrix, as specified in `crates/proto/src/fec.rs`: any
 The viewer delivers frames in frame-number order. A frame is complete when
 every block has `data` shards. It is lost when a later frame completes
 while it is still incomplete, or 100 ms after its first shard arrived,
-whichever comes first. After a lost frame the viewer decodes nothing until
-a keyframe arrives, and asks for one.
+whichever comes first. A later incomplete frame's 100 ms timeout also
+declares any entirely missing earlier frames lost. After a lost frame the
+viewer decodes nothing until a keyframe arrives, and asks for one.
 
 ### Audio (3)
 
@@ -187,6 +188,11 @@ a keyframe arrives, and asks for one.
 sends a parity packet with `seq = 4k`: the XOR of the four packets'
 `u16 length | payload`, each zero-padded to the longest. It rebuilds any
 one lost packet of the four.
+
+Each coded audio frame is at most `MAX_DATAGRAM - 18` (1 182) bytes,
+leaving room for the 16-byte audio header and the parity packet's two-byte
+length. The host picks `frame_samples` and announces it in `Accept`;
+the default is 240 samples (5 ms at 48 kHz).
 
 ### Input (4)
 
@@ -228,6 +234,9 @@ it when a frame is lost, and again every 100 ms (or the measured round
 trip, if longer) until a keyframe newer than `last` arrives. The host
 answers with an IDR frame; it encodes at most one keyframe per 50 ms for
 requests.
+
+At session start the viewer waits for the host's first keyframe without
+requesting another one, unless a frame is declared lost.
 
 ### Ping (7) and Pong (8)
 

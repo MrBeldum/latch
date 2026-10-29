@@ -117,7 +117,7 @@ impl Datagram<'_> {
 }
 
 pub fn parse(buf: &[u8]) -> Result<Datagram<'_>, WireError> {
-    if buf.len() < crate::HEADER_LEN {
+    if buf.len() < crate::HEADER_LEN || buf.len() > crate::MAX_DATAGRAM {
         return Err(WireError::Length);
     }
     let kind = buf[0];
