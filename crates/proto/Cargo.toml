@@ -1,0 +1,13 @@
+[package]
+name = "latch-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Latch's stream protocol: datagrams, Reed-Solomon FEC, reassembly, input reliability"
+
+[dependencies]
+serde = { workspace = true }
+serde_json.workspace = true
+
+[dev-dependencies]

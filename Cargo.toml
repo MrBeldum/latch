@@ -2,6 +2,9 @@
 resolver = "2"
 members = [
     "crates/core",
+    "crates/proto",
+    "crates/codec",
+    "crates/engine",
     "crates/stream",
     "crates/host",
     "crates/client",
@@ -20,6 +23,9 @@ readme = "README.md"
 
 [workspace.dependencies]
 latch-core = { path = "crates/core", version = "4.0.0" }
+latch-proto = { path = "crates/proto", version = "4.0.0" }
+latch-codec = { path = "crates/codec", version = "4.0.0" }
+latch-engine = { path = "crates/engine", version = "4.0.0" }
 latch-stream = { path = "crates/stream", version = "4.0.0" }
 latch-ui = { path = "crates/ui", version = "4.0.0" }
 latch-client = { path = "crates/client", version = "4.0.0" }

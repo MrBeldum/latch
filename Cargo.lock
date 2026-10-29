@@ -2139,6 +2139,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "latch-codec"
+version = "4.1.1"
+
+[[package]]
 name = "latch-core"
 version = "4.1.1"
 dependencies = [
@@ -2154,6 +2158,22 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "webpki-roots",
+]
+
+[[package]]
+name = "latch-engine"
+version = "4.1.1"
+dependencies = [
+ "anyhow",
+ "latch-codec",
+ "latch-proto",
+ "parking_lot",
+ "rand",
+ "serde",
+ "serde_json",
+ "tracing",
+ "windows 0.58.0",
+ "x11rb",
 ]
 
 [[package]]
@@ -2180,6 +2200,14 @@ dependencies = [
  "windows 0.58.0",
  "winresource",
  "x11rb",
+]
+
+[[package]]
+name = "latch-proto"
+version = "4.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
