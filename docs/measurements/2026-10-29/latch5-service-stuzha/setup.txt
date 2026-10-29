@@ -1,0 +1,4 @@
+active
+active
+prep_do = "/usr/local/bin/stuzha-display"
+prep_undo = "/usr/local/bin/stuzha-display idle"

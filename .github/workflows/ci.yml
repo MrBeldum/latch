@@ -23,7 +23,7 @@ jobs:
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --all-targets
       # The setup script is generated, so only a dump of it can be parsed.
       # Every plan shape, with names that need quoting, through the parser
       # of the Windows PowerShell that runs it; plus the shipped scripts.
@@ -34,119 +34,40 @@ jobs:
           $env:LATCH_DUMP_EXE = "C:\Users\O'Brien `$lab\AppData\Local\Latch\latch-host.exe"
           $env:LATCH_DUMP_ADAPTER = "Ethernet 'Realtek' `"2`" `$(x)"
           $env:LATCH_DUMP_ADAPTER_DESC = "Realtek PCIe GbE (`"x`")"
-          $files = @('scripts\install-host.ps1', 'crates\host\windows\take-over-engine.ps1')
-          foreach ($migrate in '0', '1') {
-            foreach ($dry in '0', '1') {
-              $out = Join-Path $env:RUNNER_TEMP "setup-$migrate$dry.ps1"
-              $env:LATCH_DUMP_SETUP_SCRIPT = $out
-              $env:LATCH_DUMP_MIGRATE = $migrate
-              $env:LATCH_DUMP_DRY_RUN = $dry
-              cargo test -q --locked -p latch-host --lib the_generated_script_can_be_dumped_for_a_syntax_check
-              if ($LASTEXITCODE -ne 0) { throw "dumping the setup script failed" }
-              $files += $out
-            }
-          }
+          $out = Join-Path $env:RUNNER_TEMP "setup.ps1"
+          $env:LATCH_DUMP_SETUP_SCRIPT = $out
+          cargo test -q --locked -p latch-host --lib the_generated_script_can_be_dumped_for_a_syntax_check
+          if ($LASTEXITCODE -ne 0) { throw "dumping the setup script failed" }
+          $files = @('scripts\install-host.ps1', $out)
           foreach ($f in $files) {
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errors) | Out-Null
             if ($errors.Count -gt 0) { $errors | Format-List | Out-String | Write-Host; throw "$f does not parse" }
             Write-Host "parses: $f"
           }
-      # The BroLink -> Latch retire step moves the engine folder, with the
-      # pairing state in it, on a PC that ran 4.0. Run it for real here, on
-      # temporary folders and a dummy service, through the Windows
-      # PowerShell setup uses: a clean move, a second run, a folder in the
-      # way (empty and part-filled), and a move that fails.
-      - name: retire step on an old layout
+      # Exercise cleanup on an isolated folder and a dummy service, twice.
+      - name: retire the previous streaming service
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $root = Join-Path $env:RUNNER_TEMP 'retire'
-          $old = Join-Path $root 'BroLink\engine'
-          $new = Join-Path $root 'Latch\engine'
+          $old = Join-Path $env:RUNNER_TEMP "old-engine"
           $svc = 'LatchRetireSelftest'
           $script = Join-Path $env:RUNNER_TEMP 'retire.ps1'
           $env:LATCH_DUMP_RETIRE_SCRIPT = $script
           $env:LATCH_DUMP_RETIRE_OLD = $old
-          $env:LATCH_DUMP_RETIRE_NEW = $new
           $env:LATCH_DUMP_RETIRE_SERVICE = $svc
           cargo test -q --locked -p latch-host --lib the_retire_step_can_be_dumped_for_a_windows_run
           if ($LASTEXITCODE -ne 0) { throw "dumping the retire step failed" }
-          function Wait-ServiceGone {
-            foreach ($i in 1..20) {
-              sc.exe query $svc | Out-Null
-              if ($LASTEXITCODE -eq 1060) { return $true }
-              Start-Sleep -Milliseconds 500
-            }
-            return $false
+          New-Item -ItemType Directory -Force $old | Out-Null
+          Set-Content -LiteralPath (Join-Path $old 'old-state.json') -Value '{}'
+          sc.exe create $svc binPath= "$env:WINDIR\System32\cmd.exe" start= demand | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "dummy service creation failed" }
+          foreach ($attempt in 1..2) {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script
+            if ($LASTEXITCODE -ne 0) { throw "retirement failed" }
+            if (Test-Path -LiteralPath $old) { throw "old folder remains" }
           }
-          function Reset-Layout {
-            sc.exe query $svc | Out-Null
-            if ($LASTEXITCODE -ne 1060) { sc.exe delete $svc | Out-Null }
-            if (-not (Wait-ServiceGone)) { throw "the dummy service would not go away" }
-            if (Test-Path $root) { Remove-Item $root -Recurse -Force }
-            New-Item -ItemType Directory -Force -Path (Join-Path $old 'config\credentials') | Out-Null
-            Copy-Item "$env:WINDIR\System32\whoami.exe" (Join-Path $old 'sunshine.exe')
-            Set-Content -LiteralPath (Join-Path $old 'config\sunshine_state.json') -Value '{"root":{"uniqueid":"selftest"}}'
-            Set-Content -LiteralPath (Join-Path $old 'config\credentials\cacert.pem') -Value 'cert'
-            Set-Content -LiteralPath (Join-Path $old 'config\credentials\cakey.pem') -Value 'key'
-            sc.exe create $svc binPath= "$env:WINDIR\System32\cmd.exe" start= demand | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "could not create the dummy service (sc exit $LASTEXITCODE)" }
-          }
-          function Invoke-Retire {
-            $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script | Out-String
-            Write-Host $out
-            if ($LASTEXITCODE -ne 0) { throw "the retire step exited $LASTEXITCODE" }
-            return $out
-          }
-          function Assert-Moved([string]$why) {
-            foreach ($f in 'config\sunshine_state.json', 'config\credentials\cacert.pem', 'config\credentials\cakey.pem') {
-              if (-not (Test-Path -LiteralPath (Join-Path $new $f))) { throw "${why}: $f did not reach $new" }
-            }
-            if (Test-Path -LiteralPath (Join-Path $new 'engine')) { throw "${why}: the old engine landed inside $new" }
-          }
-
-          Write-Host '== a clean move'
-          Reset-Layout
-          $out = Invoke-Retire
-          Assert-Moved 'clean move'
-          if (Test-Path -LiteralPath (Split-Path $old)) { throw 'clean move: the old folder is still there' }
-          if (-not (Wait-ServiceGone)) { throw 'clean move: the old service was not deleted' }
-          $state = Join-Path $new 'config\sunshine_state.json'
-          $before = (Get-FileHash -LiteralPath $state).Hash
-
-          Write-Host '== a second run changes nothing'
-          $out = Invoke-Retire
-          if ($out -match 'could not') { throw 'second run: it reported a failure' }
-          if ((Get-FileHash -LiteralPath $state).Hash -ne $before) { throw 'second run: the pairing state changed' }
-
-          Write-Host '== an empty engine folder in the way'
-          Reset-Layout
-          New-Item -ItemType Directory -Force -Path $new | Out-Null
-          $out = Invoke-Retire
-          Assert-Moved 'empty folder in the way'
-
-          Write-Host '== a part-filled engine folder in the way'
-          Reset-Layout
-          New-Item -ItemType Directory -Force -Path (Join-Path $new 'tools') | Out-Null
-          Set-Content -LiteralPath (Join-Path $new 'tools\left-over.txt') -Value 'x'
-          $out = Invoke-Retire
-          Assert-Moved 'part-filled folder in the way'
-          if (-not (Get-ChildItem -LiteralPath (Split-Path $new) -Filter 'engine.partial-*')) { throw 'part-filled folder: it was not kept aside' }
-
-          Write-Host '== a move that fails'
-          Reset-Layout
-          # Open without delete sharing, as an antivirus scan or an engine
-          # restarted in the gap would: Windows will not rename the folder.
-          $held = [IO.File]::Open((Join-Path $old 'config\sunshine_state.json'), 'Open', 'Read', 'Read')
-          try { $out = Invoke-Retire } finally { $held.Dispose() }
-          if ($out -notmatch 'could not move the engine \(try 5 of 5\)') { throw 'failed move: it was not retried' }
-          if (-not (Test-Path -LiteralPath (Join-Path $old 'config\sunshine_state.json'))) { throw 'failed move: the old state is gone' }
-          Assert-Moved 'failed move'
-          Write-Host 'retire step: every case passed'
-          # The runner fails a step on the last native command's exit code,
-          # and sc.exe query exits 1060 for a service that is gone, which is
-          # what these checks wait for.
+          if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { throw "old service remains" }
           exit 0
       - name: release build
         run: cargo build --locked --workspace --release
@@ -165,17 +86,20 @@ jobs:
           targets: aarch64-apple-darwin
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # FFmpeg decodes the VideoToolbox encoder's output in the tests: an
+      # independent decoder, never part of Latch.
+      - name: ffmpeg for the encoder tests
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install ffmpeg
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --all-targets
       - name: release app
         run: cargo build --locked --release -p latch-host --target aarch64-apple-darwin
       - name: bundle
         run: bash scripts/bundle-macos.sh
 
-  # Both production Linux hosts are arm64 (c_char is unsigned there, and
-  # openh264 builds its own assembly); x64 is the other common VPS.
+  # Test both common VPS architectures.
   test-linux:
     name: test-linux (${{ matrix.arch }})
     strategy:
@@ -194,11 +118,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: native deps
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake clang nasm pkg-config libasound2-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --all-targets
       - name: release host
         run: cargo build --locked --release -p latch-host
       - uses: actions/upload-artifact@v4
@@ -219,3 +143,25 @@ jobs:
       - uses: actions/checkout@v4
       - name: relay installer selftest
         run: bash deploy/relay/selftest.sh
+
+  # Nothing Latch builds may compile C, C++ or assembler (docs/ENGINE.md).
+  native-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: no C, C++ or assembler in the build graph
+        run: bash scripts/audit-native.sh
+
+  # The H.264 decoder against the ITU-T H.264.1 conformance bitstreams:
+  # every picture must equal the reference decoder's output byte for byte.
+  codec-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: fetch the conformance bitstreams
+        run: sh scripts/fetch-h264-conformance.sh
+      - name: decode them
+        run: cargo test --locked --release -p latch-codec --test conformance -- --nocapture

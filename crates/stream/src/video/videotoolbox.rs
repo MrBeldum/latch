@@ -47,6 +47,13 @@ const K_CV_PIXEL_FORMAT_420V: u32 = 0x3432_3076; // '420v', video range
 const K_CV_PIXEL_FORMAT_420F: u32 = 0x3432_3066; // '420f', full range
 const K_CV_LOCK_READ_ONLY: u64 = 1;
 
+#[link(name = "CoreMedia", kind = "framework")]
+extern "C" {}
+#[link(name = "CoreVideo", kind = "framework")]
+extern "C" {}
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {}
+#[link(name = "VideoToolbox", kind = "framework")]
 extern "C" {
     static kCFTypeDictionaryKeyCallBacks: c_void;
     static kCFTypeDictionaryValueCallBacks: c_void;
@@ -172,11 +179,7 @@ pub struct VideoToolbox {
 unsafe impl Send for VideoToolbox {}
 
 impl VideoToolbox {
-    pub fn new(format: i32) -> Result<Self> {
-        let hevc = format & crate::ffi::VIDEO_FORMAT_MASK_H265 != 0;
-        if !hevc && format & crate::ffi::VIDEO_FORMAT_MASK_H264 == 0 {
-            bail!("unsupported video format {format:#x}");
-        }
+    pub fn new(hevc: bool) -> Result<Self> {
         Ok(Self {
             hevc,
             hardware: false,
@@ -537,7 +540,7 @@ mod tests {
     fn decodes_visible_pixels_from_h264() {
         // 64x64, white top half and black bottom half, generated with OpenH264.
         let encoded = include_bytes!("../../tests/fixtures/gray-bars.h264");
-        let mut decoder = VideoToolbox::new(crate::ffi::VIDEO_FORMAT_H264).unwrap();
+        let mut decoder = VideoToolbox::new(false).unwrap();
         let frame = decoder
             .decode(encoded, true, None)
             .unwrap()

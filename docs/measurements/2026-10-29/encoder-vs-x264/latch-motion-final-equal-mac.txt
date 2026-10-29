@@ -1,0 +1,12 @@
+| Content | Target Mbps | Encoder | PSNR dB | Actual Mbps | Encode ms/frame | Process wall ms/frame | Process CPU ms/frame | Max frame / budget |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| testsrc2 | 8 | latch | 43.922 | 8.015 | 6.803 | 7.625 | 9.313 | 2.146 |
+| testsrc2 | 8 | x264 superfast | 44.398 | 7.987 | 2.867 | 3.736 | 6.381 | — |
+| mandelbrot | 8 | latch | 42.755 | 8.028 | 9.395 | 10.104 | 15.534 | 2.771 |
+| mandelbrot | 8 | x264 superfast | 42.743 | 8.032 | 3.433 | 4.336 | 8.271 | — |
+| testsrc2 | 20 | latch | 53.902 | 17.540 | 6.044 | 6.747 | 8.018 | 1.183 |
+| testsrc2 | 20 | x264 superfast | 54.273 | 17.681 | 3.167 | 4.010 | 6.593 | — |
+| mandelbrot | 20 | latch | 50.805 | 19.564 | 9.737 | 10.332 | 15.819 | 1.790 |
+| mandelbrot | 20 | x264 superfast | 50.104 | 19.761 | 3.967 | 4.718 | 9.228 | — |
+Encode time: Latch encode() only; x264 FFmpeg benchmark (includes raw input I/O).
+Artifacts: /tmp/latch-motion-final-equal-mac

@@ -1,0 +1,3 @@
+serving on 100.70.121.94:47860 (TCP and UDP)
+view example is watching: 1280×720 at 60 fps, 10000 kb/s, Latch software H.264 (X11)
+view example stopped watching after 30 s: the viewer disconnected

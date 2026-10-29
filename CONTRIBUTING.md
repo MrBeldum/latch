@@ -2,9 +2,8 @@
 
 ## Building
 
-Rust stable, a C compiler (MSVC Build Tools on Windows, Xcode command line
-tools on macOS) and CMake. The C compiler builds the vendored
-moonlight-common-c; CMake builds libopus for the audio decoder.
+Rust stable. No C compiler or CMake is required; Latch 5 uses a pure-Rust
+engine and codecs.
 
 ```powershell
 cargo fmt --all
@@ -25,12 +24,14 @@ the development PC before `cargo run -p latch-host -- --background`.
 
 ## Where things live
 
-- `crates/stream`: everything that talks to Sunshine. `nvhttp` is the
-  pairing and launch API, `session` drives moonlight-common-c through the C
-  shim in `csrc/`, `video` and `audio` decode. It knows nothing about
-  windows or Tailscale. The vendored moonlight-common-c, what was trimmed
-  from it and its two local patches are described in
-  `third_party/moonlight-common-c/VERSION`.
+- `crates/proto`: wire format, Reed–Solomon FEC, packetizer, input
+  reliability, and control framing.
+- `crates/codec`: pure-Rust H.264 Constrained Baseline encoder/decoder and
+  `lpcm-rice` audio codec.
+- `crates/engine`: capture, hardware/software encode, display sizing, and
+  the host streaming server.
+- `crates/stream`: viewer session, decoders (VideoToolbox, Media Foundation,
+  `latch-codec`), and audio playback.
 - `crates/client`: the viewer UI (a library plus `latch-client`).
   `session.rs` is the path from a listed machine to a live stream;
   `stream.rs` is the toolbar and input while streaming; `video.rs` draws
@@ -106,3 +107,40 @@ the live test by default; `LATCH_TEST_EXPECT_BLACK=1` instead verifies the
 persistent black-picture diagnosis when testing a PC without an active
 display. The GPU test uses a synthetic NV12 image to check that the picture
 is drawn with the correct orientation and range and retained between frames.
+
+## Rust engine rewrite evidence
+
+The [rewrite brief](docs/RUST_REWRITE_PROMPT.md) defines the Rust/native
+boundary and release gates. The [execution record](docs/RUST_REWRITE_STATUS.md)
+distinguishes completed preparation from the unfinished engine replacement.
+
+The decoder component baseline needs no host, pairing or screen capture:
+
+```bash
+cargo test --locked -p latch-stream --example decode_bench
+cargo build --locked --release -p latch-stream --example decode_bench
+target/release/examples/decode_bench --warmup 30 --iterations 300 > decode.json
+```
+
+On Windows the executable ends in `.exe`. Add `--require-hardware` to fail
+unless every decode uses the initialized hardware backend. Windows/Linux
+currently use OpenH264, so that gate is expected to fail there. A backend
+change during warmup or measurement also fails rather than mixing results.
+
+The default is the 64×64 bars fixture: its visible pixel samples are checked
+on every measured frame. `--fixture path/to/frame.h264` accepts a single
+Annex B H.264 IDR slice with SPS and PPS (at most 32 MiB), not a container,
+multi-frame video, multi-slice picture or packet capture. A custom fixture
+gets plane validation and a null pixel-oracle result. Collect a representative
+access unit separately for resolution-specific measurements.
+
+JSON includes the fixture hash, actual decoder, configuration, ordered raw
+decode timings and nearest-rank p50/p95/p99. Decode time includes the
+decoder's CPU output copy; total loop time also includes validation. Output
+plane byte counts are not GPU transfer measurements. Neither result measures
+capture, encoding, network, audio, presentation or input-to-display latency.
+Record revision/diff, hardware, OS/driver and power state beside each run.
+
+CI runs `cargo test --locked --workspace --all-targets`, including the
+example's deterministic checks. Live and hardware performance gates still
+require the appropriate machines and explicit runs.

@@ -2,9 +2,9 @@
 Description=Latch native headless display
 
 [Service]
-ExecStartPre=/bin/sh -c 'umask 077; touch "%t/latch.Xauthority"; /usr/bin/xauth -f "%t/latch.Xauthority" add :1 . "$(/usr/bin/mcookie)"'
+ExecStartPre=/bin/sh -c 'umask 077; touch "%t/latch.Xauthority"; printf "add :1 . %s\n" "$(/usr/bin/mcookie)" | /usr/bin/xauth -f "%t/latch.Xauthority" source -'
 ExecStart=/usr/bin/Xvfb :1 -screen 0 1920x1080x24 -nolisten tcp -auth %t/latch.Xauthority
-# Every captured frame is a copy the X server makes; see latch-engine.service.
+# The X server and the capture service need CPU time for every frame.
 CPUWeight=1000
 Restart=on-failure
 RestartSec=3

@@ -11,14 +11,13 @@ It is not the packet relay. The relay kit stays in `deploy/relay/`.
 ## What runs inside
 
 - Xvfb + XFCE (a virtual 1920×1080 desktop)
-- Sunshine (the same streaming engine Latch uses on Windows and macOS)
-- Latch's control service on TCP 47850
+- Latch 5 streaming engine (pure-Rust, in-process inside `latch-host`)
+- Latch's control service on TCP 47850 and streaming on UDP 47850
 - Optional Tailscale (`TS_AUTHKEY`), with kernel networking: the compose
   file gives the container `/dev/net/tun` and `NET_ADMIN`. Latch Host
-  decides who may pair and use the control service from each peer's own
-  tailnet address; userspace Tailscale would hand it every peer from
-  `127.0.0.1`, which it trusts as the machine itself, so the node refuses
-  to start Tailscale without the device.
+  authorizes each peer from its own tailnet address; userspace Tailscale
+  would hand it every peer from `127.0.0.1`, which it trusts as the
+  machine itself, so the node refuses to start Tailscale without the device.
 
 ## One node
 

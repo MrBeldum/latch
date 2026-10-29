@@ -1,0 +1,61 @@
+[package]
+name = "latch-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The host side of a Latch stream: capture, encode, audio, input, and the session server"
+
+[dependencies]
+latch-proto.workspace = true
+latch-codec.workspace = true
+anyhow.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+rand.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["shm", "xfixes", "randr", "xtest", "damage"] }
+libc = "0.2"
+pulseaudio = "0.3.2"
+futures = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    "Win32_Media_MediaFoundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSError", "NSObject", "NSString"] }
+objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "SCShareableContent", "SCStream", "objc2-core-graphics", "block2", "dispatch2", "objc2-core-foundation", "objc2-core-media"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFDictionary", "CFNumber", "CFString", "CFCGTypes"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime", "CMSampleBuffer", "CMFormatDescription", "CMBlockBuffer", "objc2-core-audio-types", "objc2-core-video"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVPixelBuffer", "CVBuffer", "CVImageBuffer", "CVPixelBufferIOSurface"] }
+dispatch2 = "0.3"
+
+[dev-dependencies]
+# The loopback test runs a real viewer against this engine.
+latch-stream.workspace = true
+latch-core.workspace = true

@@ -1,0 +1,54 @@
+{
+  "recorded_at_utc": "2026-10-24T17:51:50.047753+00:00",
+  "base_revision": "8aa2165f5ac3a0b86e9f3415514c6f55e275474d",
+  "branch": "rewrite/rust-streaming",
+  "working_tree_note": "Uncommitted benchmark/preflight changes. Production decoder/transport unchanged; stream_real test now recycles frames like the renderer.",
+  "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "platform": {
+    "cpu": "Apple M3 Pro",
+    "arch": "aarch64",
+    "os": "macOS 26.6.2",
+    "os_build": "25G83",
+    "power_mode": "not recorded",
+    "background_load": "not controlled",
+    "driver": "OS-provided VideoToolbox; no separate version recorded"
+  },
+  "commands": [
+    "cargo test --locked --workspace --all-targets",
+    "cargo clippy --locked --workspace --all-targets -- -D warnings",
+    "cargo build --locked --release -p latch-stream --example decode_bench",
+    "target/release/examples/decode_bench --require-hardware (3 sequential trials, /usr/bin/time -l)",
+    "LATCH_TEST_IP=<test host> LATCH_TEST_DIR=<isolated existing pairing> LATCH_TEST_WIDTH=1280 LATCH_TEST_HEIGHT=720 LATCH_TEST_FPS=30 LATCH_TEST_BITRATE_KBPS=10000 LATCH_TEST_SECONDS=12 cargo test --locked --release -p latch-stream session::real::stream_real -- --exact --ignored --nocapture"
+  ],
+  "source_sha256": {
+    "Cargo.lock": "fb706f9e98a4ab7d9f65ce279a69e72ce747c69323459d32fcc0e2a51f4b7944",
+    "Cargo.toml": "138738d125e7b724e58ff97a825a97519cefb7a7c86ec9bb4579142f3858d2b9",
+    "crates/stream/Cargo.toml": "eab31335a21023835f452cc7111494dcfb86c4c8939906186c4c318e93d1f092",
+    "crates/stream/build.rs": "0b4985ab02d3830e915b0f344006e10c03d450a723c2f5fe6f7fc64de2f2155b",
+    "crates/stream/src/session.rs": "198a5241fc51c20090d62c3ca82d6ea75166500e71168086022961f3dfc69265",
+    "crates/stream/src/video.rs": "f8c8bfecebae534d3391b3d24eeabe5f2ba9d9c0f42b105c3d9b8bf75876462c",
+    "crates/stream/src/video/videotoolbox.rs": "f1dd436f0bdf5435c61566ecaa344bc8fa4f59aea09155da67097a2f4939144b",
+    "crates/stream/examples/decode_bench.rs": "df015a8022347744badfef2fc5066ebd371b935acd726c33b375aef676cbcb06",
+    "crates/stream/tests/fixtures/gray-bars.h264": "19e6efdaec8563319bbfea5f00ebe0ff067eefc0e4062c05e7a62e301a22bc84"
+  },
+  "completion_status": "incomplete; pre-rewrite measurement gate only",
+  "windows_gate": "Existing Windows GPU host offline; user confirmed no available alternative.",
+  "cautions": [
+    "Tiny repeated 64x64 IDR measures one component, not cloud gaming performance.",
+    "No before/after replacement measurements exist.",
+    "Native GPU hardware use is self-reported by VideoToolbox; not independently corroborated by a GPU trace.",
+    "Peak process RSS excludes the rest of the application and OS/driver services.",
+    "These observations cannot establish release budgets across supported machines."
+  ],
+  "artifact_sha256": {
+    "cli-checks.json": "ebd91b1bb669c22b2de02281158c55f786a065356dec02c2b5c0a00a0d24662f",
+    "decode-1.json": "7da43067ef24a13b591e3f80e4f995d03dea3726a0971e039923ff8ae207f6c0",
+    "decode-1.time.txt": "c7afb4cc9ab14b517b60d26d85f8a6d16ced5cfe78dd1389cb825b935e15a3d9",
+    "decode-2.json": "4c4fe947ad9c709990b1c3cde6e7603e7edf88e9e41354c770ed16255eeeb2c8",
+    "decode-2.time.txt": "dca9544db270b6a660cdf6f60bb3bd80cda41dc9903a89e028e78c3642acaf07",
+    "decode-3.json": "318d22d39452f9c9791f0c1cff73774cc3521633ba8c15710fdddf97ffdf2cf5",
+    "decode-3.time.txt": "eefdcaa0e229eb16776ca5f5132109bc6005cac5a83bb6dde42b61bebccb7df8",
+    "live-release-summary.json": "22b7d115c931b807cb9daec54ce9ae50a1f67806400ae5571cb64d26944f3aa4",
+    "verification.json": "31a6440384b2e1ef67378e528dba25ca0897b52c7af6fdcdafffe79c98d998f0"
+  }
+}

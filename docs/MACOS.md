@@ -2,17 +2,18 @@
 
 Latch for the Mac is one native app: every machine on your Tailscale
 account, a Connect button each, a power menu, the stream itself, and a
-**Sharing** tab so a Windows PC or another Mac can open this desktop. Latch's stream protocol is compiled in, video is decoded by
-VideoToolbox (H.264 and HEVC), audio by Opus, and the picture is drawn in
-Latch's own window under a toolbar.
+**Sharing** tab so a Windows PC or another Mac can open this desktop. Latch's stream protocol is compiled in, video is captured with ScreenCaptureKit
+and encoded/decoded with VideoToolbox (H.264 and HEVC), audio is coded losslessly
+with `lpcm-rice`, and the picture is drawn in Latch's own window under a toolbar.
 
 ## Requirements
 
 - macOS 13+ on Apple Silicon
 - [Tailscale](https://tailscale.com/download/mac), signed in with the same
   account as your other machines
-- Screen Recording permission for the streaming engine, which macOS asks
-  for once after you set up sharing (so others can see this Mac's desktop)
+- Screen Recording and Accessibility permissions, which macOS asks
+  for when setting up sharing (so others can see this Mac's desktop and send
+  input)
 
 ## Install a prebuilt app
 
@@ -47,9 +48,8 @@ quarantine flag is how you tell macOS you fetched it deliberately.
 ./scripts/install-macos.sh
 ```
 
-builds for `aarch64-apple-darwin` (Xcode command line tools and CMake are
-needed for the C parts), bundles `dist.noindex/Latch.app`, and installs it to
-`/Applications`. The `.noindex` folder keeps build copies out of app search.
+builds for `aarch64-apple-darwin` (pure Rust, no CMake or C compilers needed),
+bundles `dist.noindex/Latch.app`, and installs it to `/Applications`. The `.noindex` folder keeps build copies out of app search.
 A locally built app never carries the quarantine flag.
 
 ### Signing

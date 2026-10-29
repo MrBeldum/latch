@@ -1,0 +1,32 @@
+Stage("Asking for the stream…")
+connected in 95.818334ms
+  1s   6.0 fps   0.63 Mbps rtt  11 ms decode 32.96 ms host 326.52 ms assembly  1.48 ms queue 28.52 ms loss  0.0% fec   0 1280x720 H.264 · software | no audio from the PC yet
+  2s   4.0 fps   0.00 Mbps rtt  12 ms decode  2.39 ms host 1401.93 ms assembly  0.00 ms queue  0.50 ms loss  0.0% fec   0 1280x720 H.264 · software | no sound: MacBook Pro Speakers is not taking audio
+  3s   4.0 fps   0.00 Mbps rtt  12 ms decode  3.52 ms host 2404.62 ms assembly  0.00 ms queue  0.19 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+  4s   4.0 fps   0.00 Mbps rtt  13 ms decode  1.90 ms host 3407.65 ms assembly  0.00 ms queue  1.33 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+  5s   4.0 fps   0.00 Mbps rtt  12 ms decode  1.93 ms host 4410.65 ms assembly  0.00 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+  6s   4.0 fps   0.00 Mbps rtt  13 ms decode  3.93 ms host 5412.40 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+  7s   4.0 fps   0.00 Mbps rtt  12 ms decode  3.88 ms host 6355.58 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+  8s   4.0 fps   0.00 Mbps rtt  12 ms decode  3.84 ms host 6553.50 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+  9s   4.0 fps   0.00 Mbps rtt  14 ms decode  2.75 ms host 6553.50 ms assembly  0.00 ms queue  0.07 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 10s   4.0 fps   0.00 Mbps rtt  14 ms decode  3.50 ms host 6553.50 ms assembly  0.00 ms queue  0.41 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 11s   4.0 fps   0.00 Mbps rtt  14 ms decode  4.82 ms host 6553.50 ms assembly  0.00 ms queue  0.38 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 12s   4.0 fps   0.00 Mbps rtt  15 ms decode  8.03 ms host 6553.50 ms assembly  0.00 ms queue  1.06 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 13s   4.0 fps   0.00 Mbps rtt  15 ms decode  2.28 ms host 6553.50 ms assembly  0.00 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 14s   4.0 fps   0.00 Mbps rtt  14 ms decode  5.44 ms host 6553.50 ms assembly  0.00 ms queue  0.54 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 15s   4.0 fps   0.00 Mbps rtt  14 ms decode  4.45 ms host 6553.50 ms assembly  0.00 ms queue  0.43 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 16s   4.0 fps   0.00 Mbps rtt  13 ms decode  4.61 ms host 6553.50 ms assembly  0.00 ms queue  0.44 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 17s   4.0 fps   0.00 Mbps rtt  13 ms decode  7.48 ms host 6553.50 ms assembly  0.00 ms queue  0.09 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 18s   4.0 fps   0.00 Mbps rtt  13 ms decode  6.09 ms host 6553.50 ms assembly  0.00 ms queue  2.71 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 19s   5.0 fps   0.01 Mbps rtt  13 ms decode  7.60 ms host 5244.08 ms assembly  0.00 ms queue  1.04 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 20s   4.0 fps   0.00 Mbps rtt  13 ms decode  2.47 ms host 631.00 ms assembly  0.00 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 21s   4.0 fps   0.00 Mbps rtt  13 ms decode  7.41 ms host 1633.18 ms assembly  0.00 ms queue  2.32 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 22s   4.0 fps   0.00 Mbps rtt  13 ms decode  7.10 ms host 2636.23 ms assembly  0.00 ms queue  0.64 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 23s   4.0 fps   0.00 Mbps rtt  13 ms decode 10.23 ms host 3639.10 ms assembly  0.00 ms queue  1.16 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 24s   4.0 fps   0.00 Mbps rtt  13 ms decode  8.26 ms host 4641.55 ms assembly  0.00 ms queue  0.52 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 25s   4.0 fps   0.00 Mbps rtt  13 ms decode  7.85 ms host 5643.85 ms assembly  0.00 ms queue  0.44 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 26s   4.0 fps   0.00 Mbps rtt  13 ms decode  7.35 ms host 6475.27 ms assembly  0.00 ms queue  0.64 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 27s   4.0 fps   0.00 Mbps rtt  13 ms decode  1.77 ms host 6553.50 ms assembly  0.00 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 28s   4.0 fps   0.00 Mbps rtt  12 ms decode  1.62 ms host 6553.50 ms assembly  0.00 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 29s   4.0 fps   0.00 Mbps rtt  12 ms decode  1.74 ms host 6553.50 ms assembly  0.00 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers
+ 30s   4.0 fps   0.00 Mbps rtt  12 ms decode  1.66 ms host 6553.50 ms assembly  0.00 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · software | audio → MacBook Pro Speakers

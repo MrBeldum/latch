@@ -128,8 +128,6 @@ pub struct StreamSettings {
     pub fps: u32,
     pub bitrate_kbps: u32,
     pub codec: Codec,
-    /// The Sunshine app to start; "Desktop" is the whole PC.
-    pub app: String,
     pub fullscreen: bool,
 }
 
@@ -141,7 +139,6 @@ impl Default for StreamSettings {
             fps: 60,
             bitrate_kbps: 50_000,
             codec: Codec::Auto,
-            app: "Desktop".into(),
             fullscreen: true,
         }
     }
@@ -184,8 +181,6 @@ pub struct KnownPc {
     /// The PC's public address as Tailscale last saw it, for a router that
     /// forwards wake packets.
     pub public_ip: Option<String>,
-    /// Sunshine's certificate (hex DER) from pairing; absent until paired.
-    pub server_cert: Option<String>,
     /// Tailscale OS string, so a remembered machine still shows Windows /
     /// macOS / Linux when Tailscale is down.
     #[serde(default)]
@@ -195,9 +190,6 @@ pub struct KnownPc {
     pub tailscale_ip: Option<String>,
     /// When the PC was last seen online (Unix seconds).
     pub last_seen_unix: Option<u64>,
-    /// The size its Desktop was last launched at from this machine, so the
-    /// first connect after Latch reopens can rejoin it at that size.
-    pub desktop_size: Option<[u32; 2]>,
     /// The tailnet it was seen on, so a machine is only ever forgotten for
     /// leaving the tailnet this machine is on now.
     pub tailnet: Option<String>,
@@ -254,14 +246,11 @@ impl ClientConfig {
     fn normalise(&mut self) {
         self.stream.fps = self.stream.fps.clamp(30, 240);
         self.stream.bitrate_kbps = self.stream.bitrate_kbps.clamp(2_000, 150_000);
-        if self.stream.app.trim().is_empty() {
-            self.stream.app = "Desktop".into();
-        }
     }
 
-    /// The window owns preferences; discovery and pairing own `pcs`. The
+    /// The window owns preferences; discovery owns `pcs`. The
     /// window's copy of `pcs` is refreshed from the file at the same time, so
-    /// a PC paired or seen during the run is known to the window too.
+    /// a PC seen during the run is known to the window too.
     pub fn save(&mut self) -> anyhow::Result<()> {
         let mut pcs = None;
         Self::update(|current| {
@@ -285,21 +274,11 @@ impl ClientConfig {
         latch_core::config::update(FILE, edit)
     }
 
-    /// Forget a machine: its addresses, how to wake it, and its pairing.
-    /// One still on the tailnet is listed again, unpaired and unwakeable
+    /// Forget a machine: its addresses and how to wake it.
+    /// One still on the tailnet is listed again, unwakeable
     /// until it has been seen online.
     pub fn forget(&mut self, node_id: &str) -> bool {
         self.pcs.remove(node_id).is_some()
-    }
-
-    pub fn forget_pin_on_mismatch(&mut self, node_id: &str, err: &anyhow::Error) -> bool {
-        if !latch_stream::nvhttp::is_pin_mismatch(err) {
-            return false;
-        }
-        if let Some(pc) = self.pcs.get_mut(node_id) {
-            pc.server_cert = None;
-        }
-        true
     }
 }
 
@@ -308,13 +287,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stale_window_settings_preserve_new_pairing_and_wake_details() {
+    fn stale_window_settings_preserve_new_wake_details() {
         let mut window = ClientConfig::default();
         let mut disk = window.clone();
         disk.pcs.insert(
             "pc".into(),
             KnownPc {
-                server_cert: Some("new-cert".into()),
                 mac: Some("02:00:00:00:00:01".into()),
                 ..Default::default()
             },
@@ -322,14 +300,32 @@ mod tests {
         window.stream.fullscreen = false;
         disk.apply_preferences(&window);
         assert!(!disk.stream.fullscreen);
-        assert_eq!(disk.pcs["pc"].server_cert.as_deref(), Some("new-cert"));
         assert_eq!(disk.pcs["pc"].mac.as_deref(), Some("02:00:00:00:00:01"));
-        window = disk.clone();
-        disk.pcs.get_mut("pc").unwrap().server_cert = None;
-        disk.apply_preferences(&window);
-        assert_eq!(
-            disk.pcs["pc"].server_cert, None,
-            "never revive a revoked pin"
+    }
+
+    #[test]
+    fn old_stream_and_machine_fields_are_ignored() {
+        let c: ClientConfig = toml::from_str(
+            r#"
+            [stream]
+            app = "Desktop"
+            bitrate_kbps = 42000
+            [pcs.n]
+            name = "Gaming-PC"
+            server_cert = "3082"
+            desktop_size = [1280, 720]
+            mac = "02:00:00:00:00:01"
+        "#,
+        )
+        .unwrap();
+        assert_eq!(c.stream.bitrate_kbps, 42000);
+        assert_eq!(c.pcs["n"].name, "Gaming-PC");
+        assert_eq!(c.pcs["n"].mac.as_deref(), Some("02:00:00:00:00:01"));
+        let saved = toml::to_string(&c).unwrap();
+        assert!(
+            !saved.contains("server_cert")
+                && !saved.contains("desktop_size")
+                && !saved.contains("app =")
         );
     }
 
@@ -388,7 +384,6 @@ mod tests {
                 mac: Some("02:00:00:00:00:01".into()),
                 lan_ip: Some("192.168.1.10".into()),
                 public_ip: None,
-                server_cert: Some("3082".into()),
                 tailscale_ip: Some("100.64.0.10".into()),
                 last_seen_unix: Some(1_788_739_200),
                 ..Default::default()
@@ -400,7 +395,7 @@ mod tests {
 
     /// A build without 720p (4.1.1, or a branch cut before it) reading a
     /// file this one wrote: the size goes back to its default, and the
-    /// machines, their certificates and wake addresses all stay.
+    /// machines and wake addresses all stay.
     #[test]
     fn a_size_this_build_does_not_know_keeps_the_machines() {
         let text = "github_token = \"t\"\n\
@@ -419,7 +414,6 @@ mod tests {
         assert_eq!(c.stream.fps, 90);
         assert_eq!(c.stream.codec, Codec::Hevc);
         assert_eq!(c.github_token.as_deref(), Some("t"));
-        assert_eq!(c.pcs["n1"].server_cert.as_deref(), Some("3082"));
         assert_eq!(c.pcs["n1"].mac.as_deref(), Some("02:00:00:00:00:01"));
         assert_eq!(c.pcs["n1"].public_ip.as_deref(), Some("116.125.113.36"));
         assert_eq!(c.pcs["n2"].name, "stuzha");
@@ -442,47 +436,22 @@ mod tests {
         let mut c = ClientConfig::default();
         c.stream.bitrate_kbps = 500;
         c.stream.fps = 5;
-        c.stream.app = "  ".into();
         if c.stream.quality == Quality::Auto {
             c.stream.resolution = Resolution::Native;
         }
         c.normalise();
         assert_eq!(c.stream.bitrate_kbps, 2_000);
         assert_eq!(c.stream.fps, 30);
-        assert_eq!(c.stream.app, "Desktop");
     }
 
     #[test]
-    fn pin_mismatch_clears_the_stored_server_cert() {
-        let mut c = ClientConfig::default();
-        c.pcs.insert(
-            "n".into(),
-            KnownPc {
-                name: "Gaming-PC".into(),
-                server_cert: Some("3082".into()),
-                ..Default::default()
-            },
-        );
-        let mismatch = anyhow::Error::from(latch_stream::nvhttp::PinMismatch);
-        assert!(c.forget_pin_on_mismatch("n", &mismatch));
-        assert_eq!(c.pcs["n"].server_cert, None);
-
-        c.pcs.get_mut("n").unwrap().server_cert = Some("3082".into());
-        let generic = anyhow::anyhow!("invalid peer certificate: expired");
-        assert!(!c.forget_pin_on_mismatch("n", &generic));
-        assert_eq!(c.pcs["n"].server_cert.as_deref(), Some("3082"));
-    }
-
-    #[test]
-    fn a_forgotten_machine_takes_its_pairing_and_nothing_else() {
+    fn a_forgotten_machine_leaves_others_alone() {
         let mut c = ClientConfig::default();
         for id in ["artemis", "stuzha"] {
             c.pcs.insert(
                 id.into(),
                 KnownPc {
                     name: id.into(),
-                    server_cert: Some("3082".into()),
-                    desktop_size: Some([1280, 720]),
                     ..Default::default()
                 },
             );
@@ -490,11 +459,9 @@ mod tests {
         assert!(c.forget("artemis"));
         assert!(!c.forget("artemis"), "gone already");
         assert_eq!(c.pcs.keys().collect::<Vec<_>>(), ["stuzha"]);
-        assert_eq!(c.pcs["stuzha"].server_cert.as_deref(), Some("3082"));
         // A file without the newer fields still reads.
         let back: ClientConfig =
             toml::from_str("[pcs.n]\nname = \"Gaming-PC\"\nserver_cert = \"3082\"\n").unwrap();
-        assert_eq!(back.pcs["n"].desktop_size, None);
         assert_eq!(back.pcs["n"].tailnet, None);
     }
 }

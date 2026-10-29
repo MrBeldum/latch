@@ -1,7 +1,7 @@
 //! The clipboard both ways while a stream runs, through Latch Host's
 //! `/v1/clipboard` on the PC.
 //!
-//! The Moonlight protocol carries keys and pictures, not clipboards, so ⌘V
+//! The stream carries keys and pictures; the control API carries clipboards, so ⌘V
 //! on the PC used to paste whatever the PC last copied, and text copied on
 //! the PC never reached the Mac. Now a worker polls the PC's clipboard
 //! every second or so and hands new text to the window, which puts it in

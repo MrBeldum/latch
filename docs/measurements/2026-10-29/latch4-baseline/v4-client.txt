@@ -1,0 +1,43 @@
+
+running 1 test
+2026-10-29T06:47:53.952910Z  INFO path to stuzha: Direct · 13 ms · 720p · 60 fps · 10 Mbps
+720p: asked 1280x720 at 60 fps, desktop None, connected in 267.6015ms
+2026-10-29T06:47:56.627392Z  INFO audio: playing on Daniel’s AirPods at 48000 Hz, 2 channels
+  pointer to the centre, 640x360
+  pointer to a quarter in, 320x180
+  100 stream pixels right, in steps of 10
+  100 stream pixels right at once
+   1s 60.4 fps, 1.0 Mbps, loss 0.0%, host 14.5 ms
+   2s 60.0 fps, 0.6 Mbps, loss 0.0%, host 9.1 ms
+   3s 60.0 fps, 0.6 Mbps, loss 0.0%, host 9.4 ms
+   4s 60.0 fps, 0.6 Mbps, loss 0.0%, host 9.0 ms
+   5s 59.8 fps, 0.6 Mbps, loss 0.0%, host 14.0 ms
+   6s 53.2 fps, 0.5 Mbps, loss 0.0%, host 21.0 ms
+   7s 53.2 fps, 0.5 Mbps, loss 0.0%, host 21.0 ms
+   8s 60.4 fps, 0.6 Mbps, loss 0.0%, host 11.3 ms
+   9s 49.9 fps, 0.5 Mbps, loss 0.0%, host 17.8 ms
+  10s 59.5 fps, 0.6 Mbps, loss 0.0%, host 11.9 ms
+  11s 64.3 fps, 0.6 Mbps, loss 0.0%, host 10.9 ms
+  12s 60.7 fps, 0.6 Mbps, loss 0.0%, host 12.8 ms
+  13s 34.8 fps, 0.3 Mbps, loss 0.0%, host 17.9 ms
+  14s 80.2 fps, 0.7 Mbps, loss 0.0%, host 18.0 ms
+  15s 60.1 fps, 0.6 Mbps, loss 0.0%, host 10.8 ms
+  16s 59.8 fps, 0.6 Mbps, loss 0.0%, host 10.7 ms
+  17s 60.2 fps, 0.6 Mbps, loss 0.0%, host 10.6 ms
+  18s 51.7 fps, 0.5 Mbps, loss 0.0%, host 12.4 ms
+  19s 68.6 fps, 0.6 Mbps, loss 0.0%, host 11.1 ms
+  20s 59.9 fps, 0.6 Mbps, loss 0.0%, host 9.7 ms
+  21s 59.9 fps, 0.6 Mbps, loss 0.0%, host 9.3 ms
+  22s 59.7 fps, 0.6 Mbps, loss 0.0%, host 10.6 ms
+  23s 60.2 fps, 0.6 Mbps, loss 0.0%, host 13.8 ms
+  24s 59.8 fps, 0.6 Mbps, loss 0.0%, host 9.5 ms
+  25s 39.8 fps, 1.1 Mbps, loss 0.0%, host 7.9 ms
+  26s 59.9 fps, 0.6 Mbps, loss 0.0%, host 7.7 ms
+  27s 59.4 fps, 0.6 Mbps, loss 0.0%, host 11.8 ms
+  28s 60.2 fps, 0.6 Mbps, loss 0.0%, host 12.5 ms
+  29s 60.2 fps, 0.6 Mbps, loss 0.0%, host 10.3 ms
+  30s 60.0 fps, 0.6 Mbps, loss 0.0%, host 9.4 ms
+test session::tests::connect_real ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 151 filtered out; finished in 34.91s
+

@@ -1,0 +1,9 @@
+---journal
+Oct 29 01:31:43 stuzha stuzha-display[70471]: asked for 1280x720 (args: none; client 1280x720 at 60 fps)
+Oct 29 01:31:43 stuzha stuzha-display[70540]: DUMMY0 at 1280x720, scale 100% (Nordic)
+Oct 29 01:31:58 stuzha stuzha-display[70697]: asked for 1280x720 (args: 1280 720; client 1280x720 at 60 fps)
+Oct 29 01:31:58 stuzha stuzha-display[70740]: DUMMY0 at 1280x720, scale 100% (Nordic)
+Oct 29 01:31:43 stuzha stuzha-display[70471]: asked for 1280x720 (args: none; client 1280x720 at 60 fps)
+Oct 29 01:31:43 stuzha stuzha-display[70540]: DUMMY0 at 1280x720, scale 100% (Nordic)
+Oct 29 01:31:58 stuzha stuzha-display[70697]: asked for 1280x720 (args: 1280 720; client 1280x720 at 60 fps)
+Oct 29 01:31:58 stuzha stuzha-display[70740]: DUMMY0 at 1280x720, scale 100% (Nordic)

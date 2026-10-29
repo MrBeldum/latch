@@ -17,6 +17,8 @@ path = "src/main.rs"
 
 [dependencies]
 latch-core.workspace = true
+latch-engine.workspace = true
+latch-proto.workspace = true
 latch-client.workspace = true
 latch-ui.workspace = true
 anyhow.workspace = true

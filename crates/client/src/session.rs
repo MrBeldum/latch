@@ -1,19 +1,18 @@
 //! Finding PCs on the tailnet, and the path from "asleep in another room" to
-//! a live stream: wake, wait, pair if needed, launch, connect.
+//! a live stream: wake, wait, check the host, connect.
 
 use crate::clipboard;
 use crate::config::{ClientConfig, Codec, KnownPc, StreamSettings};
 use crate::path::{self, Path};
 use anyhow::{anyhow, bail, Context, Result};
-use latch_core::api::{Ack, NatReport, PinRequest, PowerAction, PowerRequest, Status};
-use latch_core::{http, tailscale, wake, CONTROL_PORT, SUNSHINE_PORT};
-use latch_stream::nvhttp::PinNotEntered;
+use latch_core::api::{Ack, NatReport, PowerAction, PowerRequest, Status};
+use latch_core::{http, tailscale, wake, CONTROL_PORT};
 use latch_stream::session::Server;
-use latch_stream::{Client, Event, FrameSlot, Identity, Input, Session, Settings};
+use latch_stream::{Event, FrameSlot, Input, Session, Settings};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,12 +37,10 @@ pub struct Pc {
     /// Tailscale OS string ("windows", "macOS", "linux").
     pub os: String,
     pub ip: Option<Ipv4Addr>,
-    /// Tailscale's view; lags a wake-up by up to half a minute.
+    /// The Latch control service answered during discovery.
     pub online: bool,
     /// The Latch control service answered.
     pub host: Option<Status>,
-    /// Sunshine's port answered.
-    pub sunshine: bool,
     pub known: Option<KnownPc>,
     /// Listed from what was saved, because Tailscale on this Mac could not
     /// say; nothing has been probed.
@@ -59,7 +56,7 @@ impl Pc {
         self.known.as_ref().and_then(|k| k.mac.as_ref()).is_some()
     }
     pub fn can_stream(&self) -> bool {
-        self.ip.is_some() && (self.sunshine || self.host.is_some() || self.can_wake())
+        self.ip.is_some() && (self.host.is_some() || self.can_wake())
     }
     pub fn power_allowed(&self) -> bool {
         self.host.as_ref().is_some_and(|h| h.power_allowed)
@@ -346,7 +343,7 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
     pcs.extend(
         probe_all(cfg, &st.relay_peers())
             .into_iter()
-            .filter(|pc| pc.host.is_some() || pc.sunshine),
+            .filter(|pc| pc.host.is_some()),
     );
     pcs.sort_by(|a, b| a.name.cmp(&b.name));
     let mut listed: BTreeSet<String> = st.peer.values().map(|n| n.id.clone()).collect();
@@ -404,13 +401,13 @@ pub fn remembered(cfg: &ClientConfig) -> Vec<Pc> {
 
 fn probe_peer(cfg: &ClientConfig, n: &tailscale::Node) -> Pc {
     let ip = n.ipv4();
-    let (host, sunshine, rtt_ms) = match (n.online, ip) {
+    let (host, rtt_ms) = match (n.online, ip) {
         (true, Some(ip)) => {
             let host = host_status(ip, Duration::from_millis(900));
-            let (sunshine, rtt) = timed_port_open(ip, SUNSHINE_PORT, Duration::from_millis(900));
-            (host, sunshine, rtt)
+            let (_, rtt) = timed_port_open(ip, CONTROL_PORT, Duration::from_millis(900));
+            (host, rtt)
         }
-        _ => (None, false, None),
+        _ => (None, None),
     };
     let mut known = cfg.pcs.get(&n.id).cloned();
     if let Some(p) = n.public_ipv4() {
@@ -421,9 +418,8 @@ fn probe_peer(cfg: &ClientConfig, n: &tailscale::Node) -> Pc {
         name: n.host_name.clone(),
         os: n.os.clone(),
         ip,
-        online: n.online,
+        online: host.is_some(),
         host,
-        sunshine,
         known,
         remembered: false,
         key_expiry_days: n.key_expiry_days(),
@@ -470,7 +466,7 @@ fn measure_path(node_id: &str, ip: Ipv4Addr, prior: &Path) -> Path {
     }
     let mut best: Option<u32> = prior.rtt_ms;
     for _ in 0..3 {
-        if let (true, Some(ms)) = timed_port_open(ip, SUNSHINE_PORT, Duration::from_millis(1500)) {
+        if let (true, Some(ms)) = timed_port_open(ip, CONTROL_PORT, Duration::from_millis(1500)) {
             best = Some(best.map_or(ms, |b| b.min(ms)));
         }
     }
@@ -483,9 +479,6 @@ pub enum Step {
     Idle,
     Waking,
     Waiting,
-    Pairing {
-        pin: String,
-    },
     Launching,
     /// The stream is being negotiated; the text is the current stage.
     Connecting,
@@ -496,13 +489,12 @@ pub enum Step {
 }
 
 impl Step {
-    /// For the log: the step, without the PIN a pairing carries.
+    /// For the log: the current step.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Idle => "idle",
             Self::Waking => "waking",
             Self::Waiting => "waiting",
-            Self::Pairing { .. } => "pairing",
             Self::Launching => "launching",
             Self::Connecting => "connecting",
             Self::Streaming => "streaming",
@@ -524,8 +516,6 @@ pub struct Progress {
     pub cancel: bool,
     /// Blocks new connections while the updater swaps and relaunches this app.
     pub updating: bool,
-    /// Sunshine's app names, once listed.
-    pub apps: Vec<String>,
     /// Distinguishes this attempt from an older worker that is still running.
     pub generation: u64,
 }
@@ -541,7 +531,6 @@ impl Default for Progress {
             since: Instant::now(),
             cancel: false,
             updating: false,
-            apps: Vec::new(),
             generation: 0,
         }
     }
@@ -589,6 +578,7 @@ pub struct Live {
 
 impl Drop for Live {
     fn drop(&mut self) {
+        self.input.release_all();
         self.clipboard.stop();
     }
 }
@@ -603,7 +593,6 @@ pub struct Target {
     pub mac: Option<wake::MacAddr>,
     pub lan_ip: Option<Ipv4Addr>,
     pub public_ip: Option<Ipv4Addr>,
-    pub server_cert: Option<Vec<u8>>,
     /// What discovery last knew about the path; re-measured at connect.
     pub path: Path,
     /// Tailscale's OS string for the PC.
@@ -612,8 +601,6 @@ pub struct Target {
     /// status; see [`fit_to_host`].
     pub capture_size: Option<[u32; 2]>,
     pub max_fps: u32,
-    /// The size its Desktop was last launched at from this Mac, as saved.
-    pub desktop_size: Option<(u32, u32)>,
 }
 
 impl Target {
@@ -624,29 +611,25 @@ impl Target {
             node_id: pc.node_id.clone(),
             name: pc.name.clone(),
             ip: pc.ip?,
-            online: pc.online && (pc.sunshine || pc.host.is_some()),
+            online: pc.host.is_some(),
             mac: k
                 .and_then(|k| k.mac.as_deref())
                 .and_then(wake::MacAddr::parse),
             lan_ip: parse(k.and_then(|k| k.lan_ip.as_ref())),
             public_ip: saved_public(k.and_then(|k| k.public_ip.as_ref())),
-            server_cert: k
-                .and_then(|k| k.server_cert.as_deref())
-                .and_then(latch_stream::nvhttp::unhex),
             path: pc.path.clone(),
             os: pc.os.clone(),
             capture_size: pc.host.as_ref().and_then(|h| h.streamer.capture_size),
             max_fps: pc.host.as_ref().map_or(0, |h| h.streamer.max_fps),
-            desktop_size: k.and_then(|k| k.desktop_size).map(|[w, h]| (w, h)),
         })
     }
 }
 
 /// What to ask a PC for, from what was wanted: its own capture size when
 /// that is fixed and the wanted size is larger in either direction
-/// (Sunshine would only scale the same desktop up, blurring it and costing
-/// the encoder more; a smaller size is scaled down and is cheaper to
-/// encode), and no more frames a second than it keeps up with. The host's
+/// (scaling the same desktop up blurs it and costs the encoder more; a
+/// smaller size is scaled down and is cheaper to encode), and no more
+/// frames a second than it keeps up with. The host's
 /// ceiling is for its capture size, or 1920 × 1080 when that is not fixed;
 /// a smaller picture gets a ceiling higher in proportion to the pixels it
 /// saves, since software encoding time follows the pixel count. A larger
@@ -694,78 +677,16 @@ pub fn request_for(
     fit_to_host(s.resolution.pixels(native), s.fps, capture_size, max_fps)
 }
 
-/// The size each PC's Desktop was last launched at from here, by node. The
-/// same is kept in client.toml ([`KnownPc::desktop_size`]) for the next
-/// time this app opens.
-static LAUNCHED: Mutex<BTreeMap<String, (u32, u32)>> = Mutex::new(BTreeMap::new());
-
-/// Whether the PC's desktop takes the size of whoever launches it: a Linux
-/// desktop whose host reports no fixed size, where a prep command resizes
-/// the X screen at each launch. A Windows PC switches its display on a
-/// resume too, a Mac never does, and a fixed X screen cannot.
-fn follows_viewer(os: &str, capture_size: Option<[u32; 2]>) -> bool {
-    os.eq_ignore_ascii_case("linux") && fixed_desktop(capture_size).is_none()
-}
-
-/// Whether the running app has to be ended before this launch. Another app
-/// always does. The Desktop does when asked to (a broken capture), and on
-/// a desktop that follows the viewer when it may be running at another
-/// size: resuming keeps the PC's display as the launch left it, since the
-/// prep command runs only at a launch, so a stream at a new size would be
-/// the old desktop scaled, with the mouse moving over the old one. A
-/// Desktop this Mac never launched is of unknown size.
-fn must_relaunch(
-    current_game: u32,
-    app_id: u32,
-    desktop: bool,
-    restart_capture: bool,
-    follows_viewer: bool,
-    launched_at: Option<(u32, u32)>,
-    size: (u32, u32),
-) -> bool {
-    current_game != 0
-        && (current_game != app_id
-            || (desktop && (restart_capture || (follows_viewer && launched_at != Some(size)))))
-}
-
-/// A cancelled attempt ends the app on the PC only when it started it; one
-/// it rejoined (a game left running, a desktop someone else watches) is
-/// left as it was found, as a disconnect leaves it.
-fn ends_app_on_cancel(resumed: bool) -> bool {
-    !resumed
-}
-
-fn abandon(client: &Client<'_>, resumed: bool) {
-    if ends_app_on_cancel(resumed) {
-        let _ = client.quit();
-    }
-}
-
-/// Keep the size the PC's Desktop was launched at across restarts of this
-/// app, so the first connect afterwards resumes it rather than ending and
-/// launching it again at the same size.
-fn remember_desktop_size(node_id: &str, (w, h): (u32, u32)) {
-    if let Err(e) = ClientConfig::update(|cfg| {
-        if let Some(pc) = cfg.pcs.get_mut(node_id) {
-            pc.desktop_size = Some([w, h]);
-        }
-    }) {
-        tracing::warn!("could not save the desktop's size: {e:#}");
-    }
-}
-
 pub struct Connect {
     pub target: Target,
     pub settings: StreamSettings,
-    /// Reset Sunshine's Desktop capture instead of resuming a broken one.
-    pub restart_capture: bool,
     pub native: (u32, u32),
     pub progress: Arc<Mutex<Progress>>,
     pub live: Arc<Mutex<Option<Live>>>,
     pub ctx: egui::Context,
 }
 
-/// Wake, wait, pair, launch, connect: on its own thread, reporting into
+/// Wake, wait, check the host, connect: on its own thread, reporting into
 /// `progress` and leaving the stream in `live`.
 pub fn connect(c: Connect) {
     let generation = NEXT_CONNECT.fetch_add(1, Ordering::Relaxed);
@@ -832,7 +753,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     };
 
     // 1. Wake it if nothing answers.
-    if !t.online && !port_open(t.ip, SUNSHINE_PORT, Duration::from_millis(1200)) {
+    if !t.online && !port_open(t.ip, CONTROL_PORT, Duration::from_millis(1200)) {
         let mac = t.mac.ok_or_else(|| {
             anyhow!("{} isn't answering, and Latch doesn't know how to wake it yet. Turn it on once while Latch runs there, so this machine can learn how.", t.name)
         })?;
@@ -851,9 +772,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
                 Step::Waking,
                 format!("Waking {}… {}s", t.name, start.elapsed().as_secs()),
             );
-            if port_open(t.ip, SUNSHINE_PORT, Duration::from_millis(1500))
-                || port_open(t.ip, CONTROL_PORT, Duration::from_millis(1500))
-            {
+            if port_open(t.ip, CONTROL_PORT, Duration::from_millis(1500)) {
                 break;
             }
             if start.elapsed() > Duration::from_secs(120) {
@@ -866,11 +785,14 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         }
     }
 
-    // 2. Sunshine's port.
+    // Wait for the control service, then require the current stream protocol.
     let start = Instant::now();
-    while !port_open(t.ip, SUNSHINE_PORT, Duration::from_millis(1500)) {
+    let mut host = loop {
         if stale(&c.progress, generation) {
             bail!("cancelled");
+        }
+        if let Some(host) = host_status(t.ip, Duration::from_millis(1500)) {
+            break host;
         }
         report(
             Step::Waiting,
@@ -878,61 +800,55 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         );
         if start.elapsed() > Duration::from_secs(60) {
             bail!(
-                "{} is on, but nothing is streaming from it. Open Latch there and set up sharing on its Sharing tab.",
+                "{} is on, but Latch isn't answering. Open Latch there and set up sharing on its Sharing tab.",
                 t.name
             );
         }
         std::thread::sleep(Duration::from_secs(1));
-    }
-
-    // 3. Pair if this Mac is not known to the PC yet.
-    report(Step::Launching, "Checking pairing…".into());
-    let identity = Identity::load_or_create(&latch_core::config::data_dir()?.join("identity"))?;
-    let mut client = Client::new(&identity, IpAddr::V4(t.ip), t.server_cert.clone())?;
-    let asking_paired = || format!("Asking {} whether this Mac is paired", t.name);
-    let mut info = match client.server_info() {
-        Ok(i) => i,
-        Err(e) if latch_stream::nvhttp::is_pin_mismatch(&e) => {
-            // The engine was reinstalled; the saved cert is the old one.
-            // Forget it and pair again so the user does not have to edit
-            // client.toml.
-            tracing::warn!("{}: {e:#}; pairing again", t.name);
-            if let Err(save_error) = ClientConfig::update(|cfg| {
-                cfg.forget_pin_on_mismatch(&t.node_id, &e);
-            }) {
-                tracing::warn!("could not forget the PC's old certificate: {save_error:#}");
-            }
-            client = Client::new(&identity, IpAddr::V4(t.ip), None)?;
-            retry(8, &c.progress, generation, || client.server_info())
-                .with_context(asking_paired)?
-        }
-        Err(e) => {
-            tracing::info!("{}: {e:#}; asking again", t.name);
-            retry(8, &c.progress, generation, || client.server_info())
-                .with_context(asking_paired)?
-        }
     };
-    if !info.paired || client.server_cert().is_none() {
-        let pin = format!("{:04}", rand::random::<u16>() % 10_000);
-        report(Step::Pairing { pin: pin.clone() }, String::new());
-        let der = pair(&mut client, &pin, c, generation)?;
-        remember_cert(&t.node_id, &t.name, &der);
-        info = client.server_info().with_context(asking_paired)?;
-        if !info.paired {
-            bail!("{} did not accept the pairing", t.name);
+    let os = if host.os.is_empty() { &t.os } else { &host.os };
+    if host.streamer.protocol < 1 {
+        if !can_upgrade(os, &host.version) {
+            bail!("{}", incompatible_host(&t.name, os));
+        }
+        report(Step::Waiting, format!("Updating Latch on {}…", t.name));
+        crate::update::upgrade_for_stream(t.ip, &host.version)
+            .with_context(|| format!("Updating Latch on {}", t.name))?;
+        let start = Instant::now();
+        loop {
+            if stale(&c.progress, generation) {
+                bail!("cancelled");
+            }
+            if let Some(updated) = host_status(t.ip, Duration::from_secs(2)) {
+                if updated.streamer.protocol >= 1 {
+                    host = updated;
+                    break;
+                }
+            }
+            if start.elapsed() >= Duration::from_secs(120) {
+                bail!("Latch on {} hasn't returned with the new streaming version. Open Latch there and check its update.", t.name);
+            }
+            report(
+                Step::Waiting,
+                format!("Waiting for {} to finish updating…", t.name),
+            );
+            std::thread::sleep(Duration::from_secs(1));
         }
     }
     if stale(&c.progress, generation) {
         bail!("cancelled");
     }
 
-    // 4. Pick the app and launch or resume it, at a quality the path can
-    //    carry.
     report(Step::Launching, "Measuring the path…".into());
     let path = measure_path(&t.node_id, t.ip, &t.path);
     let mut settings = path::effective(&c.settings);
     let wanted = settings.resolution.pixels(c.native);
-    let (w, h, fps) = request_for(&c.settings, c.native, t.capture_size, t.max_fps);
+    let (w, h, fps) = request_for(
+        &c.settings,
+        c.native,
+        host.streamer.capture_size,
+        host.streamer.max_fps,
+    );
     settings.fps = fps;
     tracing::info!(
         "path to {}: {} · {}{}",
@@ -946,116 +862,32 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         }
     );
     report(Step::Launching, "Starting the stream…".into());
-    let apps = client
-        .app_list()
-        .with_context(|| format!("Asking {} what it can stream", t.name))?;
-    c.progress.lock().apps = apps.iter().map(|a| a.title.clone()).collect();
-    let app = apps
-        .iter()
-        .find(|a| a.title.eq_ignore_ascii_case(&settings.app))
-        .or_else(|| apps.iter().find(|a| a.title == "Desktop"))
-        .or_else(|| apps.first())
-        .ok_or_else(|| anyhow!("{} offers nothing to stream", t.name))?;
-    let desktop = app.title.eq_ignore_ascii_case("Desktop");
-    // Nothing on the PC has been touched yet: a cancel while the path was
-    // measured must not end what runs there.
     if stale(&c.progress, generation) {
         bail!("cancelled");
     }
-    let launched_at = LAUNCHED.lock().get(&t.node_id).copied().or(t.desktop_size);
-    if must_relaunch(
-        info.current_game,
-        app.id,
-        desktop,
-        c.restart_capture,
-        follows_viewer(&t.os, t.capture_size),
-        launched_at,
-        (w, h),
-    ) {
-        client
-            .quit()
-            .with_context(|| format!("Stopping {}'s previous stream", t.name))?;
-        let stopped = Instant::now();
-        loop {
-            if stale(&c.progress, generation) {
-                bail!("cancelled");
-            }
-            info = client
-                .server_info()
-                .with_context(|| format!("Asking {} whether its stream stopped", t.name))?;
-            if info.current_game == 0 {
-                break;
-            }
-            if stopped.elapsed() >= Duration::from_secs(10) {
-                bail!(
-                    "{} didn't stop its previous stream. Try again; if it keeps happening, restart that machine.",
-                    t.name
-                );
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-    }
-    if stale(&c.progress, generation) {
-        bail!("cancelled");
-    }
-    // Rejoining what already runs there: a cancel from here on leaves it
-    // running, as a disconnect would. Only an app this attempt started is
-    // ended again.
-    let resumed = info.current_game != 0;
-    let ri_key: [u8; 16] = rand::random();
-    let ri_id: u32 = rand::random();
-    let mut ri_iv = [0u8; 16];
-    ri_iv[..4].copy_from_slice(&ri_id.to_be_bytes());
-    let rtsp = client
-        .launch(
-            app.id,
-            w,
-            h,
-            fps,
-            settings.bitrate_kbps,
-            &ri_key,
-            ri_id,
-            resumed,
-        )
-        .with_context(|| format!("Asking {} to start the stream", t.name))?;
-    if desktop {
-        LAUNCHED.lock().insert(t.node_id.clone(), (w, h));
-        remember_desktop_size(&t.node_id, (w, h));
-    }
-
-    // 5. Connect.
-    if stale(&c.progress, generation) {
-        abandon(&client, resumed);
-        bail!("cancelled");
-    }
-    let hevc = wants_hevc(settings.codec, info.codec_mode_support);
     let frames = Arc::new(FrameSlot::default());
     let (tx, rx) = std::sync::mpsc::channel();
     let ctx = c.ctx.clone();
     let session = Session::start(
         Server {
-            address: t.ip.to_string(),
-            app_version: info.app_version.clone(),
-            gfe_version: info.gfe_version.clone(),
-            rtsp_url: rtsp,
-            codec_mode_support: info.codec_mode_support,
+            address: IpAddr::V4(t.ip),
+            port: CONTROL_PORT,
         },
         Settings {
             width: w,
             height: h,
             fps,
             bitrate_kbps: settings.bitrate_kbps,
-            hevc,
+            hevc: settings.codec != Codec::H264,
+            audio: true,
+            name: latch_core::config::machine_name(),
         },
-        ri_key,
-        ri_iv,
         frames.clone(),
         tx,
         move || ctx.request_repaint(),
     );
     if stale(&c.progress, generation) {
         drop(session);
-        abandon(&client, resumed);
         bail!("cancelled");
     }
     let input = session.input();
@@ -1068,330 +900,39 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         frames,
         events: rx,
         started: Instant::now(),
-        codec: if hevc { "HEVC" } else { "H.264" },
+        codec: "",
         requested: (w, h, fps),
-        desktop: fixed_desktop(t.capture_size).filter(|&d| d != (w, h)),
+        desktop: fixed_desktop(host.streamer.capture_size).filter(|&d| d != (w, h)),
         settings,
         path,
         clipboard: clipboard::Sync::spawn(t.ip, c.ctx.clone()),
-        shortcuts: clipboard::Shortcuts::for_os(&t.os),
+        shortcuts: clipboard::Shortcuts::for_os(if host.os.is_empty() { &t.os } else { &host.os }),
     });
     report(Step::Connecting, "Connecting…".into());
     Ok(())
 }
 
-/// HEVC when the settings allow it, the PC can encode it (Sunshine's
-/// `ServerCodecModeSupport` HEVC bits) and this machine can decode it.
-/// Windows and Linux decode H.264 only, whatever the PC offers.
-fn wants_hevc(codec: Codec, server_codecs: i32) -> bool {
-    const SCM_HEVC_MASK: i32 = 0x0F00;
-    codec != Codec::H264
-        && server_codecs & SCM_HEVC_MASK != 0
-        && latch_stream::video::supported_formats() & latch_stream::ffi::VIDEO_FORMAT_MASK_H265 != 0
+/// Whether this host accepts the existing Windows update push.
+fn can_upgrade(os: &str, version: &str) -> bool {
+    os.eq_ignore_ascii_case("windows")
+        && semver::Version::parse(version)
+            .is_ok_and(|v| latch_core::update::host_can_receive_update(&v))
 }
 
-/// `f` until it succeeds, `times` tries at most, giving up early once the
-/// attempt is cancelled.
-fn retry<T>(
-    times: u32,
-    progress: &Mutex<Progress>,
-    generation: u64,
-    mut f: impl FnMut() -> Result<T>,
-) -> Result<T> {
-    let mut last = anyhow!("not tried");
-    for attempt in 1..=times {
-        match f() {
-            Ok(v) => return Ok(v),
-            Err(e) => last = e,
-        }
-        if attempt == times || stale(progress, generation) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(700));
-    }
-    Err(last)
-}
-
-/// Pair with the PC: the handshake on this thread, and the PIN handed to
-/// Latch Host on the PC beside its first request, on another. The
-/// handshake goes on the moment the PC answers, however the PIN got in;
-/// Cancel works throughout.
-fn pair(client: &mut Client<'_>, pin: &str, c: &Connect, generation: u64) -> Result<Vec<u8>> {
-    let t = &c.target;
-    let hand_off = Arc::new(PinHandOff::new(
-        &t.name,
-        pin,
-        c.progress.clone(),
-        generation,
-        c.ctx.clone(),
-    ));
-    let mut offered = false;
-    let result = client.pair_cancellable(pin, &latch_core::config::machine_name(), |answered| {
-        if answered {
-            hand_off.finish();
-            return false;
-        }
-        if !offered {
-            offered = true;
-            let (h, host) = (hand_off.clone(), SocketAddr::from((t.ip, CONTROL_PORT)));
-            std::thread::spawn(move || h.run(host));
-        }
-        stale(&c.progress, generation) || hand_off.refused.lock().is_some()
-    });
-    // However the handshake ended, the PIN is not offered again.
-    hand_off.stop.store(true, Ordering::Relaxed);
-    result.map_err(|e| {
-        pairing_error(
-            e,
-            &t.name,
-            hand_off.refused.lock().take(),
-            hand_off.why_not.lock().take(),
-        )
-    })
-}
-
-/// What to say when pairing with `pc` failed: Latch Host's refusal when it
-/// refused for good, why the PIN never went in when nobody entered it in
-/// time, else the handshake's own error.
-fn pairing_error(
-    e: anyhow::Error,
-    pc: &str,
-    refused: Option<String>,
-    why_not: Option<String>,
-) -> anyhow::Error {
-    if let Some(reason) = refused {
-        return anyhow!("Latch on {pc} refused the PIN: {reason}.");
-    }
-    if e.downcast_ref::<PinNotEntered>().is_some() {
-        return match why_not {
-            Some(why) => anyhow!("Pairing with {pc} timed out: {why}."),
-            None => anyhow!("Pairing with {pc} timed out: nobody entered the PIN there."),
-        };
-    }
-    e.context(format!("Pairing with {pc}"))
-}
-
-/// How long the PIN is offered to Latch Host on the PC, and how long a host
-/// that cannot log in to its engine is given to manage it (it checks again
-/// every few seconds, and lags an engine that has just started).
-const PIN_OFFER_FOR: Duration = Duration::from_secs(75);
-const ENGINE_LOGIN_GRACE: Duration = Duration::from_secs(15);
-
-/// What Latch Host on the PC made of one PIN hand-off.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PinReply {
-    /// The engine has the PIN.
-    Taken,
-    /// Not taken, for a reason that can pass: the engine is not ready for
-    /// it yet, or refused it this time.
-    Retry(String),
-    /// The host cannot log in to its engine, so it cannot enter any PIN
-    /// until that is fixed (or the engine has finished starting).
-    NoEngine(String),
-    /// The host has no way to take a PIN: it is older than `/v1/pin`.
-    NoRoute,
-    /// Refused for good: this Mac may not ask, or the request is wrong.
-    Refused(String),
-    /// Nothing answered.
-    Unreachable(String),
-}
-
-/// Sort Latch Host's reply to `POST /v1/pin`. It answers every refusal with
-/// an error status and its reason in the body, so the body is read
-/// whatever the status says.
-fn pin_reply(reply: Result<http::Response>) -> PinReply {
-    let r = match reply {
-        Ok(r) => r,
-        Err(e) => return PinReply::Unreachable(format!("{e:#}")),
+fn incompatible_host(name: &str, os: &str) -> String {
+    let action = if os.eq_ignore_ascii_case("macos") {
+        "open Latch on that Mac and turn on automatic updates in Settings; its app updates itself."
+    } else if os.eq_ignore_ascii_case("linux") {
+        "install the latest latch-host-linux release tarball, following deploy/native/README.md."
+    } else {
+        "install the latest Latch release from https://github.com/MrBeldum/latch/releases/latest."
     };
-    let ack = r.parse::<Ack>().ok();
-    if r.status == 200 && ack.as_ref().is_some_and(|a| a.ok) {
-        return PinReply::Taken;
-    }
-    let reason = ack
-        .and_then(|a| a.error)
-        .filter(|e| !e.trim().is_empty())
-        .unwrap_or_else(|| format!("HTTP {}", r.status));
-    match r.status {
-        404 => PinReply::NoRoute,
-        400 | 403 | 422 => PinReply::Refused(reason),
-        _ if reason.starts_with("Latch cannot log in to the streaming engine") => {
-            PinReply::NoEngine(reason)
-        }
-        _ => PinReply::Retry(reason),
-    }
+    format!(
+        "{name} runs Latch 4.x, which streams differently. Update Latch there to connect: {action}"
+    )
 }
 
-/// Handing the PIN to Latch Host on the PC, which enters it into the
-/// engine there. It runs on its own thread beside the first pairing
-/// request and stops when that request is answered (the PIN went in,
-/// however it got there), when the attempt is cancelled, when the host
-/// refuses for good, or after [`PIN_OFFER_FOR`]. Whatever stops it, the
-/// PIN stays on screen for someone at the PC until the request gives up.
-struct PinHandOff {
-    pc: String,
-    request: PinRequest,
-    progress: Arc<Mutex<Progress>>,
-    generation: u64,
-    ctx: egui::Context,
-    /// The first pairing request is over: stop offering the PIN.
-    stop: AtomicBool,
-    /// Latch Host refused the PIN for good, and why.
-    refused: Mutex<Option<String>>,
-    /// Why the PIN has not gone in through Latch Host, for the message if
-    /// nobody enters it at all.
-    why_not: Mutex<Option<String>>,
-}
-
-impl PinHandOff {
-    fn new(
-        pc: &str,
-        pin: &str,
-        progress: Arc<Mutex<Progress>>,
-        generation: u64,
-        ctx: egui::Context,
-    ) -> Self {
-        Self {
-            pc: pc.to_string(),
-            request: PinRequest {
-                pin: pin.into(),
-                name: latch_core::config::machine_name(),
-            },
-            progress,
-            generation,
-            ctx,
-            stop: AtomicBool::new(false),
-            refused: Mutex::new(None),
-            why_not: Mutex::new(None),
-        }
-    }
-
-    fn done(&self) -> bool {
-        self.stop.load(Ordering::Relaxed) || stale(&self.progress, self.generation)
-    }
-
-    /// The first request is answered: stop, and take down any warning,
-    /// which is no longer true.
-    fn finish(&self) {
-        self.stop.store(true, Ordering::Relaxed);
-        self.show(String::new());
-    }
-
-    /// Pairing draws no spinner, so a new line has to ask for its frame.
-    fn show(&self, detail: String) {
-        let mut p = self.progress.lock();
-        if p.generation == self.generation && p.detail != detail {
-            p.detail = detail;
-            drop(p);
-            self.ctx.request_repaint();
-        }
-    }
-
-    /// Sleep `d` in short steps; false once it is time to stop.
-    fn wait(&self, d: Duration) -> bool {
-        let until = Instant::now() + d;
-        while Instant::now() < until {
-            if self.done() {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        !self.done()
-    }
-
-    fn run(&self, host: SocketAddr) {
-        let pc = &self.pc;
-        let body = serde_json::to_string(&self.request).unwrap_or_default();
-        let start = Instant::now();
-        let mut pause = Duration::from_millis(800);
-        let mut no_engine_since: Option<Instant> = None;
-        let mut refusals = 0;
-        while start.elapsed() < PIN_OFFER_FOR && !self.done() {
-            // Latch Host answers once the engine has the PIN: up to a
-            // little over half a second with an engine that holds the post.
-            let reply = pin_reply(http::request(
-                host,
-                "POST",
-                "/v1/pin",
-                Some(&body),
-                Duration::from_secs(3),
-            ));
-            if self.done() {
-                return;
-            }
-            if !matches!(reply, PinReply::Refused(_)) {
-                refusals = 0;
-            }
-            let why = |s: String| *self.why_not.lock() = Some(s);
-            match reply {
-                PinReply::Taken => {
-                    // Should the engine still not answer, this is why.
-                    why("Latch there entered the PIN, but the streaming engine never finished pairing".into());
-                    self.show(String::new());
-                    return;
-                }
-                PinReply::Retry(reason) => {
-                    tracing::info!("{pc} did not take the PIN yet: {reason}");
-                    self.show(format!(
-                        "Latch on {pc} couldn't enter the PIN yet: {reason}"
-                    ));
-                    why(format!("Latch there couldn't enter the PIN ({reason})"));
-                }
-                PinReply::NoEngine(reason) => {
-                    let since = *no_engine_since.get_or_insert_with(Instant::now);
-                    tracing::info!("{pc} did not take the PIN: {reason}");
-                    why("Latch there can't log in to its streaming engine; run setup there".into());
-                    if since.elapsed() >= ENGINE_LOGIN_GRACE {
-                        self.show(format!("Latch on {pc} can't log in to its streaming engine, so it can't enter the PIN. Run setup there, or type this PIN into the streaming engine's web page on that machine."));
-                        return;
-                    }
-                    self.show(format!(
-                        "Latch on {pc} can't log in to its streaming engine yet."
-                    ));
-                }
-                PinReply::NoRoute => {
-                    tracing::info!("{pc}: Latch Host there has no PIN route");
-                    why("Latch there is too old to enter the PIN; update it there".into());
-                    self.show(format!("Latch on {pc} is too old to enter the PIN. Type it into the streaming engine's web page on that machine, or update Latch there."));
-                    return;
-                }
-                PinReply::Refused(reason) => {
-                    // Twice in a row: a refusal can also be a moment when
-                    // the host could not ask Tailscale who this Mac is.
-                    refusals += 1;
-                    tracing::info!("{pc} refused the PIN: {reason}");
-                    if refusals >= 2 {
-                        *self.refused.lock() = Some(reason);
-                        return;
-                    }
-                }
-                PinReply::Unreachable(e) => {
-                    tracing::info!("Latch Host on {pc} did not take the PIN: {e}");
-                    self.show(format!("Latch on {pc} isn't answering, so it can't enter the PIN. Open Latch there and set up sharing, or type this PIN into the streaming engine's web page on that machine."));
-                    why("Latch there isn't answering, so it couldn't enter the PIN".into());
-                }
-            }
-            // A refusal that keeps coming costs the host two engine calls
-            // and a log line each time: ask less often as it goes on.
-            if !self.wait(pause) {
-                return;
-            }
-            pause = (pause * 2).min(Duration::from_secs(4));
-        }
-    }
-}
-
-fn remember_cert(node_id: &str, name: &str, der: &[u8]) {
-    if let Err(e) = ClientConfig::update(|cfg| {
-        let e = cfg.pcs.entry(node_id.to_string()).or_default();
-        e.name = name.to_string();
-        e.server_cert = Some(latch_stream::nvhttp::hex(der));
-    }) {
-        tracing::warn!("could not save the PC's certificate: {e:#}");
-    }
-}
-
-/// Ask the host to sleep, restart, or shut down.
+/// Ask the host to change the machine's power state.
 pub fn power(ip: Ipv4Addr, action: PowerAction) -> Result<()> {
     let a: Ack = http::post_json(
         (ip, CONTROL_PORT),
@@ -1434,6 +975,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn old_hosts_get_a_push_or_specific_update_instructions() {
+        assert!(can_upgrade("windows", "4.1.1"));
+        assert!(!can_upgrade("windows", "3.0.0"));
+        assert!(!can_upgrade("windows", "unknown"));
+        for os in ["macOS", "linux", ""] {
+            assert!(!can_upgrade(os, "4.1.1"));
+            let message = incompatible_host("Studio", os);
+            assert!(message.starts_with(
+                "Studio runs Latch 4.x, which streams differently. Update Latch there to connect: "
+            ));
+            assert!(message.ends_with('.'));
+        }
+        assert!(incompatible_host("Studio", "macOS").contains("its app updates itself"));
+        assert!(incompatible_host("Studio", "linux").contains("deploy/native/README.md"));
+        let old: Status = serde_json::from_str(r#"{"app":"latch","streamer":{}}"#).unwrap();
+        assert_eq!(old.streamer.protocol, 0);
+    }
+
+    #[test]
     fn a_saved_lan_address_is_not_taken_for_the_public_one() {
         let saved = |s: &str| saved_public(Some(&s.to_string()));
         assert_eq!(
@@ -1445,94 +1005,6 @@ mod tests {
         assert_eq!(saved("100.106.23.40"), None, "a Tailscale address");
         assert_eq!(saved("not an address"), None);
         assert_eq!(saved_public(None), None);
-    }
-
-    #[test]
-    fn a_desktop_running_at_another_size_is_launched_again() {
-        const DESKTOP: u32 = 7;
-        let p720 = (1280, 720);
-        let follows = true;
-        // Nothing running: a plain launch.
-        assert!(!must_relaunch(0, DESKTOP, true, true, follows, None, p720));
-        // Launched from here at this size: resumed.
-        assert!(!must_relaunch(
-            DESKTOP,
-            DESKTOP,
-            true,
-            false,
-            follows,
-            Some(p720),
-            p720
-        ));
-        // At another size, or at a size this Mac does not know: launched
-        // again, so the PC's display follows the new size.
-        assert!(must_relaunch(
-            DESKTOP,
-            DESKTOP,
-            true,
-            false,
-            follows,
-            Some((3024, 1964)),
-            p720
-        ));
-        assert!(must_relaunch(
-            DESKTOP, DESKTOP, true, false, follows, None, p720
-        ));
-        // A broken capture, or another app, always.
-        assert!(must_relaunch(
-            DESKTOP,
-            DESKTOP,
-            true,
-            true,
-            follows,
-            Some(p720),
-            p720
-        ));
-        assert!(must_relaunch(
-            9,
-            DESKTOP,
-            true,
-            false,
-            follows,
-            Some(p720),
-            p720
-        ));
-        // A game is never ended for a size change.
-        assert!(!must_relaunch(9, 9, false, false, follows, None, p720));
-        assert!(!must_relaunch(9, 9, false, true, follows, None, p720));
-        // A desktop that does not follow the viewer (Windows switches its
-        // display on a resume, a Mac and a fixed X screen never do) is not
-        // ended for its size, known or not; still for a broken capture.
-        for launched_at in [None, Some((3024, 1964))] {
-            assert!(!must_relaunch(
-                DESKTOP,
-                DESKTOP,
-                true,
-                false,
-                false,
-                launched_at,
-                p720
-            ));
-        }
-        assert!(must_relaunch(
-            DESKTOP, DESKTOP, true, true, false, None, p720
-        ));
-    }
-
-    #[test]
-    fn only_a_linux_desktop_without_a_fixed_size_follows_the_viewer() {
-        assert!(follows_viewer("linux", None));
-        assert!(follows_viewer("Linux", Some([0, 0])), "nonsense is no size");
-        assert!(!follows_viewer("linux", Some([1920, 1080])));
-        assert!(!follows_viewer("windows", None));
-        assert!(!follows_viewer("macOS", None));
-        assert!(!follows_viewer("", None), "an old host says no OS");
-    }
-
-    #[test]
-    fn a_cancel_ends_only_an_app_this_attempt_started() {
-        assert!(ends_app_on_cancel(false), "launched fresh, or relaunched");
-        assert!(!ends_app_on_cancel(true), "rejoined: left as it was found");
     }
 
     #[test]
@@ -1573,7 +1045,6 @@ mod tests {
     fn known(tailnet: Option<&str>, seen_days_ago: Option<u64>) -> KnownPc {
         KnownPc {
             name: "pc".into(),
-            server_cert: Some("3082".into()),
             tailnet: tailnet.map(str::to_string),
             last_seen_unix: seen_days_ago.map(|d| NOW - d * 86_400),
             ..Default::default()
@@ -1641,243 +1112,6 @@ mod tests {
             cfg.pcs["hermes"].tailnet.as_deref(),
             Some("daniel@example.com")
         );
-        assert_eq!(cfg.pcs["hermes"].server_cert.as_deref(), Some("3082"));
-    }
-
-    #[test]
-    fn the_saved_desktop_size_reaches_the_target() {
-        let pc = Pc {
-            ip: Some("100.64.0.9".parse().unwrap()),
-            known: Some(KnownPc {
-                desktop_size: Some([1280, 720]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        assert_eq!(
-            Target::from_pc(&pc).unwrap().desktop_size,
-            Some((1280, 720))
-        );
-    }
-
-    #[test]
-    fn a_pin_reply_is_read_whatever_its_status() {
-        let reply = |status: u16, body: &str| {
-            pin_reply(Ok(http::Response {
-                status,
-                body: body.into(),
-            }))
-        };
-        let ack = |e: &str| serde_json::to_string(&Ack::err(e)).unwrap();
-        assert_eq!(
-            reply(200, &serde_json::to_string(&Ack::ok()).unwrap()),
-            PinReply::Taken
-        );
-        assert_eq!(
-            reply(
-                502,
-                &ack("pairing_id must contain exactly 32 hexadecimal characters")
-            ),
-            PinReply::Retry("pairing_id must contain exactly 32 hexadecimal characters".into())
-        );
-        assert_eq!(
-            reply(
-                502,
-                &ack("Latch cannot log in to the streaming engine on this PC; run setup there")
-            ),
-            PinReply::NoEngine(
-                "Latch cannot log in to the streaming engine on this PC; run setup there".into()
-            )
-        );
-        assert_eq!(
-            reply(403, &ack("not a machine on this PC's Tailscale account")),
-            PinReply::Refused("not a machine on this PC's Tailscale account".into())
-        );
-        assert_eq!(
-            reply(400, &ack("the PIN is four digits")),
-            PinReply::Refused("the PIN is four digits".into())
-        );
-        assert_eq!(reply(404, "not found"), PinReply::NoRoute);
-        assert_eq!(reply(502, "<html>"), PinReply::Retry("HTTP 502".into()));
-        assert_eq!(
-            reply(200, &ack("not yet")),
-            PinReply::Retry("not yet".into())
-        );
-        assert!(matches!(
-            pin_reply(Err(anyhow!("timed out"))),
-            PinReply::Unreachable(e) if e == "timed out"
-        ));
-    }
-
-    #[test]
-    fn a_failed_pairing_says_why_in_the_hosts_words() {
-        let say = |e: anyhow::Error, refused: Option<&str>, why: Option<&str>| {
-            format!(
-                "{:#}",
-                pairing_error(e, "stuzha", refused.map(Into::into), why.map(Into::into))
-            )
-        };
-        assert_eq!(
-            say(
-                anyhow!("pairing cancelled"),
-                Some("not a machine on this PC's Tailscale account"),
-                None
-            ),
-            "Latch on stuzha refused the PIN: not a machine on this PC's Tailscale account."
-        );
-        assert_eq!(
-            say(
-                anyhow!(PinNotEntered),
-                None,
-                Some("Latch there isn't answering, so it couldn't enter the PIN")
-            ),
-            "Pairing with stuzha timed out: Latch there isn't answering, so it couldn't enter the PIN."
-        );
-        assert_eq!(
-            say(anyhow!(PinNotEntered), None, None),
-            "Pairing with stuzha timed out: nobody entered the PIN there."
-        );
-        assert_eq!(
-            say(anyhow!("pairing failed at the challenge step"), None, None),
-            "Pairing with stuzha: pairing failed at the challenge step"
-        );
-        // The step and the cause, not just the cause.
-        let e = anyhow!("timed out").context("Asking stuzha to start the stream");
-        assert_eq!(
-            format!("{e:#}"),
-            "Asking stuzha to start the stream: timed out"
-        );
-    }
-
-    /// A Latch Host stand-in that answers every request the same way, and
-    /// counts them.
-    fn pin_host(status: u16, body: String) -> (SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let n = count.clone();
-        std::thread::spawn(move || {
-            http::serve_with_peer_check(
-                listener,
-                |_| true,
-                move |_, _| {
-                    n.fetch_add(1, Ordering::SeqCst);
-                    http::Response {
-                        status,
-                        body: body.clone(),
-                    }
-                },
-            )
-        });
-        (addr, count)
-    }
-
-    fn hand_off() -> Arc<PinHandOff> {
-        let progress = Arc::new(Mutex::new(Progress {
-            generation: 7,
-            ..Default::default()
-        }));
-        Arc::new(PinHandOff::new(
-            "stuzha",
-            "1234",
-            progress,
-            7,
-            egui::Context::default(),
-        ))
-    }
-
-    fn start(h: &Arc<PinHandOff>, host: SocketAddr) -> std::thread::JoinHandle<()> {
-        let h = h.clone();
-        std::thread::spawn(move || h.run(host))
-    }
-
-    /// Wait until `done` holds, no longer than five seconds: what a test
-    /// waits for comes within milliseconds, but a loaded CI runner (or
-    /// Windows, which takes a second to refuse a connection) is slower.
-    fn soon(done: impl Fn() -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !done() {
-            if Instant::now() > deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        true
-    }
-
-    /// Wait for the hand-off thread, no longer than `within`.
-    fn ends_within(t: std::thread::JoinHandle<()>, within: Duration) -> bool {
-        let deadline = Instant::now() + within;
-        while !t.is_finished() {
-            if Instant::now() > deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        true
-    }
-
-    #[test]
-    fn a_hosts_reason_is_shown_and_the_hand_off_stops_when_told() {
-        let (host, _) = pin_host(
-            502,
-            serde_json::to_string(&Ack::err("engine says no")).unwrap(),
-        );
-        let h = hand_off();
-        let t = start(&h, host);
-        let want = "Latch on stuzha couldn't enter the PIN yet: engine says no";
-        assert!(
-            soon(|| h.progress.lock().detail == want),
-            "{}",
-            h.progress.lock().detail
-        );
-        assert!(!t.is_finished(), "a passing refusal is offered again");
-        h.finish();
-        assert!(ends_within(t, Duration::from_secs(3)));
-        assert_eq!(h.progress.lock().detail, "", "the warning goes with it");
-        assert!(h.refused.lock().is_none());
-    }
-
-    #[test]
-    fn a_refusal_for_good_ends_the_hand_off_with_its_reason() {
-        let (host, asked) = pin_host(
-            403,
-            serde_json::to_string(&Ack::err("not a machine on this PC's Tailscale account"))
-                .unwrap(),
-        );
-        let h = hand_off();
-        let t = start(&h, host);
-        assert!(ends_within(t, Duration::from_secs(3)));
-        assert_eq!(asked.load(Ordering::SeqCst), 2, "asked twice, then no more");
-        assert_eq!(
-            h.refused.lock().as_deref(),
-            Some("not a machine on this PC's Tailscale account")
-        );
-    }
-
-    #[test]
-    fn a_taken_pin_ends_the_hand_off_at_once() {
-        let (host, asked) = pin_host(200, serde_json::to_string(&Ack::ok()).unwrap());
-        let h = hand_off();
-        assert!(ends_within(start(&h, host), Duration::from_millis(500)));
-        assert_eq!(asked.load(Ordering::SeqCst), 1);
-        assert_eq!(h.progress.lock().detail, "");
-    }
-
-    #[test]
-    fn only_silence_reads_as_isnt_answering_and_cancel_stops_it() {
-        // Port 0 can never be connected to; a port freed by dropping a
-        // listener can be taken by a test running beside this one.
-        let closed: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let h = hand_off();
-        let t = start(&h, closed);
-        assert!(
-            soon(|| h.progress.lock().detail.contains("isn't answering")),
-            "{}",
-            h.progress.lock().detail
-        );
-        h.progress.lock().cancel = true;
-        assert!(ends_within(t, Duration::from_secs(3)));
     }
 
     #[test]
@@ -1974,7 +1208,6 @@ mod tests {
         for step in [
             Step::Waking,
             Step::Waiting,
-            Step::Pairing { pin: "1234".into() },
             Step::Connecting,
             Step::Streaming,
         ] {
@@ -2014,9 +1247,9 @@ mod tests {
             ..Default::default()
         };
         assert!(!pc.can_stream());
-        pc.sunshine = true;
+        pc.host = Some(Status::default());
         assert!(pc.can_stream());
-        pc.sunshine = false;
+        pc.host = None;
         pc.known = Some(KnownPc {
             mac: Some("02:00:00:00:00:01".into()),
             ..Default::default()
@@ -2032,13 +1265,12 @@ mod tests {
             name: "Gaming-PC".into(),
             ip: Some("203.0.113.10".parse().unwrap()),
             online: true,
-            sunshine: true,
+            host: Some(Status::default()),
             known: Some(KnownPc {
                 name: "Gaming-PC".into(),
                 mac: Some("02:00:00:00:00:01".into()),
                 lan_ip: Some("192.168.1.10".into()),
                 public_ip: Some("203.0.113.5".into()),
-                server_cert: Some("3082".into()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -2048,52 +1280,42 @@ mod tests {
         assert_eq!(t.mac.unwrap().to_string(), "02:00:00:00:00:01");
         assert_eq!(t.lan_ip, Some("192.168.1.10".parse().unwrap()));
         assert_eq!(t.public_ip, Some("203.0.113.5".parse().unwrap()));
-        assert_eq!(t.server_cert, Some(vec![0x30, 0x82]));
     }
 
-    /// `cargo test -p latch-client scan_real -- --ignored --nocapture`
-    /// Connects to `LATCH_TEST_PC` (its Tailscale name) through the
-    /// window's own path, once for each of `LATCH_TEST_RESOLUTIONS` in turn
-    /// ("540p,720p,1080p,native"), with this Mac's identity and pairing, and
-    /// leaves the PC's Desktop running as the window does. At each size it
-    /// puts the PC's pointer at the stream's centre and a quarter in, then
-    /// moves it 100 stream pixels right, running `LATCH_TEST_PROBE` (a shell
-    /// command, say one that prints the pointer and the display size over
-    /// ssh) after each step.
+    /// `LATCH_TEST_PC=name-or-ip cargo test -p latch-client connect_real -- --ignored --nocapture`
     #[test]
-    #[ignore = "needs Tailscale and a paired PC"]
+    #[ignore = "needs a live Latch 5 host and completed protocol/codec implementations"]
     fn connect_real() {
         use crate::config::{Quality, Resolution};
         let _ = tracing_subscriber::fmt().with_target(false).try_init();
         let name = std::env::var("LATCH_TEST_PC").expect("LATCH_TEST_PC");
-        let probe = || {
-            let Ok(cmd) = std::env::var("LATCH_TEST_PROBE") else {
-                return;
-            };
-            std::thread::sleep(Duration::from_millis(400));
-            let out = std::process::Command::new("sh")
-                .args(["-c", &cmd])
-                .output()
-                .expect("probe");
-            eprint!("    probe: {}", String::from_utf8_lossy(&out.stdout));
-        };
+        let cfg = ClientConfig::load();
+        let discovery = scan(&cfg);
+        let pc = discovery
+            .pcs
+            .iter()
+            .find(|p| p.name == name || p.ip.is_some_and(|ip| ip.to_string() == name))
+            .cloned()
+            .unwrap_or_else(|| Pc {
+                name: name.clone(),
+                node_id: name.clone(),
+                ip: Some(
+                    name.parse()
+                        .expect("LATCH_TEST_PC must name a host or be an IPv4 address"),
+                ),
+                ..Default::default()
+            });
+        let seconds = std::env::var("LATCH_TEST_SECONDS")
+            .map_or(5, |s| s.parse::<u64>().expect("seconds"))
+            .max(1);
         let list = std::env::var("LATCH_TEST_RESOLUTIONS").unwrap_or_else(|_| "720p".into());
-        for label in list.split(',') {
+        for label in list.split(',').map(str::trim) {
             let resolution = Resolution::ALL
                 .into_iter()
                 .find(|r| r.label() == label || (label == "native" && *r == Resolution::Native))
                 .unwrap_or_else(|| panic!("no resolution {label}"));
-            // Afresh each time, as the window does, so a pairing made by the
-            // first connect is used by the next.
-            let cfg = ClientConfig::load();
-            let discovery = scan(&cfg);
-            let pc = discovery
-                .pcs
-                .iter()
-                .find(|p| p.name == name)
-                .unwrap_or_else(|| panic!("{name} is not on the tailnet"));
             let c = Connect {
-                target: Target::from_pc(pc).expect("target"),
+                target: Target::from_pc(&pc).expect("target"),
                 settings: StreamSettings {
                     quality: Quality::Custom,
                     resolution,
@@ -2101,7 +1323,6 @@ mod tests {
                     bitrate_kbps: 10_000,
                     ..cfg.stream.clone()
                 },
-                restart_capture: false,
                 native: (3024, 1964),
                 progress: Arc::default(),
                 live: Arc::default(),
@@ -2111,70 +1332,32 @@ mod tests {
             c.progress.lock().generation = generation;
             run(&c, generation).expect("connect");
             let live = c.live.lock().take().expect("a stream");
-            let start = Instant::now();
+            let deadline = Instant::now() + Duration::from_secs(30);
             loop {
-                match live.events.recv_timeout(Duration::from_secs(20)) {
+                assert!(Instant::now() < deadline, "no stream at {label}");
+                match live.events.recv_timeout(Duration::from_secs(1)) {
                     Ok(Event::Connected) => break,
-                    Ok(Event::Failed { .. } | Event::Terminated { .. }) | Err(_) => {
-                        panic!("no stream at {label}")
+                    Ok(Event::Failed { message, .. } | Event::Terminated { message, .. }) => {
+                        panic!("{label}: {message}")
                     }
-                    Ok(_) => {}
+                    Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(e) => panic!("{label}: {e}"),
                 }
             }
-            let (w, h, fps) = live.requested;
-            eprintln!(
-                "{label}: asked {w}x{h} at {fps} fps, desktop {:?}, connected in {:?}",
-                live.desktop,
-                start.elapsed()
-            );
-            std::thread::sleep(Duration::from_secs(2));
-            let (iw, ih) = (w as i16, h as i16);
-            eprintln!("  pointer to the centre, {}x{}", w / 2, h / 2);
-            live.input.mouse_position(iw / 2, ih / 2, iw, ih);
-            probe();
-            eprintln!("  pointer to a quarter in, {}x{}", w / 4, h / 4);
-            live.input.mouse_position(iw / 4, ih / 4, iw, ih);
-            probe();
-            eprintln!("  100 stream pixels right, in steps of 10");
-            for _ in 0..10 {
-                live.input.mouse_move(10, 0);
-                std::thread::sleep(Duration::from_millis(16));
-            }
-            probe();
-            eprintln!("  100 stream pixels right at once");
-            live.input.mouse_move(100, 0);
-            probe();
-            // Letters, digits and spaces as key presses, then Return.
-            if let Ok(line) = std::env::var("LATCH_TEST_TYPE") {
-                eprintln!("  typing {line:?}");
-                for c in line.chars().map(|c| c.to_ascii_uppercase()) {
-                    assert!(c.is_ascii_alphanumeric() || c == ' ', "can't type {c:?}");
-                    for down in [true, false] {
-                        live.input.key(c as i16, down, 0);
-                        std::thread::sleep(Duration::from_millis(15));
-                    }
-                }
-                for down in [true, false] {
-                    live.input.key(crate::input::VK_RETURN, down, 0);
-                }
-                probe();
-            }
-            let seconds: u64 =
-                std::env::var("LATCH_TEST_SECONDS").map_or(0, |s| s.parse().expect("seconds"));
             for second in 1..=seconds {
                 std::thread::sleep(Duration::from_secs(1));
                 let s = live.session.stats();
-                eprintln!(
-                    "  {second:>2}s {:.1} fps, {:.1} Mbps, loss {:.1}%, host {:.1} ms",
-                    s.fps, s.mbps, s.loss_pct, s.host_ms
-                );
+                eprintln!("{label} {second}s: {}x{} {} · {:.1} fps, {:.1} Mbps, loss {:.1}%, host {:.1} ms, decode {:.1} ms · {} → {}", s.width, s.height, s.codec, s.fps, s.mbps, s.loss_pct, s.host_ms, s.decode_ms, s.encoder, s.decoder);
+                assert!(!live.session.finished(), "{label}: stream ended early");
             }
+            assert!(live.frames.seq() > 0, "{label}: no frames arrived");
+            live.input.release_all();
             live.session.stop();
-            let t = Instant::now();
-            while !live.session.finished() && t.elapsed() < Duration::from_secs(10) {
+            let start = Instant::now();
+            while !live.session.finished() && start.elapsed() < Duration::from_secs(10) {
                 std::thread::sleep(Duration::from_millis(20));
             }
-            drop(live);
+            assert!(live.session.finished(), "{label}: stream did not stop");
         }
     }
 
@@ -2185,55 +1368,16 @@ mod tests {
         eprintln!("error={:?} login={} pcs={}", d.error, d.login, d.pcs.len());
         for pc in &d.pcs {
             eprintln!(
-                "  {} ip={:?} online={} host={} sunshine={} wake={} known={:?}",
+                "  {} ip={:?} online={} host={} wake={} known={:?}",
                 pc.name,
                 pc.ip,
                 pc.online,
                 pc.host.is_some(),
-                pc.sunshine,
                 pc.can_wake(),
                 pc.known
             );
         }
         assert!(d.error.is_some() || !d.login.is_empty());
-    }
-
-    #[test]
-    fn hevc_needs_the_setting_the_pc_and_this_decoder() {
-        let hevc_pc = 0x0101;
-        assert!(!wants_hevc(Codec::H264, hevc_pc));
-        assert!(!wants_hevc(Codec::Auto, 0x0001), "an H.264-only PC");
-        assert_eq!(
-            wants_hevc(Codec::Auto, hevc_pc),
-            cfg!(target_os = "macos"),
-            "only VideoToolbox decodes HEVC here"
-        );
-    }
-
-    #[test]
-    fn a_cancelled_retry_stops_at_once() {
-        let progress = Mutex::new(Progress {
-            generation: 3,
-            ..Default::default()
-        });
-        let mut tries = 0;
-        let r: Result<()> = retry(8, &progress, 3, || {
-            tries += 1;
-            progress.lock().cancel = true;
-            bail!("the PC is not answering")
-        });
-        assert_eq!(tries, 1);
-        assert_eq!(r.unwrap_err().to_string(), "the PC is not answering");
-        progress.lock().cancel = false;
-        let mut tries = 0;
-        let r = retry(3, &progress, 3, || {
-            tries += 1;
-            if tries < 2 {
-                bail!("not yet")
-            }
-            Ok(tries)
-        });
-        assert_eq!(r.unwrap(), 2);
     }
 
     #[test]

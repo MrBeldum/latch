@@ -8,8 +8,8 @@ when retiring `latch-node` on 2026-09-21 UTC.
 ## Runtime
 
 - Xvfb provides a headless 1920x1080 display on `:1`; XFCE runs on the VPS host.
-- Sunshine v2026.906.222525 (official Ubuntu 24.04 ARM64 package) captures X11
-  and encodes H.264 in software. The VPS has no GPU encoder.
+- `latch-host` runs the streaming engine in-process, capturing X11 and encoding
+  H.264 in software via `latch-codec`. No external engine package is required.
 - `/usr/local/bin/latch-host` runs the Latch control service.
 - `/usr/local/bin/tailscale` is the CLI only. It uses the existing relay
   container's socket at `/var/run/tailscale/tailscaled.sock`; no second daemon
@@ -25,37 +25,24 @@ The `.service` files in this directory are installed in
 ordering without conflicting with Latch's automatic registration.
 `wait-engine.py` is installed as `/usr/local/libexec/latch-wait-engine.py`.
 
-`latch-engine.service` and `latch-display.service` carry `CPUWeight=1000`:
-the encoder and the X server it copies frames from get ten times the CPU
-share of other user services, which matters on a small VPS that also runs
-agents. Latch Host keeps the engine on the Linux profile
-(`crates/host/src/setup.rs`, `LINUX_ENGINE_CONF`: no frame-rate floor,
-`superfast`) and tells viewers the X screen's size and, on fewer than four
-cores, a 30 fps ceiling.
-
-`latch.service` pulls in `latch-engine.service`,
-`latch-desktop.service`, and `latch-display.service`. PulseAudio runs as
-its standard user service. Logging out of XFCE starts a fresh session
-(`latch-desktop.service` restarts whenever it ends, retrying more slowly
-if it keeps failing); like any automatic restart of a unit the others
-require, it also restarts the engine and Latch Host, so a viewer
-reconnects. Check them as `ubuntu`:
+`latch-display.service` carries `CPUWeight=1000` so the X server gets prioritized
+CPU share on a small VPS. `latch.service` runs the streaming engine in-process
+with display environment from `latch.service.d/desktop.conf`, pulling in
+`latch-desktop.service` and `latch-display.service`. PulseAudio runs as its standard
+user service. Check them as `ubuntu`:
 
 ```sh
-systemctl --user status latch latch-engine latch-desktop latch-display
-journalctl --user -u latch-engine -n 50
+systemctl --user status latch latch-desktop latch-display
+journalctl --user -u latch -n 50
 ```
 
-Streaming configuration, certificates, and paired clients live in
-`~/.config/sunshine/`. Latch's host configuration lives in
-`~/.local/share/latch/host.toml`; its `engine/config` path is a symlink to the
-Sunshine directory. Keep these private and preserve them during upgrades.
+Latch's host configuration lives in `~/.local/share/latch/host.toml`.
+Legacy Sunshine configurations and `latch-engine.service` are removed by
+`migrate-legacy.sh` and `latch-host --setup`.
 
 The X server disables TCP and uses an authentication cookie in
-`/run/user/1001/latch.Xauthority`. The `ubuntu` account is deliberately **not**
-in the `input` group: Sunshine must use its XTest fallback for this Xvfb session.
-Granting `/dev/uinput` access makes input go to kernel devices that Xvfb does not
-consume, resulting in visible video but no functioning mouse or keyboard.
+`/run/user/1001/latch.Xauthority`. Mouse and keyboard input are injected
+directly via XTest.
 
 ## Installing and updating latch-host
 
@@ -94,13 +81,10 @@ Host stops reporting a fixed capture size. Use a mode at 60 Hz for every size
 (`xrandr --newmode` with a pixel clock of 60 x htotal x vtotal): the
 compositor and browsers draw at the mode's rate.
 
-That needs Sunshine 2026.1014 or later. Earlier ones send absolute pointer
-positions through an XTest fallback that keeps the screen size it saw at
-startup, so after a resize the pointer lands at that size's scale (twice as
-far at 540p, two thirds as far at a 3024x1964 Match screen). Relative
-movement, and a desktop that stays at its startup size, are fine with any
-version. The Mac launches the Desktop again whenever it asks for another
-size than it last did, since a prep command runs only at a launch.
+In Latch 5, prep commands are specified in `host.toml` (`prep_do` / `prep_undo`)
+and executed per session with `LATCH_CLIENT_WIDTH`, `LATCH_CLIENT_HEIGHT`, and
+`LATCH_CLIENT_FPS` in the environment. Any existing Sunshine `global_prep_cmd`
+is imported automatically during setup.
 
 ## Upgrading from versions before 4.1.0
 

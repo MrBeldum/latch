@@ -1,0 +1,11 @@
+[package]
+name = "latch-codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Latch's codecs in Rust: H.264 Constrained Baseline encoder and decoder, colour conversion, lossless audio"
+
+[dependencies]
+
+[dev-dependencies]

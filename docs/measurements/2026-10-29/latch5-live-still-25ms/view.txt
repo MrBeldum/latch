@@ -1,0 +1,22 @@
+Stage("Asking for the stream…")
+connected in 129.939792ms
+  1s  35.0 fps   0.75 Mbps rtt  11 ms decode  3.44 ms host  5.64 ms assembly  0.37 ms queue  1.84 ms loss  0.0% fec   0 1280x720 H.264 · hardware | no audio from the PC yet
+  2s  39.9 fps   0.04 Mbps rtt  11 ms decode  1.71 ms host  0.15 ms assembly  0.00 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | no sound: WH-1000XM2 is not taking audio
+  3s  38.9 fps   0.03 Mbps rtt  11 ms decode  1.95 ms host  0.13 ms assembly  0.00 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+  4s  38.0 fps   0.03 Mbps rtt  11 ms decode  2.08 ms host  0.14 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+  5s  37.0 fps   0.03 Mbps rtt  11 ms decode  1.72 ms host  0.14 ms assembly  0.00 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+  6s  40.0 fps   0.04 Mbps rtt  11 ms decode  1.95 ms host  0.12 ms assembly  0.00 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+  7s  39.0 fps   0.03 Mbps rtt  11 ms decode  1.85 ms host  0.14 ms assembly  0.00 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+  8s  38.9 fps   0.03 Mbps rtt  11 ms decode  2.10 ms host  0.13 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+  9s  38.9 fps   0.03 Mbps rtt  12 ms decode  1.90 ms host  0.15 ms assembly  0.00 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+ 10s  39.0 fps   0.03 Mbps rtt  12 ms decode  2.10 ms host  0.13 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+ 11s  40.0 fps   0.04 Mbps rtt  12 ms decode  2.06 ms host  0.13 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+ 12s  38.9 fps   0.03 Mbps rtt  13 ms decode  1.12 ms host  0.14 ms assembly  0.00 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+ 13s  40.0 fps   0.04 Mbps rtt  12 ms decode  0.82 ms host  0.18 ms assembly  0.00 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+ 14s  38.8 fps   0.03 Mbps rtt  12 ms decode  0.77 ms host  0.13 ms assembly  0.00 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+ 15s  39.8 fps   0.04 Mbps rtt  12 ms decode  0.97 ms host  0.15 ms assembly  0.00 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+ 16s  38.8 fps   0.03 Mbps rtt  12 ms decode  0.87 ms host  0.12 ms assembly  0.00 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+ 17s  40.0 fps   0.04 Mbps rtt  12 ms decode  0.84 ms host  0.14 ms assembly  0.00 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+ 18s  38.0 fps   0.03 Mbps rtt  12 ms decode  2.11 ms host  0.12 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+ 19s  39.9 fps   0.03 Mbps rtt  13 ms decode  2.01 ms host  0.18 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2
+ 20s  39.8 fps   0.04 Mbps rtt  12 ms decode  2.10 ms host  0.13 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | audio → WH-1000XM2

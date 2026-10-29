@@ -1,7 +1,7 @@
-# Install Latch Host for the current user: copy the exe and the bundled
-# engine archive into %LOCALAPPDATA%\Latch, add Start Menu and Desktop
+# Install Latch Host for the current user: copy the exe into
+# %LOCALAPPDATA%\Latch, add Start Menu and Desktop
 # shortcuts, and open it. The app itself runs the one administrator step
-# (engine, firewall, Wake-on-LAN) when you click "Set up this PC".
+# (firewall, Wake-on-LAN, virtual-display modes) when you click "Set up this PC".
 #
 # -NoStart leaves the window closed. The background service this stops to
 # replace the exe always comes back, in the signed-in user's session: run
@@ -33,7 +33,7 @@ if (-not $Exe -or -not (Test-Path $Exe)) {
 
 $DestDir = Join-Path $env:LOCALAPPDATA "Latch"
 # Where versions before 4.1 installed. Their
-# settings, pairing identity and engine archive come across, and the folder
+# settings come across, and the folder
 # goes once this one is in place.
 $OldDir = Join-Path $env:LOCALAPPDATA "BroLink"
 $DestExe = Join-Path $DestDir "latch-host.exe"
@@ -47,20 +47,13 @@ Get-Process latch-host, brolink-host -ErrorAction SilentlyContinue | Stop-Proces
 Start-Sleep -Milliseconds 300
 if ((Test-Path $OldDir) -and -not (Test-Path (Join-Path $DestDir "host.toml"))) {
     New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
-    Get-ChildItem -LiteralPath $OldDir -Force | Where-Object { $_.Name -notmatch '\.exe(\.old|\.new)?$' } |
+    Get-ChildItem -LiteralPath $OldDir -Force | Where-Object { $_.Name -notmatch '\.(exe|zip)(\.old|\.new)?$' -and $_.Name -ne 'engine' } |
         ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $DestDir -Recurse -Force }
     Write-Host "Settings carried over from the previous install."
 }
 New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
 Copy-Item $Exe $DestExe -Force
 Write-Host "Installed: $DestExe"
-# Same filename setup.rs ENGINE_ZIP looks for beside the exe.
-$Zip = Join-Path (Split-Path -Parent $Exe) "Sunshine-Windows-AMD64-lite.zip"
-if (Test-Path $Zip) {
-    Copy-Item $Zip $DestDir -Force
-    Write-Host "Bundled engine archive copied; setup will not need to download it."
-}
-
 $Wsh = New-Object -ComObject WScript.Shell
 $Desktop = [Environment]::GetFolderPath("Desktop")
 $StartMenu = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs"
@@ -95,7 +88,9 @@ if ((Get-Process -Id $PID).SessionId -eq 0) {
     $up = $false
     try {
         $action = New-ScheduledTaskAction -Execute $DestExe -Argument "--background" -WorkingDirectory $DestDir
-        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+        # USERDOMAIN is not set in an SSH session; the token's own name is.
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
         $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Priority 5
         Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
         Start-ScheduledTask -TaskName $TaskName

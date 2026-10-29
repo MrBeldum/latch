@@ -12,3 +12,4 @@
 Thumbs.db
 /tmp
 __pycache__/
+/crates/codec/tests/conformance/

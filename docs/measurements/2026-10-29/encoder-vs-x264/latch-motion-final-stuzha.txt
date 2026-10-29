@@ -1,0 +1,22 @@
+kind,width,height,frames,threads,target_kbps,ms_frame,achieved_kbps,psnr,max_frame_budget,skip_percent,average_qp,last_window_kbps
+motion,1280,720,30,2,8000,24.333,8006.712,26.059,3.479,4.45,43.43,8006.712
+kind,width,height,frames,threads,target_kbps,ms_frame,achieved_kbps,psnr,max_frame_budget,skip_percent,average_qp,last_window_kbps
+motion,1280,720,30,2,8000,35.123,8006.712,26.059,3.479,4.45,43.43,8006.712
+kind,width,height,frames,threads,target_kbps,ms_frame,achieved_kbps,psnr,max_frame_budget,skip_percent,average_qp,last_window_kbps
+motion,1280,720,30,2,8000,27.353,8006.712,26.059,3.479,4.45,43.43,8006.712
+| Content | Target Mbps | Encoder | PSNR dB | Actual Mbps | Encode ms/frame | Process wall ms/frame | Process CPU ms/frame | Max frame / budget |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| still | 8 | latch | 53.082 | 1.008 | 1.315 | 1.877 | 2.112 | 3.460 |
+| still | 8 | x264 superfast | 40.597 | 1.066 | 4.767 | 7.061 | 8.679 | — |
+| typing | 8 | latch | 53.073 | 1.019 | 3.429 | 3.975 | 4.195 | 3.460 |
+| typing | 8 | x264 superfast | 41.019 | 1.067 | 5.400 | 7.904 | 8.786 | — |
+| scroll | 8 | latch | 52.974 | 2.540 | 6.372 | 6.957 | 6.577 | 3.460 |
+| scroll | 8 | x264 superfast | 47.493 | 2.567 | 8.867 | 11.489 | 9.663 | — |
+| motion | 8 | latch | 26.059 | 8.007 | 22.772 | 23.621 | 32.933 | 3.479 |
+| motion | 8 | x264 superfast | 27.789 | 7.932 | 13.067 | 15.479 | 20.713 | — |
+| testsrc2 | 8 | latch | 52.578 | 7.983 | 11.254 | 11.882 | 10.867 | 1.476 |
+| testsrc2 | 8 | x264 superfast | 53.235 | 8.049 | 11.633 | 14.174 | 11.237 | — |
+| mandelbrot | 8 | latch | 47.337 | 7.994 | 23.345 | 24.179 | 19.046 | 2.328 |
+| mandelbrot | 8 | x264 superfast | 47.115 | 7.997 | 13.733 | 16.434 | 14.099 | — |
+Encode time: Latch encode() only; x264 FFmpeg benchmark (includes raw input I/O).
+Artifacts: /tmp/latch-motion-final-after-720

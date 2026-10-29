@@ -6,7 +6,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Larger bodies are refused; nothing Latch sends comes close, except the
 /// host executable on [`crate::api::UPDATE_PATH`], which has its own limit.
@@ -83,13 +83,55 @@ fn max_body(path: &str) -> usize {
 pub struct Response {
     pub status: u16,
     pub body: String,
+    /// For `101 Switching Protocols`: who takes the connection over.
+    pub takeover: Option<Takeover>,
 }
+
+/// The protocol a connection switches to after its request, and the code
+/// that runs it. It gets the socket once `101 Switching Protocols` is
+/// written and keeps the connection's worker thread until it returns.
+#[derive(Clone)]
+pub struct Takeover {
+    pub protocol: String,
+    run: std::sync::Arc<std::sync::Mutex<Option<TakeoverFn>>>,
+}
+
+type TakeoverFn = Box<dyn FnOnce(TcpStream) + Send>;
+
+impl std::fmt::Debug for Takeover {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Takeover")
+            .field("protocol", &self.protocol)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for Takeover {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.run, &other.run)
+    }
+}
+
+impl Eq for Takeover {}
 
 impl Response {
     pub fn json<T: serde::Serialize>(status: u16, value: &T) -> Self {
         Self {
             status,
             body: serde_json::to_string(value).unwrap_or_else(|_| "{}".into()),
+            takeover: None,
+        }
+    }
+
+    /// `101 Switching Protocols` to `protocol`; `run` then owns the socket.
+    pub fn switching(protocol: &str, run: impl FnOnce(TcpStream) + Send + 'static) -> Self {
+        Self {
+            status: 101,
+            body: String::new(),
+            takeover: Some(Takeover {
+                protocol: protocol.to_string(),
+                run: std::sync::Arc::new(std::sync::Mutex::new(Some(Box::new(run)))),
+            }),
         }
     }
 
@@ -99,10 +141,57 @@ impl Response {
     }
 }
 
+struct DeadlineStream<'a> {
+    stream: &'a mut TcpStream,
+    deadline: Option<Instant>,
+}
+
+impl<'a> DeadlineStream<'a> {
+    fn new(stream: &'a mut TcpStream, deadline: Instant) -> Self {
+        Self {
+            stream,
+            deadline: Some(deadline),
+        }
+    }
+
+    fn clear_deadline(&mut self) {
+        self.deadline = None;
+    }
+}
+
+impl<'a> Read for DeadlineStream<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(deadline) = self.deadline {
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(std::io::Error::new(ErrorKind::TimedOut, "timed out"));
+            }
+            let remaining = deadline - now;
+            let _ = self.stream.set_read_timeout(Some(remaining));
+        }
+        self.stream.read(buf)
+    }
+}
+
 /// Read one request from `stream`. `None` for an empty connection (a port
 /// scan, a health probe) so the caller can drop it quietly.
 pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
-    let mut reader = BufReader::new(stream);
+    let mut deadline_stream = DeadlineStream::new(stream, Instant::now() + IDLE_TIMEOUT);
+    match read_request_from(&mut deadline_stream, |_, _, _| true)? {
+        Some(Ok(req)) => Ok(Some(req)),
+        Some(Err(resp)) => bail!("HTTP {}: {}", resp.status, resp.body),
+        None => Ok(None),
+    }
+}
+
+fn read_request_from<B>(
+    deadline_stream: &mut DeadlineStream<'_>,
+    allow_large_body: B,
+) -> Result<Option<std::result::Result<Request, Response>>>
+where
+    B: FnOnce(&str, &[(String, String)], u64) -> bool,
+{
+    let mut reader = BufReader::new(deadline_stream);
     let mut remaining = MAX_HEADER;
     let Some(line) = read_line(&mut reader, &mut remaining)? else {
         return Ok(None);
@@ -123,12 +212,28 @@ pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
     if content_length > max_body(&path) as u64 {
         bail!("body too large ({content_length} bytes)");
     }
+    reader.get_mut().clear_deadline();
+
     if content_length > MAX_BODY as u64 {
+        if !allow_large_body(&path, &headers, content_length) {
+            return Ok(Some(Err(Response::json(
+                403,
+                &crate::api::Ack::err("not a machine on this PC's Tailscale account"),
+            ))));
+        }
         reader
             .get_mut()
+            .stream
             .set_read_timeout(Some(UPDATE_BODY_TIMEOUT))
             .map_err(io_err)?;
+    } else {
+        reader
+            .get_mut()
+            .stream
+            .set_read_timeout(Some(IDLE_TIMEOUT))
+            .map_err(io_err)?;
     }
+
     // Grow only as bytes arrive; an untrusted size must not reserve the
     // entire update allowance before the sender transmits its body.
     let mut body = Vec::new();
@@ -139,12 +244,12 @@ pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
     if received as u64 != content_length {
         bail!("connection closed inside the body");
     }
-    Ok(Some(Request {
+    Ok(Some(Ok(Request {
         method,
         path,
         headers,
         body,
-    }))
+    })))
 }
 
 /// A reply with an arbitrary body: a file, a script.
@@ -169,6 +274,7 @@ pub fn write_bytes(
 
 fn reason(status: u16) -> &'static str {
     match status {
+        101 => "Switching Protocols",
         200 => "OK",
         400 => "Bad Request",
         403 => "Forbidden",
@@ -209,8 +315,25 @@ where
     A: Fn(SocketAddr) -> bool + Send + Sync + 'static,
     F: Fn(SocketAddr, &Request) -> Response + Send + Sync + 'static,
 {
+    serve_with_auth(
+        listener,
+        authorize,
+        |_, path, _, _| path == crate::api::UPDATE_PATH,
+        handler,
+    );
+}
+
+/// Like [`serve_with_peer_check`], but runs `allow_body` after reading the
+/// request head and before reading or buffering a large body (over `MAX_BODY`).
+pub fn serve_with_auth<A, B, F>(listener: TcpListener, authorize: A, allow_body: B, handler: F)
+where
+    A: Fn(SocketAddr) -> bool + Send + Sync + 'static,
+    B: Fn(SocketAddr, &str, &[(String, String)], u64) -> bool + Send + Sync + 'static,
+    F: Fn(SocketAddr, &Request) -> Response + Send + Sync + 'static,
+{
     let handler = std::sync::Arc::new(handler);
     let authorize = std::sync::Arc::new(authorize);
+    let allow_body = std::sync::Arc::new(allow_body);
     let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for conn in listener.incoming() {
         let Ok(mut stream) = conn else { continue };
@@ -220,6 +343,7 @@ where
         };
         let handler = handler.clone();
         let authorize = authorize.clone();
+        let allow_body = allow_body.clone();
         std::thread::spawn(move || {
             let _slot = slot;
             let _ = stream.set_read_timeout(Some(IDLE_TIMEOUT));
@@ -235,17 +359,115 @@ where
                 );
                 return;
             }
-            let resp = match read_request(&mut stream) {
-                Ok(Some(req)) => handler(peer, &req),
-                Ok(None) => return,
-                Err(e) => Response::json(
-                    400,
-                    &serde_json::json!({ "ok": false, "error": e.to_string() }),
-                ),
+            let resp = {
+                let mut deadline_stream =
+                    DeadlineStream::new(&mut stream, Instant::now() + IDLE_TIMEOUT);
+                match read_request_from(&mut deadline_stream, |path, headers, len| {
+                    allow_body(peer, path, headers, len)
+                }) {
+                    Ok(Some(Ok(req))) => handler(peer, &req),
+                    Ok(Some(Err(forbidden))) => forbidden,
+                    Ok(None) => return,
+                    Err(e) => Response::json(
+                        400,
+                        &serde_json::json!({ "ok": false, "error": e.to_string() }),
+                    ),
+                }
             };
+            if let (101, Some(takeover)) = (resp.status, &resp.takeover) {
+                switch(stream, takeover);
+                return;
+            }
             let _ = write_response(&mut stream, &resp);
         });
     }
+}
+
+/// Writes `101 Switching Protocols` and hands the socket over, with the
+/// HTTP timeouts lifted: the new protocol keeps its own.
+fn switch(mut stream: TcpStream, takeover: &Takeover) {
+    if validate_header("Upgrade", &takeover.protocol).is_err() {
+        return;
+    }
+    let head = format!(
+        "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: {}\r\n\r\n",
+        takeover.protocol
+    );
+    if stream.write_all(head.as_bytes()).is_err() || stream.flush().is_err() {
+        return;
+    }
+    let _ = stream.set_read_timeout(None);
+    let _ = stream.set_write_timeout(None);
+    let run = takeover.run.lock().ok().and_then(|mut run| run.take());
+    if let Some(run) = run {
+        run(stream);
+    }
+}
+
+/// Asks the server at `addr` to switch the connection to `protocol` with a
+/// POST of `body` (JSON) to `path`. `Ok(Ok(socket))` once it has; the socket
+/// holds nothing past the server's `101` head. `Ok(Err(reply))` when the
+/// server answered with anything else.
+pub fn upgrade(
+    addr: SocketAddr,
+    path: &str,
+    protocol: &str,
+    body: &[u8],
+    timeout: Duration,
+) -> Result<std::result::Result<TcpStream, Response>> {
+    validate_target("POST", path)?;
+    validate_header("Upgrade", protocol)?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(io_err)?;
+    stream.set_read_timeout(Some(timeout)).map_err(io_err)?;
+    stream.set_write_timeout(Some(timeout)).map_err(io_err)?;
+    let _ = stream.set_nodelay(true);
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: {protocol}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).map_err(io_err)?;
+    stream.write_all(body).map_err(io_err)?;
+    stream.flush().map_err(io_err)?;
+    // Byte by byte up to the blank line, so nothing the new protocol sends
+    // right behind the head is swallowed by a buffer.
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if head.len() >= MAX_HEADER {
+            bail!("reply head too large");
+        }
+        match stream.read(&mut byte).map_err(io_err)? {
+            0 => bail!("connection closed before the reply"),
+            _ => head.push(byte[0]),
+        }
+    }
+    let mut reader = BufReader::new(&head[..]);
+    let mut remaining = MAX_HEADER;
+    let line = read_line(&mut reader, &mut remaining)?.context("no HTTP status")?;
+    let mut parts = line.splitn(3, ' ');
+    if !matches!(parts.next(), Some("HTTP/1.0" | "HTTP/1.1")) {
+        bail!("invalid HTTP version");
+    }
+    let status: u16 = parts
+        .next()
+        .filter(|c| c.len() == 3 && c.bytes().all(|b| b.is_ascii_digit()))
+        .context("invalid HTTP status")?
+        .parse()?;
+    let headers = read_headers(&mut reader, &mut remaining)?;
+    if status == 101 {
+        if !header(&headers, "upgrade").is_some_and(|u| u.eq_ignore_ascii_case(protocol)) {
+            bail!("the server switched to another protocol");
+        }
+        return Ok(Ok(stream));
+    }
+    let mut body = Vec::new();
+    let mut rest = BufReader::new(&mut stream);
+    read_response_body(&mut rest, &headers, &mut body, MAX_BODY as u64, false)?;
+    Ok(Err(Response {
+        status,
+        body: String::from_utf8_lossy(&body).into_owned(),
+        takeover: None,
+    }))
 }
 
 struct ConnectionSlot(std::sync::Arc<std::sync::atomic::AtomicUsize>);
@@ -383,6 +605,7 @@ pub fn exchange_with<S: Read + Write>(
     Ok(Response {
         status,
         body: String::from_utf8_lossy(&body).into_owned(),
+        takeover: None,
     })
 }
 
@@ -620,6 +843,7 @@ mod tests {
                     ("POST", "/v1/echo") => Response {
                         status: 200,
                         body: String::from_utf8_lossy(&req.body).into_owned(),
+                        takeover: None,
                     },
                     _ => Response::json(404, &serde_json::json!({ "ok": false })),
                 }
@@ -734,5 +958,98 @@ mod tests {
         assert_eq!(e.to_string(), "connection closed");
         let e = io_err(std::io::Error::other("disk full"));
         assert!(e.to_string().contains("disk full"), "{e}");
+    }
+
+    #[test]
+    fn an_upgraded_connection_carries_the_new_protocol_both_ways() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            serve(listener, |_, req| {
+                if req.path != "/v1/stream" {
+                    return Response::json(404, &serde_json::json!({ "ok": false }));
+                }
+                let body = req.body.clone();
+                Response::switching("test-proto/1", move |mut s| {
+                    // Sent at once: must not be lost in the client's reader.
+                    s.write_all(&body).unwrap();
+                    let mut b = [0u8; 4];
+                    s.read_exact(&mut b).unwrap();
+                    s.write_all(&b).unwrap();
+                })
+            })
+        });
+        let mut s = upgrade(
+            addr,
+            "/v1/stream",
+            "test-proto/1",
+            b"hello",
+            Duration::from_secs(2),
+        )
+        .unwrap()
+        .unwrap();
+        let mut got = [0u8; 5];
+        s.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"hello");
+        s.write_all(b"ping").unwrap();
+        let mut back = [0u8; 4];
+        s.read_exact(&mut back).unwrap();
+        assert_eq!(&back, b"ping");
+        let refused = upgrade(
+            addr,
+            "/v1/other",
+            "test-proto/1",
+            b"{}",
+            Duration::from_secs(2),
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(refused.status, 404);
+    }
+
+    #[test]
+    fn head_deadline_times_out_slow_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut deadline_stream =
+                DeadlineStream::new(&mut stream, Instant::now() + Duration::from_millis(50));
+            let res = read_request_from(&mut deadline_stream, |_, _, _| true);
+            tx.send(res.is_err()).unwrap();
+        });
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.write_all(b"GET /").unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = s.write_all(b" HTTP/1.1\r\n\r\n");
+        assert!(rx.recv_timeout(Duration::from_secs(2)).unwrap());
+    }
+
+    #[test]
+    fn large_update_body_rejected_for_unauthorized_callers() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            serve_with_auth(
+                listener,
+                |_| true,
+                |_peer, _path, _headers, _len| false,
+                |_, _| Response::json(200, &Ack::ok()),
+            );
+        });
+        let body = vec![0x4du8; 100 * 1024];
+        let r = request_with(
+            addr,
+            "POST",
+            crate::api::UPDATE_PATH,
+            &[("X-Latch-Version", "3.1.0")],
+            &body,
+            Duration::from_secs(5),
+        );
+        match r {
+            Ok(resp) => assert_eq!(resp.status, 403),
+            Err(e) => assert!(e.to_string().contains("403") || e.to_string().contains("closed")),
+        }
     }
 }

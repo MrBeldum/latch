@@ -1,0 +1,12 @@
+Stage("Asking for the stream…")
+connected in 120.747458ms
+  1s   6.0 fps   0.06 Mbps rtt  12 ms decode  3.32 ms host  4.58 ms assembly  0.01 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · software | 
+  2s   4.0 fps   0.00 Mbps rtt  12 ms decode  3.11 ms host  0.10 ms assembly  0.00 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · software | 
+  3s   4.0 fps   0.00 Mbps rtt  12 ms decode  4.28 ms host  0.15 ms assembly  0.00 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · software | 
+  4s   4.0 fps   0.00 Mbps rtt  13 ms decode  3.88 ms host  0.15 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · software | 
+  5s   4.0 fps   0.00 Mbps rtt  13 ms decode  3.89 ms host  0.15 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · software | 
+  6s   4.0 fps   0.00 Mbps rtt  13 ms decode  3.80 ms host  0.12 ms assembly  0.00 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · software | 
+  7s   4.0 fps   0.00 Mbps rtt  13 ms decode  3.82 ms host  0.17 ms assembly  0.00 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · software | 
+  8s   4.0 fps   0.00 Mbps rtt  17 ms decode  3.72 ms host  0.15 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · software | 
+  9s   4.0 fps   0.00 Mbps rtt  16 ms decode  3.57 ms host  0.12 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · software | 
+ 10s   4.0 fps   0.00 Mbps rtt  15 ms decode  4.04 ms host  0.15 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · software | 

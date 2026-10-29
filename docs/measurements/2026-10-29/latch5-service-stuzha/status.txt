@@ -1,0 +1,2 @@
+status: latch 5.0.0 {'kind': 'Latch', 'installed': True, 'running': True, 'api_ok': True, 'encoder': 'Latch software H.264', 'audio_problem': '', 'capture_size': None, 'max_fps': 30, 'viewer': False, 'protocol': 1}
+view exit 0
