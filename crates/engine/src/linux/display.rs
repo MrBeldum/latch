@@ -64,7 +64,10 @@ fn timings(width: u32, height: u32) -> anyhow::Result<randr::ModeInfo> {
 }
 
 pub(super) fn prepare(width: u32, height: u32, fps: u32) -> anyhow::Result<Option<Previous>> {
-    timings(width, height)?;
+    if let Err(error) = timings(width, height) {
+        tracing::warn!(%error, width, height, "keeping current display mode; streaming at the capture size");
+        return Ok(None);
+    }
     configure(width, height, fps.max(50), 50.0)
 }
 
@@ -243,5 +246,6 @@ mod tests {
         assert_eq!(refresh(&m), 60.0);
         assert_eq!((m.htotal, m.vtotal), (3048, 1967));
         assert!(timings(1, 1080).is_err());
+        assert!(prepare(6016, 3384, 60).unwrap().is_none());
     }
 }

@@ -6,7 +6,10 @@ use crate::{
     software::{Bgra, CpuCapture},
 };
 use anyhow::{bail, Context, Result};
-use std::{mem::ManuallyDrop, time::Duration};
+use std::{
+    mem::ManuallyDrop,
+    time::{Duration, Instant},
+};
 use windows::{
     core::{s, Interface},
     Win32::{
@@ -375,6 +378,58 @@ pub(super) struct Capture {
     pub display: DisplayRect,
     pub has_frame: bool,
     cpu_seeded: bool,
+    retry: ReopenBackoff,
+}
+struct ReopenBackoff {
+    at: Instant,
+    delay: Duration,
+}
+impl ReopenBackoff {
+    fn new() -> Self {
+        Self {
+            at: Instant::now(),
+            delay: Duration::from_millis(50),
+        }
+    }
+    fn defer(&mut self, now: Instant) {
+        self.at = now + self.delay;
+        self.delay = (self.delay * 2).min(Duration::from_secs(1));
+    }
+}
+fn oriented_size(width: u32, height: u32, rotation: DXGI_MODE_ROTATION) -> (u32, u32) {
+    if matches!(
+        rotation,
+        DXGI_MODE_ROTATION_ROTATE90 | DXGI_MODE_ROTATION_ROTATE270
+    ) {
+        (height, width)
+    } else {
+        (width, height)
+    }
+}
+fn desktop_rect(desc: &DXGI_OUTDUPL_DESC, coordinates: RECT) -> DisplayRect {
+    let (width, height) = oriented_size(desc.ModeDesc.Width, desc.ModeDesc.Height, desc.Rotation);
+    DisplayRect {
+        x: coordinates.left,
+        y: coordinates.top,
+        width,
+        height,
+    }
+}
+fn duplicate(output: &display::Output, gpu: &Gpu) -> Result<IDXGIOutputDuplication> {
+    // SAFETY: the device belongs to the selected output's adapter.
+    unsafe {
+        output
+            .output
+            .cast::<IDXGIOutput5>()
+            .and_then(|o| o.DuplicateOutput1(&gpu.device, 0, &[DXGI_FORMAT_B8G8R8A8_UNORM]))
+            .or_else(|_| {
+                output
+                    .output
+                    .cast::<IDXGIOutput1>()?
+                    .DuplicateOutput(&gpu.device)
+            })
+    }
+    .context("duplicate desktop output")
 }
 // SAFETY: D3D11/DXGI interfaces are free threaded and the immediate context has
 // multithread protection. Capture is used exclusively by its video worker; no
@@ -382,31 +437,13 @@ pub(super) struct Capture {
 unsafe impl Send for Capture {}
 impl Capture {
     pub fn new() -> Result<Self> {
+        let _dpi = display::DpiAwareness::physical();
         let output = display::select()?;
         let gpu = Gpu::new(&output.adapter)?;
-        // SAFETY: Duplication uses a device on the enumerated output's adapter.
-        let duplication = unsafe {
-            output
-                .output
-                .cast::<IDXGIOutput5>()
-                .and_then(|o| o.DuplicateOutput1(&gpu.device, 0, &[DXGI_FORMAT_B8G8R8A8_UNORM]))
-                .or_else(|_| {
-                    output
-                        .output
-                        .cast::<IDXGIOutput1>()?
-                        .DuplicateOutput(&gpu.device)
-                })
-        }
-        .context("duplicate desktop output")?;
+        let duplication = duplicate(&output, &gpu)?;
         // SAFETY: The duplication owns its descriptor.
         let desc = unsafe { duplication.GetDesc() };
-        let rect = output.desc.DesktopCoordinates;
-        let display = DisplayRect {
-            x: rect.left,
-            y: rect.top,
-            width: (rect.right - rect.left) as u32,
-            height: (rect.bottom - rect.top) as u32,
-        };
+        let display = desktop_rect(&desc, output.desc.DesktopCoordinates);
         let source = gpu.texture(
             desc.ModeDesc.Width,
             desc.ModeDesc.Height,
@@ -434,16 +471,69 @@ impl Capture {
             display,
             has_frame: false,
             cpu_seeded: false,
+            retry: ReopenBackoff::new(),
         })
+    }
+    fn reopen(&mut self) -> Result<()> {
+        let _dpi = display::DpiAwareness::physical();
+        let output = display::select()?;
+        // Reuse the device and cursor shaders while the adapter is unchanged.
+        // SAFETY: both descriptors are copied from live DXGI interfaces.
+        let (old, new) = unsafe {
+            (
+                self.gpu
+                    .device
+                    .cast::<IDXGIDevice>()?
+                    .GetAdapter()?
+                    .GetDesc()?
+                    .AdapterLuid,
+                output.adapter.GetDesc1()?.AdapterLuid,
+            )
+        };
+        if old.HighPart != new.HighPart || old.LowPart != new.LowPart {
+            *self = Self::new()?;
+            return Ok(());
+        }
+        let duplication = duplicate(&output, &self.gpu)?;
+        // SAFETY: duplication owns its descriptor.
+        let desc = unsafe { duplication.GetDesc() };
+        let source = self.gpu.texture(
+            desc.ModeDesc.Width,
+            desc.ModeDesc.Height,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            false,
+        )?;
+        let display = desktop_rect(&desc, output.desc.DesktopCoordinates);
+        let frame = self.gpu.texture(
+            display.width,
+            display.height,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            D3D11_BIND_RENDER_TARGET.0 as u32,
+            false,
+        )?;
+        self.source = source;
+        self.frame = frame;
+        self.display = display;
+        self.rotation = desc.Rotation;
+        self.pointer = Default::default();
+        self.shape = Default::default();
+        self.renderer.shape = None;
+        self.has_frame = false;
+        self.cpu_seeded = false;
+        self.duplication = Some(duplication);
+        self.retry = ReopenBackoff::new();
+        Ok(())
     }
     pub fn grab(&mut self, timeout: Duration) -> Result<bool> {
         if self.duplication.is_none() {
-            match Self::new() {
-                Ok(capture) => *self = capture,
-                Err(e) => {
-                    tracing::debug!("desktop duplication still unavailable: {e:#}");
-                    return Ok(false);
-                }
+            if Instant::now() < self.retry.at {
+                return Ok(false);
+            }
+            if let Err(e) = self.reopen() {
+                tracing::debug!("desktop duplication still unavailable: {e:#}");
+                self.retry.defer(Instant::now());
+                return Ok(false);
             }
         }
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
@@ -467,6 +557,7 @@ impl Capture {
                 // own only one duplication per output. Retain the last safe copy
                 // while a secure desktop temporarily prevents reopening.
                 self.duplication = None;
+                self.retry.defer(Instant::now());
                 return Ok(false);
             }
             Err(e) => return Err(e).context("acquire desktop frame"),
@@ -475,7 +566,35 @@ impl Capture {
         let mut shape_bytes = None;
         let copied = (|| -> Result<()> {
             let texture: ID3D11Texture2D = resource.context("DXGI returned no frame")?.cast()?;
-            // SAFETY: These textures have identical dimensions and BGRA format.
+            // Use the acquired texture as the final authority on physical size;
+            // DesktopCoordinates can be virtualised for DPI-unaware processes.
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            let mut source = D3D11_TEXTURE2D_DESC::default();
+            // SAFETY: both descriptors are copied from live owned textures.
+            unsafe {
+                texture.GetDesc(&mut desc);
+                self.source.GetDesc(&mut source);
+            }
+            if (desc.Width, desc.Height) != (source.Width, source.Height) {
+                self.source = self.gpu.texture(
+                    desc.Width,
+                    desc.Height,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                    false,
+                )?;
+                let (width, height) = oriented_size(desc.Width, desc.Height, self.rotation);
+                self.frame = self.gpu.texture(
+                    width,
+                    height,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    D3D11_BIND_RENDER_TARGET.0 as u32,
+                    false,
+                )?;
+                self.display.width = width;
+                self.display.height = height;
+            }
+            // SAFETY: these textures have identical dimensions and BGRA format.
             unsafe {
                 self.gpu.context.CopyResource(&self.source, &texture);
             }
@@ -638,7 +757,33 @@ impl Converter {
                 right: output.0 as i32,
                 bottom: output.1 as i32,
             };
-            context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&rect));
+            let fitted = DisplayRect {
+                width: input.0,
+                height: input.1,
+                ..Default::default()
+            }
+            .fitted(output.0, output.1);
+            let content = RECT {
+                left: fitted.x,
+                top: fitted.y,
+                right: fitted.x + fitted.width as i32,
+                bottom: fitted.y + fitted.height as i32,
+            };
+            context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&content));
+            context.VideoProcessorSetOutputBackgroundColor(
+                &processor,
+                true,
+                &D3D11_VIDEO_COLOR {
+                    Anonymous: D3D11_VIDEO_COLOR_0 {
+                        YCbCr: D3D11_VIDEO_COLOR_YCbCrA {
+                            Y: 0.0,
+                            Cb: 0.5,
+                            Cr: 0.5,
+                            A: 1.0,
+                        },
+                    },
+                },
+            );
             context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&rect));
             Ok(Self {
                 gpu: gpu.clone(),
@@ -715,6 +860,56 @@ impl Converter {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn physical_texture_size_and_reopen_backoff() {
+        use super::*;
+        assert_eq!(
+            oriented_size(1920, 1080, DXGI_MODE_ROTATION_IDENTITY),
+            (1920, 1080)
+        );
+        assert_eq!(
+            oriented_size(1920, 1080, DXGI_MODE_ROTATION_ROTATE90),
+            (1080, 1920)
+        );
+        assert_eq!(
+            oriented_size(1920, 1080, DXGI_MODE_ROTATION_ROTATE270),
+            (1080, 1920)
+        );
+        let desc = DXGI_OUTDUPL_DESC {
+            ModeDesc: DXGI_MODE_DESC {
+                Width: 1920,
+                Height: 1080,
+                ..Default::default()
+            },
+            Rotation: DXGI_MODE_ROTATION_IDENTITY,
+            ..Default::default()
+        };
+        // A DPI-unaware output rectangle must never shrink the physical frame.
+        let display = desktop_rect(
+            &desc,
+            RECT {
+                left: -1280,
+                top: 20,
+                right: 0,
+                bottom: 740,
+            },
+        );
+        assert_eq!(
+            display,
+            DisplayRect {
+                x: -1280,
+                y: 20,
+                width: 1920,
+                height: 1080
+            }
+        );
+        let mut retry = ReopenBackoff::new();
+        let now = Instant::now();
+        for millis in [50, 100, 200, 400, 800, 1000, 1000] {
+            retry.defer(now);
+            assert_eq!(retry.at.duration_since(now), Duration::from_millis(millis));
+        }
+    }
     #[test]
     fn cursor_shaders_compile_without_a_gpu() -> anyhow::Result<()> {
         super::compile_shader(windows::core::s!("vs"), windows::core::s!("vs_4_0"))?;

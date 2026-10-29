@@ -2,7 +2,7 @@
 
 use super::ffi::*;
 use crate::video::{Codec, EncodedVideo, VideoConfig};
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{bail, ensure, Result};
 use parking_lot::Mutex;
 use std::{ffi::c_void, ptr, time::Instant};
 
@@ -16,12 +16,15 @@ pub(super) struct Encoder {
     session: Owned,
     output: Box<Mutex<Output>>,
     pub hardware: bool,
-    fps: u32,
+    config: VideoConfig,
     index: i64,
 }
 
 impl Encoder {
     pub fn new(config: &VideoConfig) -> Result<Self> {
+        Self::create(config, true)
+    }
+    fn create(config: &VideoConfig, allow_hardware: bool) -> Result<Self> {
         ensure!(
             config.width > 0
                 && config.height > 0
@@ -47,14 +50,22 @@ impl Encoder {
         // at a stable address until invalidate has drained callbacks in Drop.
         unsafe {
             for (hardware, low_latency) in [(true, true), (true, false), (false, false)] {
-                let mut entries = vec![(
-                    kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
-                    if hardware {
-                        kCFBooleanTrue
-                    } else {
-                        kCFBooleanFalse
-                    },
-                )];
+                if hardware && !allow_hardware {
+                    continue;
+                }
+                let mut entries = if hardware {
+                    vec![(
+                        kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
+                        kCFBooleanTrue,
+                    )]
+                } else {
+                    // Omitting RequireHardware alone can select the same failing
+                    // hardware encoder again. Explicitly disable it for this retry.
+                    vec![(
+                        kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
+                        kCFBooleanFalse,
+                    )]
+                };
                 if low_latency {
                     entries.push((
                         kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
@@ -99,7 +110,7 @@ impl Encoder {
             session: Owned::new(session)?,
             output,
             hardware: required_hardware,
-            fps: config.fps,
+            config: config.clone(),
             index: 0,
         };
         // SAFETY: the session is live and each property receives the documented CF value type.
@@ -176,7 +187,21 @@ impl Encoder {
                 2,
                 &kCFTypeArrayCallBacks,
             ))?;
-            self.set(kVTCompressionPropertyKey_DataRateLimits, limits.0)
+            let status = VTSessionSetProperty(
+                self.session.0,
+                kVTCompressionPropertyKey_DataRateLimits,
+                limits.0,
+            );
+            if status == -12900 {
+                // kVTPropertyNotSupportedErr (notably software HEVC)
+                tracing::debug!(
+                    "VideoToolbox encoder does not support peak rate limits; using average bitrate"
+                );
+            } else {
+                check(status, "set VideoToolbox data rate limits")?;
+            }
+            self.config.bitrate_kbps = kbps;
+            Ok(())
         }
     }
     pub fn encode(
@@ -184,7 +209,30 @@ impl Encoder {
         image: Ref,
         captured: Instant,
         keyframe: bool,
-    ) -> Result<EncodedVideo> {
+    ) -> Result<Option<EncodedVideo>> {
+        match self.encode_once(image, captured, keyframe) {
+            Err(error) if self.hardware => {
+                tracing::warn!(%error, "VideoToolbox hardware encode failed; retrying in software");
+                self.software_retry(image, captured)
+            }
+            result => result,
+        }
+    }
+    fn software_retry(&mut self, image: Ref, captured: Instant) -> Result<Option<EncodedVideo>> {
+        // Destroy the failed session before selecting the replacement. Both its
+        // callback state and this call's retained image stay alive during invalidation.
+        unsafe {
+            VTCompressionSessionInvalidate(self.session.0);
+        }
+        *self = Self::create(&self.config, false)?;
+        self.encode_once(image, captured, true)
+    }
+    fn encode_once(
+        &mut self,
+        image: Ref,
+        captured: Instant,
+        keyframe: bool,
+    ) -> Result<Option<EncodedVideo>> {
         {
             let mut out = self.output.lock();
             out.captured = captured;
@@ -205,8 +253,8 @@ impl Encoder {
                 VTCompressionSessionEncodeFrame(
                     self.session.0,
                     image,
-                    time(self.index, self.fps),
-                    time(1, self.fps),
+                    time(self.index, self.config.fps),
+                    time(1, self.config.fps),
                     options.0,
                     ptr::null_mut(),
                     ptr::null_mut(),
@@ -214,16 +262,15 @@ impl Encoder {
                 "encode picture",
             )?;
             check(
-                VTCompressionSessionCompleteFrames(self.session.0, time(self.index, self.fps)),
+                VTCompressionSessionCompleteFrames(
+                    self.session.0,
+                    time(self.index, self.config.fps),
+                ),
                 "complete picture",
             )?;
         }
         self.index += 1;
-        self.output
-            .lock()
-            .frame
-            .take()
-            .ok_or_else(|| anyhow!("VideoToolbox dropped the picture"))?
+        self.output.lock().frame.take().transpose()
     }
 }
 impl Drop for Encoder {
@@ -242,12 +289,24 @@ unsafe extern "C" fn encoded(
     // SAFETY: context points to the session's stable boxed Mutex until invalidation completes.
     let out = unsafe { &*context.cast::<Mutex<Output>>() };
     let mut out = out.lock();
-    out.frame = Some((|| {
-        check(status, "VideoToolbox output")?;
-        ensure!(!sample.is_null(), "VideoToolbox dropped the picture");
+    out.frame = callback_frame(status, sample.is_null(), || {
         // SAFETY: the callback's sample and all of its borrowed data stay live for this scope.
         unsafe { annex_b(sample, out.hevc, out.captured) }
-    })());
+    });
+}
+
+fn callback_frame(
+    status: i32,
+    dropped: bool,
+    read: impl FnOnce() -> Result<EncodedVideo>,
+) -> Option<Result<EncodedVideo>> {
+    if status != 0 {
+        Some(check(status, "VideoToolbox output").and_then(|()| read()))
+    } else if dropped {
+        None
+    } else {
+        Some(read())
+    }
 }
 
 unsafe fn annex_b(sample: Ref, hevc: bool, captured: Instant) -> Result<EncodedVideo> {

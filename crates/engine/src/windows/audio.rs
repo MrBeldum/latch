@@ -68,15 +68,19 @@ impl Loopback {
                 wave.wBitsPerSample,
                 wave.nBlockAlign as usize,
             );
-            let (subformat, valid_bits) = if tag == WAVE_FORMAT_EXTENSIBLE as u16
+            let (subformat, valid_bits, mask) = if tag == WAVE_FORMAT_EXTENSIBLE as u16
                 && wave.cbSize as usize
                     >= std::mem::size_of::<WAVEFORMATEXTENSIBLE>()
                         - std::mem::size_of::<WAVEFORMATEX>()
             {
                 let ext = (format as *const WAVEFORMATEXTENSIBLE).read_unaligned();
-                (Some(ext.SubFormat), ext.Samples.wValidBitsPerSample)
+                (
+                    Some(ext.SubFormat),
+                    ext.Samples.wValidBitsPerSample,
+                    ext.dwChannelMask,
+                )
             } else {
-                (None, bits)
+                (None, bits, 0)
             };
             let float = tag == WAVE_FORMAT_IEEE_FLOAT as u16
                 || subformat == Some(KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
@@ -119,7 +123,7 @@ impl Loopback {
                 valid_bits,
                 block,
                 float,
-                resampler: Resampler::new(rate, channels),
+                resampler: Resampler::with_channel_mask(rate, channels, mask),
                 pending: VecDeque::new(),
             })
         }

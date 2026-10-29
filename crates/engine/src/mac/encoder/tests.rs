@@ -116,7 +116,7 @@ fn ffmpeg() -> Option<std::path::PathBuf> {
     })
 }
 
-fn roundtrip(codec: Codec) {
+fn roundtrip(codec: Codec, allow_hardware: bool) {
     let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let Some(ffmpeg) = ffmpeg() else {
         eprintln!("no ffmpeg on this machine; skipping the independent decode of {codec:?}");
@@ -129,7 +129,7 @@ fn roundtrip(codec: Codec) {
         bitrate_kbps: 10_000,
         codec,
     };
-    let mut encoder = Encoder::new(&config).unwrap();
+    let mut encoder = Encoder::create(&config, allow_hardware).unwrap();
     let image = surface();
     let dir = std::env::temp_dir().join(format!("latch-mac-{}-{codec:?}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
@@ -155,7 +155,15 @@ fn roundtrip(codec: Codec) {
             captured = Instant::now();
         }
         let forced = i == 16 || i == 40;
-        let encoded = encoder.encode(image.0, captured, forced).unwrap();
+        let mut encoded = None;
+        for _ in 0..30 {
+            encoded = encoder.encode(image.0, captured, forced).unwrap();
+            if encoded.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs_f64(1.0 / f64::from(FPS)));
+        }
+        let encoded = encoded.expect("encoder kept dropping the picture for one second");
         assert_eq!(encoded.captured, captured);
         if i == 0 || forced {
             assert!(encoded.keyframe, "{codec:?}: requested keyframe at {i}");
@@ -213,13 +221,68 @@ fn roundtrip(codec: Codec) {
 }
 #[test]
 fn hevc_iosurface_roundtrip() {
-    roundtrip(Codec::Hevc);
+    roundtrip(Codec::Hevc, true);
 }
 #[test]
 fn h264_high_iosurface_roundtrip() {
-    roundtrip(Codec::H264High);
+    roundtrip(Codec::H264High, true);
 }
 #[test]
 fn h264_baseline_iosurface_roundtrip() {
-    roundtrip(Codec::H264Baseline);
+    roundtrip(Codec::H264Baseline, true);
+}
+
+#[test]
+fn dropped_callback_is_no_output_but_status_errors_propagate() {
+    assert!(callback_frame(0, true, || panic!("dropped sample must not be read")).is_none());
+    assert!(
+        callback_frame(-12915, true, || panic!("failed sample must not be read"))
+            .unwrap()
+            .is_err()
+    );
+}
+
+#[test]
+fn software_session_encodes_an_iosurface() {
+    let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let config = VideoConfig {
+        width: WIDTH as u32,
+        height: HEIGHT as u32,
+        fps: FPS,
+        bitrate_kbps: 10_000,
+        codec: Codec::H264Baseline,
+    };
+    let mut encoder = Encoder::create(&config, false).unwrap();
+    let image = surface();
+    fill(&image, &pattern(0));
+    let frame = encoder
+        .encode(image.0, Instant::now(), true)
+        .unwrap()
+        .expect("software IDR");
+    assert!(frame.keyframe);
+    assert!(!encoder.hardware);
+    encoder.bitrate(8_000).unwrap();
+    let captured = Instant::now();
+    // Model a session that was advertised as hardware at creation but becomes
+    // unavailable at encode time (as on the virtual Mac CI runner).
+    encoder.hardware = true;
+    // SAFETY: invalidate our owned session, forcing the production encode error path.
+    unsafe {
+        VTCompressionSessionInvalidate(encoder.session.0);
+    }
+    let retried = encoder
+        .encode(image.0, captured, false)
+        .unwrap()
+        .expect("replacement software IDR");
+    assert!(retried.keyframe);
+    assert_eq!(retried.captured, captured);
+    assert_eq!(encoder.config.bitrate_kbps, 8_000);
+    assert!(!encoder.hardware);
+}
+
+#[test]
+fn software_iosurface_roundtrips() {
+    for codec in [Codec::H264Baseline, Codec::H264High, Codec::Hevc] {
+        roundtrip(codec, false);
+    }
 }

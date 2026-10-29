@@ -38,6 +38,7 @@ fn extended(vk: u16) -> bool {
     matches!(vk, 0x21..=0x28 | 0x2c..=0x2e | 0x5b..=0x5d | 0x6f | 0x90 | 0xa3 | 0xa5)
 }
 fn construct(event: &Event, display: DisplayRect) -> Result<Vec<INPUT>> {
+    let _dpi = super::display::DpiAwareness::physical();
     let mut out = Vec::new();
     match event {
         Event::Key { vk, down, .. } => {

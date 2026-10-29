@@ -14,13 +14,35 @@ pub struct DisplayRect {
 }
 
 impl DisplayRect {
-    /// Where a point in a `pw × ph` picture lands on this display.
+    /// The centred content rectangle when this display is fitted into a picture.
+    /// Capture and injection share this rounding so bars never shift a click.
+    pub fn fitted(&self, pw: u32, ph: u32) -> Self {
+        let (pw, ph) = (pw.max(1), ph.max(1));
+        let (w, h) = (u64::from(self.width.max(1)), u64::from(self.height.max(1)));
+        let (width, height) = if u64::from(pw) * h > u64::from(ph) * w {
+            ((u64::from(ph) * w / h).max(1) as u32, ph)
+        } else {
+            (pw, (u64::from(pw) * h / w).max(1) as u32)
+        };
+        Self {
+            x: ((pw - width) / 2) as i32,
+            y: ((ph - height) / 2) as i32,
+            width,
+            height,
+        }
+    }
+
+    /// Map picture content onto the display, clamping clicks in the bars to its edge.
     pub fn map(&self, x: u16, y: u16, pw: u16, ph: u16) -> (i32, i32) {
-        let pw = pw.max(1) as i64;
-        let ph = ph.max(1) as i64;
-        let fx = (x as i64).min(pw - 1) * self.width as i64 / pw;
-        let fy = (y as i64).min(ph - 1) * self.height as i64 / ph;
-        (self.x + fx as i32, self.y + fy as i32)
+        let content = self.fitted(u32::from(pw), u32::from(ph));
+        let axis = |p: u16, start: i32, extent: u32, size: u32| {
+            let p = (i64::from(p) - i64::from(start)).clamp(0, i64::from(extent));
+            (p * i64::from(size) / i64::from(extent)).min(i64::from(size.saturating_sub(1))) as i32
+        };
+        (
+            self.x + axis(x, content.x, content.width, self.width),
+            self.y + axis(y, content.y, content.height, self.height),
+        )
     }
 }
 
@@ -420,5 +442,45 @@ pub mod keymap {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::*;
+
+    #[test]
+    fn aspect_fit_and_bar_clicks() {
+        let display = DisplayRect {
+            x: -1512,
+            y: 20,
+            width: 1512,
+            height: 982,
+        };
+        let fit = display.fitted(2560, 1440);
+        assert_eq!((fit.x, fit.y, fit.width, fit.height), (171, 0, 2217, 1440));
+        assert_eq!(display.map(171, 0, 2560, 1440), (-1512, 20));
+        assert_eq!(display.map(0, 720, 2560, 1440), (-1512, 511));
+        assert_eq!(display.map(2559, 720, 2560, 1440), (-1, 511));
+        let display = DisplayRect {
+            x: 30,
+            y: -100,
+            width: 1920,
+            height: 1080,
+        };
+        assert_eq!(
+            display.fitted(1920, 1200),
+            DisplayRect {
+                x: 0,
+                y: 60,
+                width: 1920,
+                height: 1080
+            }
+        );
+        assert_eq!(display.map(960, 0, 1920, 1200), (990, -100));
+        assert_eq!(display.map(960, 1199, 1920, 1200), (990, 979));
+        assert_eq!(display.map(960, 600, 1920, 1200), (990, 440));
+        assert_eq!(display.map(0, 0, 0, 0), (30, -100));
+        assert_eq!(DisplayRect::default().map(u16::MAX, u16::MAX, 0, 0), (0, 0));
     }
 }
