@@ -560,6 +560,7 @@ pub struct Live {
     pub frames: Arc<FrameSlot>,
     pub events: Receiver<Event>,
     pub started: Instant,
+    pub codec: &'static str,
     pub requested: (u32, u32, u32),
     /// The PC's desktop, when it is a fixed size other than the stream's
     /// (the stream is that desktop scaled down). Relative mouse movement
@@ -899,6 +900,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         frames,
         events: rx,
         started: Instant::now(),
+        codec: "",
         requested: (w, h, fps),
         desktop: fixed_desktop(host.streamer.capture_size).filter(|&d| d != (w, h)),
         settings,
@@ -912,7 +914,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
 
 /// Whether this host accepts the existing Windows update push.
 fn can_upgrade(os: &str, version: &str) -> bool {
-    latch_core::update::takes_pushed_host(os)
+    os.eq_ignore_ascii_case("windows")
         && semver::Version::parse(version)
             .is_ok_and(|v| latch_core::update::host_can_receive_update(&v))
 }

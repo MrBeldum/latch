@@ -657,10 +657,17 @@ impl View {
                                 } else {
                                     (live.requested.0, live.requested.1)
                                 };
+                                let codec = if !live.codec.is_empty() {
+                                    live.codec
+                                } else if !s.codec.is_empty() {
+                                    s.codec
+                                } else {
+                                    "Connecting…"
+                                };
                                 ui.label(
                                     RichText::new(format!(
-                                        "{w}×{h} · {} fps · {}",
-                                        live.requested.2, if s.codec.is_empty() { "Connecting…" } else { s.codec }
+                                        "{w}×{h} · {} fps · {codec}",
+                                        live.requested.2
                                     ))
                                     .font(theme::mono(theme::text::MONO - 0.5))
                                     .color(P.text_tertiary),
@@ -1970,6 +1977,7 @@ pub(crate) mod tests {
             frames,
             events: rx,
             started: Instant::now(),
+            codec: "HEVC",
             requested: (1920, 1080, 60),
             desktop: None,
             settings,

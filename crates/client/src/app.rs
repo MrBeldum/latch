@@ -470,7 +470,13 @@ impl ClientApp {
         let mut fullscreen = None;
         {
             let mut guard = self.live.lock();
-            let Some(live) = guard.as_ref() else { return };
+            let Some(live) = guard.as_mut() else { return };
+            if live.codec.is_empty() {
+                let s = live.session.stats();
+                if !s.codec.is_empty() {
+                    live.codec = s.codec;
+                }
+            }
             let mut prog = self.progress.lock();
             while let Ok(ev) = live.events.try_recv() {
                 match ev {
@@ -1706,7 +1712,7 @@ impl ClientApp {
                         .show(ui, |ui| {
                             ui.add(
                                 egui::Label::new(
-                                    egui::RichText::new(include_str!("../NOTICE"))
+                                    egui::RichText::new(ui::NOTICES)
                                         .font(ui::theme::mono(11.5))
                                         .color(P.text_secondary),
                                 )
@@ -2168,7 +2174,11 @@ mod tests {
             "{}",
             w[2]
         );
-        assert!(w[3].contains("Update Latch Host"), "{}", w[3]);
+        assert!(
+            w[3].contains("Install the latest Latch release"),
+            "{}",
+            w[3]
+        );
         assert_eq!(
             host_audio_problem(&Mutex::new(disc.clone()), &gaming_pc.node_id).as_deref(),
             Some("Unable to initialize audio capture. The stream will not have audio.")
