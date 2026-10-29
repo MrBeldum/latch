@@ -14,8 +14,7 @@ use std::time::Duration;
 
 /// Turning HDR off answers within seconds.
 const TIMEOUT: Duration = Duration::from_secs(25);
-/// The report is slower: PowerShell with WMI and a screen sample, then two
-/// calls to the engine's web API of up to 8 s each.
+/// The report also collects displays and a screen sample on the PC.
 const REPORT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What the PC said, in a form the stream's notice can show.
@@ -185,9 +184,7 @@ pub fn verdict(report: &Value) -> Help {
         "The PC's own desktop is black: its display is off or asleep. Wake \
          it with a key press, or check the PC's power settings."
     } else if report["windows"]["locked"] == Value::Bool(true) {
-        "The PC is showing its lock screen, which the streaming engine \
-         cannot capture. Sign in on the PC, or let the engine run as a \
-         service."
+        "The PC is showing its lock screen. Sign in on the PC to share its desktop."
     } else if headless {
         "No monitor is attached to the PC, so Windows is drawing to a \
          placeholder display that captures as black. Attach a monitor or a \
@@ -322,7 +319,6 @@ mod tests {
         let elsewhere = serde_json::json!({
             "windows": {"supported": false},
             "advanced_color": {"supported": false},
-            "sunshine": {},
         });
         assert_eq!(verdict(&elsewhere).message, "");
         for os in ["windows", "linux"] {

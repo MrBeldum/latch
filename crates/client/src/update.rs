@@ -632,7 +632,7 @@ fn should_push(running: &Version, rel: &Release) -> bool {
 
 pub fn old_host_message(name: &str, version: &Version) -> String {
     format!(
-        "{name} runs Latch Host {version}, which cannot take an update over the network. Connect to it and choose PC → Update Latch Host in the toolbar: this machine installs the new version through the stream. After that, updates are automatic."
+        "{name} runs Latch Host {version}, which cannot take an update over the network. Install the latest Latch release on that PC from https://github.com/MrBeldum/latch/releases/latest. After that, updates are automatic."
     )
 }
 
@@ -665,6 +665,19 @@ fn is_transient(e: &anyhow::Error) -> bool {
         || s.contains("Connection reset")
         || s.contains("os error 32")
         || s.contains("os error 35")
+}
+
+/// Use the same verified download and update push as the automatic updater
+/// before connecting to a host that speaks the old streaming protocol.
+pub fn upgrade_for_stream(ip: Ipv4Addr, running: &str) -> Result<()> {
+    let cfg = ClientConfig::load();
+    let token = update::token(cfg.github_token.as_deref());
+    let rel = update::latest(token.as_deref())?;
+    let running = Version::parse(running)?;
+    if rel.version.major < 5 || !should_push(&running, &rel) {
+        bail!("no Latch 5 update is available. Install Latch 5 on that PC to connect.");
+    }
+    push_host(&rel, token.as_deref(), ip)
 }
 
 /// Send the new host to the PC at `ip`. The host checks the digest, swaps
@@ -994,7 +1007,7 @@ mod tests {
         let msg = old_host_message("Gaming-PC", &Version::new(3, 0, 0));
         assert!(msg.contains("Gaming-PC"), "{msg}");
         assert!(msg.contains("3.0.0"), "{msg}");
-        assert!(msg.contains("Update Latch Host"), "{msg}");
+        assert!(msg.contains("Install the latest Latch release"), "{msg}");
         assert!(!msg.contains("Broken pipe"), "{msg}");
         assert!(!msg.contains("os error"), "{msg}");
     }

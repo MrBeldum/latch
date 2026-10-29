@@ -1,4 +1,4 @@
-//! Latch viewer: machine list, pairing, stream window.
+//! Latch viewer: machine list and stream window.
 
 pub mod app;
 pub mod clipboard;

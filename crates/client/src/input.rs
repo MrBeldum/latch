@@ -1,13 +1,12 @@
-//! Keyboard and mouse translation: egui events in, Moonlight input calls out.
+//! Keyboard and mouse translation: egui events in, Latch input calls out.
 
 use egui::{Key, Modifiers, PointerButton};
-use latch_stream::ffi::{
-    BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT, BUTTON_X1, BUTTON_X2, MODIFIER_ALT, MODIFIER_CTRL,
-    MODIFIER_META, MODIFIER_SHIFT,
+use latch_stream::input::{
+    BUTTON_BACK, BUTTON_FORWARD, BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT, MOD_ALT, MOD_CTRL,
+    MOD_META, MOD_SHIFT,
 };
 use latch_stream::Input;
 use std::collections::BTreeSet;
-use std::ffi::c_char;
 
 pub const VK_SHIFT: i16 = 0x10;
 pub const VK_CONTROL: i16 = 0x11;
@@ -123,37 +122,41 @@ pub fn vk(key: Key) -> Option<i16> {
     })
 }
 
-pub fn button(b: PointerButton) -> Option<i32> {
+pub fn button(b: PointerButton) -> Option<u8> {
     Some(match b {
         PointerButton::Primary => BUTTON_LEFT,
         PointerButton::Secondary => BUTTON_RIGHT,
         PointerButton::Middle => BUTTON_MIDDLE,
-        PointerButton::Extra1 => BUTTON_X1,
-        PointerButton::Extra2 => BUTTON_X2,
+        PointerButton::Extra1 => BUTTON_BACK,
+        PointerButton::Extra2 => BUTTON_FORWARD,
     })
 }
 
-/// Where keyboard and mouse events go: the PC, through Moonlight, or in
+/// Where keyboard and mouse events go: the PC, through Latch, or in
 /// tests a recording, so the order and masks the PC would see can be
 /// checked.
 pub trait Sink {
-    /// `vk` is a Windows virtual-key code; `mask` the `MODIFIER_*` bits.
-    fn key(&self, vk: i16, down: bool, mask: c_char);
+    /// `vk` is a Windows virtual-key code; `mask` the `MOD_*` bits.
+    fn key(&self, vk: i16, down: bool, mask: u8);
     /// `b` is one of the `BUTTON_*` codes.
-    fn button(&self, b: i32, down: bool);
+    fn button(&self, b: u8, down: bool);
     /// An absolute position in a `w` by `h` picture.
     fn position(&self, x: i16, y: i16, w: i16, h: i16);
     /// Relative movement, while the mouse is captured.
     fn motion(&self, dx: i16, dy: i16);
     /// In 1/120ths of a wheel click; positive is up and right.
     fn scroll(&self, vertical: i16, horizontal: i16);
+    fn release_all(&self);
 }
 
 impl Sink for Input {
-    fn key(&self, vk: i16, down: bool, mask: c_char) {
+    fn release_all(&self) {
+        Input::release_all(self);
+    }
+    fn key(&self, vk: i16, down: bool, mask: u8) {
         Input::key(self, vk, down, mask);
     }
-    fn button(&self, b: i32, down: bool) {
+    fn button(&self, b: u8, down: bool) {
         self.mouse_button(b, down);
     }
     fn position(&self, x: i16, y: i16, w: i16, h: i16) {
@@ -171,11 +174,12 @@ impl Sink for Input {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sent {
-    Key(i16, bool, c_char),
-    Button(i32, bool),
+    Key(i16, bool, u8),
+    Button(u8, bool),
     Position(i16, i16, i16, i16),
     Motion(i16, i16),
     Scroll(i16, i16),
+    ReleaseAll,
 }
 
 /// A [`Sink`] that keeps what it is sent, and says whether the stream is
@@ -213,10 +217,13 @@ impl Recorder {
 
 #[cfg(test)]
 impl Sink for Recorder {
-    fn key(&self, vk: i16, down: bool, mask: c_char) {
+    fn release_all(&self) {
+        self.record(Sent::ReleaseAll);
+    }
+    fn key(&self, vk: i16, down: bool, mask: u8) {
         self.record(Sent::Key(vk, down, mask));
     }
-    fn button(&self, b: i32, down: bool) {
+    fn button(&self, b: u8, down: bool) {
         self.record(Sent::Button(b, down));
     }
     fn position(&self, x: i16, y: i16, w: i16, h: i16) {
@@ -230,9 +237,9 @@ impl Sink for Recorder {
     }
 }
 
-/// One key event as Moonlight takes it: the key, down or up, and the
+/// One key event as Latch takes it: the key, down or up, and the
 /// modifier mask sent with it.
-type KeyEvent = (i16, bool, c_char);
+type KeyEvent = (i16, bool, u8);
 
 /// The modifier keys, in the order their mask bits are listed.
 const MODIFIERS: [i16; 4] = [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN];
@@ -246,11 +253,11 @@ fn send(out: &(impl Sink + ?Sized), events: &[KeyEvent]) {
 /// Press `keys` in order and release them in reverse, with `mask` for the
 /// modifiers already held. Usable from any thread with an [`Input`], which
 /// is what typing on the PC from a worker needs.
-pub fn press_chord(out: &(impl Sink + ?Sized), keys: &[i16], mask: c_char) {
+pub fn press_chord(out: &(impl Sink + ?Sized), keys: &[i16], mask: u8) {
     send(out, &chord_events(keys, mask));
 }
 
-fn chord_events(keys: &[i16], mask: c_char) -> Vec<KeyEvent> {
+fn chord_events(keys: &[i16], mask: u8) -> Vec<KeyEvent> {
     let mut events = Vec::new();
     let mut held = Vec::new();
     for &k in keys {
@@ -268,7 +275,7 @@ fn chord_events(keys: &[i16], mask: c_char) -> Vec<KeyEvent> {
 /// `mask` outside `keys` are released first, so ⌘ held as Ctrl does not
 /// turn Shift+Insert into Ctrl+Shift+Insert, and pressed again after.
 /// `press` is the part of `keys` to press: those not already held.
-fn alone_events(keys: &[i16], press: &[i16], mask: c_char) -> Vec<KeyEvent> {
+fn alone_events(keys: &[i16], press: &[i16], mask: u8) -> Vec<KeyEvent> {
     let others: Vec<i16> = MODIFIERS
         .into_iter()
         .filter(|&vk| mask & mask_of(&[vk]) != 0 && !keys.contains(&vk))
@@ -287,19 +294,19 @@ fn alone_events(keys: &[i16], press: &[i16], mask: c_char) -> Vec<KeyEvent> {
     events
 }
 
-fn mask_of(keys: &[i16]) -> c_char {
-    let mut m: c_char = 0;
+fn mask_of(keys: &[i16]) -> u8 {
+    let mut m: u8 = 0;
     if keys.contains(&VK_SHIFT) {
-        m |= MODIFIER_SHIFT;
+        m |= MOD_SHIFT;
     }
     if keys.contains(&VK_CONTROL) {
-        m |= MODIFIER_CTRL;
+        m |= MOD_CTRL;
     }
     if keys.contains(&VK_MENU) {
-        m |= MODIFIER_ALT;
+        m |= MOD_ALT;
     }
     if keys.contains(&VK_LWIN) {
-        m |= MODIFIER_META;
+        m |= MOD_META;
     }
     m
 }
@@ -309,7 +316,7 @@ fn mask_of(keys: &[i16]) -> c_char {
 #[derive(Default)]
 pub struct Held {
     keys: BTreeSet<i16>,
-    buttons: BTreeSet<i32>,
+    buttons: BTreeSet<u8>,
 }
 
 impl Held {
@@ -322,7 +329,7 @@ impl Held {
         out.key(vk, down, self.mask());
     }
 
-    pub fn button(&mut self, out: &(impl Sink + ?Sized), b: i32, down: bool) {
+    pub fn button(&mut self, out: &(impl Sink + ?Sized), b: u8, down: bool) {
         if down {
             self.buttons.insert(b);
         } else {
@@ -353,13 +360,13 @@ impl Held {
         .collect()
     }
 
-    /// The modifier byte Moonlight wants alongside every key event.
-    pub fn mask(&self) -> c_char {
+    /// The modifier byte Latch wants alongside every key event.
+    pub fn mask(&self) -> u8 {
         [
-            (VK_SHIFT, MODIFIER_SHIFT),
-            (VK_CONTROL, MODIFIER_CTRL),
-            (VK_MENU, MODIFIER_ALT),
-            (VK_LWIN, MODIFIER_META),
+            (VK_SHIFT, MOD_SHIFT),
+            (VK_CONTROL, MOD_CTRL),
+            (VK_MENU, MOD_ALT),
+            (VK_LWIN, MOD_META),
         ]
         .into_iter()
         .filter(|(vk, _)| self.keys.contains(vk))
@@ -373,6 +380,7 @@ impl Held {
         for b in std::mem::take(&mut self.buttons) {
             out.button(b, false);
         }
+        out.release_all();
     }
 
     /// Press a chord and release it, e.g. Ctrl+Alt+Del. A key that is
@@ -415,6 +423,32 @@ impl Held {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn releasing_sends_key_ups_and_a_host_wide_release() {
+        let out = Recorder::default();
+        out.connected.set(true);
+        let mut held = Held::default();
+        held.key(&out, VK_CONTROL, true);
+        held.button(&out, BUTTON_LEFT, true);
+        out.take();
+        held.release_all(&out);
+        assert_eq!(
+            out.take(),
+            [
+                Sent::Key(VK_CONTROL, false, 0),
+                Sent::Button(BUTTON_LEFT, false),
+                Sent::ReleaseAll
+            ]
+        );
+        assert!(!held.any_down());
+        held.release_all(&out);
+        assert_eq!(
+            out.take(),
+            [Sent::ReleaseAll],
+            "also clears keys this view did not track"
+        );
+    }
 
     #[test]
     fn command_and_control_share_one_remote_control_key() {
@@ -471,18 +505,15 @@ mod tests {
         held.keys.insert(VK_CONTROL);
         assert_eq!(held.chord_plan(&[VK_CONTROL, VK_C]), vec![VK_C]);
         assert_eq!(held.chord_plan(&[VK_CONTROL, VK_V]), vec![VK_V]);
-        assert_eq!(held.mask(), MODIFIER_CTRL);
+        assert_eq!(held.mask(), MOD_CTRL);
         // Nothing held: the whole chord is pressed.
         let none = Held::default();
         assert_eq!(
             none.chord_plan(&[VK_CONTROL, VK_MENU, VK_DELETE]),
             vec![VK_CONTROL, VK_MENU, VK_DELETE]
         );
-        assert_eq!(
-            mask_of(&[VK_CONTROL, VK_MENU]),
-            MODIFIER_CTRL | MODIFIER_ALT
-        );
-        assert_eq!(mask_of(&[VK_LWIN]), MODIFIER_META);
+        assert_eq!(mask_of(&[VK_CONTROL, VK_MENU]), MOD_CTRL | MOD_ALT);
+        assert_eq!(mask_of(&[VK_LWIN]), MOD_META);
         assert_eq!(mask_of(&[VK_C]), 0);
     }
 
@@ -493,10 +524,7 @@ mod tests {
         held.keys.insert(VK_CONTROL);
         assert_eq!(
             held.chord_alone_events(&[VK_CONTROL, VK_INSERT]),
-            vec![
-                (VK_INSERT, true, MODIFIER_CTRL),
-                (VK_INSERT, false, MODIFIER_CTRL)
-            ]
+            vec![(VK_INSERT, true, MOD_CTRL), (VK_INSERT, false, MOD_CTRL)]
         );
         // Cut is Shift+Delete: Ctrl+Shift+Delete would be another shortcut
         // (Firefox clears history), so Ctrl goes up for it and back down.
@@ -504,11 +532,11 @@ mod tests {
             held.chord_alone_events(&[VK_SHIFT, VK_DELETE]),
             vec![
                 (VK_CONTROL, false, 0),
-                (VK_SHIFT, true, MODIFIER_SHIFT),
-                (VK_DELETE, true, MODIFIER_SHIFT),
-                (VK_DELETE, false, MODIFIER_SHIFT),
+                (VK_SHIFT, true, MOD_SHIFT),
+                (VK_DELETE, true, MOD_SHIFT),
+                (VK_DELETE, false, MOD_SHIFT),
                 (VK_SHIFT, false, 0),
-                (VK_CONTROL, true, MODIFIER_CTRL),
+                (VK_CONTROL, true, MOD_CTRL),
             ]
         );
         // ⌘ as the Windows key: Super+Ctrl+Insert would copy nothing.
@@ -518,11 +546,11 @@ mod tests {
             held.chord_alone_events(&[VK_CONTROL, VK_INSERT]),
             vec![
                 (VK_LWIN, false, 0),
-                (VK_CONTROL, true, MODIFIER_CTRL),
-                (VK_INSERT, true, MODIFIER_CTRL),
-                (VK_INSERT, false, MODIFIER_CTRL),
+                (VK_CONTROL, true, MOD_CTRL),
+                (VK_INSERT, true, MOD_CTRL),
+                (VK_INSERT, false, MOD_CTRL),
                 (VK_CONTROL, false, 0),
-                (VK_LWIN, true, MODIFIER_META),
+                (VK_LWIN, true, MOD_META),
             ]
         );
     }

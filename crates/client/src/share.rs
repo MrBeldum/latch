@@ -21,7 +21,7 @@ pub struct LocalShare {
 
 pub type Slot = Arc<Mutex<LocalShare>>;
 
-/// The Sharing page: setup, what this machine reports, paired devices,
+/// The Sharing page: setup, what this machine reports,
 /// options and diagnostics. Drawn by whoever shares this machine.
 pub trait SharePage {
     fn show(&mut self, ui: &mut egui::Ui);

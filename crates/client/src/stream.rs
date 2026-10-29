@@ -93,7 +93,6 @@ fn is_mac_os(os: &str) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Disconnect,
-    RestartStream,
     /// Ask the PC to leave HDR, which is what a black capture usually is.
     TurnOffHdr,
     Power(PowerAction),
@@ -584,7 +583,9 @@ impl View {
                         Kv::new("Frame assembly", format!("{:.2} ms", stats.assembly_ms)),
                         Kv::new("Decoder queue", format!("{:.2} ms", stats.queue_ms)),
                         Kv::new("Decode", format!("{:.2} ms", stats.decode_ms)),
-                        Kv::new("Decoder", stats.decoder.to_string()),
+                        Kv::new("Codec", stats.codec.to_string()),
+                        Kv::new("Encoder on host", stats.encoder.clone()),
+                        Kv::new("Decoder here", stats.decoder.to_string()),
                     ]
                     .map(Kv::mono);
                     ui::kv_grid(ui, &rows);
@@ -656,10 +657,17 @@ impl View {
                                 } else {
                                     (live.requested.0, live.requested.1)
                                 };
+                                let codec = if !live.codec.is_empty() {
+                                    live.codec
+                                } else if !s.codec.is_empty() {
+                                    s.codec
+                                } else {
+                                    "Connecting…"
+                                };
                                 ui.label(
                                     RichText::new(format!(
-                                        "{w}×{h} · {} fps · {}",
-                                        live.requested.2, live.codec
+                                        "{w}×{h} · {} fps · {codec}",
+                                        live.requested.2
                                     ))
                                     .font(theme::mono(theme::text::MONO - 0.5))
                                     .color(P.text_tertiary),
@@ -1053,9 +1061,6 @@ impl View {
                                     actions.push(Action::TurnOffHdr);
                                 }
                             }
-                            if ui::secondary_button(ui, "Restart stream").clicked() {
-                                actions.push(Action::RestartStream);
-                            }
                         });
                     });
                 }
@@ -1420,7 +1425,7 @@ impl View {
                 self.cmd_since_v_up |= m.command;
                 self.held.modifiers(out, m, cmd_is_ctrl);
                 // OS autorepeat arrives as extra Downs with `repeat`.
-                // Sunshine does not generate them, so holding a key
+                // The host does not generate them, so holding a key
                 // would otherwise type once. Releases never repeat.
                 let Some(vk) = physical_key.and_then(input::vk).or_else(|| input::vk(key)) else {
                     return;
@@ -1614,7 +1619,7 @@ fn caps_tap(seen: Option<bool>, now: Option<bool>, keys_to_pc: bool) -> (Option<
 
 /// A wheel or trackpad scroll as the PC takes it, in 1/120ths of a click:
 /// (horizontal, vertical). egui's +x moves the content right, which is
-/// scrolling left; Moonlight's horizontal scroll, like Windows' and
+/// scrolling left; Latch's horizontal scroll, like Windows' and
 /// Linux's, is positive to the right. Vertical agrees: +y is up.
 fn wheel_to_host(unit: egui::MouseWheelUnit, delta: Vec2) -> (f32, f32) {
     let scale = match unit {
@@ -1629,7 +1634,7 @@ fn wheel_to_host(unit: egui::MouseWheelUnit, delta: Vec2) -> (f32, f32) {
 fn mouse_position_in_video(p: Pos2, video: Rect, ppp: f32) -> (i16, i16, i16, i16) {
     let width = ((video.width() * ppp).round() as i16).max(2);
     let height = ((video.height() * ppp).round() as i16).max(2);
-    // Rect's far edges are inclusive, but pixels are zero-based. Moonlight
+    // Rect's far edges are inclusive, but pixels are zero-based. Latch
     // sends width - 1 and height - 1 as the coordinate limits on the wire.
     let x = ((p.x - video.left()) * ppp)
         .round()
@@ -1945,11 +1950,8 @@ pub(crate) mod tests {
         let settings = crate::config::StreamSettings::default();
         let session = latch_stream::Session::start(
             latch_stream::session::Server {
-                address: "10.255.255.1".into(),
-                app_version: "7.1.431.-1".into(),
-                gfe_version: "3.23.0.74".into(),
-                rtsp_url: "rtsp://10.255.255.1:48010".into(),
-                codec_mode_support: 1,
+                address: "10.255.255.1".parse().unwrap(),
+                port: latch_core::CONTROL_PORT,
             },
             latch_stream::Settings {
                 width: 1920,
@@ -1957,9 +1959,9 @@ pub(crate) mod tests {
                 fps: 60,
                 bitrate_kbps: 50_000,
                 hevc: true,
+                audio: true,
+                name: "UI test".into(),
             },
-            [0; 16],
-            [0; 16],
             frames.clone(),
             tx,
             || {},
@@ -2770,13 +2772,28 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "renders changed streaming UI text with a GPU"]
+    fn snapshots_stream_migration() {
+        use crate::app::snapshots::{file_name, save};
+        for (name, view) in [
+            ("toolbar", view_with_bar()),
+            ("stats", View { stats: true, ..view_with_bar() }),
+            ("black-picture", View { problem: Some("The PC is sending a black picture: the connection and the video are healthy, but every frame is blank. Asking the PC why…".into()), ..View::default() }),
+        ] {
+            let size = Vec2::new(1280.0, 800.0);
+            let mut h = harness_with(size, 1.0, true, fixture(view, Extra { os: "windows".into(), ..Default::default() }));
+            save(h.render().unwrap(), &file_name("migration-stream", name, size, 1.0));
+        }
+    }
+
     // What the PC is sent: the order, the signs and the masks.
 
     use crate::input::{
         Recorder, Sent, VK_CAPITAL, VK_CONTROL, VK_LWIN, VK_MENU, VK_RETURN, VK_SHIFT, VK_TAB, VK_V,
     };
     use egui::{Key, PointerButton};
-    use latch_stream::ffi::{BUTTON_LEFT, MODIFIER_CTRL, MODIFIER_SHIFT};
+    use latch_stream::input::{BUTTON_LEFT, MOD_CTRL, MOD_SHIFT};
     use std::rc::Rc;
 
     const VK_T: i16 = 0x54;
@@ -2912,9 +2929,9 @@ pub(crate) mod tests {
         assert_eq!(
             tap.take(),
             [
-                Sent::Key(VK_SHIFT, true, MODIFIER_SHIFT),
-                Sent::Key(VK_T, true, MODIFIER_SHIFT),
-                Sent::Key(VK_T, false, MODIFIER_SHIFT),
+                Sent::Key(VK_SHIFT, true, MOD_SHIFT),
+                Sent::Key(VK_T, true, MOD_SHIFT),
+                Sent::Key(VK_T, false, MOD_SHIFT),
                 Sent::Key(VK_SHIFT, false, 0),
             ]
         );
@@ -2934,8 +2951,8 @@ pub(crate) mod tests {
         assert_eq!(
             tap.take(),
             [
-                Sent::Key(VK_CONTROL, true, MODIFIER_CTRL),
-                Sent::Key(VK_Z, true, MODIFIER_CTRL),
+                Sent::Key(VK_CONTROL, true, MOD_CTRL),
+                Sent::Key(VK_Z, true, MOD_CTRL),
                 Sent::Key(VK_CONTROL, false, 0),
             ]
         );
@@ -3072,6 +3089,7 @@ pub(crate) mod tests {
             tap.take(),
             [
                 Sent::Position(20, 170, 640, 360),
+                Sent::ReleaseAll,
                 Sent::Button(BUTTON_LEFT, true),
             ]
         );
