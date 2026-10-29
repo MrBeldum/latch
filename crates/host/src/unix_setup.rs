@@ -813,7 +813,11 @@ mod tests {
             kept,
             "[Unit]\n\n[Service]\nEnvironment=DISPLAY=:1\nEnvironment=LATCH_DISPLAY_FOLLOWS_VIEWER=1\nRestart=on-failure\n"
         );
-        assert_eq!(without_engine_lines(&kept), kept, "a second run changes nothing");
+        assert_eq!(
+            without_engine_lines(&kept),
+            kept,
+            "a second run changes nothing"
+        );
     }
 
     use super::*;

@@ -417,12 +417,18 @@ mod tests {
             adapter: "",
             adapter_description: "",
         });
-        assert!(s.contains("$latchExe = 'C:\\Users\\O''Brien\\latch-host.exe'"), "{s}");
+        assert!(
+            s.contains("$latchExe = 'C:\\Users\\O''Brien\\latch-host.exe'"),
+            "{s}"
+        );
         assert!(s.contains("$_.Program -ieq $latchExe"));
         assert!(s.contains("$_.Action -eq 'Block' -and $_.Direction -eq 'Inbound'"));
         let lift = s.find("Remove-NetFirewallRule").unwrap();
         let allow = s.find("add rule name=\"Latch Host\"").unwrap();
-        assert!(lift < allow, "block rules go before the allow rules are added");
+        assert!(
+            lift < allow,
+            "block rules go before the allow rules are added"
+        );
     }
 
     #[test]

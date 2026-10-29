@@ -111,7 +111,9 @@ fn main() -> anyhow::Result<()> {
         .and_then(|(x, y)| Some((x.parse::<i16>().ok()?, y.parse::<i16>().ok()?)))
     {
         std::thread::sleep(Duration::from_millis(500));
-        session.input().mouse_position(x, y, width as i16, height as i16);
+        session
+            .input()
+            .mouse_position(x, y, width as i16, height as i16);
         eprintln!("pointer sent to {x},{y} of {width}x{height}");
     }
 
