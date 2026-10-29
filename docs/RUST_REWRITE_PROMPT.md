@@ -111,3 +111,23 @@ reference measurement is unavailable, complete the independent preparation,
 name the precise unmet gate and the evidence needed to resume, and report
 the rewrite as incomplete. Do not substitute a design document, scaffold,
 synthetic benchmark or passing compilation for a completed migration.
+
+## Additions from execution (2026-10-29)
+
+Doing the work sharpened three of the answers above.
+
+- **Raw material** also means the standard's own test data: the ITU-T
+  H.264.1 conformance bitstreams and their reference YUV, which settle a
+  decoder's correctness without trusting any implementation, and the
+  vendor decoders (FFmpeg, VideoToolbox) as independent judges of an
+  encoder's stream.
+- **Methods** that found what tests written by the same authors did not:
+  an adversarial review (independent readers per area, then a skeptic
+  trying to refute each finding), an impairment relay built from the
+  protocol's own simulator for whole sessions, CI on every platform the
+  code claims, and the real service run once against the real desktop
+  before any rollout.
+- **What shows it is right** must include the losing comparisons too: the
+  encoder is faster than x264 on desktops and slower on film, and both
+  are reported. A rewrite is done when its unverified parts are named,
+  not when they are absent.
