@@ -23,7 +23,7 @@ jobs:
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --all-targets
       # The setup script is generated, so only a dump of it can be parsed.
       # Every plan shape, with names that need quoting, through the parser
       # of the Windows PowerShell that runs it; plus the shipped scripts.
@@ -168,7 +168,7 @@ jobs:
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --all-targets
       - name: release app
         run: cargo build --locked --release -p latch-host --target aarch64-apple-darwin
       - name: bundle
@@ -198,7 +198,7 @@ jobs:
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --all-targets
       - name: release host
         run: cargo build --locked --release -p latch-host
       - uses: actions/upload-artifact@v4

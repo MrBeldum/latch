@@ -106,3 +106,40 @@ the live test by default; `LATCH_TEST_EXPECT_BLACK=1` instead verifies the
 persistent black-picture diagnosis when testing a PC without an active
 display. The GPU test uses a synthetic NV12 image to check that the picture
 is drawn with the correct orientation and range and retained between frames.
+
+## Rust engine rewrite evidence
+
+The [rewrite brief](docs/RUST_REWRITE_PROMPT.md) defines the Rust/native
+boundary and release gates. The [execution record](docs/RUST_REWRITE_STATUS.md)
+distinguishes completed preparation from the unfinished engine replacement.
+
+The decoder component baseline needs no host, pairing or screen capture:
+
+```bash
+cargo test --locked -p latch-stream --example decode_bench
+cargo build --locked --release -p latch-stream --example decode_bench
+target/release/examples/decode_bench --warmup 30 --iterations 300 > decode.json
+```
+
+On Windows the executable ends in `.exe`. Add `--require-hardware` to fail
+unless every decode uses the initialized hardware backend. Windows/Linux
+currently use OpenH264, so that gate is expected to fail there. A backend
+change during warmup or measurement also fails rather than mixing results.
+
+The default is the 64×64 bars fixture: its visible pixel samples are checked
+on every measured frame. `--fixture path/to/frame.h264` accepts a single
+Annex B H.264 IDR slice with SPS and PPS (at most 32 MiB), not a container,
+multi-frame video, multi-slice picture or packet capture. A custom fixture
+gets plane validation and a null pixel-oracle result. Collect a representative
+access unit separately for resolution-specific measurements.
+
+JSON includes the fixture hash, actual decoder, configuration, ordered raw
+decode timings and nearest-rank p50/p95/p99. Decode time includes the
+decoder's CPU output copy; total loop time also includes validation. Output
+plane byte counts are not GPU transfer measurements. Neither result measures
+capture, encoding, network, audio, presentation or input-to-display latency.
+Record revision/diff, hardware, OS/driver and power state beside each run.
+
+CI runs `cargo test --locked --workspace --all-targets`, including the
+example's deterministic checks. Live and hardware performance gates still
+require the appropriate machines and explicit runs.

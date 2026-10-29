@@ -1,0 +1,34 @@
+{
+  "scope": "Local aarch64 macOS checks only; remote CI not executed",
+  "format": {
+    "command": "cargo fmt --all -- --check",
+    "exit_code": 0
+  },
+  "clippy": {
+    "command": "cargo clippy --locked --workspace --all-targets -- -D warnings",
+    "exit_code": 0
+  },
+  "tests": {
+    "command": "cargo test --locked --workspace --all-targets",
+    "exit_code": 0,
+    "passed": 401,
+    "failed": 0,
+    "ignored": 15,
+    "includes_example_checks": 6
+  },
+  "release_example_build": {
+    "command": "cargo build --locked --release -p latch-stream --example decode_bench",
+    "exit_code": 0
+  },
+  "live_tests": {
+    "debug_passed": 1,
+    "release_passed": 1,
+    "note": "Existing Linux software host to Mac hardware decoder, not a replacement test"
+  },
+  "initial_baseline_issue": "Unchanged first workspace run intermittently failed update::tests::failed_launch_restores_the_previous_executable; isolated and subsequent full runs passed.",
+  "upstream_future_incompatibility_notice": "block v0.1.6; cargo emits a future-version compatibility notice",
+  "local_logs": [
+    "target/rust-rewrite/final-tests.log",
+    "target/rust-rewrite/clippy.log"
+  ]
+}

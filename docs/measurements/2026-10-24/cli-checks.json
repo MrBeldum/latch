@@ -1,0 +1,61 @@
+[
+  {
+    "args": [
+      "--iterations",
+      "0"
+    ],
+    "exit_code": 1,
+    "error": "Error: iterations out of range 1..=100000"
+  },
+  {
+    "args": [
+      "--iterations",
+      "100001"
+    ],
+    "exit_code": 1,
+    "error": "Error: iterations out of range 1..=100000"
+  },
+  {
+    "args": [
+      "--warmup",
+      "10001"
+    ],
+    "exit_code": 1,
+    "error": "Error: warmup exceeds max 10000"
+  },
+  {
+    "args": [
+      "--unknown"
+    ],
+    "exit_code": 1,
+    "error": "Error: unrecognized argument: '--unknown'"
+  },
+  {
+    "args": [
+      "--fixture",
+      "/does-not-exist"
+    ],
+    "exit_code": 1,
+    "error": "Error: open /does-not-exist\n\nCaused by:\n    No such file or directory (os error 2)"
+  },
+  {
+    "case": "empty",
+    "exit_code": 1,
+    "error": "Error: invalid fixture size: 0 bytes (limit 32MiB)"
+  },
+  {
+    "case": "container",
+    "exit_code": 1,
+    "error": "Error: fixture must be Annex B H.264, not a container or packet capture"
+  },
+  {
+    "case": "multi_frame",
+    "exit_code": 1,
+    "error": "Error: fixture requires SPS, PPS and exactly one IDR slice; multi-frame and multi-slice fixtures are unsupported"
+  },
+  {
+    "case": "custom_single_au_zero_warmup",
+    "exit_code": 0,
+    "pixel_oracle": null
+  }
+]

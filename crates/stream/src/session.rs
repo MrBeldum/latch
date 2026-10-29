@@ -1047,6 +1047,9 @@ mod real {
                         frames.seq()
                     );
                 }
+                // Exercise the same buffer reuse as the renderer; discarding
+                // every frame makes this test profile fresh allocations instead.
+                frames.recycle(f);
             }
             let second = start.elapsed().as_secs();
             if connected && second > sampled_second {

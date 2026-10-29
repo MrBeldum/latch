@@ -2200,6 +2200,7 @@ dependencies = [
  "rcgen",
  "rsa",
  "rustls",
+ "serde_json",
  "sha2",
  "tracing",
  "x509-parser",
