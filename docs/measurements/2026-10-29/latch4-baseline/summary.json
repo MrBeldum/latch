@@ -1,0 +1,21 @@
+{
+ "what": "Latch 4.1.1 (8aa2165, Sunshine 2026.1014 x264 superfast zerolatency software, moonlight-common-c + VideoToolbox viewer) streaming stuzha's real :1 desktop (mostly still) to this Mac, 1280x720 asked at 60 fps, 10 Mbps, direct tailnet path 13 ms",
+ "host_cpu_pct_one_core": {
+  "median": 71.0,
+  "mean": 70.4,
+  "n": 31
+ },
+ "host_rss_mb": 115,
+ "viewer_cpu_pct_one_core": {
+  "median": 5.85,
+  "mean": 5.3
+ },
+ "viewer_rss_mb": 30,
+ "fps": {
+  "median": 59.95
+ },
+ "host_capture_to_send_ms": {
+  "median": 11.0
+ },
+ "caveat": "stuzha is shared: other build/bench work may have been running (load average in stuzha-env.txt was taken right after). Sunshine encodes every frame at 60 fps even when the desktop is still."
+}

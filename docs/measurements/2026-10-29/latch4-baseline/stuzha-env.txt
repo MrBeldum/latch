@@ -1,0 +1,6 @@
+ 23:49:33 up 4 days,  7:06,  6 users,  load average: 2.25, 1.58, 1.36
+2
+CPU(s):                                  2
+Model name:                              Neoverse-N1
+[2026-10-28 23:49:33.332801] [0x0000fd49797488c0] [info]    [misc] has_elevated_privileges found permitted cap:21
+7.0.0-1013-oracle
