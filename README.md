@@ -13,10 +13,13 @@ Tailscale. Mac, Windows, Linux, and a VPS container all run the same Latch
 app. Each one lists the others and can Connect; each one can share its own
 desktop.
 
-On a Mac, frames are decoded with VideoToolbox. On Windows and Linux the
-viewer uses OpenH264. Sharing uses the streaming engine Latch installs
-(Sunshine): bundled in the Windows zip, downloaded on first Mac setup, and
-shipped in the Docker node image for a VPS.
+Latch 5 uses a custom pure-Rust streaming engine compiled directly into
+`latch-host` (`latch-engine`, `latch-proto`, `latch-codec`, and `latch-stream`).
+Streaming runs over UDP with Reed-Solomon forward error correction over
+Tailscale WireGuard. Audio is encoded losslessly with `lpcm-rice`. Video is
+decoded with VideoToolbox on macOS, Media Foundation on Windows, and
+`latch-codec` on Linux. No external streaming engine or C/C++ build dependencies
+are needed.
 
 [Tailscale](https://tailscale.com) is the path and the identity check. A
 machine answers only peers signed in to the same Tailscale account.
@@ -27,8 +30,8 @@ machine answers only peers signed in to the same Tailscale account.
    account, with a dot and a line for what it can do right now. The
    **Sharing** tab sets up the streaming engine so others can Connect here.
 2. Click **Connect**. If a Windows PC is asleep, Latch wakes it and waits.
-   The first time, it pairs by itself: the PIN goes to Latch on that
-   machine over Tailscale, which enters it for you.
+   Connections connect directly using Tailscale authentication without
+   pairing PINs.
 3. The desktop appears, full screen by default, and nothing else: the
    mouse is captured the moment you click the picture, as in a game, so
    games that read raw mouse movement work. **Ctrl+Alt** (Control-Option
@@ -55,12 +58,11 @@ machine answers only peers signed in to the same Tailscale account.
    [latest release](https://github.com/MrBeldum/latch/releases/latest)
    and unzip it. Run `latch-host.exe`, or `install-host.ps1` for
    shortcuts and start-at-logon.
-3. On the **Sharing** tab, click **Set up as administrator**. One administrator prompt installs the bundled
-   streaming engine as a Windows service (if none is installed), gives
-   Latch a login to it, opens the control port to your tailnet only,
-   turns Fast Startup off and arms the network card for Wake-on-LAN.
-   The same window lists every other machine on the account; **Connect**
-   opens their desktop.
+3. On the **Sharing** tab, click **Set up as administrator**. One administrator prompt opens the control
+   and streaming UDP ports to your tailnet only, retires any legacy Latch 4
+   streaming engine services, turns Fast Startup off, and arms the network
+   card for Wake-on-LAN. The same window lists every other machine on the
+   account; **Connect** opens their desktop.
 
 Advanced engine settings are not exposed; Latch configures the engine
 itself. Details in [docs/WINDOWS.md](docs/WINDOWS.md).
@@ -133,10 +135,7 @@ GitHub publishes and its own code signature, swapped into `/Applications`
 once no stream is running, and relaunched. A newer Latch Host is sent
 from the Mac to every PC whose host reports an older version, over the same
 Tailscale-authenticated control API that can put the PC to sleep; the host
-verifies the digest, replaces its executable and restarts. That path
-updates only `latch-host.exe`. The Windows zip on GitHub also contains
-the pinned engine archive for first-time setup; a host update
-does not install or migrate the engine. A PC that is asleep gets the host
+verifies the digest, replaces its executable and restarts. That path updates `latch-host.exe`, which contains the entire streaming engine. A PC that is asleep gets the host
 update the next time the Mac sees it. Nothing is downloaded on the PC, and
 no GitHub login is needed there.
 

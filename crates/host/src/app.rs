@@ -146,6 +146,7 @@ impl HostApp {
         }
     }
 
+    #[cfg_attr(not(feature = "client"), allow(dead_code))]
     pub(crate) fn shared(&self) -> parking_lot::MutexGuard<'_, Shared> {
         self.shared.lock()
     }
@@ -321,6 +322,7 @@ const STOPPED: &str = "Stopped from this window.";
 
 impl Shared {
     /// The service is down because someone pressed Stop, not by accident.
+    #[cfg_attr(not(feature = "client"), allow(dead_code))]
     pub(crate) fn stopped_by_user(&self) -> bool {
         self.service_error.as_deref() == Some(STOPPED)
     }
@@ -844,6 +846,14 @@ impl HostApp {
     }
 }
 
+impl eframe::App for HostApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.page(ui);
+        });
+    }
+}
+
 /// What this machine's NAT means for the others, in a sentence that names
 /// the right kind of machine (the service log's version says "a Mac").
 fn network_sentence(n: &latch_core::api::NatReport, noun: &str) -> String {
@@ -1194,7 +1204,7 @@ mod tests {
 ///
 /// Nothing here reads or writes real settings or reaches the service: the
 /// window and the page are both built headless.
-#[cfg(test)]
+#[cfg(all(test, feature = "client"))]
 mod snapshots {
     use super::*;
     use crate::product::NodeApp;

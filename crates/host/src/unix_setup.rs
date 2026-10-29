@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 pub fn run(p: &Plan<'_>) -> Result<()> {
     let result = (|| {
@@ -443,9 +444,16 @@ fn retire_legacy_launch_agent() {
 /// nothing to adopt or something failed, in which case the copy runs on
 /// where it is.
 #[cfg(target_os = "macos")]
+pub fn bundle_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let app = exe.parent()?.parent()?.parent()?;
+    (app.extension().is_some_and(|e| e == "app")).then(|| app.to_path_buf())
+}
+
+#[cfg(target_os = "macos")]
 pub fn adopt_legacy_bundle(background: bool) -> Result<()> {
     use std::os::unix::process::CommandExt;
-    let Some(old) = latch_client::update::bundle_path().filter(|b| {
+    let Some(old) = bundle_path().filter(|b| {
         b.file_name()
             .is_some_and(|n| n == crate::legacy::MAC_BUNDLE)
     }) else {
@@ -632,6 +640,7 @@ fn retire_legacy_user_unit() {
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn systemctl_user(args: &[&str]) -> Result<bool> {
     Ok(Command::new("systemctl")
         .arg("--user")

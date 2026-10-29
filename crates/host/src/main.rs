@@ -11,6 +11,7 @@ use anyhow::Result;
 use clap::Parser;
 use latch_core::config::data_dir;
 use latch_host::logfile::RotatingLog;
+#[cfg(feature = "client")]
 use latch_host::product::NodeApp;
 use latch_host::service::{self, Service};
 
@@ -103,12 +104,24 @@ fn main() -> Result<()> {
     if service::starts_with_window(&latch_host::config::HostConfig::load()) {
         service::ensure_service_running();
     }
-    eframe::run_native(
-        "Latch",
-        latch_client::native_options(),
-        Box::new(|cc| Ok(Box::new(NodeApp::new(cc)))),
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))
+    #[cfg(feature = "client")]
+    {
+        eframe::run_native(
+            "Latch",
+            latch_client::native_options(),
+            Box::new(|cc| Ok(Box::new(NodeApp::new(cc)))),
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+    #[cfg(not(feature = "client"))]
+    {
+        eframe::run_native(
+            "Latch",
+            native_options(),
+            Box::new(|cc| Ok(Box::new(latch_host::app::HostApp::new(cc)))),
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))
+    }
 }
 
 fn run_setup() -> Result<()> {
@@ -183,6 +196,35 @@ fn init_logging(file: &str) {
         .with_ansi(false)
         .with_writer(std::sync::Mutex::new(sink))
         .init();
+}
+
+#[cfg(not(feature = "client"))]
+fn native_options() -> eframe::NativeOptions {
+    use eframe::egui;
+    let icon = if cfg!(target_os = "macos") {
+        egui::IconData::default()
+    } else {
+        egui::IconData {
+            rgba: latch_core::icon::render(64),
+            width: 64,
+            height: 64,
+        }
+    };
+    eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1100.0, 720.0])
+            .with_min_inner_size([640.0, 420.0])
+            .with_title("Latch")
+            .with_icon(icon),
+        renderer: eframe::Renderer::Wgpu,
+        vsync: false,
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            present_mode: eframe::egui_wgpu::wgpu::PresentMode::AutoNoVsync,
+            desired_maximum_frame_latency: Some(1),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]

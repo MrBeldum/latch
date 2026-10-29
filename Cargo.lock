@@ -1906,7 +1906,7 @@ dependencies = [
 
 [[package]]
 name = "latch-client"
-version = "4.1.1"
+version = "5.0.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -1932,11 +1932,11 @@ dependencies = [
 
 [[package]]
 name = "latch-codec"
-version = "4.1.1"
+version = "5.0.0"
 
 [[package]]
 name = "latch-core"
-version = "4.1.1"
+version = "5.0.0"
 dependencies = [
  "anyhow",
  "directories",
@@ -1954,7 +1954,7 @@ dependencies = [
 
 [[package]]
 name = "latch-engine"
-version = "4.1.1"
+version = "5.0.0"
 dependencies = [
  "anyhow",
  "latch-codec",
@@ -1970,7 +1970,7 @@ dependencies = [
 
 [[package]]
 name = "latch-host"
-version = "4.1.1"
+version = "5.0.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1998,7 +1998,7 @@ dependencies = [
 
 [[package]]
 name = "latch-proto"
-version = "4.1.1"
+version = "5.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2006,7 +2006,7 @@ dependencies = [
 
 [[package]]
 name = "latch-stream"
-version = "4.1.1"
+version = "5.0.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -2021,7 +2021,7 @@ dependencies = [
 
 [[package]]
 name = "latch-ui"
-version = "4.1.1"
+version = "5.0.0"
 dependencies = [
  "ab_glyph",
  "egui",

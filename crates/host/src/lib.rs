@@ -9,6 +9,7 @@ pub mod legacy;
 pub mod logfile;
 pub mod power;
 pub mod prep;
+#[cfg(feature = "client")]
 pub mod product;
 pub mod service;
 pub mod setup;

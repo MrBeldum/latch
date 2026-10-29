@@ -2,9 +2,8 @@
 
 ## Building
 
-Rust stable, a C compiler (MSVC Build Tools on Windows, Xcode command line
-tools on macOS) and CMake. The C compiler builds the vendored
-moonlight-common-c; CMake builds libopus for the audio decoder.
+Rust stable. No C compiler or CMake is required; Latch 5 uses a pure-Rust
+engine and codecs.
 
 ```powershell
 cargo fmt --all
@@ -25,12 +24,14 @@ the development PC before `cargo run -p latch-host -- --background`.
 
 ## Where things live
 
-- `crates/stream`: everything that talks to Sunshine. `nvhttp` is the
-  pairing and launch API, `session` drives moonlight-common-c through the C
-  shim in `csrc/`, `video` and `audio` decode. It knows nothing about
-  windows or Tailscale. The vendored moonlight-common-c, what was trimmed
-  from it and its two local patches are described in
-  `third_party/moonlight-common-c/VERSION`.
+- `crates/proto`: wire format, Reed–Solomon FEC, packetizer, input
+  reliability, and control framing.
+- `crates/codec`: pure-Rust H.264 Constrained Baseline encoder/decoder and
+  `lpcm-rice` audio codec.
+- `crates/engine`: capture, hardware/software encode, display sizing, and
+  the host streaming server.
+- `crates/stream`: viewer session, decoders (VideoToolbox, Media Foundation,
+  `latch-codec`), and audio playback.
 - `crates/client`: the viewer UI (a library plus `latch-client`).
   `session.rs` is the path from a listed machine to a live stream;
   `stream.rs` is the toolbar and input while streaming; `video.rs` draws

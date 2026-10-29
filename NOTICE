@@ -2,35 +2,13 @@ Latch
 Copyright (c) 2026 Latch Contributors
 Licensed under the GNU General Public License, version 3 or later (LICENSE).
 
-Compiled into the client (crates/stream):
-
-  moonlight-common-c, GPL-3.0, Moonlight Game Streaming Project
-    third_party/moonlight-common-c (commit 874ac954, see VERSION there)
-    https://github.com/moonlight-stream/moonlight-common-c
-    Includes ENet (MIT, Lee Salzman) and nanors (MIT, sleepybishop).
-  Opus, BSD-3-Clause, Xiph.Org Foundation; statically linked through the
-    audiopus_sys crate.                     https://opus-codec.org
-  OpenH264, BSD-2-Clause, Cisco Systems. Only a Windows or Linux viewer
-    uses it, as a software H.264 decoder; the Mac uses VideoToolbox.
-    It is built from source, so Cisco's binary patent grant does not cover
-    it.                                     https://github.com/cisco/openh264
-
-Shipped inside latch-windows-x64.zip and installed by setup:
-
-  Sunshine, GPL-3.0, LizardByte. The unmodified Windows lite archive
-    (Sunshine-Windows-AMD64-lite.zip); the version is pinned in
-    crates/host/src/setup.rs and .github/workflows/release.yml and its
-    source is at https://github.com/LizardByte/Sunshine
-    On the PC, setup gives the unpacked sunshine.exe and sunshinesvc.exe
-    Latch's description, product name and icon (crates/host/src/brand.rs);
-    their copyright, licence and version strings are kept as shipped.
+Parts of crates/codec/src/h264/decode are adapted from pith-h264 0.1.1
+(https://github.com/pith-hash/pith-h264), MIT License, Copyright (c) 2026 pith-hash contributors.
 
 Used when present, never redistributed:
 
   Tailscale, BSD-3-Clause client            https://tailscale.com
   Apollo, GPL-3.0, ClassicOldSong           https://github.com/ClassicOldSong/Apollo
-  ViGEmBus, MIT, Nefarius (installed through Sunshine on request)
-                                            https://github.com/nefarius/ViGEmBus
 
 Fonts:
 
