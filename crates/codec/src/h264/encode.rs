@@ -123,7 +123,7 @@ impl Encoder {
             idr_id: 0,
             qp: 30,
             model: 0.,
-            subpixel: false,
+            subpixel: true,
             refresh_start: 0,
             window: VecDeque::new(),
         })
@@ -150,11 +150,12 @@ impl Encoder {
         let complexity = complexity(picture, self.source.as_deref());
         let debt =
             self.window.iter().sum::<usize>() as f64 * 8. - budget * self.window.len() as f64;
-        let target = (budget - debt * 0.25).clamp(budget * 0.5, budget * 1.5);
+        let target = (budget - debt * 0.5).clamp(budget * 0.5, budget * 1.5);
         let proposed = if self.model > 0. {
             6. * (self.model * complexity / target).max(1e-6).log2() + 24.
         } else {
-            30.
+            // Start from bits per pixel rather than over-quantizing smaller/high-bitrate pictures.
+            8. + 6. * (picture.width as f64 * picture.height as f64 / budget).log2()
         };
         let lo = if self.source.is_none() {
             18
@@ -162,18 +163,22 @@ impl Encoder {
             self.qp.saturating_sub(4).max(18)
         };
         let hi = if self.source.is_none() {
-            45
+            51
         } else {
-            (self.qp + 4).min(45)
+            (self.qp + 4).min(51)
         };
         let mut qp = (proposed.round() as u8).clamp(lo, hi);
-        let mut suppression = ((proposed - qp as f64).max(0.) / 6.).floor().min(10.) as u8;
-        let is_motion = if let Some(old) = &self.source {
+        // Exhaust normal quantization before dropping individual coefficients.
+        let mut suppression = if qp == 51 {
+            ((proposed - 51.).max(0.) / 6.).floor().min(10.) as u8
+        } else {
+            0
+        };
+        let changed_mbs = if let Some(old) = &self.source {
             let pw = picture.padded_width();
             let ph = picture.padded_height();
             let mb_cols = pw / 16;
             let mb_rows = ph / 16;
-            let total_mbs = mb_cols * mb_rows;
             let mut changed_mbs = 0;
             for my in 0..mb_rows {
                 let y = my * 16 + 8;
@@ -186,11 +191,31 @@ impl Encoder {
                     }
                 }
             }
-            changed_mbs * 2 > total_mbs
+            changed_mbs
         } else {
-            false
+            0
         };
-        let half_pel = if !idr && self.subpixel {
+        let rows = picture.padded_height() / 16;
+        let total_mbs = rows * picture.padded_width() / 16;
+        let is_motion = changed_mbs * 2 > total_mbs;
+        let globals: Vec<_> = (0..self.workers.len())
+            .map(|i| {
+                if idr {
+                    (0, 0)
+                } else {
+                    worker::scroll(
+                        picture,
+                        self.source.as_ref().unwrap(),
+                        i * rows / self.workers.len(),
+                        (i + 1) * rows / self.workers.len(),
+                    )
+                }
+            })
+            .collect();
+        // At high QP fractional search costs more than its quality gain; also skip tiny updates and scrolls.
+        let refine_motion =
+            self.subpixel && qp < 38 && changed_mbs * 32 > total_mbs && globals.contains(&(0, 0));
+        let half_pel = if !idr && refine_motion {
             Some(Arc::new(predict::compute_half_pel(
                 &self.reconstruction.y,
                 self.reconstruction.y_stride,
@@ -219,8 +244,9 @@ impl Encoder {
                         end: (i + 1) * rows / self.workers.len(),
                         qp,
                         suppression,
-                        subpixel: self.subpixel,
+                        subpixel: half_pel.is_some() && qp < 38,
                         is_motion,
+                        global: globals[i],
                         idr,
                         frame_num,
                         idr_id: self.idr_id,
@@ -276,9 +302,12 @@ impl Encoder {
                 }
                 mbs.extend(band.mbs);
             }
-            if data.len() as f64 * 8. > if idr { budget * 4. } else { target * 1.05 } {
-                if qp < hi {
-                    qp = (qp + 2).min(hi);
+            if data.len() as f64 * 8. > if idr { budget * 4. } else { target * 1.3 } {
+                if qp < 51 {
+                    let step = (6.
+                        * (data.len() as f64 * 8. / if idr { budget * 3.5 } else { target }).log2())
+                    .ceil() as u8;
+                    qp = (qp + step.clamp(1, 12)).min(51);
                     continue;
                 }
                 if suppression < 10 {
@@ -310,7 +339,7 @@ impl Encoder {
         self.model = if self.model == 0. {
             measurement
         } else {
-            self.model * 0.6 + measurement * 0.4
+            self.model * 0.2 + measurement * 0.8
         };
         self.refresh_start =
             (self.refresh_start + (budget / 128.).max(1.) as usize) % self.quality.len();
@@ -333,7 +362,7 @@ impl Encoder {
         self.config.bitrate_kbps = kbps.max(1);
     }
 
-    /// Enables fractional search for hosts where its measured quality gain warrants the cost.
+    /// Enables adaptive fractional search (on by default); tiny desktop updates and scrolls skip it.
     pub fn set_subpixel_refinement(&mut self, enabled: bool) {
         self.subpixel = enabled;
     }

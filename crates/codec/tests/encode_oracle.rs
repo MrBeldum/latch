@@ -1,4 +1,4 @@
-//! Set LATCH_CODEC_DECODER_ORACLE=1 to also check each access unit with the Rust decoder.
+//! Both the Rust decoder and FFmpeg must reproduce the encoder reference exactly.
 mod encode_content;
 use latch_codec::h264::{Encoder, EncoderConfig};
 use std::{
@@ -38,20 +38,71 @@ fn compare(
         threads,
     })
     .unwrap();
-    e.set_subpixel_refinement(threads == 3);
-    let mut native =
-        std::env::var_os("LATCH_CODEC_DECODER_ORACLE").map(|_| latch_codec::h264::Decoder::new());
+    e.set_subpixel_refinement(threads != 1);
+    let mut native = latch_codec::h264::Decoder::new();
+    let natural = if matches!(kind, "testsrc2" | "mandelbrot") {
+        let filter = if kind == "testsrc2" {
+            format!("testsrc2=size={width}x{height}:rate=30")
+        } else {
+            format!("mandelbrot=s={width}x{height}:r=30")
+        };
+        let output = Command::new(&ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                &filter,
+                "-frames:v",
+                &frames.to_string(),
+                "-pix_fmt",
+                "yuv420p",
+                "-f",
+                "rawvideo",
+                "-",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Some(output.stdout)
+    } else {
+        None
+    };
     let mut bitstream = Vec::new();
     let mut expected = Vec::new();
     for i in 0..frames {
-        let p = encode_content::frame(width, height, i, kind);
+        let p = if let Some(raw) = &natural {
+            let mut p = latch_codec::Yuv420::new(width, height);
+            let mut offset = i * (width * height * 3 / 2) as usize;
+            for (plane, stride, n) in [
+                (&mut p.y, p.y_stride, 1),
+                (&mut p.u, p.c_stride, 2),
+                (&mut p.v, p.c_stride, 2),
+            ] {
+                for row in 0..height as usize / n {
+                    let len = width as usize / n;
+                    plane[row * stride..row * stride + len]
+                        .copy_from_slice(&raw[offset..offset + len]);
+                    offset += len;
+                }
+            }
+            p.pad_edges();
+            p
+        } else {
+            encode_content::frame(width, height, i, kind)
+        };
         let start = bitstream.len();
         e.encode(&p, i == frames / 2, &mut bitstream)
             .unwrap_or_else(|err| {
                 panic!("{kind} {width}x{height} threads={threads} kbps={kbps} frame={i}: {err}")
             });
         let rec = encode_content::raw(e.reconstruction());
-        if let Some(native) = &mut native {
+        {
             let decoded = native
                 .decode(&bitstream[start..])
                 .expect("Rust decoder")
@@ -140,8 +191,17 @@ fn software_oracle_small() {
     }
 }
 #[test]
+fn software_oracle_natural_motion() {
+    for kind in ["testsrc2", "mandelbrot"] {
+        compare(640, 360, 2, 2000, kind, 12, false);
+    }
+}
+#[test]
 #[ignore = "full resolution FFmpeg matrix; run with --ignored"]
 fn software_oracle_desktop_matrix() {
+    for kind in ["testsrc2", "mandelbrot"] {
+        compare(1920, 1080, 2, 8000, kind, 30, false);
+    }
     for (w, h) in [(1366, 768), (1920, 1080), (640, 360), (2560, 1600)] {
         for threads in [1, 4] {
             for kbps in [8000, 20000] {
@@ -242,7 +302,13 @@ fn settled_desktop_skips_and_bitrate_changes_apply() {
             })
             .sum::<i64>()
     };
-    assert!(error(encode_content::raw(e.reconstruction())) < error(initial));
+    // A high bits-per-pixel budget can start at the quality floor already.
+    let before_error = error(initial);
+    let after_error = error(encode_content::raw(e.reconstruction()));
+    assert!(after_error <= before_error);
+    if first.qp > 18 {
+        assert!(after_error < before_error);
+    }
     assert!(first.qp >= info.qp);
     e.set_bitrate(1000);
     let mut max = 0.;

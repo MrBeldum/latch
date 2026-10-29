@@ -36,7 +36,8 @@ pub(super) fn intra4(
         t[0] = rec[(y - 1) * stride + x - 1] as i32;
         l[0] = t[0];
     }
-    let mut candidates = Vec::with_capacity(9);
+    let mut candidates = [(0u32, 2u8, [0u8; 16], 0u32); 9];
+    let mut count = 0;
     for mode in 0..9 {
         if (matches!(mode, 0 | 3 | 7) && y == 0)
             || (matches!(mode, 1 | 8) && x == 0)
@@ -128,11 +129,13 @@ pub(super) fn intra4(
             .sum::<u32>()
             * 2
             + rate;
-        candidates.push((sad, mode, p, rate));
+        candidates[count] = (sad, mode, p, rate);
+        count += 1;
     }
-    candidates.sort_unstable_by_key(|v| v.0);
-    candidates
-        .into_iter()
+    candidates[..count].sort_unstable_by_key(|v| v.0);
+    candidates[..count]
+        .iter()
+        .copied()
         .take(3)
         .map(|(_, m, p, rate)| {
             let cost = satd(src, ss, so, &p) + rate;
@@ -150,9 +153,9 @@ pub(super) fn intra_plane(
     n: usize,
     mode: u8,
     chroma: bool,
-) -> Vec<u8> {
-    let mut t = vec![128i32; n + 1];
-    let mut l = t.clone();
+) -> [u8; 256] {
+    let mut t = [128i32; 17];
+    let mut l = t;
     if y > 0 {
         for i in 0..n {
             t[i + 1] = rec[(y - 1) * stride + x + i] as i32;
@@ -169,10 +172,11 @@ pub(super) fn intra_plane(
     }
     let dc = match (x > 0, y > 0) {
         (true, true) => {
-            (t[1..].iter().sum::<i32>() + l[1..].iter().sum::<i32>() + n as i32) / (2 * n) as i32
+            (t[1..=n].iter().sum::<i32>() + l[1..=n].iter().sum::<i32>() + n as i32)
+                / (2 * n) as i32
         }
-        (true, false) => (l[1..].iter().sum::<i32>() + (n / 2) as i32) / n as i32,
-        (false, true) => (t[1..].iter().sum::<i32>() + (n / 2) as i32) / n as i32,
+        (true, false) => (l[1..=n].iter().sum::<i32>() + (n / 2) as i32) / n as i32,
+        (false, true) => (t[1..=n].iter().sum::<i32>() + (n / 2) as i32) / n as i32,
         _ => 128,
     };
     let mut h = 0;
@@ -192,7 +196,7 @@ pub(super) fn intra_plane(
         (17 * v + 16) >> 5
     };
     let a = 16 * (t[n] + l[n]);
-    let mut p = vec![0; n * n];
+    let mut p = [0; 256];
     for yy in 0..n {
         for xx in 0..n {
             let val = match mode {
@@ -258,6 +262,72 @@ pub(super) fn chroma_mc(
     let d = sample(plane, stride, width, height, sx + 1, sy + 1);
     (((8 - dx) * (8 - dy) * a + dx * (8 - dy) * b + (8 - dx) * dy * c + dx * dy * d + 32) >> 6)
         as u8
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn chroma8x8(
+    dst: &mut [u8],
+    ds: usize,
+    offset: usize,
+    src: &[u8],
+    ss: usize,
+    so: usize,
+    dx: u16,
+    dy: u16,
+) {
+    assert!(offset + 7 * ds + 8 <= dst.len() && so + 8 * ss + 9 <= src.len());
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let weights = [(8 - dx) * (8 - dy), dx * (8 - dy), (8 - dx) * dy, dx * dy];
+        for y in 0..8 {
+            let p = src.as_ptr().add(so + y * ss);
+            let a = vmovl_u8(vld1_u8(p));
+            let b = vmovl_u8(vld1_u8(p.add(1)));
+            let c = vmovl_u8(vld1_u8(p.add(ss)));
+            let d = vmovl_u8(vld1_u8(p.add(ss + 1)));
+            let sum = vmlaq_n_u16(
+                vmlaq_n_u16(
+                    vmlaq_n_u16(vmulq_n_u16(a, weights[0]), b, weights[1]),
+                    c,
+                    weights[2],
+                ),
+                d,
+                weights[3],
+            );
+            vst1_u8(
+                dst.as_mut_ptr().add(offset + y * ds),
+                vrshrn_n_u16::<6>(sum),
+            );
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    chroma8x8_scalar(dst, ds, offset, src, ss, so, dx, dy);
+}
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
+fn chroma8x8_scalar(
+    dst: &mut [u8],
+    ds: usize,
+    offset: usize,
+    src: &[u8],
+    ss: usize,
+    so: usize,
+    dx: u16,
+    dy: u16,
+) {
+    let weights = [(8 - dx) * (8 - dy), dx * (8 - dy), (8 - dx) * dy, dx * dy];
+    for y in 0..8 {
+        for x in 0..8 {
+            let i = so + y * ss + x;
+            dst[offset + y * ds + x] = ((src[i] as u16 * weights[0]
+                + src[i + 1] as u16 * weights[1]
+                + src[i + ss] as u16 * weights[2]
+                + src[i + ss + 1] as u16 * weights[3]
+                + 32)
+                >> 6) as u8;
+        }
+    }
 }
 
 /// Six-tap half samples retain their precision until the diagonal pass.
@@ -420,10 +490,18 @@ pub(super) fn subpel_sources(
 }
 
 pub fn compute_half_pel(plane: &[u8], stride: usize, width: usize, height: usize) -> HalfPelPlanes {
+    compute_half_pel_impl::<true>(plane, stride, width, height)
+}
+fn compute_half_pel_impl<const SIMD: bool>(
+    plane: &[u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+) -> HalfPelPlanes {
     let mut h = vec![0u8; stride * height];
     let mut v = vec![0u8; stride * height];
     let mut d = vec![0u8; stride * height];
-    let mut raw_h = vec![0i32; stride * height];
+    let mut raw_h = vec![0i16; stride * height];
 
     let tap = |v0: i32, v1: i32, v2: i32, v3: i32, v4: i32, v5: i32| {
         v0 - 5 * v1 + 20 * v2 + 20 * v3 - 5 * v4 + v5
@@ -437,12 +515,29 @@ pub fn compute_half_pel(plane: &[u8], stride: usize, width: usize, height: usize
                 plane[y_off + cx] as i32
             };
             let rh = tap(s(-2), s(-1), s(0), s(1), s(2), s(3));
-            raw_h[y_off + x] = rh;
+            raw_h[y_off + x] = rh as i16;
             h[y_off + x] = ((rh + 16) >> 5).clamp(0, 255) as u8;
         }
         let row = &plane[y_off..y_off + width];
         let mid_end = width.saturating_sub(3);
-        for x in 2..mid_end {
+        #[allow(unused_mut)] // Mutable only in the NEON path.
+        let mut middle = 2;
+        #[cfg(target_arch = "aarch64")]
+        if SIMD {
+            while middle + 8 <= mid_end {
+                // Six eight-byte loads stay inside this row (including the final +3 tap).
+                unsafe {
+                    use std::arch::aarch64::*;
+                    let rh = half_tap_neon(std::array::from_fn(|i| {
+                        vreinterpretq_s16_u16(vmovl_u8(vld1_u8(row.as_ptr().add(middle + i - 2))))
+                    }));
+                    vst1q_s16(raw_h.as_mut_ptr().add(y_off + middle), rh);
+                    vst1_u8(h.as_mut_ptr().add(y_off + middle), vqrshrun_n_s16::<5>(rh));
+                }
+                middle += 8;
+            }
+        }
+        for x in middle..mid_end {
             let rh = tap(
                 row[x - 2] as i32,
                 row[x - 1] as i32,
@@ -451,7 +546,7 @@ pub fn compute_half_pel(plane: &[u8], stride: usize, width: usize, height: usize
                 row[x + 2] as i32,
                 row[x + 3] as i32,
             );
-            raw_h[y_off + x] = rh;
+            raw_h[y_off + x] = rh as i16;
             h[y_off + x] = ((rh + 16) >> 5).clamp(0, 255) as u8;
         }
         for x in mid_end.max(2)..width {
@@ -460,7 +555,7 @@ pub fn compute_half_pel(plane: &[u8], stride: usize, width: usize, height: usize
                 plane[y_off + cx] as i32
             };
             let rh = tap(s(-2), s(-1), s(0), s(1), s(2), s(3));
-            raw_h[y_off + x] = rh;
+            raw_h[y_off + x] = rh as i16;
             h[y_off + x] = ((rh + 16) >> 5).clamp(0, 255) as u8;
         }
     }
@@ -491,7 +586,32 @@ pub fn compute_half_pel(plane: &[u8], stride: usize, width: usize, height: usize
         let v_row = &mut v[y_off..y_off + width];
         let d_row = &mut d[y_off..y_off + width];
 
-        for x in 0..width {
+        #[allow(unused_mut)] // Mutable only in the NEON path.
+        let mut middle = 0;
+        #[cfg(target_arch = "aarch64")]
+        if SIMD {
+            while middle + 8 <= width {
+                unsafe {
+                    use std::arch::aarch64::*;
+                    let rv =
+                        half_tap_neon([r0, r1, r2, r3, r4, r5].map(|r| {
+                            vreinterpretq_s16_u16(vmovl_u8(vld1_u8(r.as_ptr().add(middle))))
+                        }));
+                    vst1_u8(v_row.as_mut_ptr().add(middle), vqrshrun_n_s16::<5>(rv));
+                    let rows =
+                        [rh0, rh1, rh2, rh3, rh4, rh5].map(|r| vld1q_s16(r.as_ptr().add(middle)));
+                    let lo = diagonal_tap_neon(rows.map(|r| vget_low_s16(r)));
+                    let hi = diagonal_tap_neon(rows.map(|r| vget_high_s16(r)));
+                    let result = vqmovn_u16(vcombine_u16(
+                        vqrshrun_n_s32::<10>(lo),
+                        vqrshrun_n_s32::<10>(hi),
+                    ));
+                    vst1_u8(d_row.as_mut_ptr().add(middle), result);
+                }
+                middle += 8;
+            }
+        }
+        for x in middle..width {
             let rv = tap(
                 r0[x] as i32,
                 r1[x] as i32,
@@ -502,12 +622,40 @@ pub fn compute_half_pel(plane: &[u8], stride: usize, width: usize, height: usize
             );
             v_row[x] = ((rv + 16) >> 5).clamp(0, 255) as u8;
 
-            let rd = tap(rh0[x], rh1[x], rh2[x], rh3[x], rh4[x], rh5[x]);
+            let rd = tap(
+                rh0[x] as i32,
+                rh1[x] as i32,
+                rh2[x] as i32,
+                rh3[x] as i32,
+                rh4[x] as i32,
+                rh5[x] as i32,
+            );
             d_row[x] = ((rd + 512) >> 10).clamp(0, 255) as u8;
         }
     }
 
     HalfPelPlanes { h, v, d }
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn half_tap_neon(v: [std::arch::aarch64::int16x8_t; 6]) -> std::arch::aarch64::int16x8_t {
+    use std::arch::aarch64::*;
+    vaddq_s16(
+        vsubq_s16(
+            vmulq_n_s16(vaddq_s16(v[2], v[3]), 20),
+            vmulq_n_s16(vaddq_s16(v[1], v[4]), 5),
+        ),
+        vaddq_s16(v[0], v[5]),
+    )
+}
+#[cfg(target_arch = "aarch64")]
+unsafe fn diagonal_tap_neon(
+    v: [std::arch::aarch64::int16x4_t; 6],
+) -> std::arch::aarch64::int32x4_t {
+    use std::arch::aarch64::*;
+    let a = vaddq_s32(vmovl_s16(v[0]), vmovl_s16(v[5]));
+    let b = vmlal_n_s16(vmlal_n_s16(a, v[1], -5), v[4], -5);
+    vmlal_n_s16(vmlal_n_s16(b, v[2], 20), v[3], 20)
 }
 
 #[inline(always)]
@@ -676,6 +824,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn chroma_simd_matches_scalar() {
+        let mut seed = 93u32;
+        let src: Vec<_> = (0..16 * 16)
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (seed >> 16) as u8
+            })
+            .collect();
+        for dy in 0..8 {
+            for dx in 0..8 {
+                let mut a = [0; 16 * 16];
+                let mut b = a;
+                chroma8x8(&mut a, 16, 17, &src, 16, 18, dx, dy);
+                chroma8x8_scalar(&mut b, 16, 17, &src, 16, 18, dx, dy);
+                assert_eq!(a, b);
+            }
+        }
+    }
+    #[test]
+    fn half_pel_simd_matches_scalar() {
+        let mut seed = 91u32;
+        for (width, height, stride) in [(16, 16, 16), (34, 19, 48), (130, 98, 144)] {
+            let plane: Vec<_> = (0..stride * height)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    (seed >> 16) as u8
+                })
+                .collect();
+            let simd = compute_half_pel(&plane, stride, width, height);
+            let scalar = compute_half_pel_impl::<false>(&plane, stride, width, height);
+            assert_eq!(simd.h, scalar.h);
+            assert_eq!(simd.v, scalar.v);
+            assert_eq!(simd.d, scalar.d);
+        }
+    }
     #[test]
     fn half_pel_and_subpel_match_luma_mc() {
         let width = 32;
