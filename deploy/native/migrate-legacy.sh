@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Move a native Linux node from the names used before 4.1.0 to the current
-# ones. Run it as the user that owns the desktop,
+# Move a native Linux node to Latch 5: from the BroLink names used before
+# 4.1.0, and from Latch 4's separate engine unit. Run it as the user that owns the desktop,
 # from this directory, after putting the new latch-host at /usr/local/bin:
 #
 #   sudo install -m 0755 latch-host /usr/local/bin/latch-host
@@ -29,11 +29,21 @@ for u in "${OLD_UNITS[@]}"; do rm -f "$UNITS/$u.service"; done
 rm -rf "$UNITS/brolink.service.d"
 
 echo "==> installing the new units"
+# A display or desktop unit already here is the owner's (a dummy-driver
+# Xorg, their own session): keep it. Only a missing one is installed.
 for u in latch-display latch-desktop; do
-	install -m 0644 "$HERE/$u.service" "$UNITS/$u.service"
+	[[ -f "$UNITS/$u.service" ]] || install -m 0644 "$HERE/$u.service" "$UNITS/$u.service"
 done
 mkdir -p "$UNITS/latch.service.d"
-install -m 0644 "$HERE/latch.service.d/desktop.conf" "$UNITS/latch.service.d/desktop.conf"
+dropin="$UNITS/latch.service.d/desktop.conf"
+if [[ -f "$dropin" ]]; then
+	# Latch 4's drop-in also tied the service to the separate engine unit
+	# and waited for it; the engine now runs inside latch-host. The rest of
+	# the owner's lines (display, environment) stay.
+	sed -i -E '/latch-engine\.service/d; /latch-wait-engine\.py|wait-engine\.py/d' "$dropin"
+else
+	install -m 0644 "$HERE/latch.service.d/desktop.conf" "$dropin"
+fi
 # The base unit is the one latch-host writes itself; the same text, so it
 # finds nothing to change when it starts.
 printf '[Unit]\nDescription=Latch\nAfter=network.target\n\n[Service]\nExecStart="%s" --background\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n' "$BIN" >"$UNITS/latch.service"
