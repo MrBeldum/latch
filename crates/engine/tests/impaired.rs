@@ -224,7 +224,18 @@ fn a_bad_network_slows_the_picture_but_loses_no_key() {
     let fps: f32 = seconds.iter().map(|s| s.fps).sum::<f32>() / seconds.len() as f32;
     let recovered: u32 = seconds.iter().map(|s| s.fec_recovered).sum();
     eprintln!("average {fps:.1} fps through the bad network; FEC rebuilt {recovered} shards");
-    assert!(fps > 30.0, "the picture nearly stopped: {fps:.1} fps");
+    // The picture must keep coming, to the end: a stream that recovered
+    // from nothing would trail off to 0 fps. How fast it comes is the
+    // machine's (a debug build on a loaded CI runner manages about 10 fps
+    // of this pattern; a release build on the ARM host keeps 50), measured
+    // separately in docs/measurements.
+    let tail = &seconds[seconds.len() - 3..];
+    assert!(
+        tail.iter().all(|s| s.fps >= 3.0),
+        "the picture stopped: {:?}",
+        tail.iter().map(|s| s.fps).collect::<Vec<_>>()
+    );
+    assert!(fps >= 5.0, "the picture nearly stopped: {fps:.1} fps");
     assert!(
         recovered > 0,
         "FEC never had to rebuild anything: was there loss?"

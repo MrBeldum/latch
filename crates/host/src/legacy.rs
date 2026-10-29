@@ -112,10 +112,37 @@ mod tests {
     }
 
     #[test]
+    /// The seam the Windows CI job runs the retire step through (see
+    /// `.github/workflows/ci.yml`): on a temporary folder and a dummy
+    /// service, never the real ones, which a run of this repository's tests
+    /// on a real PC must not touch. `LATCH_DUMP_RETIRE_SCRIPT` writes the
+    /// script; `LATCH_DUMP_RETIRE_OLD` and `LATCH_DUMP_RETIRE_SERVICE` are
+    /// required. The script gets the preamble setup's own script has.
     fn the_retire_step_can_be_dumped_for_a_windows_run() {
         let Ok(out) = std::env::var("LATCH_DUMP_RETIRE_SCRIPT") else {
             return;
         };
-        std::fs::write(out, retire_windows_ps()).expect("write retire script");
+        let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} is required"));
+        let (old, service) = (
+            var("LATCH_DUMP_RETIRE_OLD"),
+            var("LATCH_DUMP_RETIRE_SERVICE"),
+        );
+        assert!(
+            !old.to_ascii_lowercase().starts_with(r"c:\program files")
+                && !["LatchStream", "BroLinkStream", "SunshineService"]
+                    .iter()
+                    .any(|real| service.eq_ignore_ascii_case(real)),
+            "the selftest never runs on the real engine"
+        );
+        let retire = retire_windows_ps_with(
+            &[&old],
+            &[&service],
+            &["LatchRetireSelftestTask"],
+            &["Latch Retire Selftest"],
+        );
+        let script = format!(
+            "$ErrorActionPreference = 'Continue'\nfunction Step($m) {{ Write-Output $m }}\n$setupFailed = $false\n{retire}if ($setupFailed) {{ exit 1 }}\nexit 0\n"
+        );
+        std::fs::write(out, script).expect("write the script");
     }
 }
