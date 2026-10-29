@@ -38,32 +38,74 @@ impl Impairment {
 pub struct Link {
     impairment: Impairment,
     seed: u64,
+    bad: bool,
+    flight: Vec<(Instant, Vec<u8>)>,
+    counts: (u64, u64, u64),
 }
 
 impl Link {
     pub fn new(impairment: Impairment, seed: u64) -> Self {
-        Self { impairment, seed }
+        Self {
+            impairment,
+            seed: if seed == 0 { 1 } else { seed },
+            bad: false,
+            flight: Vec::new(),
+            counts: (0, 0, 0),
+        }
     }
 
+    fn random(&mut self) -> f64 {
+        self.seed ^= self.seed >> 12;
+        self.seed ^= self.seed << 25;
+        self.seed ^= self.seed >> 27;
+        (self.seed.wrapping_mul(0x2545f4914f6cdd1d) >> 11) as f64 / ((1u64 << 53) as f64)
+    }
+    fn arrival(&mut self, now: Instant) -> Instant {
+        let jitter = self.impairment.jitter.mul_f64(self.random());
+        let reorder = if self.random() < self.impairment.reorder {
+            self.impairment.reorder_delay
+        } else {
+            Duration::ZERO
+        };
+        now + self.impairment.delay + jitter + reorder
+    }
     /// Sends a datagram at `now`.
     pub fn send(&mut self, now: Instant, datagram: &[u8]) {
-        let _ = (now, datagram, self.impairment, self.seed);
-        todo!()
+        self.counts.0 += 1;
+        if self.bad {
+            if self.random() < self.impairment.burst_exit {
+                self.bad = false;
+            }
+        } else if self.random() < self.impairment.burst_enter {
+            self.bad = true;
+        }
+        if self.bad || self.random() < self.impairment.loss {
+            self.counts.1 += 1;
+            return;
+        }
+        let at = self.arrival(now);
+        self.flight.push((at, datagram.to_vec()));
+        if self.random() < self.impairment.duplicate {
+            self.counts.2 += 1;
+            let at = self.arrival(now);
+            self.flight.push((at, datagram.to_vec()));
+        }
     }
 
     /// Datagrams that have arrived by `now`, in arrival order.
     pub fn receive(&mut self, now: Instant) -> Vec<Vec<u8>> {
-        let _ = now;
-        todo!()
+        self.flight.sort_by_key(|x| x.0);
+        let end = self.flight.partition_point(|x| x.0 <= now);
+        self.flight.drain(..end).map(|x| x.1).collect()
     }
 
     /// When the next datagram in flight arrives.
     pub fn next_arrival(&self) -> Option<Instant> {
-        todo!()
+        self.flight.iter().map(|x| x.0).min()
     }
 
     /// Datagrams sent, lost, duplicated so far.
     pub fn counts(&self) -> (u64, u64, u64) {
-        todo!()
+        self.counts
     }
 }

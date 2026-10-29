@@ -15,8 +15,13 @@ impl RttEstimator {
     }
 
     pub fn sample(&mut self, rtt: Duration) {
-        let _ = rtt;
-        todo!()
+        if let Some(srtt) = self.srtt {
+            self.rttvar = self.rttvar.mul_f64(0.75) + srtt.abs_diff(rtt).mul_f64(0.25);
+            self.srtt = Some(srtt.mul_f64(0.875) + rtt.mul_f64(0.125));
+        } else {
+            self.srtt = Some(rtt);
+            self.rttvar = rtt / 2;
+        }
     }
 
     pub fn srtt(&self) -> Option<Duration> {
