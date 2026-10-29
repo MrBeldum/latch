@@ -128,7 +128,12 @@ fn run_setup() -> Result<()> {
 /// 32 MB `panel.log` — the condition is normal and wgpu recreates the
 /// swapchain itself, so there is nothing to act on. Latch stays at info
 /// and that one target is heard from only when it is an error.
-const DEFAULT_LOG: &str = "info,wgpu_hal=error";
+///
+/// The PulseAudio client (Linux desktop audio) logs "Reactor error: Client
+/// disconnected" at error level whenever Latch closes its capture stream at
+/// the end of a session, which is every session; a capture that really
+/// fails is reported by the engine itself ("sound stopped: …").
+const DEFAULT_LOG: &str = "info,wgpu_hal=error,pulseaudio::client::reactor=off";
 
 /// Release builds abort on a panic, in any thread. Without this the reason
 /// went to stderr, which nothing keeps (a launchd agent, a Windows Run-key
