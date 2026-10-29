@@ -10,7 +10,7 @@ use crate::software::{Bgra, CpuCapture, SoftwarePipeline};
 use crate::video::{VideoConfig, VideoPipeline};
 use parking_lot::Mutex;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The pattern the running test session draws, shared with its input.
 static CURRENT: Mutex<Option<Arc<Mutex<Pattern>>>> = Mutex::new(None);
@@ -33,36 +33,50 @@ pub fn open_video(config: &VideoConfig, motion: Motion) -> anyhow::Result<Box<dy
         motion,
     )));
     *CURRENT.lock() = Some(pattern.clone());
-    Ok(Box::new(SoftwarePipeline::new(Shared(pattern), config)?))
+    let shared = Shared {
+        pattern,
+        interval: Duration::from_secs(1) / config.fps.max(1),
+        next: Instant::now(),
+    };
+    Ok(Box::new(SoftwarePipeline::new(shared, config)?))
 }
 
 pub fn open_input() -> anyhow::Result<Box<dyn InputSink>> {
     Ok(Box::new(PatternInput))
 }
 
-struct Shared(Arc<Mutex<Pattern>>);
+struct Shared {
+    pattern: Arc<Mutex<Pattern>>,
+    interval: Duration,
+    next: Instant,
+}
 
 impl CpuCapture for Shared {
     fn size(&self) -> (u32, u32) {
-        self.0.lock().size()
+        self.pattern.lock().size()
     }
 
+    /// Looks at the pattern once a frame interval, as a screen refreshes;
+    /// sleeps outside the lock so input is never held up behind a frame.
     fn grab(&mut self, frame: &mut Bgra, timeout: Duration) -> anyhow::Result<bool> {
-        // The pattern paces itself by sleeping; do that outside the lock so
-        // input is never held up behind a frame interval.
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = Instant::now() + timeout;
         loop {
-            let changed = self.0.lock().grab(frame, Duration::ZERO)?;
-            let now = std::time::Instant::now();
-            if changed || now >= deadline {
-                return Ok(changed);
+            let now = Instant::now();
+            if now >= self.next {
+                self.next = now + self.interval;
+                if self.pattern.lock().grab(frame, Duration::ZERO)? {
+                    return Ok(true);
+                }
             }
-            std::thread::sleep((deadline - now).min(Duration::from_millis(2)));
+            if now >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep((self.next.min(deadline) - now).min(Duration::from_millis(2)));
         }
     }
 
     fn display(&self) -> DisplayRect {
-        self.0.lock().display()
+        self.pattern.lock().display()
     }
 
     fn name(&self) -> String {
