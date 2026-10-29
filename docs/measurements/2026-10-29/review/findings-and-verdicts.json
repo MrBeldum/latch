@@ -1,0 +1,406 @@
+{
+ "confirmed": [
+  {
+   "severity": "high",
+   "file": "crates/proto/src/input.rs",
+   "line": 244,
+   "defect": "When 1024 events are unacknowledged, InputSender::enqueue drops the oldest one with pop_front. The host's InputReceiver then waits forever for that sequence number, so the gap can never be filled.",
+   "scenario": "The host stops acknowledging for a while (a network blip, or the resend starvation in the next finding) while the user moves the pointer. In absolute mode MousePosition events go through enqueue, so about 8.5 s of motion at 120 Hz fills the queue. The next MousePosition or Key event pops the oldest unacked seq S. The host's receiver.next stays at S and it keeps acking S. ack(S) removes nothing, so the queue stays at 1024 and keeps dropping its front. No input is applied for the rest of the session. A scratch test sent 1034 lost moves, then 2 s of working network with key presses: the host applied 0 events, host next=0, sender unacked=1024.",
+   "fix": "Never discard an unacked event the host may not have applied. When the queue is full, drop or merge the incoming pointer-motion event: overwrite the newest MousePosition or MouseMove in place, which is safe because the host dedups by seq. Let key, button, text and ReleaseAll events exceed the cap, since they come at human rate, and size the receiver window to match. Or add an explicit 'skip to seq' so the host can advance past abandoned events.",
+   "area": "protocol",
+   "verdict": "Confirmed at input.rs:242-248. enqueue() pop_fronts the oldest unacked entry once 1024 are queued. InputReceiver::receive (input.rs:329-347) only advances on pending[next] and has no skip, so a dropped seq S that the host never got leaves host.next at S. Every later ack(S) removes nothing, so the queue stays full and keeps dropping its front. Nothing in session.rs or server.rs resets either side, so input stays dead for the session."
+  },
+  {
+   "severity": "high",
+   "file": "crates/proto/src/input.rs",
+   "line": 272,
+   "defect": "When any event has never been sent, InputSender::poll sends only from that event onward and resets last_send. Older unacked events are retransmitted only after 20 ms with no new event. The spec instead says every Input datagram carries every unacknowledged event, oldest first.",
+   "scenario": "Pointer events arrive every 8-16 ms (60-120 Hz) during a drag or continuous motion, and one Input datagram is lost. Every later datagram starts after the lost events. The host stores them as pending behind the gap and keeps acking the gap. The resend branch never runs because each new event resets last_send before 20 ms pass. All host input (pointer, keys, buttons) freezes until the user stops for at least 20 ms. If motion lasts about 1024 events, the previous finding makes it permanent. Scratch test, absolute moves every 10 ms with the 2nd datagram lost: the host applied 1 of 300 events over 3 s, with 299 unacked.",
+   "fix": "Build every Input datagram from queue[0], the oldest unacked event, and fill it with as many events as fit, as PROTOCOL.md says. Mark the included events as sent and keep the 20 ms resend timer only for the case where nothing new arrives.",
+   "area": "protocol",
+   "verdict": "Confirmed at input.rs:272-279. When any entry is unsent, poll() writes only from that entry onward and sets last_send. session.rs Input::send pushes and flushes on every event, so during motion faster than 50 Hz last_send is always under 20 ms old. The resend branch (282-291), the only one that starts at queue[0], never runs. This contradicts PROTOCOL.md: 'Each Input datagram carries every unacknowledged event, oldest first'. The host holds everything after the gap and keeps acking the gap."
+  },
+  {
+   "severity": "high",
+   "file": "crates/proto/src/audio.rs",
+   "line": 29,
+   "defect": "AudioPacketizer only rejects payloads over 65535 bytes. A 480-sample stereo lpcm-rice frame is up to about 1.9 KB, so Audio datagrams routinely exceed MAX_DATAGRAM (1200). The viewer receives into a MAX_DATAGRAM+1 buffer (crates/stream/src/session.rs:714), and wire::parse does not reject oversized Audio.",
+   "scenario": "The host plays music. In a scratch test, a music-like signal (tones plus mild broadband noise) gave 1472-1501-byte datagrams for 200 of 200 frames. Noise at amplitude 2000 gave 1506 bytes, and full-scale noise gave 1901/1903. On macOS and Linux the viewer's recv_from silently truncates them to 1201 bytes. AudioReceiver stores the truncated payload, latch_codec::audio::decode fails, and Player::push drops the frame with no concealment. Parity rebuilt from a truncated parity packet is garbage too. On Windows recv_from returns WSAEMSGSIZE and the packet is discarded. Either way, loud audio cuts out. The datagrams are also larger than Tailscale's 1280 MTU, so they are IP-fragmented.",
+   "fix": "Make every audio datagram fit 1200 bytes. One way is 240-sample (5 ms) frames: worst-case verbatim is 965 bytes, plus 16 header and 2 parity length bytes. Another is to split a coded frame across packets. In AudioPacketizer, refuse or split payloads over MAX_DATAGRAM - 16 - 2. Have wire::parse reject datagrams over MAX_DATAGRAM so truncation is caught.",
+   "area": "protocol",
+   "verdict": "Confirmed. AudioPacketizer::packetize only rejects payloads over 65535 bytes, and wire::parse kind 3 only checks len >= 16. lpcm-rice verbatim for 480 stereo samples is about 1925 bytes, and ENGINE.md's own 0.5-1 Mbps is up to 1250 B/frame, so 16 + payload often exceeds MAX_DATAGRAM (1200). The viewer's recv buffer is MAX_DATAGRAM+1 (session.rs:714), so larger datagrams are truncated (Unix) or rejected (Windows). The truncated payload then fails to decode, and parity rebuilt from it is wrong too."
+  },
+  {
+   "severity": "high",
+   "file": "crates/proto/src/audio.rs",
+   "line": 123,
+   "defect": "AudioReceiver::push rejects data packets more than 64 past `next` (and parity packets likewise at line 113) without advancing `next` or updating `latest`. After any gap of more than 64 packets, every later packet is rejected and pop() returns None forever.",
+   "scenario": "A Wi-Fi outage or roam of about 0.65 s or more loses audio seq N..N+64 or more; the session itself survives up to 10 s of silence. Afterwards every packet has seq - next > 64 and is dropped. `latest` stays at N-1 and no parity for N's group is stored, so pop() never emits Missing. Audio is silent for the rest of the session, and the viewer has no reset path (session.rs only calls push/pop). Scratch test, 400 packets with seq 40..119 dropped: only 40 outputs were ever popped, stats (40, 0, 0).",
+   "fix": "Resynchronise when a packet lands beyond the window. Either emit Missing for the skipped range (or jump `next` to the packet's group start, seq - seq % GROUP), clearing stale frames and parity. Or update `latest` before the window check so pop() can give up on the missing packets, and let the window slide.",
+   "area": "protocol",
+   "verdict": "Confirmed at audio.rs:113 and 123. Packets with seq - next > 64 are dropped without moving next or latest. pop() (184-205) only advances when it has the frame, the group's parity, or latest >= group+5, and none of these can happen once every packet arriving is beyond the window. AudioReceiver is created once per session in receive() and never reset, so after about 0.65 s of lost audio the sound stays off for the rest of the session."
+  },
+  {
+   "severity": "low",
+   "file": "crates/proto/src/video.rs",
+   "line": 361,
+   "defect": "poll() checks FRAME_TIMEOUT only for the head frame `next`. If the head frame got no shards at all and a later frame is incomplete, neither is declared lost until another frame completes, and next_deadline() returns None. PROTOCOL.md says a frame is lost 100 ms after its first shard.",
+   "scenario": "Frame N (two datagrams) is entirely lost, frame N+1 gets one shard, and then the screen goes still. A scratch test polled at 50, 120, 200 and 240 ms after N+1's first shard: each poll returned None and next_deadline was None. Loss detection and the keyframe request wait for the host's IDLE_REPEAT (250 ms) frame instead of about 100 ms, so the viewer shows a stale picture for longer.",
+   "fix": "Also treat the head as lost when any later pending frame has passed first + FRAME_TIMEOUT, and include those deadlines in next_deadline().",
+   "area": "protocol",
+   "verdict": "Confirmed. poll() computes timeout only from pending.get(&next) (video.rs:352-355). If the head frame has no shards it is None, and `later` needs a complete later frame. next_deadline() likewise returns None. An incomplete N+1 behind a fully lost N is not declared lost 100 ms after its first shard, as PROTOCOL.md says, but only when another frame completes. On a still screen that is the host's 250 ms IDLE_REPEAT."
+  },
+  {
+   "severity": "low",
+   "file": "crates/proto/src/video.rs",
+   "line": 430,
+   "defect": "Reassembler starts with waiting=true and KeyframeRequests::due fires as soon as waiting is true. So the viewer sends a KeyframeRequest the moment the first shard of the session's initial keyframe arrives, before any frame is lost. PROTOCOL.md says requests are sent when a frame is lost.",
+   "scenario": "Every session start: the first video shard sets media_seen in session.rs, the multi-shard initial IDR is still incomplete, and due(true, ...) returns true, so a request is sent. The host sets session.keyframe and encodes a second IDR 50 ms later (KEYFRAME_GAP). If the first IDR takes more than 100 ms, a third follows. These back-to-back IDR bursts at startup cause loss on constrained links.",
+   "fix": "Only request after a declared loss: track a `lost` flag separately from the initial wait-for-first-keyframe gating. Or delay the first request until the initial keyframe has not completed within FRAME_TIMEOUT + rtt of the first shard.",
+   "area": "protocol",
+   "verdict": "Confirmed. Reassembler::new sets waiting=true (video.rs:232). session.rs computes waiting from waiting_for_keyframe() and calls keyframes.due() once media_seen is set by the first video shard. due() fires immediately when last_sent is None, so the first shard of the still-incomplete initial IDR sends a KeyframeRequest. server.rs then sets session.keyframe and encodes another IDR once KEYFRAME_GAP has passed. That is a spurious request with no lost frame, contrary to PROTOCOL.md."
+  },
+  {
+   "severity": "high",
+   "file": "crates/stream/src/session.rs",
+   "line": 576,
+   "defect": "After the control loop the viewer sets `inner.stop` (line 563), and only then handles the outcome. `Outcome::Failed` goes through the `fail` closure, which drops the event when `inner.stopping()` is true (line 430), so a post-Accept failure never emits `Event::Failed`.",
+   "scenario": "UDP 47850 is blocked between the machines, or the host sends `End` or closes TCP before the first video datagram (for example capture failed, or another device took over during startup). `control_loop` returns `Outcome::Failed(\"connecting\", \"...no picture arrived: UDP port 47850 may be blocked...\")`, but nothing is emitted. The client's `poll_live` then sees `finished()` with no event and sets `Step::Ended { error: None }`, so the stream closes as if the user had stopped it and the diagnosis is lost. Reproduced: a fake host that answers 101 + Accept and never sends UDP. The `view` example printed only `Stage(...)`; the viewer dropped TCP at about 8 s; no Failed event came, and the example hit its own 20 s timeout.",
+   "fix": "In `run`, emit before setting the stop flag, or bypass the guard: `Outcome::Failed(stage, message) => inner.emit(Event::Failed { stage, message })`. A user stop already arrives as `Outcome::Stopped`.",
+   "area": "lifecycle",
+   "verdict": "Confirmed in session.rs. run() stores inner.stop=true right after control_loop returns, then sends Outcome::Failed through `fail`, which emits only if !inner.stopping(). The Failed event is therefore always swallowed, including the 'UDP port may be blocked' message and the host End/close before media. app.rs poll_live then sees finished() with no event and sets Step::Ended{error: None}."
+  },
+  {
+   "severity": "high",
+   "file": "crates/engine/src/server.rs",
+   "line": 173,
+   "defect": "The `opening` lock is released when `prepare` returns, but the session only enters `current` later, in `run` (line 258), after the HTTP worker writes the 101. A second `prepare` in that gap sees `current == None` and does not end or wait for the first. `run` then replaces the old session (line 258-261) without waiting for it to finish.",
+   "scenario": "Viewer B (a second device, or the same client cancelling and reconnecting while request A is still being prepared) posts /v1/stream while A's `prepare` is running. B blocks on `opening`. When A's `prepare` returns, B usually takes the lock before A's `run` installs A. Linux (desktop follows the viewer): B's `prepare` records A's size as 'previous' and resizes for B. Both sessions then run; A is ended without a wait; A's undo restores the pre-A size while B is streaming. B's software pipeline re-creates its encoder at the wrong size, and B's own undo later leaves the desktop at A's size. Windows: B's `video::open` fails because A's prepared pipeline still holds the DXGI duplication (one per output per process, see capture.rs:466), so B is refused with 500 \"could not capture the screen\".",
+   "fix": "Keep the opening guard (for example an `ArcMutexGuard` on `Arc<Mutex<()>>`) inside `Prepared` until `run` has put the session into `current`, or until `Prepared` is dropped. Also, in `run`, if `replaced` is `Some`, call `end` and then `wait_finished` before starting media.",
+   "area": "lifecycle",
+   "verdict": "Confirmed. `_opening` is a local guard in prepare() (server.rs:173) and is dropped on return. The session enters `current` only in run() (line 258), after http.rs switch() writes the 101. A second prepare waiting on `opening` wakes immediately, sees current==None, skips the takeover wait and runs its own prep and video::open. On Windows that DuplicateOutput fails, because Microsoft's docs say a process can have only one duplication per output. run() then replaces the old session without waiting for it."
+  },
+  {
+   "severity": "medium",
+   "file": "crates/engine/src/server.rs",
+   "line": 688,
+   "defect": "`InputState.display`, which absolute mouse positions are mapped onto, is set once from the info at open and refreshed only after a pipeline reopen. `send_video` never re-reads `pipeline.info()` after a normal frame, even though every pipeline follows desktop size changes on its own (X11 ConfigureNotify, DXGI ACCESS_LOST \u2192 new Capture, macOS SCK restart).",
+   "scenario": "A Windows host streams 1920x1080, then a fullscreen game or the user switches the display to 1280x720. DXGI reopens and the stream follows the new size, but `DisplayRect` stays 1920x1080. A click at the centre of the viewer maps to (960,540) and is normalised against a 1280x720 virtual screen, so it lands at about 75% across and down; clicks near the right or bottom edge go off-screen. The same happens on Linux when the X desktop is resized mid-session. `/v1/status` likewise keeps reporting the original encoder and hardware flag after the Windows MF\u2192software fallback.",
+   "fix": "In `send_video`, after each successful `pipeline.next`, compare `pipeline.info()` with the last value seen. When it changes, update `session.input.lock().display` and the server status (encoder, hardware).",
+   "area": "lifecycle",
+   "verdict": "Confirmed. InputState.display is set from info.display at run() and updated only in the reopen branch of send_video. Windows Capture::grab replaces *self via Capture::new after ACCESS_LOST, with a new DesktopCoordinates. MfPipeline rebuilds its converter and encoder, VideoProxy refreshes info after each next(), and SoftwarePipeline reports capture.display(). send_video never copies the new display into state.display, so DisplayRect::map scales clicks to the old rect. The status encoder and hardware fields are also never refreshed."
+  },
+  {
+   "severity": "medium",
+   "file": "crates/proto/src/input.rs",
+   "line": 243,
+   "defect": "When 1,024 events are unacknowledged, `InputSender::enqueue` silently `pop_front`s the oldest one. The host's `InputReceiver` applies strictly in sequence and waits for that event forever. Every later event is then held as pending and never applied, and the ack never advances.",
+   "scenario": "A UDP blackout of a few seconds (Wi-Fi roam or campus Wi-Fi loss, shorter than the 10 s silence limit so TCP keeps the session alive), or a host whose receive thread stalls on injection. Meanwhile the user moves the pointer (absolute `MousePosition` per egui frame, ~120 Hz, not coalesced) and scrolls. At ~240 events/s the queue overflows in about 4 s, and the event with sequence N is dropped. Once the network recovers, the host acks N forever, every new event is buffered and never applied, and keyboard and mouse stay dead for the rest of the session while video keeps flowing.",
+   "fix": "Never drop an unacknowledged event without resyncing. Coalesce the trailing unacked `MousePosition` and `Scroll` entries the way `MouseMove` is coalesced. If the queue is still full, refuse new non-move events, or end or resync the input stream (for example a sender-side 'first held seq' that lets the receiver skip forward, followed by `ReleaseAll`).",
+   "area": "lifecycle",
+   "verdict": "Same defect as [0], confirmed at input.rs:243-244. pop_front of an unacked event the host never received leaves InputReceiver.next stuck at that seq forever. The receiver has no skip-ahead and the sender has no resync, so input stays dead for the session after any overflow."
+  },
+  {
+   "severity": "medium",
+   "file": "crates/engine/src/server.rs",
+   "line": 674,
+   "defect": "`session.keyframe` is read only before the blocking `pipeline.next(keyframe, IDLE_REPEAT)` call. A KeyframeRequest that arrives while `next` is waiting for a screen change is ignored until that call returns, which on a still screen is the next 250 ms idle repeat.",
+   "scenario": "On a still desktop, the frame carrying the last typed character is lost entirely. The viewer only notices when the idle repeat (a P-frame) completes, about 250 ms later, and then sends a KeyframeRequest. The host has already started the next `next(false, 250ms)` wait, so it sends another unusable repeat at about 500 ms and only then encodes the IDR. The viewer shows a stale picture for about half a second, instead of roughly 1 RTT + 1 frame interval as PROTOCOL.md describes.",
+   "fix": "Let a request wake the pipeline. Pass the session's keyframe flag (or a condvar) into the pipeline's idle wait, or call `next` with an idle no longer than one frame interval and loop until `IDLE_REPEAT`, re-reading the flag each time.",
+   "area": "lifecycle",
+   "verdict": "Confirmed. send_video reads session.keyframe once before pipeline.next(keyframe, IDLE_REPEAT=250 ms). The pipelines' idle waits never re-check the session flag: the Mac condvar wait until idle, the MfPipeline grab loop until idle elapses, and SoftwarePipeline::acquire until its deadline. On a still screen, a request that arrives during the wait is honoured only after the 250 ms repeat is sent."
+  },
+  {
+   "severity": "medium",
+   "file": "crates/engine/src/server.rs",
+   "line": 684,
+   "defect": "The 'starting it again' path calls `video::open(&config)` while the failed pipeline is still alive (it is replaced only after the new one opens). `reopened` is never reset, so after one recovery any later error ends the session.",
+   "scenario": "Windows host: `pipeline.next` fails with the old Capture still holding its `IDXGIOutputDuplication` (for example AcquireNextFrame returns DEVICE_REMOVED after a driver reset, or the encoder and its software fallback both fail). `video::open` \u2192 `Capture::new` \u2192 `DuplicateOutput` fails because the process already duplicates that output. The reopen never succeeds, and the viewer gets End code 2 instead of a restarted stream. On any platform, a second capture loss hours into a session (for example a second display mode change) ends it with no retry.",
+   "fix": "Drop the old pipeline before opening the new one (hold it in an `Option` and `take()` it first). Reset `reopened` after a frame succeeds, or allow N reopens per time window.",
+   "area": "lifecycle",
+   "verdict": "Confirmed. In the error branch, video::open(&config) runs while the old `pipeline` (Windows: a VideoProxy whose worker thread still owns the Capture and its IDXGIOutputDuplication) is alive; it is only replaced after the open succeeds. Microsoft's DuplicateOutput docs, and the code's own comment in capture.rs, say a process can hold only one duplication per output, so the reopen fails when the error happened with the duplication held. `reopened` is never reset, so a second failure later in the session always ends it."
+  },
+  {
+   "severity": "low",
+   "file": "crates/engine/src/server.rs",
+   "line": 182,
+   "defect": "A takeover waits only `TAKEOVER_WAIT` (5 s) for the old session to finish, but the old session marks itself finished only after joining its media threads and running its undo. An owner prep_undo script may legitimately take up to 15 s (prep.rs `run(..., 15 s)`), and a Windows mode restore plus the join can also take several seconds.",
+   "scenario": "A host with a prep_undo that takes 6\u201315 s (or a slow mode restore after a blocked `next`): every takeover is answered 503 \"the previous stream is still letting go of the screen; try again\", even though the old session ends normally moments later. The new viewer shows an error instead of taking over.",
+   "fix": "Make the takeover wait cover the worst-case undo (more than 15 s plus the join), or have the new `prepare` wait on 'finished' without a short deadline while the old session is known to be in its undo.",
+   "area": "lifecycle",
+   "verdict": "Confirmed. prepare() ends the old session and waits only TAKEOVER_WAIT = 5 s (server.rs:40, 182). The old session calls mark_finished only after control() has joined its media threads and after `undo()`. prep.rs runs prep_undo with a 15 s limit, so any undo taking 5-15 s makes the takeover return 503 after the old viewer has already been ended."
+  },
+  {
+   "severity": "low",
+   "file": "crates/engine/src/server.rs",
+   "line": 733,
+   "defect": "When `capture.read` fails mid-session, `send_audio` logs \"sound stopped\" and returns. It never tells the viewer (PROTOCOL.md defines Notice kind \"audio\" for this) and never tries to reopen, so the rest of the session is silent while the viewer still describes its player as working.",
+   "scenario": "On a Linux host the PulseAudio/PipeWire server restarts, or on macOS the SCK audio stream errors. The audio thread exits, video continues, and the viewer's stats keep showing \"audio \u2192 speakers\" with no explanation. Sound returns only after a reconnect.",
+   "fix": "On error, store the problem in the session and have the control loop send `Notice { kind: \"audio\", message }`. Retry `audio::open()` (as video does) before giving up.",
+   "area": "lifecycle",
+   "verdict": "Confirmed. send_audio returns on any capture.read error after only a server.log line. Nothing in engine or host ever sends Notice{kind:\"audio\"} (the only Notice written is the input one at server.rs:371), and there is no audio::open retry. The viewer is never told and stays silent until it reconnects."
+  },
+  {
+   "severity": "high",
+   "file": "crates/host/src/setup.rs",
+   "line": 228,
+   "defect": "The elevated `--setup-elevated` helper writes its PowerShell script to `C:\\Windows\\Temp\\latch-setup-<pid>.ps1` with `std::fs::write` (CREATE_ALWAYS), then runs it with `-File`. The comment at line 215 says that folder is writable by administrators only, but it is not: BUILTIN\\Users has `(CI)(S,WD,AD,X)` there, so any standard user can create files in it and keeps full control of files they create.",
+   "scenario": "A second, non-admin account on the PC (or malware running as any user) watches for an elevated latch-host.exe; its PID is visible to all users through Get-Process. It then creates `C:\\Windows\\Temp\\latch-setup-<pid>.ps1` and holds a handle open with full sharing. `wake::probe()` runs PowerShell first, which gives it about a second of head start. The admin's `fs::write` truncates and fills the attacker-owned file; CREATE_ALWAYS keeps the file's owner and DACL. The attacker then overwrites the content in the few hundred ms before the child powershell.exe reads it. The attacker's PowerShell runs as administrator, so a standard user escalates to admin the next time the owner clicks Set up / Repair.",
+   "fix": "Do not put the script in a shared directory. Pipe it to `powershell ... -Command -` on stdin, or pass it with `-EncodedCommand`. Otherwise create it with `OpenOptions::new().write(true).create_new(true)` under a random name, so a pre-created file makes the open fail; a file the admin creates there inherits no Users ACE. Then correct the comment.",
+   "area": "security",
+   "verdict": "Confirmed at setup.rs:215-228. The elevated helper writes latch-setup-<pid>.ps1 into %SystemRoot%\\Temp with std::fs::write (create+truncate, which is CREATE_ALWAYS on Windows), then runs it with -File. The default ACL on C:\\Windows\\Temp gives BUILTIN\\Users (CI)(S,WD,AD,X) and CREATOR OWNER full control, so a standard user can pre-create that name. CREATE_ALWAYS keeps the existing owner and DACL, leaving a TOCTOU window to swap the content before the elevated PowerShell reads it. The comment's 'administrators only' claim is wrong."
+  },
+  {
+   "severity": "high",
+   "file": "crates/host/src/service.rs",
+   "line": 593,
+   "defect": "Every loopback connection is the owner. `authorized()` returns true for loopback, and `loopback_caller` returns `Caller::Local` whenever TUN is not known to be false. Local callers may use every route. With pairing gone, that now includes `POST /v1/stream` (watch the desktop and inject input), as well as the clipboard, power and, on Windows, `/v1/update`.",
+   "scenario": "(a) Windows with fast user switching: a process in another, standard account connects to 127.0.0.1:47850, which is shared across sessions. It POSTs /v1/stream, reads the token from Accept and sends Hello from 127.0.0.1. It then gets the owner's screen and SendInput into the owner's session. It can also POST /v1/update with its own x64 PE and a higher version header; that exe is written to the owner's %LOCALAPPDATA%\\Latch and started as the owner. (b) macOS: any process of the same user that lacks Screen Recording and Accessibility uses Latch's grants as a confused deputy, which bypasses TCC. (c) Relay VPS: any other uid on the host takes over the `ubuntu` XFCE session and its terminal.",
+   "fix": "Authenticate local callers. Keep a random secret in the 0700 data dir that the window and scripts send as a header, and refuse /v1/stream, /v1/update, /v1/power, the clipboard routes and /v1/quit from loopback without it. Alternatively check the peer socket's owning uid/SID: /proc/net/tcp inode to uid on Linux, GetExtendedTcpTable plus the process token on Windows, libproc on macOS.",
+   "area": "security",
+   "verdict": "Confirmed. authorized() returns true for any loopback IP, and loopback_caller returns Caller::Local unless TUN is known false. Local is allowed on every route, including POST /v1/stream (screen plus SendInput), the clipboard routes, /v1/power, /v1/update and /v1/quit. The only other check is sent_by_latch, which is a header any process can send. The listener is on 0.0.0.0:47850, so on a multi-user Windows PC another account's processes reach it via 127.0.0.1 and get the owner's desktop and input, or start a pushed exe as the owner."
+  },
+  {
+   "severity": "medium",
+   "file": "crates/host/src/service.rs",
+   "line": 202,
+   "defect": "On Linux, `Service::run` calls `crate::prep::migrate()?`, so any error there stops the service from starting. `migrate_from` starts with `HostConfig::try_load()?`, which is strict and fails on a syntax error, a wrong type or an empty file. It also fails when sunshine.conf has more than one `global_prep_cmd` entry (prep.rs:134), JSON serde rejects (prep.rs:164), or the file cannot be read. The rest of the service is written to keep running on a bad host.toml (`load()` salvages, `next_config` keeps the old settings).",
+   "scenario": "The owner hand-edits `prep_do = /usr/local/bin/stuzha-display` without quotes, or Latch 4 left two global_prep_cmd entries. latch.service exits 1 right after binding. desktop.conf restarts it every 3 s and it fails every time, so stuzha or the relay desktop cannot be reached from any viewer until someone fixes the file over SSH. migrate-legacy.sh (`set -e`, then `\"$BIN\" --setup`) has already stopped the old stack, so the node ends up with nothing running.",
+   "fix": "In `Service::run`, log the migration error and carry on (`if let Err(e) = migrate() { self.log(...) }`). In `migrate_from`, read the config with the lenient `HostConfig::load()`, or skip the import when `try_load` fails.",
+   "area": "security",
+   "verdict": "Confirmed. Service::run calls `crate::prep::migrate()?` (service.rs:202). On Linux, migrate_from begins with HostConfig::try_load()?, which errors on invalid TOML or an empty file. It also errors through legacy_commands' ensure!(len <= 1) or a serde failure on sunshine.conf. Any of these makes the service exit at startup, while the rest of the service deliberately uses the lenient load() and next_config."
+  },
+  {
+   "severity": "medium",
+   "file": "crates/host/src/unix_setup.rs",
+   "line": 48,
+   "defect": "`retire_engine()` runs `remove_dir_all(~/.config/sunshine)` unconditionally on every Linux setup and Repair. It does not check that the folder belonged to Latch 4's engine.",
+   "scenario": "A Linux user who runs their own Sunshine for Moonlight game streaming, and never had Latch 4, installs Latch 5 and clicks Set up (app.rs:182 calls setup::run). Their Sunshine credentials, paired Moonlight clients, apps.json and state are deleted permanently, with no backup.",
+   "fix": "Remove or back up ~/.config/sunshine only when a Latch 4 engine unit (latch-engine.service or brolink-engine.service) was found. Better still, rename it to a dated backup instead of deleting it.",
+   "area": "security",
+   "verdict": "Confirmed at unix_setup.rs:47-50. On Linux, retire_engine() runs remove_dir_all(~/.config/sunshine) whenever the folder exists. It does not check that a Latch 4 or BroLink engine unit was present, so a user's own Sunshine configuration and pairings are deleted permanently by Set up or Repair."
+  },
+  {
+   "severity": "medium",
+   "file": "crates/host/src/service.rs",
+   "line": 995,
+   "defect": "`loopback_caller` treats `tun == None` (unknown) the same as a kernel TUN and returns `Caller::Local` without asking `whois`. `self.tun` stays None until a `tailscale status` succeeds with BackendState Running, so this check fails open.",
+   "scenario": "Under userspace Tailscale (the mode this code explicitly supports), the service starts before tailscaled is Running, or `tailscale status` times out or fails. Until the next successful 5 s refresh, a shared-in machine from another tailnet arrives from 127.0.0.1 and is treated as Local. It can start a stream, inject input, read the log, call /v1/quit, or push an update on Windows. If the CLI never answers status, the window never closes.",
+   "fix": "Return Local only when `tun == Some(true)`. For None, do the same `whois_addr` check as for Some(false): Ok(None) means Local, a found peer must pass `admits`, and an error is refused.",
+   "area": "security",
+   "verdict": "Confirmed at service.rs:995. `if tun != Some(false) { return Caller::Local }` treats an unknown TUN state (None) as kernel mode. self.tun starts None and is set only by note_tun after a successful tailscale::status(), which fails unless BackendState is Running. Under userspace Tailscale, relayed peers that arrive before the first successful refresh (up to 5 s after tailscaled comes up, or forever if status keeps failing) are treated as Local without whois. This fails open."
+  },
+  {
+   "severity": "medium",
+   "file": "crates/core/src/http.rs",
+   "line": 274,
+   "defect": "The pre-check `authorized(peer.ip())` lets every loopback connection through, and `read_request` then reads the whole request before `caller()` decides who it is. That includes up to 128 MB of body on /v1/update with a 120 s per-read timeout, and headers under only a 15 s per-read timeout with no overall deadline. Under userspace Tailscale every relayed tailnet peer is loopback.",
+   "scenario": "Under userspace Tailscale, an unauthorized shared-in machine opens 16 connections and sends one header byte every 14 s. MAX_CONNECTIONS=16 is reached and new connections are dropped at accept, so the owner's viewers cannot get status or start a stream for hours. Alternatively it POSTs /v1/update with Content-Length 128 MB on 16 connections, and the host buffers about 2 GB before any authorization check runs.",
+   "fix": "Read and bound the head, run `caller()` (whois_addr), and only then read the body. Allow the 128 MB limit only for an authorized caller on /v1/update, and put an overall deadline on reading the request head, not just a per-read timeout.",
+   "area": "security",
+   "verdict": "Confirmed. serve_with_peer_check's authorize closure is Service::authorized, which passes all loopback. read_request then reads the whole head (16 KB, 15 s per-read timeout, no overall deadline) and up to UPDATE_MAX_BYTES of body for /v1/update before handle() calls caller()/whois. Under userspace Tailscale every relayed peer is loopback, so an unauthorized peer can hold all 16 slots (MAX_CONNECTIONS) with a slow head, or make the host buffer large bodies, before any authorization."
+  },
+  {
+   "severity": "medium",
+   "file": "crates/host/src/prep.rs",
+   "line": 52,
+   "defect": "On Windows the prep command is passed as `cmd.args([\"/D\",\"/S\",\"/C\", script])`. Rust quotes that argument with MSVC rules, turning each `\"` into `\\\"`, but cmd.exe does not understand backslash escapes, so any prep_do or prep_undo containing a double quote is mangled.",
+   "scenario": "With `prep_do = '\"C:\\Program Files\\Tools\\setres.exe\" %LATCH_CLIENT_WIDTH% %LATCH_CLIENT_HEIGHT%'`, cmd receives `/S /C \"\\\"C:\\Program Files\\Tools\\setres.exe\\\" ...\"`. After /S strips the outer quotes it tries to run `\\\"C:\\Program...`, fails with \"The filename, directory name, or volume label syntax is incorrect\", and every stream is refused with 500 \"could not prepare the desktop\".",
+   "fix": "Build the command line verbatim with `std::os::windows::process::CommandExt::raw_arg`, for example `cmd.raw_arg(format!(\"/D /S /C \\\"{script}\\\"\"))`, instead of `.args`.",
+   "area": "security",
+   "verdict": "Confirmed at prep.rs:51-52. cmd.exe is not a .bat/.cmd target, so Rust applies MSVC quoting to the `script` argument: wrapped in quotes because it has spaces, with each inner '\"' written as '\\\"'. cmd /S /C strips only the outer quotes and does not understand backslash escapes, so a prep_do such as '\"C:\\Program Files\\...\\setres.exe\" ...' runs '\\\"C:\\Program...' and fails. prepare() then errors and every stream is refused with 500."
+  },
+  {
+   "severity": "low",
+   "file": "crates/engine/src/server.rs",
+   "line": 173,
+   "defect": "`opening` is released when `prepare` returns, but `current` is set only later in `run()`, after the 101 is written. A second request waiting on `opening` therefore always sees `current == None`, skips the takeover wait, and runs its own desktop prep and capture open while the first session is prepared but not yet installed.",
+   "scenario": "Viewer A's prepare (stuzha-display plus capture open, about 1-2 s) is in progress when viewer B, or A's retry after START_TIMEOUT, POSTs /v1/stream. B runs prep_do at its size and opens a second pipeline. A.run installs A, then B.run replaces it and ends A without waiting (line 258). A's undo (`stuzha-display idle`) then runs after B's prep, so B streams a desktop that was just reset to 1920x1080 under its capture. If A's 101 write fails instead, dropping Prepared runs the same undo.",
+   "fix": "Keep the slot until the session is installed. Move the `opening` guard, or a 'pending' marker in `current`, into `Prepared`, and release it only after `current.replace(session)`, or when Prepared is dropped.",
+   "area": "security",
+   "verdict": "Same race as [8], confirmed. The `opening` guard is released when prepare() returns, but current.replace happens later in run() after the 101. A second request sees current==None, runs its own prep_do and capture while the first is prepared, then run() ends the first without waiting. The first session's undo (or Prepared::drop undo if its 101 write fails) then runs after the second session's prep."
+  },
+  {
+   "severity": "low",
+   "file": "crates/engine/src/server.rs",
+   "line": 182,
+   "defect": "A takeover ends the old session first, then waits only TAKEOVER_WAIT (5 s) for it to finish. Finishing includes running prep_undo, which is allowed 15 s. If the undo is slower, the new viewer is refused with 503 even though the old viewer has already been disconnected.",
+   "scenario": "An owner's undo script takes about 6 s (an xrandr mode switch plus xfconf on a loaded VPS). Connecting from the iPad while the Mac watches kicks the Mac with End 1 and gives the iPad \"the previous stream is still letting go of the screen; try again\", so neither device is streaming.",
+   "fix": "Wait at least as long as the undo limit (15 s plus margin), or check that the old session can finish before ending it.",
+   "area": "security",
+   "verdict": "Same as [13], confirmed. The old session is ended first, then waited on for only 5 s, while its finish includes prep_undo with a 15 s limit (prep.rs:28). A 6-15 s undo leaves the old viewer kicked with End 1 and the new one refused with 503."
+  },
+  {
+   "severity": "low",
+   "file": "crates/host/src/legacy.rs",
+   "line": 16,
+   "defect": "Retirement stops and deletes only the services `LatchStream` and `BroLinkStream`. Latch 4's setup re-registered the engine as `SunshineService` (displayed as \"Latch Streaming\", binary C:\\Program Files\\Latch\\engine\\tools\\sunshinesvc.exe) whenever `LatchStream` would not start.",
+   "scenario": "On a PC where Latch 4 fell back to `SunshineService`, setup kills the engine processes and deletes the folder but leaves an Automatic LocalSystem service pointing at a missing binary. Every boot logs an SCM 7000 error for \"Latch Streaming\", and the stale service is never removed.",
+   "fix": "Also stop and delete `SunshineService`, but only when its PathName lies under one of the retired engine directories, so a user's own Sunshine is left alone.",
+   "area": "security",
+   "verdict": "Confirmed. legacy.rs retires only the services LatchStream and BroLinkStream. Latch 4's setup (045f0b2^:crates/host/src/setup.rs) re-registered the engine as UPSTREAM_SERVICE = 'SunshineService', displayed 'Latch Streaming' with bin <engine>\\tools\\sunshinesvc.exe, whenever LatchStream would not start. Latch 5 deletes that folder but leaves the Automatic service pointing at a missing binary."
+  },
+  {
+   "severity": "low",
+   "file": "deploy/native/latch-display.service",
+   "line": 5,
+   "defect": "The X authorization cookie is passed on xauth's command line (`add :1 . \"$(mcookie)\"`), where any local user can read it from /proc/<pid>/cmdline.",
+   "scenario": "Another uid on the VPS polls /proc/*/cmdline while latch-display starts or restarts and captures the cookie. It then connects to /tmp/.X11-unix/X1 (world-connectable) and controls the XFCE session that Latch streams, including its terminal.",
+   "fix": "Feed the command on stdin, e.g. `printf 'add :1 . %s\\n' \"$(mcookie)\" | xauth -f \"%t/latch.Xauthority\" source -`, so the cookie never appears in argv.",
+   "area": "security",
+   "verdict": "Confirmed at deploy/native/latch-display.service:5. The cookie from $(mcookie) is passed as an argv element to xauth ('add :1 . <cookie>'), so other local uids can read it from /proc/<pid>/cmdline while xauth runs, unless /proc uses hidepid. Xvfb's only access control is that cookie. Low severity, but a real exposure."
+  },
+  {
+   "severity": "high",
+   "file": "crates/stream/src/video/mediafoundation.rs",
+   "line": 355,
+   "defect": "ROOT CAUSE of the CI failure in windows::tests::software_mf_round_trip: the decoder's low-latency mode is never switched on. The code sets it through ICodecAPI::SetValue(CODECAPI_AVLowLatencyMode, VT_BOOL) and throws the result away with `let _ =`. Microsoft's H.264 Video Decoder page lists CODECAPI_AVLowLatencyMode only as a transform attribute, set through IMFTransform::GetAttributes. The decoder's ICodecAPI covers just four properties: AVDecVideoAcceleration_H264, MaxCodedWidth, MaxCodedHeight and ThumbnailGenerationMode. So the SetValue fails silently and the MFT stays in its default mode, where it keeps decoded pictures back for output reordering (up to the DPB size).",
+   "scenario": "The test feeds 16 access units into a 160x98 Baseline stream at 4 Mbps (level 2.1 or 3). The encoder side works: Microsoft's encoder defaults to slice encoding (low latency), and encode() returns one Annex B access unit per input. The SPS has no VUI bitstream_restriction, so the decoder assumes MaxDpbFrames = min(MaxDpbMbs/70, 16) = 16 and holds pictures for reordering. ProcessOutput keeps returning MF_E_TRANSFORM_NEED_MORE_INPUT, drain() queues nothing, and every decode() returns Ok(None). Result: 'MF round trip produced only 0 decoded pictures' with no error, because the only error was discarded. In production the same buffering means every Windows viewer's Fallback gives up after PROBATION = 10 access units and switches to latch-codec, so Media Foundation and DXVA decoding are never actually used (that is the 0b14a55 workaround). The encoder path is not at fault: its input and output types, START_OF_STREAM handling, timestamps, Annex B output and SPS/PPS splicing are all fine for this test.",
+   "fix": "In State::new, before SetInputType, replace lines 355-357 with:\n```rust\nlet attributes = transform.GetAttributes().context(\"decoder attributes\")?;\n// CODECAPI_AVLowLatencyMode has the same GUID as MF_LOW_LATENCY\nattributes\n    .SetUINT32(&CODECAPI_AVLowLatencyMode, 1)\n    .context(\"enable decoder low-latency mode\")?;\n```\nThis is how Chromium and Firefox configure this MFT. Do not ignore the result. With low latency on, the MFT emits one picture per access unit and the test gets 16 pictures, well over the 8 it needs. Optionally assert in the test that the first IDR decodes to a picture immediately, so latency regressions are caught.",
+   "area": "platform",
+   "verdict": "Confirmed. mediafoundation.rs:355-357 sets CODECAPI_AVLowLatencyMode through ICodecAPI::SetValue and discards the result with `let _ =`. Microsoft's H.264 Video Decoder page lists CODECAPI_AVLowLatencyMode only under Transform Attributes (IMFTransform::GetAttributes, Windows 8+). Its ICodecAPI list covers only MaxCodedWidth/Height, AVDecVideoAcceleration_H264 and ThumbnailGenerationMode. So low-latency mode is likely never enabled, and the MFT holds pictures for reordering. This matches the CI symptom that commit 0b14a55 works around (0 pictures, no error)."
+  },
+  {
+   "severity": "high",
+   "file": "crates/engine/src/windows/capture.rs",
+   "line": 404,
+   "defect": "Two different size sources are mixed. The cursor/composite target `frame` (and the converter's input size) comes from DXGI_OUTPUT_DESC.DesktopCoordinates, which Microsoft documents as DPI-dependent. The `source` texture comes from the duplication's ModeDesc (physical pixels). The shader copies source to target 1:1 (`src = pos`). The `--background` service that runs the engine never declares DPI awareness: there is no manifest entry and no SetProcessDpiAwarenessContext, and eframe/winit is not started in that mode.",
+   "scenario": "A Windows host with a 1920x1080 monitor at 150% scaling (a common laptop default). The unaware service is told DesktopCoordinates = 1280x720, so `frame` is 1280x720. The shader writes only the top-left 1280x720 of the 1920x1080 desktop into it, and the viewer gets a cropped picture missing the right third and bottom third of the screen. The cursor is still drawn at physical coordinates inside that cropped area. Separately, DuplicateOutput1 fails for unaware processes, so HDR and float-format scanouts always go through the BGRA conversion.",
+   "fix": "Make the service per-monitor DPI aware at process start: SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) in `--background`, or a PerMonitorV2 manifest. In Capture::new, size `frame` from the duplication's ModeDesc (swap width and height for ROTATE90/270) rather than DesktopCoordinates. Use DesktopCoordinates only for the input-mapping origin, and bail if the two disagree.",
+   "area": "platform",
+   "verdict": "Confirmed in code. In capture.rs Capture::new, `frame` and DisplayRect come from DXGI_OUTPUT_DESC.DesktopCoordinates, which Microsoft documents as 'depend on the DPI of the desktop'. `source` comes from the duplication's ModeDesc in physical pixels, and the shader copies with desktop.Load(src = pos) 1:1. Nothing in crates/ or build.rs declares DPI awareness (no manifest, no SetProcessDpiAwareness*), and the --background path (main.rs) never starts winit. On a scaled display the composite target is smaller than the source, so the picture is cropped."
+  },
+  {
+   "severity": "medium",
+   "file": "crates/engine/src/mac/capture.rs",
+   "line": 174,
+   "defect": "ScreenCaptureKit is set to scalesToFit plus preservesAspectRatio at the viewer's requested size, so whenever the aspect ratios differ the encoded picture contains letterbox or pillarbox bars. VideoInfo.display, however, is the whole display rect, and DisplayRect::map maps the whole picture, bars included, linearly onto the display.",
+   "scenario": "A Windows viewer with Native 2560x1440 (16:9) connects to a MacBook (1512x982 points, 1.54:1). SCK draws the desktop about 2217 px wide, centred, with about 171 px bars on each side. The viewer clicks the Apple menu at the left edge of the visible desktop (picture x=171). The host maps that to 171*1512/2560 \u2248 101 pt, so the click lands about 100 pt to the right of the target. Every absolute click is off horizontally in proportion to its distance from the centre (vertically for taller viewers).",
+   "fix": "Either (a) in open_video, shrink the requested width or height to the display's aspect ratio (even numbers) and report that size in VideoInfo, so there are no bars; or (b) compute the fitted content rect inside width\u00d7height and map MousePosition relative to that rect, clamping clicks in the bars to the edge.",
+   "area": "platform",
+   "verdict": "Confirmed. mac/capture.rs sets SCK width/height to the viewer's request with setScalesToFit(true) and setPreservesAspectRatio(true), so SCK letterboxes or pillarboxes when aspect ratios differ. VideoInfo.display is the whole display.frame(), and DisplayRect::map scales picture coordinates (bars included) linearly onto it. On non-Linux hosts capture_size() is None, so the client asks for the viewer's native size, and clicks land off target in proportion to their distance from the centre."
+  },
+  {
+   "severity": "medium",
+   "file": "crates/engine/src/windows/display.rs",
+   "line": 166,
+   "defect": "prepare() returns an error when the virtual display has no mode of exactly the requested size at a refresh rate of at least the requested fps. Server::prepare turns any prep error into a 500 refusal, so the session never starts. host/src/virtual_display.rs documents the intended behaviour: a size the driver lacks should leave the desktop as it is and the picture is scaled.",
+   "scenario": "Setup writes the VDD modes at 60 and 120 Hz only, but the viewer's settings offer 144, 165 and 240 fps. A viewer that picks 144 fps makes `mode.dmDisplayFrequency >= 144` match nothing, and the user gets \"could not prepare the desktop: virtual display has no requested size at or above the requested refresh rate\" instead of a stream. The same happens for any viewer whose native size is not in stream_modes(), or when vdd_settings.xml could not be parsed. Linux has the same pattern: timings() rejects anything outside 640x360..=5120x2880, so a 6K viewer is refused.",
+   "fix": "When no exact mode exists, fall back to the highest refresh rate available at that size, or return Ok(None) and keep the current mode (log it). Never fail the session on a missing mode. In Linux configure(), likewise return Ok(None) instead of erroring for out-of-range sizes.",
+   "area": "platform",
+   "verdict": "Confirmed. windows/display.rs prepare() returns an error from `best.context(\"virtual display has no requested size at or above the requested refresh rate\")` when no mode matches exactly with dmDisplayFrequency >= fps. prep.rs propagates it and Server::prepare maps it to 500. Setup writes REFRESH_RATES [60, 120] (virtual_display.rs:21) while the viewer offers 144, 165 and 240 fps (settings.rs:86), so a 144 fps request on a VDD host is refused. virtual_display.rs's doc says a missing size should leave the desktop as it is."
+  },
+  {
+   "severity": "medium",
+   "file": "crates/engine/src/mac/input.rs",
+   "line": 147,
+   "defect": "Mouse button events are created with CGEventCreateMouseEvent and posted without ever setting kCGMouseEventClickState (field 1), so every synthesized click has click state 1. macOS apps take NSEvent.clickCount from this field, and the window server does not raise it for posted events.",
+   "scenario": "A viewer double-clicks a file in Finder on a Mac host: down/up/down/up arrive within the double-click interval and all carry clickState 1. Finder sees two single clicks: the file is selected but not opened. Double-click to select a word, or triple-click to select a line, also fails in every Cocoa text view.",
+   "fix": "Track the last button-down (button, time, position) in Sink. If the same button goes down within NSEvent.doubleClickInterval (about 0.5 s) and a few points of the previous down, increment a click counter, otherwise reset it to 1. Set CGEventSetIntegerValueField(e, 1 /*kCGMouseEventClickState*/, count) on that down and on its matching up (and on drags).",
+   "area": "platform",
+   "verdict": "Confirmed. mac/input.rs builds MouseButton events with CGEventCreateMouseEvent and never sets kCGMouseEventClickState (field 1). The only CGEventSetIntegerValueField calls are fields 4 and 5 for deltas. Posted events keep click state 1, so double and triple clicks become separate single clicks in Cocoa apps."
+  },
+  {
+   "severity": "medium",
+   "file": "crates/engine/src/mac/encoder.rs",
+   "line": 226,
+   "defect": "When VideoToolbox reports a frame as dropped (the callback runs with status 0, a NULL sample and kVTEncodeInfo_FrameDropped), encode() returns Err(\"VideoToolbox dropped the picture\"). Video::next passes that up with `?`, and send_video reopens the pipeline once and ends the session (CAPTURE_FAILED) on the second error.",
+   "scenario": "With RealTime and low-latency rate control, VT may drop a frame under load (for example GPU contention or a burst above DataRateLimits). The first drop tears down and recreates ScreenCaptureKit and the encoder. A second drop at any later point in the session ends the stream with \"The host could not capture its screen\".",
+   "fix": "Treat a NULL sample with status 0 as 'no output' rather than an error. In Video::next, loop and encode the next or current picture again, keeping a pending keyframe request, or return the next frame. Reserve Err for a nonzero status.",
+   "area": "platform",
+   "verdict": "Confirmed. The encoder callback turns a status-0 callback with a NULL sample into Err('VideoToolbox dropped the picture'), and encode() also errors if no frame was produced. Video::next propagates this with `?`, and send_video's error path reopens once (`reopened` is never reset) and then ends the session with CAPTURE_FAILED. A routine VT frame drop under RealTime with low-latency rate control is therefore treated as a capture failure."
+  },
+  {
+   "severity": "medium",
+   "file": "crates/engine/src/windows/capture.rs",
+   "line": 440,
+   "defect": "After DXGI_ERROR_ACCESS_LOST the duplication is set to None, and every grab() call then runs Capture::new(): DXGI factory, adapter and output enumeration, EnumDisplayDevices and D3D11CreateDevice, then DuplicateOutput. There is no backoff. MfPipeline::next retries with only a 1 ms sleep between attempts.",
+   "scenario": "The host PC is locked (or a UAC prompt is up) during a session. The desktop switches to Winlogon and DuplicateOutput keeps failing with E_ACCESSDENIED, so the video worker creates and destroys a D3D11 device dozens to hundreds of times a second, pinning a core and churning GPU resources for as long as the PC stays locked (possibly hours). A debug line is logged for every attempt.",
+   "fix": "Rate-limit reopen attempts (for example at most one every 250-500 ms, tracked with an Instant on Capture). Return Ok(false) in between. Reuse the existing Gpu and CursorRenderer when the selected adapter is unchanged, and retry only DuplicateOutput.",
+   "area": "platform",
+   "verdict": "Confirmed. After ACCESS_LOST, grab() sets duplication=None, and every later grab() calls Self::new(): display::select, Gpu::new (D3D11 device) and DuplicateOutput. On failure it logs at debug and returns Ok(false) immediately. MfPipeline::next loops with only a 1 ms sleep when !changed until its idle repeat, so while the secure desktop blocks duplication the worker recreates D3D devices hundreds of times a second with no backoff."
+  },
+  {
+   "severity": "low",
+   "file": "crates/engine/src/mac/input.rs",
+   "line": 182,
+   "defect": "Horizontal scroll is passed to CGEventCreateScrollWheelEvent2's wheel2 without negation. In CoreGraphics and AppKit a positive horizontal delta means scroll left (the client's wheel_to_host comment says the same: native +x is scrolling left). The protocol defines positive as right, and the Windows (HWHEEL) and X11 (button 7) hosts follow that.",
+   "scenario": "A viewer scrolls right (horizontal = +120) on a Mac host. The host posts wheel2 = +40, and Safari, Finder and other apps scroll left. Horizontal scrolling is reversed on Mac hosts only.",
+   "fix": "Pass `-pixels(*horizontal)` as the horizontal argument, and fix the test's expected sign for field 97.",
+   "area": "platform",
+   "verdict": "Confirmed. mac/input.rs passes pixels(*horizontal) unchanged as wheel2 of CGEventCreateScrollWheelEvent2. The client's own wheel_to_host comment (stream.rs:1620-1630) says native +x, which comes from NSEvent/CG deltas, is scrolling left, and negates it for the protocol where positive means right. The Mac host does not negate back, so horizontal scrolling is reversed on Mac hosts only."
+  },
+  {
+   "severity": "low",
+   "file": "crates/engine/src/windows/capture.rs",
+   "line": 641,
+   "defect": "The video processor's destination rect is the whole output, so whenever the desktop's aspect ratio differs from the requested size the desktop is scaled non-uniformly. This happens on any physical monitor, because display::prepare returns None for non-virtual displays.",
+   "scenario": "A Windows host with a 1920x1200 monitor and a viewer asking for 1920x1080: the desktop is squashed vertically by 10% in the stream (circles become ellipses, text distorted). Input still maps correctly, but the picture is geometrically wrong.",
+   "fix": "Compute an aspect-preserving destination rect centred in the output and clear the bars, then account for that rect in input mapping. Alternatively, report the aspect-fitted size in VideoInfo and encode at that size.",
+   "area": "platform",
+   "verdict": "Confirmed. Converter::new sets VideoProcessorSetStreamDestRect and OutputTargetRect to the full output (0,0,out.w,out.h) with no aspect fitting. display::prepare returns None for non-virtual outputs, so a physical monitor whose aspect differs from the request (for example 1920x1200 to 1920x1080) is stretched non-uniformly."
+  },
+  {
+   "severity": "low",
+   "file": "crates/engine/src/audio.rs",
+   "line": 69,
+   "defect": "Resampler::pick keeps only channels 0 and 1 of a multichannel WASAPI mix format. Centre, LFE and surround channels are discarded instead of downmixed.",
+   "scenario": "A Windows host whose default output is set to 5.1 or 7.1 has a mix format with 6 or 8 channels. A film or game puts dialogue in the front centre channel (index 2). The streamed stereo contains only FL and FR, so the dialogue and bass effects are missing on the viewer.",
+   "fix": "Downmix when channels > 2 using the WAVEFORMATEXTENSIBLE channel mask, for example L = FL + 0.707\u00b7FC + 0.707\u00b7SL (+ BL), R = FR + 0.707\u00b7FC + 0.707\u00b7SR (+ BR), with LFE optional, then normalise or clamp.",
+   "area": "platform",
+   "verdict": "Confirmed at audio.rs:68-75. Resampler::push's pick() returns [f[0], f[1]] for any channel count above 1. Windows initializes WASAPI loopback with the device mix format (GetMixFormat) without AUTOCONVERTPCM, so a 5.1 or 7.1 device delivers 6-8 channels, and the centre, LFE and surround channels are dropped instead of downmixed."
+  },
+  {
+   "severity": "low",
+   "file": "crates/engine/src/audio.rs",
+   "line": 89,
+   "defect": "In the resampler's non-48 kHz path, `pos` never goes negative (after the loop it is reduced by `frames` and is always >= 0), so the `last` sample is never used. Every output sample that falls between a chunk's last input frame and the next chunk's first frame is computed with b = a (a held sample) instead of being interpolated.",
+   "scenario": "A 44.1 kHz WASAPI device delivers about 441-frame packets. Once per packet (every 10 ms) one output sample is a zero-order hold instead of linear interpolation. On high-frequency content this adds a periodic error at 100 Hz (faint buzz or distortion).",
+   "fix": "Keep the boundary sample for the next call. When i + 1 == frames, stop the loop (`while self.pos < (frames - 1) as f64`), store last = pick(frames - 1), and subtract `frames` so pos lands in [-1, 0). The existing `i < 0 => self.last` branch then interpolates across the boundary.",
+   "area": "platform",
+   "verdict": "Confirmed. After the loop pos >= frames, and `pos -= frames` leaves pos in [0, step), so `i < 0` and `self.last` are never used. The sample in [frames-1, frames) takes b = a (`i + 1 < frames` is false), a zero-order hold once per chunk instead of interpolating to the next chunk's first frame. Minor, but the cross-chunk interpolation the comment describes never happens."
+  },
+  {
+   "severity": "low",
+   "file": "crates/engine/src/server.rs",
+   "line": 631,
+   "defect": "The input mapping rect (`state.display`) is taken from pipeline.info() only at session start and after a pipeline reopen. When a platform pipeline's display changes mid-session (a Windows mode change recreates Capture with a new DesktopCoordinates; an X11 RandR resize reallocates X11Capture), info().display changes but the injector keeps mapping onto the old rect.",
+   "scenario": "During a session the host's resolution changes from 2560x1440 to 1920x1080 (the user or another tool changes it). Video recovers, because MfPipeline and SoftwarePipeline rebuild for the new size, but absolute clicks are still scaled to 2560x1440. A click at the bottom-right of the picture lands off-screen and is clamped, and every click lands at the wrong place.",
+   "fix": "In send_video, after each successful pipeline.next(), compare pipeline.info().display with the stored value and update `session.input.lock().display` when it changes. Alternatively, have next() report display changes in EncodedVideo.",
+   "area": "platform",
+   "verdict": "Same as [9], confirmed. state.display is set at run() and only refreshed in the reopen branch. Windows Capture recreation and SoftwarePipeline resizing change info().display mid-session (VideoProxy even refreshes its info), but send_video never pushes the new rect into InputState, so absolute input keeps mapping to the old desktop size."
+  }
+ ],
+ "refuted": [
+  {
+   "severity": "medium",
+   "file": "crates/proto/src/video.rs",
+   "line": 355,
+   "defect": "The frame timeout is fixed at 100 ms from the frame's first shard, whatever the frame's size and even while its shards are still arriving. A frame (typically a keyframe) that takes more than 100 ms to cross the bottleneck is always declared lost.",
+   "scenario": "A 1080p HEVC or H.264 IDR from VideoToolbox is about 300 KB. VideoToolbox's DataRateLimits is set to 1.5x the bitrate per second, which does not cap a single frame. Over the roughly 20 Mbps campus Wi-Fi path, that IDR takes about 120 ms to arrive. At 100 ms poll() returns Lost and the viewer requests a keyframe. The host sends another IDR of the same size, which is also declared lost at 100 ms. The viewer re-requests every max(100 ms, rtt), so the picture stays frozen in a keyframe loop. This follows PROTOCOL.md's wording, but the rule itself is the defect.",
+   "fix": "Time a frame out on inactivity: 100 ms since its latest shard, keeping a `last` Instant in Pending. Or scale the deadline by frame_len over the measured receive throughput. Update next_deadline to match, and update PROTOCOL.md.",
+   "area": "protocol",
+   "verdict": "The code (video.rs:352-355) implements PROTOCOL.md exactly: a frame is lost '100 ms after its first shard arrived'. The finding concedes this. The scenario also assumes a single IDR over 100 ms of wire time, which means the configured bitrate already exceeds the path. That is a design or tuning question, not a code defect against the documented behaviour, and the 300 KB IDR and 20 Mbps path figures are not verified."
+  },
+  {
+   "severity": "low",
+   "file": "crates/stream/src/video/mediafoundation.rs",
+   "line": 451,
+   "defect": "decode() returns `queue.pop_front()`, the oldest buffered picture, one per access unit. Whenever the MFT emits more than one picture for an input (an IDR flush, a format change, or the current non-low-latency mode), the extra pictures stay queued and every later frame is shown that many frames late, permanently.",
+   "scenario": "After an IDR flushes 3 held pictures in one drain, the queue holds 3 extra pictures. From then on each decode() returns the picture from 3 access units earlier: 50 ms of added latency at 60 fps that never recovers, against ENGINE.md's \"newest frame wins\" rule.",
+   "fix": "Return the newest picture and discard older ones: `let newest = self.queue.pop_back(); self.queue.clear(); Ok(newest)`. Alternatively, drain the queue in the caller and publish only the last picture.",
+   "area": "platform",
+   "verdict": "The code does return queue.pop_front() and keeps any extra pictures, but the claimed permanent latency is not shown. In the current non-low-latency mode, an IDR flush of N held pictures is followed by about N inputs that produce nothing while the MFT refills its DPB, so the queue drains back to 0. In low-latency mode the MFT is 1:1. No concrete trigger for a lasting backlog is demonstrated."
+  },
+  {
+   "severity": "low",
+   "file": "crates/engine/src/windows/capture.rs",
+   "line": 612,
+   "defect": "The legacy output colour space bitfield is `(1 << 2) | (2 << 4)`. A Nominal_Range value of 2 is D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255 (full range), not 16..235 as the comment says. Only the ID3D11VideoContext1 override that follows corrects it, and that runs only if the cast succeeds.",
+   "scenario": "On a runtime or driver where `context.cast::<ID3D11VideoContext1>()` fails, the video processor writes full-range NV12. The MF media types and every viewer (full_range=false) treat it as limited range, so blacks turn grey-lifted, whites clip, and saturation is off.",
+   "fix": "Use `(1 << 2) | (1 << 4)` (YCbCr_Matrix=709, Nominal_Range=16_235) for the output colour space.",
+   "area": "platform",
+   "verdict": "The legacy bitfield (1<<2)|(2<<4) does select NOMINAL_RANGE_0_255, so the comment is wrong. But ID3D11VideoContext1 is a D3D11 runtime interface on every Windows 10+ system, and current Rust MSVC targets require Windows 10+. The cast always succeeds and VideoProcessorSetOutputColorSpace1(YCBCR_STUDIO_G22_LEFT_P709) overrides it, so the failure scenario cannot be reached on a supported platform."
+  }
+ ]
+}
