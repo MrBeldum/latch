@@ -12,6 +12,7 @@ pub mod input;
 pub mod pattern;
 pub mod server;
 pub mod software;
+pub mod testmode;
 pub mod video;
 
 #[cfg(target_os = "linux")]

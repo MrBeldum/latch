@@ -35,6 +35,9 @@ pub trait InputSink: Send {
 
 /// Opens this platform's injector.
 pub fn open() -> anyhow::Result<Box<dyn InputSink>> {
+    if crate::testmode::motion().is_some() {
+        return crate::testmode::open_input();
+    }
     #[cfg(target_os = "macos")]
     return crate::mac::open_input();
     #[cfg(windows)]

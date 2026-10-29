@@ -58,6 +58,9 @@ pub trait VideoPipeline: Send {
 
 /// What this machine can encode, best first.
 pub fn encodable() -> Vec<Codec> {
+    if crate::testmode::motion().is_some() {
+        return vec![Codec::H264Baseline];
+    }
     #[cfg(target_os = "macos")]
     return crate::mac::encodable();
     #[cfg(windows)]
@@ -68,6 +71,9 @@ pub fn encodable() -> Vec<Codec> {
 
 /// Opens this platform's pipeline for `config`.
 pub fn open(config: &VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>> {
+    if let Some(motion) = crate::testmode::motion() {
+        return crate::testmode::open_video(config, motion);
+    }
     #[cfg(target_os = "macos")]
     return crate::mac::open_video(config);
     #[cfg(windows)]

@@ -38,3 +38,6 @@ windows = { version = "0.58", features = [
 ] }
 
 [dev-dependencies]
+# The loopback test runs a real viewer against this engine.
+latch-stream.workspace = true
+latch-core.workspace = true
