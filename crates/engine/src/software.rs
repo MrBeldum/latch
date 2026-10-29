@@ -187,6 +187,11 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
             );
         }
         self.timings.convert = started.elapsed();
+        // A repeat shows the old picture, but it was taken up now: what the
+        // viewer learns about the host's delay is about this frame.
+        if !changed && !resized {
+            self.captured = started;
+        }
         let mut data = Vec::new();
         let started = Instant::now();
         let info = self

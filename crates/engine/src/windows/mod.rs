@@ -81,6 +81,11 @@ impl MfPipeline {
             if self.capture.has_frame
                 && (changed || force || buffered || self.last_sent.elapsed() >= idle)
             {
+                // A repeat is stamped when it is sent again, so the viewer's
+                // host delay is about this frame.
+                if !changed && !buffered {
+                    self.last_capture = Instant::now();
+                }
                 let texture = self.converter.convert(&self.capture.frame)?;
                 let sample = if self.encoder.hardware {
                     Encoder::texture_sample(&texture)?

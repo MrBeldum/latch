@@ -104,7 +104,9 @@ impl VideoPipeline for Video {
             if elapsed >= due {
                 if let Some(picture) = &state.picture {
                     let image = ffi::Owned::retain(picture.image.0);
-                    let captured = picture.captured;
+                    // A repeat is stamped when it is sent again, so the
+                    // viewer's host delay is about this frame.
+                    let captured = if changed { picture.captured } else { now };
                     self.generation = state.generation;
                     drop(state);
                     let frame =
