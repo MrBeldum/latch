@@ -157,7 +157,7 @@ fn square_is_white(f: &Frame) -> bool {
 fn the_picture_arrives_and_keys_show_up_in_it() {
     std::env::set_var("LATCH_TEST_PATTERN", "still");
     let port = host();
-    let (session, frames, _events) = connect(port);
+    let (session, frames, events) = connect(port);
     let (mut seq, first) =
         next_frame(&frames, 0, Duration::from_secs(5)).expect("no frame arrived");
     assert_eq!((first.width, first.height), (W, H));
@@ -210,6 +210,19 @@ fn the_picture_arrives_and_keys_show_up_in_it() {
     assert!(times[times.len() / 2] < Duration::from_millis(150));
     let stats = session.stats();
     eprintln!("{stats:?}");
+    let (takeover, picture, _events) = connect(port);
+    next_frame(&picture, 0, Duration::from_secs(5)).expect("takeover has no picture");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Event::Terminated { code, .. } = events
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("old viewer was not told about takeover")
+        {
+            assert_eq!(code, control::end::TAKEN_OVER as i32);
+            break;
+        }
+    }
+    takeover.stop();
     session.stop();
     let start = Instant::now();
     while !session.finished() {

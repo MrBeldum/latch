@@ -25,8 +25,8 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// How long the host may take to open its screen and answer.
-const START_TIMEOUT: Duration = Duration::from_secs(20);
+/// Includes takeover (up to 30 s), this viewer's prep (15 s), and capture open.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// After the host accepts, its first frame must arrive within this.
 const MEDIA_TIMEOUT: Duration = Duration::from_secs(8);
 /// A host heard from neither over TCP nor UDP for this long is gone.
@@ -190,6 +190,8 @@ struct Inner {
     wake: Box<dyn Fn() + Send + Sync>,
     frames: Arc<FrameSlot>,
     stats: Mutex<Stats>,
+    /// Persists across the receive thread's periodic player description.
+    host_audio_problem: Mutex<String>,
     video_health: Mutex<VideoHealth>,
     decode: Mutex<DecodeWindow>,
     link: Mutex<Option<Link>>,
@@ -338,6 +340,7 @@ impl Session {
             wake: Box::new(wake),
             frames,
             stats: Mutex::new(Stats::default()),
+            host_audio_problem: Mutex::new(String::new()),
             video_health: Mutex::new(VideoHealth::default()),
             decode: Mutex::new(DecodeWindow::default()),
             link: Mutex::new(None),
@@ -573,7 +576,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     *inner.link.lock() = None;
     match outcome {
         Outcome::Stopped => {}
-        Outcome::Failed(stage, message) => fail(&stage, message),
+        Outcome::Failed(stage, message) => inner.emit(Event::Failed { stage, message }),
         Outcome::Ended(code, message) => inner.emit(Event::Terminated { code, message }),
     }
 }
@@ -636,9 +639,12 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
                 inner.heard();
                 match n.kind.as_str() {
                     "audio" => {
+                        *inner.host_audio_problem.lock() = n.message.clone();
                         if !n.message.is_empty() {
                             inner.stats.lock().audio =
                                 format!("no sound from the host: {}", n.message);
+                        } else {
+                            inner.stats.lock().audio.clear();
                         }
                     }
                     _ if !n.message.is_empty() => inner.emit(Event::Notice(n.message)),
@@ -819,7 +825,12 @@ fn receive(
                 s.rtt_ms = rtt.srtt().map_or(0, |d| d.as_millis() as u32);
                 s.rtt_var_ms = rtt.rttvar().as_millis() as u32;
                 if let Some(p) = &player {
-                    s.audio = p.describe();
+                    let problem = inner.host_audio_problem.lock();
+                    s.audio = if problem.is_empty() {
+                        p.describe()
+                    } else {
+                        format!("no sound from the host: {problem}")
+                    };
                 }
             }
             window_bytes = 0;
