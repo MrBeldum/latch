@@ -1,0 +1,604 @@
+Stage("Asking for the stream…")
+connected in 54.576333ms
+  1s  48.9 fps   1.32 Mbps rtt  12 ms decode  3.60 ms host  6.70 ms assembly  0.17 ms queue  4.46 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  2s  45.8 fps   0.73 Mbps rtt  12 ms decode  2.19 ms host  7.76 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  3s  49.8 fps   1.02 Mbps rtt  13 ms decode  2.21 ms host  6.28 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  4s  44.9 fps   0.92 Mbps rtt  13 ms decode  2.40 ms host  9.41 ms assembly  0.09 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  5s  44.9 fps   0.73 Mbps rtt  13 ms decode  2.88 ms host  8.61 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  6s  48.0 fps   0.80 Mbps rtt  13 ms decode  2.56 ms host  6.27 ms assembly  0.12 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  7s  49.0 fps   1.08 Mbps rtt  12 ms decode  2.59 ms host  5.25 ms assembly  0.10 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  8s  50.8 fps   0.92 Mbps rtt  12 ms decode  2.69 ms host  4.86 ms assembly  0.01 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  9s  50.0 fps   0.80 Mbps rtt  12 ms decode  2.65 ms host  4.79 ms assembly  0.04 ms queue  0.07 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 10s  49.7 fps   1.03 Mbps rtt  12 ms decode  2.71 ms host  4.77 ms assembly  0.03 ms queue  0.17 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 11s  49.7 fps   0.99 Mbps rtt  12 ms decode  3.19 ms host  5.06 ms assembly  0.03 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 12s  48.9 fps   0.80 Mbps rtt  12 ms decode  3.10 ms host  5.57 ms assembly  0.12 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 13s  49.8 fps   0.98 Mbps rtt  13 ms decode  3.09 ms host  4.68 ms assembly  0.21 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 14s  49.0 fps   1.03 Mbps rtt  13 ms decode  2.68 ms host  5.27 ms assembly  0.07 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 15s  49.8 fps   0.82 Mbps rtt  13 ms decode  2.39 ms host  5.17 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 16s  49.8 fps   0.91 Mbps rtt  12 ms decode  2.51 ms host  5.98 ms assembly  0.09 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 17s  50.0 fps   1.08 Mbps rtt  12 ms decode  2.34 ms host  4.77 ms assembly  0.02 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 18s  49.9 fps   0.81 Mbps rtt  12 ms decode  2.48 ms host  4.95 ms assembly  0.01 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 19s  49.7 fps   0.89 Mbps rtt  13 ms decode  2.77 ms host  4.75 ms assembly  0.01 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 20s  47.8 fps   1.05 Mbps rtt  13 ms decode  2.41 ms host  6.05 ms assembly  0.16 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 21s  49.9 fps   0.87 Mbps rtt  13 ms decode  2.76 ms host  5.19 ms assembly  0.03 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 22s  50.0 fps   0.84 Mbps rtt  13 ms decode  2.86 ms host  4.67 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 23s  49.9 fps   1.09 Mbps rtt  13 ms decode  2.69 ms host  4.69 ms assembly  0.07 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 24s  50.0 fps   0.92 Mbps rtt  13 ms decode  2.53 ms host  4.77 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 25s  50.0 fps   0.86 Mbps rtt  13 ms decode  2.54 ms host  4.73 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 26s  50.0 fps   0.97 Mbps rtt  13 ms decode  2.58 ms host  4.93 ms assembly  0.14 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 27s  49.9 fps   1.05 Mbps rtt  13 ms decode  2.34 ms host  4.86 ms assembly  0.11 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 28s  50.8 fps   0.83 Mbps rtt  13 ms decode  1.30 ms host  4.73 ms assembly  0.06 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 29s  49.7 fps   0.99 Mbps rtt  13 ms decode  1.91 ms host  4.66 ms assembly  0.04 ms queue  0.09 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 30s  49.9 fps   1.04 Mbps rtt  13 ms decode  2.47 ms host  4.66 ms assembly  0.12 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 31s  50.0 fps   0.84 Mbps rtt  13 ms decode  2.39 ms host  4.90 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 32s  49.8 fps   0.90 Mbps rtt  13 ms decode  2.62 ms host  5.14 ms assembly  0.07 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 33s  48.7 fps   1.08 Mbps rtt  13 ms decode  2.28 ms host  6.00 ms assembly  0.22 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 34s  47.8 fps   0.78 Mbps rtt  12 ms decode  2.23 ms host  7.13 ms assembly  0.13 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 35s  49.7 fps   0.87 Mbps rtt  12 ms decode  2.65 ms host  4.75 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 36s  49.9 fps   1.11 Mbps rtt  12 ms decode  2.50 ms host  4.66 ms assembly  0.20 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 37s  50.0 fps   0.89 Mbps rtt  12 ms decode  1.48 ms host  5.21 ms assembly  0.05 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 38s  46.9 fps   0.78 Mbps rtt  13 ms decode  2.47 ms host  6.61 ms assembly  0.13 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 39s  49.8 fps   1.05 Mbps rtt  13 ms decode  1.98 ms host  4.80 ms assembly  0.12 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 40s  50.0 fps   1.00 Mbps rtt  13 ms decode  2.18 ms host  4.79 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 41s  50.0 fps   0.84 Mbps rtt  13 ms decode  2.69 ms host  4.65 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 42s  48.9 fps   1.02 Mbps rtt  13 ms decode  2.72 ms host  5.74 ms assembly  0.16 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 43s  48.9 fps   1.04 Mbps rtt  13 ms decode  2.20 ms host  5.69 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 44s  50.0 fps   0.84 Mbps rtt  13 ms decode  1.75 ms host  4.78 ms assembly  0.02 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 45s  49.7 fps   0.96 Mbps rtt  13 ms decode  2.65 ms host  5.37 ms assembly  0.07 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 46s  49.9 fps   1.10 Mbps rtt  13 ms decode  2.64 ms host  4.93 ms assembly  0.14 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 47s  49.7 fps   0.85 Mbps rtt  13 ms decode  2.71 ms host  4.71 ms assembly  0.03 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 48s  49.7 fps   0.90 Mbps rtt  13 ms decode  2.49 ms host  4.97 ms assembly  0.01 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 49s  49.7 fps   1.15 Mbps rtt  12 ms decode  2.48 ms host  4.61 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 50s  49.8 fps   0.82 Mbps rtt  12 ms decode  2.46 ms host  5.60 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 51s  49.0 fps   0.82 Mbps rtt  12 ms decode  2.14 ms host  5.42 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 52s  49.9 fps   1.12 Mbps rtt  12 ms decode  2.63 ms host  4.88 ms assembly  0.22 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 53s  49.9 fps   0.96 Mbps rtt  12 ms decode  2.52 ms host  5.66 ms assembly  0.11 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 54s  49.7 fps   0.83 Mbps rtt  12 ms decode  2.59 ms host  4.92 ms assembly  0.00 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 55s  49.8 fps   1.02 Mbps rtt  12 ms decode  2.54 ms host  4.80 ms assembly  0.09 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 56s  48.8 fps   1.00 Mbps rtt  12 ms decode  2.58 ms host  5.13 ms assembly  0.07 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 57s  50.7 fps   0.83 Mbps rtt  12 ms decode  2.54 ms host  4.81 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 58s  49.8 fps   1.02 Mbps rtt  12 ms decode  2.57 ms host  4.82 ms assembly  0.02 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 59s  48.0 fps   1.03 Mbps rtt  13 ms decode  2.43 ms host  6.65 ms assembly  0.13 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 60s  50.0 fps   0.85 Mbps rtt  13 ms decode  2.60 ms host  4.83 ms assembly  0.03 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 61s  49.8 fps   0.96 Mbps rtt  13 ms decode  2.66 ms host  5.42 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 62s  47.8 fps   1.05 Mbps rtt  14 ms decode  2.34 ms host  6.59 ms assembly  0.59 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 63s  41.0 fps   0.69 Mbps rtt  13 ms decode  2.55 ms host 11.60 ms assembly  0.07 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 64s  46.7 fps   0.78 Mbps rtt  13 ms decode  2.35 ms host  6.54 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 65s  49.7 fps   1.04 Mbps rtt  13 ms decode  2.54 ms host  5.30 ms assembly  0.11 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 66s  49.9 fps   1.01 Mbps rtt  13 ms decode  2.72 ms host  4.87 ms assembly  0.21 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 67s  48.8 fps   0.84 Mbps rtt  13 ms decode  2.71 ms host  5.17 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 68s  50.0 fps   0.99 Mbps rtt  13 ms decode  2.25 ms host  4.85 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 69s  50.0 fps   1.06 Mbps rtt  13 ms decode  2.39 ms host  4.82 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 70s  49.9 fps   0.82 Mbps rtt  13 ms decode  2.36 ms host  5.35 ms assembly  0.01 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 71s  49.8 fps   0.98 Mbps rtt  13 ms decode  2.50 ms host  4.73 ms assembly  0.12 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 72s  49.7 fps   1.05 Mbps rtt  13 ms decode  2.65 ms host  4.90 ms assembly  0.13 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 73s  50.9 fps   0.83 Mbps rtt  13 ms decode  2.12 ms host  4.66 ms assembly  0.02 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 74s  49.7 fps   0.91 Mbps rtt  13 ms decode  2.13 ms host  4.77 ms assembly  0.09 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 75s  49.7 fps   1.09 Mbps rtt  13 ms decode  2.38 ms host  4.88 ms assembly  0.15 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 76s  49.9 fps   0.85 Mbps rtt  13 ms decode  2.30 ms host  4.62 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 77s  49.9 fps   0.84 Mbps rtt  13 ms decode  2.42 ms host  4.69 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 78s  50.0 fps   1.13 Mbps rtt  13 ms decode  1.86 ms host  4.80 ms assembly  0.19 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 79s  50.0 fps   0.90 Mbps rtt  12 ms decode  1.91 ms host  4.77 ms assembly  0.09 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 80s  50.8 fps   0.82 Mbps rtt  12 ms decode  0.80 ms host  4.76 ms assembly  0.07 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 81s  49.7 fps   1.06 Mbps rtt  12 ms decode  1.19 ms host  4.76 ms assembly  0.12 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 82s  49.8 fps   1.02 Mbps rtt  12 ms decode  2.37 ms host  4.58 ms assembly  0.13 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 83s  49.9 fps   0.86 Mbps rtt  12 ms decode  1.13 ms host  4.89 ms assembly  0.12 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 84s  49.8 fps   0.97 Mbps rtt  12 ms decode  2.32 ms host  4.99 ms assembly  0.12 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 85s  50.0 fps   1.05 Mbps rtt  12 ms decode  2.34 ms host  4.89 ms assembly  0.23 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 86s  50.7 fps   0.82 Mbps rtt  13 ms decode  2.41 ms host  4.88 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 87s  49.9 fps   1.02 Mbps rtt  12 ms decode  2.49 ms host  4.59 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 88s  49.8 fps   1.03 Mbps rtt  13 ms decode  2.54 ms host  4.75 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 89s  50.0 fps   0.84 Mbps rtt  13 ms decode  2.31 ms host  4.78 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 90s  50.7 fps   0.95 Mbps rtt  13 ms decode  2.38 ms host  4.82 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 91s  49.9 fps   1.12 Mbps rtt  13 ms decode  2.31 ms host  4.71 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 92s  48.8 fps   0.80 Mbps rtt  13 ms decode  2.65 ms host  5.75 ms assembly  0.04 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 93s  50.0 fps   0.87 Mbps rtt  13 ms decode  2.65 ms host  4.78 ms assembly  0.00 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 94s  49.9 fps   1.14 Mbps rtt  13 ms decode  2.38 ms host  4.99 ms assembly  0.12 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 95s  50.9 fps   0.90 Mbps rtt  12 ms decode  1.47 ms host  4.82 ms assembly  0.05 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 96s  48.9 fps   0.80 Mbps rtt  12 ms decode  1.39 ms host  5.33 ms assembly  0.07 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 97s  48.9 fps   1.07 Mbps rtt  12 ms decode  2.35 ms host  5.63 ms assembly  0.10 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 98s  49.0 fps   0.98 Mbps rtt  12 ms decode  2.59 ms host  5.86 ms assembly  0.09 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 99s  49.9 fps   0.85 Mbps rtt  12 ms decode  2.63 ms host  4.78 ms assembly  0.11 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+100s  50.0 fps   0.98 Mbps rtt  12 ms decode  2.67 ms host  5.27 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+101s  48.0 fps   1.06 Mbps rtt  13 ms decode  2.65 ms host  6.66 ms assembly  0.16 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+102s  48.9 fps   0.79 Mbps rtt  13 ms decode  2.74 ms host  5.37 ms assembly  0.07 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+103s  50.0 fps   1.02 Mbps rtt  13 ms decode  2.53 ms host  4.77 ms assembly  0.04 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+104s  51.0 fps   1.06 Mbps rtt  12 ms decode  2.57 ms host  4.75 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+105s  48.9 fps   0.79 Mbps rtt  13 ms decode  2.56 ms host  6.45 ms assembly  0.02 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+106s  48.9 fps   0.89 Mbps rtt  12 ms decode  2.29 ms host  5.54 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+107s  49.9 fps   1.10 Mbps rtt  12 ms decode  2.29 ms host  4.89 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+108s  50.7 fps   0.88 Mbps rtt  12 ms decode  2.69 ms host  4.61 ms assembly  0.02 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+109s  49.8 fps   0.83 Mbps rtt  12 ms decode  2.22 ms host  4.65 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+110s  40.9 fps   0.89 Mbps rtt  13 ms decode  2.64 ms host 11.56 ms assembly  0.23 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+111s  50.0 fps   1.00 Mbps rtt  13 ms decode  2.38 ms host  4.99 ms assembly  0.04 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+112s  49.9 fps   0.86 Mbps rtt  13 ms decode  2.37 ms host  4.78 ms assembly  0.01 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+113s  49.9 fps   0.97 Mbps rtt  13 ms decode  2.43 ms host  4.75 ms assembly  0.02 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+114s  49.9 fps   1.05 Mbps rtt  13 ms decode  2.56 ms host  4.67 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+115s  50.0 fps   0.77 Mbps rtt  13 ms decode  2.61 ms host  5.38 ms assembly  0.02 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+116s  48.7 fps   0.97 Mbps rtt  13 ms decode  1.27 ms host  5.37 ms assembly  0.10 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+117s  50.7 fps   1.09 Mbps rtt  13 ms decode  1.13 ms host  4.80 ms assembly  0.06 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+118s  49.8 fps   0.83 Mbps rtt  13 ms decode  2.46 ms host  4.84 ms assembly  0.02 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+119s  49.8 fps   0.89 Mbps rtt  13 ms decode  2.78 ms host  5.53 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+120s  48.7 fps   1.11 Mbps rtt  13 ms decode  1.67 ms host  5.84 ms assembly  0.22 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+121s  46.0 fps   0.81 Mbps rtt  13 ms decode  2.16 ms host  6.77 ms assembly  0.15 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+122s  49.9 fps   0.79 Mbps rtt  12 ms decode  1.82 ms host  7.11 ms assembly  0.02 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+123s  48.7 fps   1.05 Mbps rtt  12 ms decode  2.22 ms host  6.12 ms assembly  0.29 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+124s  42.0 fps   0.88 Mbps rtt  14 ms decode  2.63 ms host  9.81 ms assembly  0.09 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+125s  49.8 fps   0.81 Mbps rtt  13 ms decode  2.34 ms host  6.27 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+126s  49.7 fps   1.01 Mbps rtt  13 ms decode  2.33 ms host  5.21 ms assembly  0.13 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+127s  49.0 fps   1.06 Mbps rtt  13 ms decode  2.56 ms host  5.01 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+128s  46.8 fps   0.77 Mbps rtt  13 ms decode  2.19 ms host  7.84 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+129s  49.9 fps   0.90 Mbps rtt  13 ms decode  2.42 ms host  4.95 ms assembly  0.09 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+130s  50.8 fps   1.13 Mbps rtt  13 ms decode  2.24 ms host  4.82 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+131s  49.0 fps   0.80 Mbps rtt  13 ms decode  1.38 ms host  4.97 ms assembly  0.08 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+132s  49.9 fps   0.84 Mbps rtt  13 ms decode  2.48 ms host  5.73 ms assembly  0.03 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+133s  48.9 fps   1.12 Mbps rtt  13 ms decode  2.27 ms host  5.72 ms assembly  0.10 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+134s  49.9 fps   0.94 Mbps rtt  13 ms decode  2.23 ms host  4.79 ms assembly  0.01 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+135s  49.7 fps   0.79 Mbps rtt  13 ms decode  2.14 ms host  4.84 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+136s  49.9 fps   1.04 Mbps rtt  13 ms decode  2.36 ms host  5.15 ms assembly  0.19 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+137s  50.0 fps   0.99 Mbps rtt  13 ms decode  2.35 ms host  4.75 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+138s  50.8 fps   0.83 Mbps rtt  13 ms decode  2.43 ms host  4.74 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+139s  50.0 fps   0.97 Mbps rtt  13 ms decode  2.55 ms host  4.80 ms assembly  0.04 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+140s  49.9 fps   1.05 Mbps rtt  13 ms decode  2.51 ms host  4.78 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+141s  49.7 fps   0.80 Mbps rtt  13 ms decode  2.51 ms host  4.95 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+142s  49.9 fps   1.02 Mbps rtt  13 ms decode  2.87 ms host  4.82 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+143s  50.0 fps   1.02 Mbps rtt  13 ms decode  2.47 ms host  4.86 ms assembly  0.07 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+144s  49.9 fps   0.82 Mbps rtt  12 ms decode  2.24 ms host  5.13 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+145s  50.0 fps   0.93 Mbps rtt  13 ms decode  2.29 ms host  4.93 ms assembly  0.14 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+146s  49.7 fps   1.09 Mbps rtt  12 ms decode  2.38 ms host  5.18 ms assembly  0.13 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+147s  50.7 fps   0.88 Mbps rtt  12 ms decode  1.71 ms host  4.81 ms assembly  0.09 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+148s  49.7 fps   0.88 Mbps rtt  12 ms decode  1.47 ms host  4.87 ms assembly  0.10 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+149s  49.8 fps   1.10 Mbps rtt  13 ms decode  2.01 ms host  4.88 ms assembly  0.15 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+150s  49.9 fps   0.91 Mbps rtt  13 ms decode  2.34 ms host  4.73 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+151s  49.9 fps   0.78 Mbps rtt  13 ms decode  2.51 ms host  5.06 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+152s  50.0 fps   1.04 Mbps rtt  13 ms decode  2.47 ms host  5.25 ms assembly  0.09 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+153s  48.9 fps   0.99 Mbps rtt  13 ms decode  2.49 ms host  5.96 ms assembly  0.18 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+154s  50.8 fps   0.88 Mbps rtt  13 ms decode  2.25 ms host  4.79 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+155s  49.7 fps   0.97 Mbps rtt  13 ms decode  2.51 ms host  4.72 ms assembly  0.13 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+156s  49.8 fps   1.07 Mbps rtt  13 ms decode  2.48 ms host  4.90 ms assembly  0.15 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+157s  48.8 fps   0.79 Mbps rtt  13 ms decode  2.41 ms host  6.63 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+158s  48.7 fps   0.95 Mbps rtt  13 ms decode  2.56 ms host  5.80 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+159s  49.9 fps   1.04 Mbps rtt  13 ms decode  2.01 ms host  4.87 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+160s  49.8 fps   0.84 Mbps rtt  13 ms decode  1.72 ms host  4.97 ms assembly  0.00 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+161s  50.0 fps   0.91 Mbps rtt  13 ms decode  1.94 ms host  4.77 ms assembly  0.10 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+162s  46.8 fps   1.04 Mbps rtt  12 ms decode  2.04 ms host  7.49 ms assembly  0.23 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+163s  48.9 fps   0.86 Mbps rtt  12 ms decode  1.87 ms host  5.68 ms assembly  0.14 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+164s  49.8 fps   0.79 Mbps rtt  12 ms decode  1.87 ms host  4.98 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+165s  50.8 fps   1.16 Mbps rtt  12 ms decode  1.81 ms host  4.91 ms assembly  0.10 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+166s  47.8 fps   0.90 Mbps rtt  12 ms decode  2.05 ms host  6.36 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+167s  48.9 fps   0.82 Mbps rtt  12 ms decode  1.91 ms host  6.09 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+168s  50.7 fps   1.03 Mbps rtt  12 ms decode  2.14 ms host  4.94 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+169s  49.9 fps   1.05 Mbps rtt  13 ms decode  1.78 ms host  4.93 ms assembly  0.03 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+170s  49.8 fps   0.83 Mbps rtt  12 ms decode  1.63 ms host  4.73 ms assembly  0.02 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+171s  48.8 fps   0.99 Mbps rtt  12 ms decode  1.62 ms host  6.71 ms assembly  0.13 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+172s  49.9 fps   1.06 Mbps rtt  12 ms decode  2.06 ms host  5.05 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+173s  49.9 fps   0.83 Mbps rtt  12 ms decode  2.35 ms host  5.06 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+174s  49.7 fps   0.95 Mbps rtt  12 ms decode  2.22 ms host  4.88 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+175s  42.8 fps   0.95 Mbps rtt  13 ms decode  2.40 ms host  8.94 ms assembly  0.33 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+176s  47.9 fps   0.86 Mbps rtt  13 ms decode  2.22 ms host  6.22 ms assembly  0.02 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+177s  50.0 fps   0.81 Mbps rtt  13 ms decode  1.85 ms host  4.78 ms assembly  0.00 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+178s  49.9 fps   1.09 Mbps rtt  13 ms decode  2.22 ms host  4.91 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+179s  49.9 fps   0.94 Mbps rtt  13 ms decode  2.40 ms host  5.16 ms assembly  0.04 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+180s  20.0 fps   0.33 Mbps rtt  29 ms decode  2.43 ms host 35.37 ms assembly  0.07 ms queue  0.08 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+181s  36.9 fps   0.63 Mbps rtt  25 ms decode  1.98 ms host 15.26 ms assembly  0.02 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+182s  41.0 fps   0.83 Mbps rtt  22 ms decode  1.98 ms host  9.85 ms assembly  0.11 ms queue  0.19 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+183s  48.0 fps   1.03 Mbps rtt  20 ms decode  1.82 ms host  7.92 ms assembly  0.12 ms queue  0.72 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+184s  48.8 fps   0.79 Mbps rtt  55 ms decode  1.83 ms host  7.10 ms assembly  0.08 ms queue  1.45 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+185s  42.8 fps   0.81 Mbps rtt  45 ms decode  1.95 ms host 10.23 ms assembly  0.13 ms queue  0.07 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+186s  48.8 fps   1.11 Mbps rtt  52 ms decode  1.58 ms host  7.76 ms assembly  0.30 ms queue  1.00 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+187s  47.7 fps   0.78 Mbps rtt  42 ms decode  1.91 ms host  6.66 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+188s  47.8 fps   0.81 Mbps rtt  35 ms decode  2.06 ms host  6.66 ms assembly  0.10 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+189s  45.9 fps   1.00 Mbps rtt  30 ms decode  1.86 ms host  8.22 ms assembly  0.18 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+190s  40.9 fps   0.83 Mbps rtt  26 ms decode  2.09 ms host 12.10 ms assembly  0.12 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+191s  42.8 fps   0.70 Mbps rtt  23 ms decode  1.71 ms host 10.51 ms assembly  0.03 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+192s  47.8 fps   0.91 Mbps rtt  20 ms decode  1.63 ms host  7.49 ms assembly  0.05 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+193s  42.8 fps   0.99 Mbps rtt  18 ms decode  1.90 ms host  8.71 ms assembly  0.41 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+194s  45.8 fps   0.78 Mbps rtt  17 ms decode  1.96 ms host  9.15 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+195s  41.8 fps   0.71 Mbps rtt  16 ms decode  1.89 ms host 11.16 ms assembly  0.09 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+196s  48.0 fps   0.93 Mbps rtt  16 ms decode  1.76 ms host  8.07 ms assembly  0.14 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+197s  44.0 fps   0.99 Mbps rtt  17 ms decode  1.73 ms host  7.95 ms assembly  0.16 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+198s  40.9 fps   0.66 Mbps rtt  15 ms decode  1.96 ms host 10.60 ms assembly  0.07 ms queue  0.09 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+199s  45.9 fps   0.80 Mbps rtt  15 ms decode  2.12 ms host  7.95 ms assembly  0.19 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+200s  42.8 fps   0.94 Mbps rtt  15 ms decode  2.41 ms host  9.39 ms assembly  0.22 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+201s  45.9 fps   0.86 Mbps rtt  19 ms decode  2.04 ms host  8.15 ms assembly  0.93 ms queue  0.11 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+202s  49.8 fps   0.83 Mbps rtt  18 ms decode  1.75 ms host  5.44 ms assembly  0.05 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+203s  44.8 fps   0.90 Mbps rtt  20 ms decode  2.01 ms host  8.20 ms assembly  1.01 ms queue  0.08 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+204s  43.7 fps   0.92 Mbps rtt  20 ms decode  1.77 ms host  9.75 ms assembly  0.15 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+205s  42.9 fps   0.71 Mbps rtt  18 ms decode  1.96 ms host 10.25 ms assembly  0.19 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+206s  46.0 fps   0.79 Mbps rtt  17 ms decode  2.07 ms host  8.59 ms assembly  0.10 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+207s  46.8 fps   1.01 Mbps rtt  16 ms decode  1.81 ms host  7.26 ms assembly  0.26 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+208s  49.0 fps   0.91 Mbps rtt  15 ms decode  2.01 ms host  6.33 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+209s  40.0 fps   0.64 Mbps rtt  14 ms decode  2.10 ms host 11.07 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+210s  44.0 fps   0.87 Mbps rtt  14 ms decode  2.08 ms host  9.90 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+211s  45.9 fps   0.95 Mbps rtt  13 ms decode  2.06 ms host  7.99 ms assembly  0.22 ms queue  0.07 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+212s  48.8 fps   0.77 Mbps rtt  13 ms decode  1.88 ms host  6.55 ms assembly  0.10 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+213s  44.8 fps   0.76 Mbps rtt  13 ms decode  1.87 ms host  8.16 ms assembly  0.15 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+214s  45.8 fps   1.02 Mbps rtt  13 ms decode  1.81 ms host  9.11 ms assembly  0.24 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+215s  50.0 fps   0.91 Mbps rtt  13 ms decode  1.93 ms host  5.02 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+216s  48.9 fps   0.77 Mbps rtt  13 ms decode  2.34 ms host  5.78 ms assembly  0.00 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+217s  48.9 fps   0.98 Mbps rtt  13 ms decode  2.15 ms host  5.89 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+218s  39.0 fps   0.81 Mbps rtt  13 ms decode  2.37 ms host 12.52 ms assembly  0.31 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+219s  38.8 fps   0.61 Mbps rtt  17 ms decode  2.45 ms host 15.62 ms assembly  0.19 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+220s  47.7 fps   0.81 Mbps rtt  16 ms decode  2.66 ms host  7.42 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+221s  48.8 fps   1.08 Mbps rtt  15 ms decode  2.44 ms host  6.84 ms assembly  0.16 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+222s  48.9 fps   0.81 Mbps rtt  14 ms decode  2.27 ms host  5.70 ms assembly  0.02 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+223s  49.7 fps   1.04 Mbps rtt  14 ms decode  2.64 ms host  4.87 ms assembly  0.09 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+224s  50.0 fps   0.97 Mbps rtt  13 ms decode  2.50 ms host  4.86 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+225s  49.8 fps   0.86 Mbps rtt  13 ms decode  2.61 ms host  5.10 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+226s  48.9 fps   0.92 Mbps rtt  13 ms decode  2.64 ms host  5.84 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+227s  50.0 fps   1.07 Mbps rtt  13 ms decode  2.20 ms host  4.83 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+228s  50.9 fps   0.80 Mbps rtt  13 ms decode  1.87 ms host  4.83 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+229s  49.9 fps   0.95 Mbps rtt  12 ms decode  1.49 ms host  4.89 ms assembly  0.02 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+230s  48.8 fps   1.02 Mbps rtt  12 ms decode  1.70 ms host  5.77 ms assembly  0.06 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+231s  49.8 fps   0.83 Mbps rtt  12 ms decode  1.63 ms host  4.86 ms assembly  0.03 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+232s  49.9 fps   0.85 Mbps rtt  12 ms decode  1.97 ms host  4.86 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+233s  50.0 fps   1.07 Mbps rtt  12 ms decode  2.48 ms host  4.98 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+234s  49.7 fps   0.82 Mbps rtt  12 ms decode  2.44 ms host  5.59 ms assembly  0.01 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+235s  50.0 fps   0.83 Mbps rtt  12 ms decode  2.50 ms host  4.78 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+236s  49.9 fps   1.05 Mbps rtt  12 ms decode  2.45 ms host  4.70 ms assembly  0.09 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+237s  49.9 fps   0.93 Mbps rtt  13 ms decode  2.75 ms host  4.86 ms assembly  0.08 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+238s  49.8 fps   0.81 Mbps rtt  13 ms decode  2.91 ms host  4.96 ms assembly  0.08 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+239s  49.8 fps   1.02 Mbps rtt  13 ms decode  2.65 ms host  5.20 ms assembly  0.14 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+240s  47.8 fps   0.94 Mbps rtt  12 ms decode  2.19 ms host  8.27 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+241s  45.9 fps   0.73 Mbps rtt  13 ms decode  2.04 ms host  7.82 ms assembly  0.20 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+242s  39.9 fps   0.73 Mbps rtt  14 ms decode  2.27 ms host  8.16 ms assembly  0.23 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+243s  48.8 fps   1.07 Mbps rtt  13 ms decode  2.44 ms host  8.49 ms assembly  0.31 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+244s  47.8 fps   0.80 Mbps rtt  13 ms decode  2.49 ms host  6.76 ms assembly  0.09 ms queue  0.19 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+245s  47.7 fps   0.83 Mbps rtt  13 ms decode  2.84 ms host  6.84 ms assembly  0.07 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+Poor(true)
+246s  41.0 fps   1.18 Mbps rtt  13 ms decode  2.92 ms host  7.26 ms assembly  0.16 ms queue  0.04 ms loss  3.2% fec   0 1280x720 H.264 · hardware | 
+247s  50.7 fps   1.07 Mbps rtt  13 ms decode  2.48 ms host  6.37 ms assembly  0.14 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+248s  49.9 fps   0.83 Mbps rtt  13 ms decode  2.64 ms host  4.93 ms assembly  0.08 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+Poor(false)
+249s  49.0 fps   0.93 Mbps rtt  13 ms decode  2.62 ms host  5.65 ms assembly  0.18 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+250s  47.8 fps   1.01 Mbps rtt  13 ms decode  2.33 ms host  6.66 ms assembly  0.13 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+251s  44.8 fps   0.72 Mbps rtt  13 ms decode  2.55 ms host 10.86 ms assembly  0.36 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+252s  42.7 fps   0.75 Mbps rtt  13 ms decode  2.58 ms host 11.07 ms assembly  0.13 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+253s  41.8 fps   0.92 Mbps rtt  13 ms decode  2.66 ms host 11.04 ms assembly  0.25 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+254s  46.0 fps   0.83 Mbps rtt  13 ms decode  2.66 ms host  6.88 ms assembly  0.16 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+255s  47.9 fps   0.75 Mbps rtt  13 ms decode  2.33 ms host  7.46 ms assembly  0.09 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+256s  43.8 fps   0.86 Mbps rtt  13 ms decode  2.35 ms host  9.48 ms assembly  0.13 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+257s  47.7 fps   1.00 Mbps rtt  13 ms decode  2.67 ms host  8.33 ms assembly  0.08 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+258s  49.9 fps   0.82 Mbps rtt  13 ms decode  2.23 ms host  4.93 ms assembly  0.09 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+259s  49.9 fps   0.96 Mbps rtt  13 ms decode  2.37 ms host  5.13 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+260s  48.7 fps   1.05 Mbps rtt  13 ms decode  2.48 ms host  5.82 ms assembly  0.18 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+261s  48.8 fps   0.78 Mbps rtt  13 ms decode  2.76 ms host  6.04 ms assembly  0.09 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+262s  50.0 fps   0.88 Mbps rtt  13 ms decode  2.68 ms host  5.29 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+263s  49.0 fps   1.10 Mbps rtt  14 ms decode  2.40 ms host  5.22 ms assembly  0.46 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+264s  47.8 fps   0.83 Mbps rtt  13 ms decode  2.45 ms host  6.39 ms assembly  0.10 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+265s  50.8 fps   0.82 Mbps rtt  13 ms decode  2.63 ms host  4.90 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+266s  47.8 fps   1.01 Mbps rtt  13 ms decode  2.69 ms host  7.04 ms assembly  0.19 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+267s  49.8 fps   0.99 Mbps rtt  13 ms decode  2.55 ms host  4.84 ms assembly  0.02 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+268s  49.9 fps   0.83 Mbps rtt  13 ms decode  2.63 ms host  4.79 ms assembly  0.10 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+269s  48.9 fps   0.96 Mbps rtt  13 ms decode  2.26 ms host  5.20 ms assembly  0.02 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+270s  46.7 fps   0.97 Mbps rtt  13 ms decode  2.40 ms host  7.02 ms assembly  0.10 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+271s  39.9 fps   0.66 Mbps rtt  15 ms decode  2.83 ms host 14.29 ms assembly  0.32 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+272s  45.7 fps   0.80 Mbps rtt  14 ms decode  2.31 ms host  8.85 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+273s  48.9 fps   1.07 Mbps rtt  14 ms decode  2.40 ms host  6.19 ms assembly  0.20 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+274s  48.0 fps   0.85 Mbps rtt  14 ms decode  2.40 ms host  7.37 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+275s  37.9 fps   0.64 Mbps rtt  14 ms decode  2.49 ms host 13.77 ms assembly  0.23 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+276s  40.0 fps   0.78 Mbps rtt  14 ms decode  3.16 ms host 13.03 ms assembly  0.19 ms queue  0.07 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+277s  49.7 fps   1.05 Mbps rtt  13 ms decode  3.28 ms host  5.12 ms assembly  0.02 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+278s  50.0 fps   0.81 Mbps rtt  13 ms decode  2.96 ms host  4.84 ms assembly  0.03 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+279s  45.8 fps   0.79 Mbps rtt  13 ms decode  3.00 ms host  7.97 ms assembly  0.05 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+280s  35.9 fps   0.73 Mbps rtt  13 ms decode  3.29 ms host 13.83 ms assembly  0.34 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+281s  35.9 fps   0.76 Mbps rtt  13 ms decode  3.43 ms host 16.76 ms assembly  0.39 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+282s  50.7 fps   0.79 Mbps rtt  13 ms decode  3.29 ms host  4.90 ms assembly  0.01 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+283s  49.7 fps   0.94 Mbps rtt  13 ms decode  3.30 ms host  4.81 ms assembly  0.08 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+284s  46.8 fps   1.01 Mbps rtt  13 ms decode  3.37 ms host  7.26 ms assembly  0.12 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+285s  47.9 fps   0.77 Mbps rtt  13 ms decode  3.11 ms host  6.75 ms assembly  0.03 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+286s  49.9 fps   0.85 Mbps rtt  13 ms decode  2.85 ms host  5.22 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+287s  49.7 fps   1.09 Mbps rtt  13 ms decode  3.18 ms host  4.73 ms assembly  0.08 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+288s  49.8 fps   0.88 Mbps rtt  13 ms decode  3.23 ms host  5.10 ms assembly  0.04 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+289s  49.9 fps   0.79 Mbps rtt  13 ms decode  2.77 ms host  5.79 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+290s  48.7 fps   1.00 Mbps rtt  13 ms decode  2.95 ms host  6.02 ms assembly  0.08 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+291s  48.9 fps   0.94 Mbps rtt  13 ms decode  2.52 ms host  5.56 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+292s  50.0 fps   0.81 Mbps rtt  13 ms decode  2.60 ms host  4.95 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+293s  49.7 fps   0.93 Mbps rtt  13 ms decode  2.45 ms host  5.85 ms assembly  0.14 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+294s  47.8 fps   1.01 Mbps rtt  13 ms decode  2.42 ms host  6.95 ms assembly  0.19 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+295s  44.9 fps   0.72 Mbps rtt  13 ms decode  2.46 ms host  8.40 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+296s  48.8 fps   0.85 Mbps rtt  13 ms decode  2.50 ms host  6.42 ms assembly  0.12 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+297s  49.8 fps   1.07 Mbps rtt  13 ms decode  2.88 ms host  5.03 ms assembly  0.23 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+298s  50.7 fps   0.81 Mbps rtt  12 ms decode  2.69 ms host  4.73 ms assembly  0.07 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+299s  49.8 fps   0.84 Mbps rtt  13 ms decode  2.60 ms host  4.65 ms assembly  0.01 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+300s  47.0 fps   0.99 Mbps rtt  13 ms decode  2.55 ms host  8.65 ms assembly  0.21 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+301s  42.9 fps   0.76 Mbps rtt  16 ms decode  2.12 ms host 11.38 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+302s  48.8 fps   0.80 Mbps rtt  15 ms decode  2.23 ms host  6.87 ms assembly  0.39 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+303s  48.0 fps   0.90 Mbps rtt  14 ms decode  2.50 ms host  5.65 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+304s  50.0 fps   1.04 Mbps rtt  14 ms decode  2.45 ms host  6.05 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+305s  38.9 fps   0.64 Mbps rtt  16 ms decode  2.59 ms host 13.15 ms assembly  0.30 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+306s  42.0 fps   0.71 Mbps rtt  15 ms decode  2.65 ms host 12.16 ms assembly  0.31 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+307s  50.0 fps   1.08 Mbps rtt  15 ms decode  2.06 ms host  5.20 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+308s  50.0 fps   0.87 Mbps rtt  14 ms decode  2.06 ms host  4.87 ms assembly  0.15 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+309s  49.9 fps   0.79 Mbps rtt  14 ms decode  1.93 ms host  4.96 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+310s  46.9 fps   0.99 Mbps rtt  14 ms decode  2.02 ms host  7.81 ms assembly  0.28 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+311s  48.8 fps   0.97 Mbps rtt  14 ms decode  2.14 ms host  5.91 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+312s  49.8 fps   0.82 Mbps rtt  13 ms decode  2.07 ms host  4.80 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+313s  50.8 fps   0.97 Mbps rtt  13 ms decode  2.15 ms host  4.84 ms assembly  0.10 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+314s  49.7 fps   1.04 Mbps rtt  13 ms decode  2.12 ms host  5.10 ms assembly  0.14 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+315s  48.7 fps   0.77 Mbps rtt  13 ms decode  2.15 ms host  5.80 ms assembly  0.12 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+316s  49.8 fps   0.92 Mbps rtt  12 ms decode  1.69 ms host  5.11 ms assembly  0.17 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+317s  46.8 fps   1.00 Mbps rtt  12 ms decode  1.97 ms host  7.50 ms assembly  0.13 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+318s  47.9 fps   0.79 Mbps rtt  12 ms decode  1.94 ms host  6.21 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+319s  47.9 fps   0.78 Mbps rtt  12 ms decode  1.93 ms host  6.05 ms assembly  0.04 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+320s  49.7 fps   1.11 Mbps rtt  12 ms decode  2.16 ms host  5.05 ms assembly  0.10 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+321s  50.0 fps   0.91 Mbps rtt  12 ms decode  2.06 ms host  4.84 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+322s  49.9 fps   0.79 Mbps rtt  12 ms decode  2.01 ms host  5.23 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+323s  48.7 fps   1.00 Mbps rtt  12 ms decode  2.21 ms host  5.94 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+324s  48.8 fps   0.96 Mbps rtt  12 ms decode  2.59 ms host  5.26 ms assembly  0.19 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+325s  50.0 fps   0.82 Mbps rtt  12 ms decode  2.40 ms host  4.91 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+326s  49.9 fps   0.95 Mbps rtt  12 ms decode  2.52 ms host  4.96 ms assembly  0.12 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+327s  49.9 fps   1.06 Mbps rtt  12 ms decode  2.68 ms host  5.33 ms assembly  0.04 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+328s  47.9 fps   0.76 Mbps rtt  12 ms decode  2.21 ms host  6.18 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+329s  49.7 fps   0.91 Mbps rtt  12 ms decode  2.52 ms host  5.01 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+330s  50.0 fps   1.09 Mbps rtt  12 ms decode  2.64 ms host  4.84 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+331s  48.9 fps   0.75 Mbps rtt  13 ms decode  2.40 ms host  6.19 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+332s  49.8 fps   0.87 Mbps rtt  13 ms decode  2.36 ms host  5.62 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+333s  49.9 fps   1.06 Mbps rtt  13 ms decode  2.34 ms host  5.04 ms assembly  0.11 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+334s  48.9 fps   0.86 Mbps rtt  13 ms decode  2.55 ms host  5.38 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+335s  48.7 fps   0.77 Mbps rtt  13 ms decode  2.32 ms host  6.30 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+336s  49.7 fps   1.06 Mbps rtt  13 ms decode  2.59 ms host  5.83 ms assembly  0.08 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+337s  49.8 fps   0.95 Mbps rtt  13 ms decode  2.37 ms host  4.97 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+338s  49.8 fps   0.84 Mbps rtt  13 ms decode  2.35 ms host  4.87 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+339s  48.9 fps   0.97 Mbps rtt  13 ms decode  2.49 ms host  5.92 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+340s  48.0 fps   1.02 Mbps rtt  13 ms decode  2.42 ms host  6.61 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+341s  50.0 fps   0.80 Mbps rtt  13 ms decode  2.27 ms host  4.94 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+342s  49.9 fps   0.97 Mbps rtt  13 ms decode  2.22 ms host  5.09 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+343s  49.7 fps   1.01 Mbps rtt  13 ms decode  2.44 ms host  5.26 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+344s  49.9 fps   0.81 Mbps rtt  13 ms decode  2.32 ms host  5.74 ms assembly  0.01 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+345s  49.0 fps   0.86 Mbps rtt  13 ms decode  2.61 ms host  6.02 ms assembly  0.11 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+346s  49.8 fps   1.11 Mbps rtt  13 ms decode  2.38 ms host  4.73 ms assembly  0.13 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+347s  50.7 fps   0.83 Mbps rtt  12 ms decode  2.22 ms host  4.77 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+348s  49.7 fps   0.84 Mbps rtt  13 ms decode  2.57 ms host  4.89 ms assembly  0.07 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+349s  47.9 fps   1.05 Mbps rtt  13 ms decode  2.85 ms host  6.97 ms assembly  0.11 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+350s  49.8 fps   0.92 Mbps rtt  13 ms decode  3.02 ms host  4.96 ms assembly  0.04 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+351s  49.7 fps   0.80 Mbps rtt  13 ms decode  3.08 ms host  4.93 ms assembly  0.03 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+352s  49.8 fps   1.06 Mbps rtt  13 ms decode  3.03 ms host  5.02 ms assembly  0.14 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+353s  48.7 fps   0.95 Mbps rtt  13 ms decode  2.99 ms host  5.83 ms assembly  0.05 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+354s  45.8 fps   0.75 Mbps rtt  13 ms decode  2.86 ms host  7.64 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+355s  47.9 fps   0.95 Mbps rtt  13 ms decode  2.93 ms host  6.43 ms assembly  0.09 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+356s  49.9 fps   1.03 Mbps rtt  13 ms decode  2.74 ms host  4.83 ms assembly  0.10 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+357s  50.8 fps   0.81 Mbps rtt  13 ms decode  2.67 ms host  4.85 ms assembly  0.04 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+358s  45.9 fps   0.79 Mbps rtt  13 ms decode  2.99 ms host  7.44 ms assembly  0.02 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+359s  45.7 fps   0.99 Mbps rtt  13 ms decode  2.47 ms host  7.73 ms assembly  0.15 ms queue  0.14 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+360s  45.0 fps   0.77 Mbps rtt  16 ms decode  2.67 ms host  9.55 ms assembly  0.34 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+361s  47.9 fps   0.78 Mbps rtt  16 ms decode  2.32 ms host  7.57 ms assembly  0.26 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+362s  44.0 fps   0.86 Mbps rtt  16 ms decode  2.54 ms host  9.68 ms assembly  0.20 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+363s  44.8 fps   0.96 Mbps rtt  16 ms decode  2.51 ms host 10.12 ms assembly  0.24 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+364s  43.8 fps   0.73 Mbps rtt  15 ms decode  2.37 ms host  9.24 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+365s  47.8 fps   0.83 Mbps rtt  15 ms decode  2.02 ms host  6.10 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+366s  50.0 fps   1.07 Mbps rtt  14 ms decode  1.71 ms host  5.00 ms assembly  0.04 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+367s  49.7 fps   0.84 Mbps rtt  13 ms decode  1.72 ms host  5.45 ms assembly  0.04 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+368s  48.9 fps   0.84 Mbps rtt  13 ms decode  1.90 ms host  6.24 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+369s  49.8 fps   1.08 Mbps rtt  13 ms decode  1.80 ms host  4.91 ms assembly  0.05 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+370s  49.8 fps   0.93 Mbps rtt  12 ms decode  1.72 ms host  4.97 ms assembly  0.07 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+371s  48.9 fps   0.83 Mbps rtt  13 ms decode  1.43 ms host  5.53 ms assembly  0.06 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+372s  48.8 fps   0.96 Mbps rtt  12 ms decode  1.72 ms host  6.95 ms assembly  0.04 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+373s  48.9 fps   1.02 Mbps rtt  12 ms decode  1.78 ms host  5.08 ms assembly  0.12 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+374s  50.0 fps   0.80 Mbps rtt  13 ms decode  1.61 ms host  4.96 ms assembly  0.01 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+375s  50.8 fps   0.98 Mbps rtt  13 ms decode  1.45 ms host  4.69 ms assembly  0.04 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+376s  48.7 fps   1.01 Mbps rtt  13 ms decode  1.40 ms host  5.56 ms assembly  0.12 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+377s  50.8 fps   0.82 Mbps rtt  12 ms decode  1.42 ms host  4.85 ms assembly  0.04 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+378s  50.0 fps   0.93 Mbps rtt  12 ms decode  1.77 ms host  4.73 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+379s  49.8 fps   1.09 Mbps rtt  12 ms decode  1.98 ms host  4.73 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+380s  49.0 fps   0.78 Mbps rtt  12 ms decode  1.99 ms host  5.50 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+381s  50.0 fps   0.89 Mbps rtt  12 ms decode  1.37 ms host  4.77 ms assembly  0.02 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+382s  49.9 fps   1.07 Mbps rtt  12 ms decode  1.69 ms host  5.01 ms assembly  0.20 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+383s  49.0 fps   0.85 Mbps rtt  12 ms decode  1.47 ms host  6.22 ms assembly  0.06 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+384s  48.8 fps   0.74 Mbps rtt  14 ms decode  2.00 ms host  5.42 ms assembly  0.02 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+385s  50.0 fps   1.05 Mbps rtt  14 ms decode  1.76 ms host  4.83 ms assembly  0.11 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+386s  50.8 fps   0.96 Mbps rtt  13 ms decode  1.34 ms host  4.82 ms assembly  0.03 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+387s  44.8 fps   0.78 Mbps rtt  13 ms decode  1.58 ms host  6.92 ms assembly  0.05 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+388s  50.0 fps   0.96 Mbps rtt  13 ms decode  1.67 ms host  5.06 ms assembly  0.04 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+389s  49.9 fps   1.07 Mbps rtt  12 ms decode  1.47 ms host  4.81 ms assembly  0.09 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+390s  49.9 fps   0.79 Mbps rtt  12 ms decode  1.62 ms host  4.86 ms assembly  0.10 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+391s  43.9 fps   0.82 Mbps rtt  16 ms decode  1.75 ms host  9.91 ms assembly  0.18 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+392s  46.8 fps   1.04 Mbps rtt  16 ms decode  1.49 ms host  9.36 ms assembly  0.17 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+393s  45.8 fps   0.74 Mbps rtt  19 ms decode  1.61 ms host  7.34 ms assembly  0.06 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+394s  49.9 fps   0.78 Mbps rtt  17 ms decode  1.75 ms host  4.98 ms assembly  0.03 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+395s  47.9 fps   1.04 Mbps rtt  16 ms decode  1.53 ms host  7.11 ms assembly  0.09 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+396s  49.9 fps   0.94 Mbps rtt  15 ms decode  1.40 ms host  5.05 ms assembly  0.07 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+397s  49.0 fps   0.82 Mbps rtt  14 ms decode  1.57 ms host  5.27 ms assembly  0.07 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+398s  50.0 fps   0.94 Mbps rtt  14 ms decode  1.52 ms host  5.34 ms assembly  0.13 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+399s  45.9 fps   0.99 Mbps rtt  14 ms decode  1.63 ms host  8.08 ms assembly  0.15 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+400s  34.9 fps   0.54 Mbps rtt  24 ms decode  1.51 ms host 17.07 ms assembly  0.08 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+401s  50.0 fps   0.85 Mbps rtt  21 ms decode  1.41 ms host  4.77 ms assembly  0.07 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+402s  49.8 fps   1.11 Mbps rtt  19 ms decode  1.45 ms host  4.89 ms assembly  0.15 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+403s  49.9 fps   0.87 Mbps rtt  18 ms decode  1.63 ms host  4.99 ms assembly  0.06 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+404s  49.8 fps   0.79 Mbps rtt  16 ms decode  1.52 ms host  5.10 ms assembly  0.03 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+405s  48.9 fps   1.02 Mbps rtt  15 ms decode  1.80 ms host  5.36 ms assembly  0.16 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+406s  50.8 fps   0.98 Mbps rtt  14 ms decode  1.40 ms host  4.70 ms assembly  0.08 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+407s  49.9 fps   0.83 Mbps rtt  14 ms decode  1.44 ms host  4.89 ms assembly  0.05 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+408s  49.8 fps   0.96 Mbps rtt  13 ms decode  1.73 ms host  4.95 ms assembly  0.08 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+409s  47.7 fps   1.01 Mbps rtt  13 ms decode  1.67 ms host  6.44 ms assembly  0.12 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+410s  49.7 fps   0.79 Mbps rtt  13 ms decode  1.68 ms host  4.77 ms assembly  0.03 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+411s  49.8 fps   0.98 Mbps rtt  13 ms decode  1.86 ms host  4.90 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+412s  49.8 fps   1.03 Mbps rtt  12 ms decode  1.59 ms host  4.90 ms assembly  0.07 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+413s  49.8 fps   0.82 Mbps rtt  12 ms decode  1.56 ms host  4.99 ms assembly  0.04 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+414s  50.8 fps   0.89 Mbps rtt  12 ms decode  1.76 ms host  4.59 ms assembly  0.01 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+415s  50.0 fps   1.09 Mbps rtt  12 ms decode  1.72 ms host  4.81 ms assembly  0.06 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+416s  49.9 fps   0.82 Mbps rtt  12 ms decode  1.56 ms host  4.97 ms assembly  0.02 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+417s  50.0 fps   0.85 Mbps rtt  13 ms decode  2.33 ms host  5.07 ms assembly  0.04 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+418s  49.8 fps   1.09 Mbps rtt  12 ms decode  2.23 ms host  4.88 ms assembly  0.10 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+419s  47.9 fps   0.89 Mbps rtt  12 ms decode  2.23 ms host  5.99 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+420s  37.0 fps   0.58 Mbps rtt  13 ms decode  2.06 ms host 16.25 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+421s  45.8 fps   0.90 Mbps rtt  13 ms decode  1.87 ms host  7.66 ms assembly  0.21 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+422s  45.9 fps   0.97 Mbps rtt  13 ms decode  1.67 ms host  7.55 ms assembly  0.30 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+423s  49.8 fps   0.86 Mbps rtt  14 ms decode  2.17 ms host  7.08 ms assembly  0.14 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+424s  46.0 fps   0.84 Mbps rtt  14 ms decode  1.95 ms host  8.99 ms assembly  0.15 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+425s  48.8 fps   1.06 Mbps rtt  14 ms decode  2.03 ms host  6.96 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+426s  49.9 fps   0.84 Mbps rtt  13 ms decode  2.16 ms host  4.84 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+427s  49.7 fps   0.79 Mbps rtt  13 ms decode  2.40 ms host  5.01 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+428s  49.7 fps   1.07 Mbps rtt  13 ms decode  2.29 ms host  4.92 ms assembly  0.20 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+429s  48.8 fps   0.94 Mbps rtt  13 ms decode  2.38 ms host  6.39 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+430s  49.9 fps   0.86 Mbps rtt  13 ms decode  2.59 ms host  5.22 ms assembly  0.08 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+431s  49.7 fps   0.98 Mbps rtt  12 ms decode  1.92 ms host  4.69 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+432s  49.8 fps   1.05 Mbps rtt  13 ms decode  1.83 ms host  4.84 ms assembly  0.09 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+433s  49.9 fps   0.81 Mbps rtt  12 ms decode  1.99 ms host  5.66 ms assembly  0.02 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+434s  48.9 fps   1.00 Mbps rtt  12 ms decode  2.30 ms host  5.97 ms assembly  0.07 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+435s  50.0 fps   1.01 Mbps rtt  12 ms decode  2.29 ms host  4.95 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+436s  49.8 fps   0.79 Mbps rtt  12 ms decode  2.61 ms host  5.48 ms assembly  0.07 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+437s  49.9 fps   0.90 Mbps rtt  12 ms decode  2.63 ms host  4.86 ms assembly  0.13 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+438s  48.0 fps   1.06 Mbps rtt  13 ms decode  2.30 ms host  6.74 ms assembly  0.32 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+439s  49.9 fps   0.83 Mbps rtt  13 ms decode  2.11 ms host  5.22 ms assembly  0.10 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+440s  50.0 fps   0.87 Mbps rtt  13 ms decode  1.99 ms host  5.27 ms assembly  0.10 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+441s  49.9 fps   1.08 Mbps rtt  13 ms decode  2.03 ms host  5.03 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+442s  48.8 fps   0.89 Mbps rtt  13 ms decode  1.87 ms host  5.82 ms assembly  0.07 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+443s  48.9 fps   0.81 Mbps rtt  13 ms decode  2.22 ms host  5.55 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+444s  49.9 fps   1.01 Mbps rtt  13 ms decode  2.08 ms host  5.24 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+445s  48.8 fps   0.96 Mbps rtt  13 ms decode  2.09 ms host  5.77 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+446s  49.8 fps   0.78 Mbps rtt  13 ms decode  2.00 ms host  4.88 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+447s  49.8 fps   0.93 Mbps rtt  13 ms decode  2.07 ms host  4.96 ms assembly  0.01 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+448s  49.8 fps   1.02 Mbps rtt  13 ms decode  2.04 ms host  5.19 ms assembly  0.16 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+449s  49.0 fps   0.83 Mbps rtt  13 ms decode  2.14 ms host  5.67 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+450s  49.8 fps   0.94 Mbps rtt  13 ms decode  2.16 ms host  4.94 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+451s  49.8 fps   1.09 Mbps rtt  13 ms decode  2.30 ms host  5.37 ms assembly  0.17 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+452s  47.7 fps   0.76 Mbps rtt  13 ms decode  1.94 ms host  7.21 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+453s  49.8 fps   0.89 Mbps rtt  13 ms decode  2.13 ms host  5.15 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+454s  50.7 fps   1.11 Mbps rtt  13 ms decode  1.91 ms host  4.87 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+455s  49.0 fps   0.86 Mbps rtt  12 ms decode  1.95 ms host  5.03 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+456s  50.7 fps   0.79 Mbps rtt  12 ms decode  1.88 ms host  4.87 ms assembly  0.03 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+457s  50.0 fps   1.10 Mbps rtt  12 ms decode  1.68 ms host  4.84 ms assembly  0.01 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+458s  49.7 fps   0.88 Mbps rtt  12 ms decode  2.18 ms host  5.49 ms assembly  0.01 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+459s  49.8 fps   0.82 Mbps rtt  12 ms decode  1.81 ms host  5.24 ms assembly  0.08 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+460s  48.9 fps   0.99 Mbps rtt  12 ms decode  1.92 ms host  5.06 ms assembly  0.04 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+461s  50.9 fps   1.04 Mbps rtt  12 ms decode  1.82 ms host  4.77 ms assembly  0.04 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+462s  48.8 fps   0.75 Mbps rtt  13 ms decode  1.70 ms host  5.54 ms assembly  0.01 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+463s  48.8 fps   1.02 Mbps rtt  13 ms decode  2.27 ms host  5.88 ms assembly  0.04 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+464s  49.9 fps   1.01 Mbps rtt  12 ms decode  1.94 ms host  5.64 ms assembly  0.06 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+465s  49.7 fps   0.82 Mbps rtt  12 ms decode  1.69 ms host  4.86 ms assembly  0.05 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+466s  49.7 fps   0.89 Mbps rtt  12 ms decode  1.96 ms host  4.82 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+467s  48.7 fps   1.08 Mbps rtt  13 ms decode  2.36 ms host  6.49 ms assembly  0.10 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+468s  49.8 fps   0.79 Mbps rtt  12 ms decode  1.87 ms host  4.83 ms assembly  0.02 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+469s  50.0 fps   0.88 Mbps rtt  12 ms decode  1.98 ms host  5.17 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+470s  49.8 fps   1.10 Mbps rtt  12 ms decode  2.23 ms host  4.90 ms assembly  0.22 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+471s  49.8 fps   0.87 Mbps rtt  12 ms decode  2.32 ms host  4.85 ms assembly  0.02 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+472s  50.0 fps   0.79 Mbps rtt  12 ms decode  2.22 ms host  4.76 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+473s  49.8 fps   1.03 Mbps rtt  12 ms decode  2.35 ms host  4.90 ms assembly  0.11 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+474s  49.7 fps   0.96 Mbps rtt  12 ms decode  2.29 ms host  4.90 ms assembly  0.07 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+475s  50.9 fps   0.85 Mbps rtt  12 ms decode  2.15 ms host  4.63 ms assembly  0.13 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+476s  49.9 fps   1.04 Mbps rtt  12 ms decode  2.41 ms host  4.85 ms assembly  0.13 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+477s  49.8 fps   0.77 Mbps rtt  12 ms decode  2.41 ms host  4.81 ms assembly  0.07 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+478s  46.8 fps   0.94 Mbps rtt  12 ms decode  2.31 ms host  7.19 ms assembly  0.19 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+479s  48.0 fps   1.01 Mbps rtt  13 ms decode  2.18 ms host  6.58 ms assembly  0.25 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+480s  41.0 fps   0.64 Mbps rtt  13 ms decode  2.31 ms host 12.75 ms assembly  0.30 ms queue  0.11 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+481s  49.9 fps   0.83 Mbps rtt  13 ms decode  1.99 ms host  6.14 ms assembly  0.09 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+482s  45.0 fps   0.96 Mbps rtt  13 ms decode  2.26 ms host  8.60 ms assembly  0.40 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+483s  39.8 fps   0.78 Mbps rtt  20 ms decode  2.29 ms host 14.35 ms assembly  0.28 ms queue  0.09 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+484s  45.9 fps   0.76 Mbps rtt  19 ms decode  2.11 ms host  8.11 ms assembly  0.12 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+485s  45.8 fps   0.87 Mbps rtt  17 ms decode  2.18 ms host  8.09 ms assembly  0.05 ms queue  0.09 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+486s  50.0 fps   1.09 Mbps rtt  16 ms decode  2.34 ms host  5.33 ms assembly  0.09 ms queue  0.09 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+487s  48.8 fps   0.77 Mbps rtt  16 ms decode  2.29 ms host  5.77 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+488s  49.9 fps   0.86 Mbps rtt  19 ms decode  1.99 ms host  5.57 ms assembly  0.04 ms queue  0.17 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+489s  48.7 fps   1.06 Mbps rtt  18 ms decode  1.93 ms host  6.13 ms assembly  0.10 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+490s  48.8 fps   0.85 Mbps rtt  17 ms decode  1.94 ms host  5.72 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+491s  49.9 fps   0.79 Mbps rtt  16 ms decode  1.71 ms host  4.71 ms assembly  0.04 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+492s  49.8 fps   1.08 Mbps rtt  15 ms decode  2.09 ms host  4.77 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+493s  49.8 fps   0.92 Mbps rtt  15 ms decode  2.04 ms host  5.91 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+494s  48.8 fps   0.82 Mbps rtt  14 ms decode  1.94 ms host  6.14 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+495s  49.7 fps   0.95 Mbps rtt  14 ms decode  1.96 ms host  4.68 ms assembly  0.21 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+496s  49.8 fps   1.03 Mbps rtt  15 ms decode  2.07 ms host  5.06 ms assembly  0.12 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+497s  49.9 fps   0.81 Mbps rtt  15 ms decode  1.75 ms host  4.92 ms assembly  0.31 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+498s  49.9 fps   1.00 Mbps rtt  15 ms decode  2.12 ms host  4.92 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+499s  49.9 fps   1.02 Mbps rtt  15 ms decode  1.76 ms host  4.65 ms assembly  0.03 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+500s  49.9 fps   0.79 Mbps rtt  14 ms decode  1.80 ms host  5.69 ms assembly  0.06 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+501s  49.9 fps   0.91 Mbps rtt  23 ms decode  1.77 ms host  4.98 ms assembly  0.01 ms queue  0.16 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+502s  49.8 fps   1.08 Mbps rtt  21 ms decode  1.74 ms host  5.06 ms assembly  0.28 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+503s  49.9 fps   0.81 Mbps rtt  19 ms decode  1.88 ms host  4.85 ms assembly  0.03 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+504s  49.8 fps   0.86 Mbps rtt  18 ms decode  1.77 ms host  5.23 ms assembly  0.03 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+505s  49.9 fps   1.08 Mbps rtt  16 ms decode  1.88 ms host  4.76 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+506s  49.7 fps   0.86 Mbps rtt  16 ms decode  2.06 ms host  4.85 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+507s  49.8 fps   0.78 Mbps rtt  15 ms decode  1.80 ms host  4.79 ms assembly  0.00 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+508s  48.9 fps   1.01 Mbps rtt  14 ms decode  1.89 ms host  5.55 ms assembly  0.22 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+509s  49.8 fps   0.97 Mbps rtt  14 ms decode  1.72 ms host  5.10 ms assembly  0.06 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+510s  49.9 fps   0.85 Mbps rtt  13 ms decode  1.99 ms host  5.53 ms assembly  0.05 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+511s  49.8 fps   0.94 Mbps rtt  13 ms decode  1.77 ms host  4.70 ms assembly  0.02 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+512s  47.8 fps   1.01 Mbps rtt  13 ms decode  2.25 ms host  6.90 ms assembly  0.12 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+513s  48.9 fps   0.79 Mbps rtt  13 ms decode  1.86 ms host  5.42 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+514s  49.8 fps   0.99 Mbps rtt  13 ms decode  1.56 ms host  6.20 ms assembly  0.06 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+515s  49.8 fps   1.06 Mbps rtt  13 ms decode  2.16 ms host  4.89 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+516s  46.8 fps   0.71 Mbps rtt  13 ms decode  2.33 ms host  6.30 ms assembly  0.01 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+517s  50.7 fps   0.91 Mbps rtt  13 ms decode  1.72 ms host  4.89 ms assembly  0.15 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+518s  47.9 fps   1.05 Mbps rtt  13 ms decode  1.79 ms host  5.88 ms assembly  0.21 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+519s  50.0 fps   0.87 Mbps rtt  13 ms decode  1.52 ms host  5.40 ms assembly  0.07 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+520s  49.9 fps   0.79 Mbps rtt  13 ms decode  1.70 ms host  4.93 ms assembly  0.04 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+521s  49.8 fps   1.07 Mbps rtt  12 ms decode  1.67 ms host  4.81 ms assembly  0.14 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+522s  49.8 fps   0.92 Mbps rtt  12 ms decode  1.55 ms host  4.92 ms assembly  0.09 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+523s  49.0 fps   0.84 Mbps rtt  12 ms decode  1.65 ms host  7.27 ms assembly  0.12 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+524s  49.8 fps   0.94 Mbps rtt  12 ms decode  1.61 ms host  4.82 ms assembly  0.03 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+525s  49.7 fps   1.05 Mbps rtt  12 ms decode  1.49 ms host  4.84 ms assembly  0.06 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+526s  49.9 fps   0.76 Mbps rtt  12 ms decode  1.78 ms host  4.76 ms assembly  0.01 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+527s  49.0 fps   1.00 Mbps rtt  12 ms decode  1.62 ms host  5.62 ms assembly  0.07 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+528s  49.9 fps   1.03 Mbps rtt  12 ms decode  1.49 ms host  5.70 ms assembly  0.02 ms queue  0.01 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+529s  49.8 fps   0.84 Mbps rtt  12 ms decode  1.61 ms host  4.82 ms assembly  0.04 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+530s  50.0 fps   0.89 Mbps rtt  12 ms decode  1.76 ms host  4.90 ms assembly  0.11 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+531s  50.0 fps   1.10 Mbps rtt  12 ms decode  1.68 ms host  4.76 ms assembly  0.11 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+532s  48.9 fps   0.79 Mbps rtt  12 ms decode  1.56 ms host  5.27 ms assembly  0.10 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+533s  49.9 fps   0.85 Mbps rtt  12 ms decode  1.75 ms host  4.76 ms assembly  0.07 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+534s  50.8 fps   1.10 Mbps rtt  12 ms decode  1.54 ms host  4.87 ms assembly  0.08 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+535s  49.9 fps   0.90 Mbps rtt  12 ms decode  1.97 ms host  4.83 ms assembly  0.09 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+536s  49.7 fps   0.77 Mbps rtt  12 ms decode  1.88 ms host  4.83 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+537s  50.9 fps   1.06 Mbps rtt  12 ms decode  1.82 ms host  4.80 ms assembly  0.07 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+538s  45.8 fps   0.87 Mbps rtt  12 ms decode  1.63 ms host  7.97 ms assembly  0.04 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+539s  48.9 fps   0.82 Mbps rtt  12 ms decode  1.69 ms host  6.56 ms assembly  0.05 ms queue  0.02 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+540s  48.9 fps   0.93 Mbps rtt  12 ms decode  2.06 ms host  6.17 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+541s  45.0 fps   0.95 Mbps rtt  12 ms decode  2.14 ms host  7.56 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+542s  48.8 fps   0.80 Mbps rtt  12 ms decode  2.70 ms host  7.48 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+543s  49.8 fps   0.89 Mbps rtt  12 ms decode  2.25 ms host  5.32 ms assembly  0.09 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+544s  47.9 fps   1.03 Mbps rtt  13 ms decode  2.46 ms host  5.99 ms assembly  0.09 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+545s  50.0 fps   0.83 Mbps rtt  13 ms decode  2.42 ms host  5.74 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+546s  49.8 fps   0.81 Mbps rtt  13 ms decode  2.44 ms host  4.80 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+547s  49.9 fps   1.10 Mbps rtt  13 ms decode  2.68 ms host  4.92 ms assembly  0.15 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+548s  48.8 fps   0.89 Mbps rtt  13 ms decode  2.48 ms host  5.86 ms assembly  0.03 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+549s  49.0 fps   0.77 Mbps rtt  13 ms decode  2.35 ms host  6.54 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+550s  49.9 fps   1.02 Mbps rtt  13 ms decode  2.31 ms host  5.18 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+551s  49.7 fps   0.98 Mbps rtt  12 ms decode  2.06 ms host  4.94 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+552s  48.8 fps   0.78 Mbps rtt  12 ms decode  2.47 ms host  5.59 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+553s  48.7 fps   0.92 Mbps rtt  12 ms decode  2.69 ms host  6.21 ms assembly  0.09 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+554s  48.9 fps   1.03 Mbps rtt  13 ms decode  2.26 ms host  5.60 ms assembly  0.24 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+555s  50.8 fps   0.80 Mbps rtt  13 ms decode  2.50 ms host  5.00 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+556s  49.7 fps   0.89 Mbps rtt  13 ms decode  2.39 ms host  4.84 ms assembly  0.09 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+557s  49.7 fps   1.06 Mbps rtt  13 ms decode  2.54 ms host  4.83 ms assembly  0.09 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+558s  47.9 fps   0.77 Mbps rtt  13 ms decode  2.57 ms host  6.86 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+559s  50.0 fps   0.85 Mbps rtt  13 ms decode  2.69 ms host  5.26 ms assembly  0.02 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+560s  50.0 fps   1.11 Mbps rtt  13 ms decode  2.84 ms host  4.78 ms assembly  0.20 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+561s  49.9 fps   0.86 Mbps rtt  12 ms decode  2.64 ms host  5.07 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+562s  48.9 fps   0.75 Mbps rtt  12 ms decode  2.36 ms host  6.14 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+563s  48.8 fps   1.00 Mbps rtt  12 ms decode  2.77 ms host  5.83 ms assembly  0.19 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+564s  49.8 fps   0.99 Mbps rtt  13 ms decode  2.64 ms host  5.06 ms assembly  0.03 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+565s  49.9 fps   0.85 Mbps rtt  12 ms decode  2.80 ms host  5.47 ms assembly  0.11 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+566s  50.0 fps   0.97 Mbps rtt  13 ms decode  2.74 ms host  4.81 ms assembly  0.22 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+567s  49.9 fps   1.04 Mbps rtt  13 ms decode  2.57 ms host  4.87 ms assembly  0.12 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+568s  49.9 fps   0.80 Mbps rtt  13 ms decode  2.49 ms host  4.92 ms assembly  0.07 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+569s  46.9 fps   0.90 Mbps rtt  13 ms decode  2.43 ms host  7.12 ms assembly  0.14 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+570s  49.7 fps   1.04 Mbps rtt  13 ms decode  2.40 ms host  5.51 ms assembly  0.16 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+571s  50.0 fps   0.83 Mbps rtt  12 ms decode  2.40 ms host  4.70 ms assembly  0.01 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+572s  49.9 fps   0.87 Mbps rtt  13 ms decode  2.52 ms host  4.97 ms assembly  0.01 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+573s  48.8 fps   1.07 Mbps rtt  13 ms decode  2.80 ms host  6.01 ms assembly  0.08 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+574s  48.9 fps   0.83 Mbps rtt  13 ms decode  2.68 ms host  6.03 ms assembly  0.07 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+575s  49.9 fps   0.77 Mbps rtt  13 ms decode  2.70 ms host  4.74 ms assembly  0.17 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+576s  45.8 fps   1.01 Mbps rtt  13 ms decode  3.02 ms host  7.08 ms assembly  0.25 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+577s  49.7 fps   0.96 Mbps rtt  13 ms decode  2.89 ms host  5.15 ms assembly  0.03 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+578s  48.8 fps   0.82 Mbps rtt  13 ms decode  3.09 ms host  6.16 ms assembly  0.14 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+579s  50.0 fps   0.98 Mbps rtt  13 ms decode  3.03 ms host  4.75 ms assembly  0.08 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+580s  49.9 fps   1.04 Mbps rtt  13 ms decode  2.85 ms host  5.05 ms assembly  0.18 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+581s  48.9 fps   0.76 Mbps rtt  13 ms decode  2.99 ms host  5.76 ms assembly  0.16 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+582s  48.8 fps   0.96 Mbps rtt  13 ms decode  2.90 ms host  5.57 ms assembly  0.11 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+583s  49.0 fps   1.05 Mbps rtt  13 ms decode  3.07 ms host  6.19 ms assembly  0.10 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+584s  49.9 fps   0.81 Mbps rtt  13 ms decode  3.05 ms host  4.73 ms assembly  0.21 ms queue  0.06 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+585s  50.9 fps   0.88 Mbps rtt  13 ms decode  2.59 ms host  4.73 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+586s  49.7 fps   1.10 Mbps rtt  13 ms decode  2.37 ms host  4.84 ms assembly  0.13 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+587s  50.0 fps   0.81 Mbps rtt  13 ms decode  2.42 ms host  4.85 ms assembly  0.04 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+588s  49.8 fps   0.84 Mbps rtt  13 ms decode  2.49 ms host  4.94 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+589s  49.8 fps   1.10 Mbps rtt  13 ms decode  2.51 ms host  4.96 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+590s  49.9 fps   0.90 Mbps rtt  13 ms decode  2.60 ms host  5.17 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+591s  49.8 fps   0.77 Mbps rtt  13 ms decode  2.28 ms host  4.79 ms assembly  0.02 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+592s  49.8 fps   1.05 Mbps rtt  13 ms decode  2.18 ms host  5.12 ms assembly  0.11 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+593s  49.9 fps   0.97 Mbps rtt  13 ms decode  2.35 ms host  4.89 ms assembly  0.03 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+594s  50.7 fps   0.84 Mbps rtt  13 ms decode  2.54 ms host  4.76 ms assembly  0.09 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+595s  50.0 fps   1.00 Mbps rtt  12 ms decode  2.75 ms host  4.84 ms assembly  0.05 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+596s  49.8 fps   1.04 Mbps rtt  12 ms decode  2.69 ms host  5.11 ms assembly  0.06 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+597s  49.7 fps   0.80 Mbps rtt  12 ms decode  2.43 ms host  5.05 ms assembly  0.08 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+598s  48.0 fps   0.94 Mbps rtt  12 ms decode  2.28 ms host  7.04 ms assembly  0.24 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+599s  49.0 fps   1.05 Mbps rtt  12 ms decode  2.51 ms host  6.46 ms assembly  0.22 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+600s  45.9 fps   0.72 Mbps rtt  12 ms decode  2.55 ms host  7.77 ms assembly  0.06 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 

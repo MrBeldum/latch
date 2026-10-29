@@ -31,6 +31,7 @@ Each line names evidence that does not rest on the code's own claims.
 | Input is reliable and fast | A key press reaches a decoded picture in 19.7 ms p50 over loopback, and in 33 ms p50 / 53 ms p95 over the tailnet to the ARM host (13 ms round trip), timed on the viewer's own clock |
 | The transport survives a bad network | Through a relay with 3% loss, bursts, duplication, reordering and 10 ± 4 ms delay both ways, FEC rebuilds what it can, lost frames recover by keyframe, and 41 back-to-back key presses arrive exactly once, in order (CI, all platforms) |
 | It costs less than Latch 4 | stuzha (2-core ARM Linux) sharing its real desktop at 720p60, 10 Mbps, with audio: the engine used about 3% of a core and 20 MB; Latch 4's Sunshine used 71% and 115 MB on the same desktop. The Mac viewer used 1.3% against 5.3% ([baseline](measurements/2026-10-29/latch4-baseline/), [Latch 5](measurements/2026-10-29/latch5-live-still/)) |
+| It holds up over time | Ten minutes of motion on every frame (the sweep pattern) from the ARM host over the tailnet at 720p60, 8 Mbps: median 49.8 fps (p5 42.8), one second in 600 with loss, host memory flat at 15 MB, viewer at 17–18 MB ([run](measurements/2026-10-29/latch5-10min-motion/)) |
 | The real service works | The 5.0 `latch-host --background` on stuzha admitted the Mac by its Tailscale identity, imported the owner's display script from Latch 4's Sunshine configuration, ran it before the session and its undo after, and used 1–2% of a core and 23 MB ([run](measurements/2026-10-29/latch5-service-stuzha/)); 4.1.1 was restored afterwards |
 | Independent review | Four reviewers read the protocol, the session lifecycle, security and the platform code without the authors' notes; a fifth tried to refute each of their 40 findings and confirmed 37. All 37 are fixed, most with a regression test that failed before the fix |
 | It builds and passes everywhere | CI: Linux x86-64 and ARM64, Windows, macOS, with clippy denying warnings and every test, including both end-to-end session tests |
@@ -53,8 +54,8 @@ Nothing below has been observed; each needs the named machine or person.
   (the VideoToolbox encoder has, with synthetic frames, for all three
   codecs).
 - **HEVC end to end** (Mac host to Mac viewer) depends on the above.
-- **Hours-long sessions and energy.** The longest session ran ten minutes
-  (see below); no energy measurement was taken.
+- **Hours-long sessions and energy.** The longest session ran ten minutes;
+  no energy measurement was taken.
 - **Full-motion encoding on the ARM host at 1080p**: about 3.5× x264's
   time; 720p meets 30 fps at the median with spikes above budget on a
   shared host.
