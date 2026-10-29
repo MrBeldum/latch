@@ -1,9 +1,10 @@
-//! Opus packets in, sound out. Decoding happens on the stream's audio
-//! thread; the OS pulls from a ring buffer on its own thread, resampled to
-//! whatever rate the output device runs at and spread over its channels.
-//! If the buffer grows past a fifth of a second the oldest audio is
-//! dropped: latency matters more than never skipping. What the output side
-//! found is kept, so "no sound" comes with its reason.
+//! Coded audio frames in, sound out. Decoding (`lpcm-rice`, lossless, a few
+//! microseconds a frame) happens on the stream's receive thread; the OS
+//! pulls from a ring buffer on its own thread, resampled to whatever rate
+//! the output device runs at and spread over its channels. If the buffer
+//! grows past [`MAX_QUEUED_MS`] the oldest audio is dropped: latency matters
+//! more than never skipping. What the output side found is kept, so "no
+//! sound" comes with its reason.
 
 use anyhow::{bail, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -13,11 +14,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 
-/// Queued sound beyond this is cut back to [`KEEP_MS`].
-const MAX_QUEUED_MS: usize = 200;
-const KEEP_MS: usize = 80;
-/// Opus never carries more channels than this
-/// (`AUDIO_CONFIGURATION_MAX_CHANNEL_COUNT` in moonlight-common-c).
+/// Queued sound beyond this is cut back to [`KEEP_MS`]. Low, so sound stays
+/// close to the picture; a Wi-Fi hiccup longer than this is a click.
+const MAX_QUEUED_MS: usize = 120;
+const KEEP_MS: usize = 50;
 const MAX_CHANNELS: usize = 8;
 
 /// The output device, as the output thread found it.
@@ -34,10 +34,11 @@ pub enum Output {
 }
 
 pub struct Player {
-    decoder: *mut audiopus_sys::OpusMSDecoder,
     channels: usize,
     samples_per_frame: usize,
-    pcm: Vec<f32>,
+    pcm: Vec<i16>,
+    /// The last frame played, faded out in place of a lost one.
+    last: Vec<f32>,
     /// Interleaved samples at the stream's rate and channel count.
     queue: Arc<Mutex<VecDeque<f32>>>,
     /// Dropped with the player, which ends the output thread and with it
@@ -54,57 +55,16 @@ pub struct Player {
     undecodable: u64,
 }
 
-// The decoder pointer is only touched from the thread that owns the Player.
-unsafe impl Send for Player {}
-
 impl Player {
-    pub fn new(
-        sample_rate: u32,
-        channels: usize,
-        streams: i32,
-        coupled: i32,
-        samples_per_frame: usize,
-        mapping: &[u8],
-    ) -> Result<Self> {
-        if channels == 0 || channels > MAX_CHANNELS || mapping.len() < channels {
+    pub fn new(sample_rate: u32, channels: usize, samples_per_frame: usize) -> Result<Self> {
+        if channels == 0 || channels > MAX_CHANNELS {
             bail!("audio with {channels} channels is not something Latch plays");
         }
-        // Validate before any integer casts, allocation, or call into Opus.
-        if !matches!(sample_rate, 8_000 | 12_000 | 16_000 | 24_000 | 48_000) {
-            bail!("unsupported Opus sample rate {sample_rate}");
+        if !(8_000..=192_000).contains(&sample_rate) {
+            bail!("unsupported sample rate {sample_rate}");
         }
-        let max_frame = sample_rate as usize * 120 / 1000;
-        let frame_step = sample_rate as usize / 400; // Opus uses 2.5 ms units.
-        if samples_per_frame == 0
-            || samples_per_frame > max_frame
-            || !samples_per_frame.is_multiple_of(frame_step)
-        {
-            bail!("invalid Opus frame size {samples_per_frame}");
-        }
-        if streams <= 0
-            || streams > 255
-            || coupled < 0
-            || coupled > streams
-            || streams + coupled > 255
-            || mapping[..channels]
-                .iter()
-                .any(|&c| c != 255 && i32::from(c) >= streams + coupled)
-        {
-            bail!("invalid Opus channel mapping");
-        }
-        let mut err = 0;
-        let decoder = unsafe {
-            audiopus_sys::opus_multistream_decoder_create(
-                sample_rate as i32,
-                channels as i32,
-                streams,
-                coupled,
-                mapping.as_ptr(),
-                &mut err,
-            )
-        };
-        if decoder.is_null() || err != 0 {
-            bail!("Opus decoder failed ({err})");
+        if samples_per_frame == 0 || samples_per_frame > latch_codec::audio::MAX_SAMPLES {
+            bail!("invalid audio frame size {samples_per_frame}");
         }
         let queue: Arc<Mutex<VecDeque<f32>>> = Arc::default();
         let (stop, stopped) = mpsc::channel();
@@ -122,12 +82,10 @@ impl Player {
         // Whole frames only: dropping half a frame would swap the channels.
         let keep = per_ms * KEEP_MS / channels * channels;
         Ok(Self {
-            decoder,
             channels,
             samples_per_frame,
-            // Opus can emit up to 120 ms; a buffer sized only for the
-            // negotiated frame would refuse a longer packet outright.
-            pcm: vec![0.0; max_frame * channels],
+            pcm: Vec::with_capacity(samples_per_frame * channels),
+            last: Vec::new(),
             queue,
             _output_thread: stop,
             output,
@@ -140,43 +98,45 @@ impl Player {
         })
     }
 
-    /// Decode one packet. An empty slice means the packet was lost; Opus
-    /// then synthesises what it can.
+    /// Decode and queue one frame. An empty slice means the frame was lost:
+    /// the last one is repeated, fading, so a gap is a dip rather than a
+    /// click.
     pub fn push(&mut self, packet: &[u8]) {
-        let frame = self.pcm.len() / self.channels;
-        let n = unsafe {
-            audiopus_sys::opus_multistream_decode_float(
-                self.decoder,
-                if packet.is_empty() {
-                    std::ptr::null()
-                } else {
-                    packet.as_ptr()
-                },
-                packet.len() as i32,
-                self.pcm.as_mut_ptr(),
-                if packet.is_empty() {
-                    self.samples_per_frame as i32
-                } else {
-                    frame as i32
-                },
-                0,
-            )
-        };
         if packet.is_empty() {
             self.lost += 1;
-        } else {
-            self.packets += 1;
+            if self.last.is_empty() {
+                return;
+            }
+            let n = self.last.len() as f32;
+            for (i, s) in self.last.iter_mut().enumerate() {
+                *s *= 0.5 * (1.0 - i as f32 / n);
+            }
+            self.queue_samples();
+            return;
         }
-        if n <= 0 {
+        if let Err(e) = latch_codec::audio::decode(packet, &mut self.pcm) {
             self.undecodable += 1;
             if self.undecodable == 1 {
-                tracing::warn!("audio: Opus refused a packet ({n})");
+                tracing::warn!("audio: undecodable frame ({e})");
             }
             return;
         }
-        let samples = &self.pcm[..n as usize * self.channels];
+        if !self.pcm.len().is_multiple_of(self.channels)
+            || self.pcm.len() / self.channels > self.samples_per_frame * 4
+        {
+            self.undecodable += 1;
+            return;
+        }
+        self.packets += 1;
+        self.last.clear();
+        self.last
+            .extend(self.pcm.iter().map(|&v| f32::from(v) / 32768.0));
+        self.queue_samples();
+    }
+
+    fn queue_samples(&mut self) {
         let mut q = self.queue.lock();
-        q.extend(samples);
+        q.extend(&self.last);
         if q.len() > self.max_queued {
             let drop = q.len() - self.keep;
             q.drain(..drop);
@@ -217,12 +177,6 @@ fn phrase(output: &Output, packets: u64, lost: u64, pulled: u64) -> String {
                 format!("audio → {device}")
             }
         }
-    }
-}
-
-impl Drop for Player {
-    fn drop(&mut self) {
-        unsafe { audiopus_sys::opus_multistream_decoder_destroy(self.decoder) };
     }
 }
 
@@ -498,72 +452,46 @@ mod tests {
 
     #[test]
     fn invalid_audio_configuration_is_rejected_before_allocating() {
-        for rate in [0, 44_100, u32::MAX] {
-            assert!(Player::new(rate, 2, 1, 1, 480, &[0, 1]).is_err());
+        for rate in [0, 1_000, u32::MAX] {
+            assert!(Player::new(rate, 2, 480).is_err());
         }
-        for frame in [0, 1, 5_761, usize::MAX] {
-            assert!(Player::new(48_000, 2, 1, 1, frame, &[0, 1]).is_err());
+        for frame in [0, latch_codec::audio::MAX_SAMPLES + 1, usize::MAX] {
+            assert!(Player::new(48_000, 2, frame).is_err());
         }
-        for (streams, coupled, mapping) in [
-            (0, 0, [0, 1]),
-            (1, 2, [0, 1]),
-            (1, 0, [0, 1]),
-            (i32::MAX, 1, [0, 1]),
-        ] {
-            assert!(Player::new(48_000, 2, streams, coupled, 480, &mapping).is_err());
-        }
+        assert!(Player::new(48_000, 0, 480).is_err());
+        assert!(Player::new(48_000, MAX_CHANNELS + 1, 480).is_err());
     }
 
-    /// A stereo Opus packet of `frames` samples of a tone, from libopus's
-    /// own encoder: what Sunshine sends, minus the network.
+    /// One coded 10 ms stereo frame of a tone, as a host sends it.
     fn tone_packet(frames: usize) -> Vec<u8> {
-        let mut err = 0;
-        let enc = unsafe {
-            audiopus_sys::opus_encoder_create(
-                48_000,
-                2,
-                audiopus_sys::OPUS_APPLICATION_AUDIO,
-                &mut err,
-            )
-        };
-        assert!(!enc.is_null() && err == 0, "encoder: {err}");
-        let pcm: Vec<f32> = (0..frames)
+        let pcm: Vec<i16> = (0..frames)
             .flat_map(|i| {
-                let s = (i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.5;
+                let s =
+                    ((i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 16_000.0) as i16;
                 [s, s]
             })
             .collect();
-        let mut out = vec![0u8; 4000];
-        let n = unsafe {
-            audiopus_sys::opus_encode_float(
-                enc,
-                pcm.as_ptr(),
-                frames as i32,
-                out.as_mut_ptr(),
-                out.len() as i32,
-            )
-        };
-        unsafe { audiopus_sys::opus_encoder_destroy(enc) };
-        assert!(n > 0, "encode: {n}");
-        out.truncate(n as usize);
+        let mut out = Vec::new();
+        latch_codec::audio::encode(&pcm, &mut out);
         out
     }
 
     #[test]
-    fn opus_packets_become_samples_and_the_device_pulls_them() {
-        // Sunshine's stereo layout: one coupled stream, channels 0 and 1,
-        // 10 ms frames as negotiated on a remote path.
-        let mut p = Player::new(48_000, 2, 1, 1, 480, &[0, 1]).unwrap();
+    fn coded_frames_become_samples_and_the_device_pulls_them() {
+        let mut p = Player::new(48_000, 2, 480).unwrap();
         let packet = tone_packet(480);
         for _ in 0..10 {
             p.push(&packet);
         }
         assert_eq!(p.packets, 10);
         assert_eq!(p.queue.lock().len(), 10 * 480 * 2, "480 stereo frames each");
-        // A lost packet is concealed at the stream's frame size.
+        // A lost frame is concealed at the stream's frame size.
         p.push(&[]);
         assert_eq!(p.queue.lock().len(), 11 * 480 * 2);
         assert_eq!((p.lost, p.undecodable), (1, 0));
+        // Garbage is counted, not played.
+        p.push(&[0xff; 7]);
+        assert_eq!(p.undecodable, 1);
         // The queue never grows past the cap, and never by a partial frame.
         for _ in 0..100 {
             p.push(&packet);
@@ -603,8 +531,6 @@ mod tests {
         }
         let desc = p.describe();
         assert!(desc.contains("audio") || desc.contains("sound"), "{desc}");
-        assert!(Player::new(48_000, 0, 1, 0, 480, &[]).is_err());
-        assert!(Player::new(48_000, 2, 1, 1, 480, &[0]).is_err());
     }
 
     #[test]

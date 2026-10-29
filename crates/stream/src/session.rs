@@ -1,50 +1,58 @@
-//! One streaming session: starts the moonlight-common-c connection on a
-//! worker thread, routes its callbacks to the decoders, and reports what
-//! happens through [`Event`]s. moonlight-common-c holds exactly one
-//! connection at a time, so sessions are serialised through a global lock.
+//! One stream from a Latch host (`docs/PROTOCOL.md`): asks the host's
+//! control port for a session, then receives video and audio over UDP,
+//! decodes them, and sends input. Each session owns its sockets and
+//! threads; nothing is global, so a session can start while the last one
+//! is still letting go.
+//!
+//! Threads: the session's own thread runs the TCP control messages and
+//! the timers that end a dead session; a receive thread takes every
+//! datagram, puts frames together, plays audio and resends input; a decode
+//! thread decodes frames in order and publishes the newest to the renderer.
 
-use crate::audio::{Output, Player};
-use crate::ffi;
+use crate::audio::Player;
 use crate::video::{self, Decoder, FrameSlot};
+use latch_proto::audio::{AudioOut, AudioReceiver};
+use latch_proto::control::{self, Accept, Codec, Message, Report, StreamRequest};
+use latch_proto::input::{Event as InputEvent, InputSender};
+use latch_proto::rtt::RttEstimator;
+use latch_proto::video::{InFrame, KeyframeRequests, Reassembled, Reassembler, ReassemblyStats};
+use latch_proto::wire::{self, Datagram};
 use parking_lot::{Condvar, Mutex};
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_void};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::collections::VecDeque;
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, UdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-static CONNECTION: Mutex<()> = Mutex::new(());
-/// Held for every `LiSend*` and around `LiStopConnection`, so input cannot
-/// run while moonlight is destroying its queues.
-static INPUT: Mutex<()> = Mutex::new(());
-/// Keeps `Inner` alive for C callbacks, including moonlight's detached
-/// termination thread that can fire after `bl_stop` returns.
-static CURRENT: Mutex<Option<Arc<Inner>>> = Mutex::new(None);
-
-fn current() -> Option<Arc<Inner>> {
-    CURRENT.lock().clone()
-}
-
-fn send_input(connected: &std::sync::atomic::AtomicBool, f: impl FnOnce()) {
-    let _guard = INPUT.lock();
-    if connected.load(Ordering::Acquire) {
-        f();
-    }
-}
+/// How long the host may take to open its screen and answer.
+const START_TIMEOUT: Duration = Duration::from_secs(20);
+/// After the host accepts, its first frame must arrive within this.
+const MEDIA_TIMEOUT: Duration = Duration::from_secs(8);
+/// A host heard from neither over TCP nor UDP for this long is gone.
+const SILENT: Duration = Duration::from_secs(10);
+const KEEPALIVE: Duration = Duration::from_secs(1);
+const HELLO_FAST: Duration = Duration::from_millis(50);
+const HELLO_SLOW: Duration = Duration::from_secs(1);
+const PING_EVERY: Duration = Duration::from_millis(500);
+/// Complete frames waiting for the decoder. Past this the decoder cannot
+/// keep up: the queue is dropped and the stream restarts at a keyframe,
+/// rather than the picture falling further and further behind.
+const DECODE_QUEUE: usize = 8;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// A connection stage is starting.
     Stage(String),
     Connected,
-    /// Setup failed before the connection was established.
+    /// Setup failed before the stream started.
     Failed {
         stage: String,
-        code: i32,
+        message: String,
     },
-    /// The connection ended after it was established. `code` 0 means the PC
-    /// closed it on purpose.
+    /// The stream ended after it started. `code` 0 means the host or this
+    /// side ended it on purpose; the others are `latch_proto::control::end`
+    /// codes, or -1 when the connection broke.
     Terminated {
         code: i32,
         message: String,
@@ -53,6 +61,17 @@ pub enum Event {
     Poor(bool),
     /// This machine cannot play the stream's sound; the reason.
     NoAudio(String),
+    /// Something the host wants the person to know (it cannot inject
+    /// input, say).
+    Notice(String),
+}
+
+/// Where the host is.
+#[derive(Debug, Clone)]
+pub struct Server {
+    pub address: IpAddr,
+    /// The host's control port, which is also its media port.
+    pub port: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -63,16 +82,9 @@ pub struct Settings {
     pub bitrate_kbps: u32,
     /// Ask for HEVC when both sides can; otherwise H.264.
     pub hevc: bool,
-}
-
-/// What `Session::start` needs from `/serverinfo` and `/launch`.
-#[derive(Debug, Clone)]
-pub struct Server {
-    pub address: String,
-    pub app_version: String,
-    pub gfe_version: String,
-    pub rtsp_url: String,
-    pub codec_mode_support: i32,
+    pub audio: bool,
+    /// This machine's name, for the host's log.
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -82,12 +94,18 @@ pub struct Stats {
     pub rtt_ms: u32,
     pub rtt_var_ms: u32,
     pub decode_ms: f32,
+    /// Capture to send on the host.
     pub host_ms: f32,
+    /// First shard to whole frame.
     pub assembly_ms: f32,
+    /// Whole frame to the decoder starting on it.
     pub queue_ms: f32,
     pub width: u32,
     pub height: u32,
     pub decoder: &'static str,
+    /// The host's encoder, in its own words.
+    pub encoder: String,
+    pub codec: &'static str,
     /// Share of video packets in the last second that arrived too late or
     /// not at all and could not be rebuilt from FEC.
     pub loss_pct: f32,
@@ -141,35 +159,63 @@ impl VideoHealth {
     }
 }
 
+/// What the decode thread adds up between two stats updates.
 #[derive(Default)]
-struct Window {
-    since: Option<Instant>,
+struct DecodeWindow {
     frames: u32,
-    bytes: u64,
     decode_us: u64,
+    queue_us: u64,
     host_tenths: u64,
-    /// RTP totals at the start of the window, to difference against.
-    rtp: Option<ffi::RtpVideoStats>,
+    assembly_us: u64,
+}
+
+/// What input needs to reach the host.
+struct Link {
+    udp: UdpSocket,
+    host: SocketAddr,
+    sender: InputSender,
+    buf: Vec<u8>,
+}
+
+impl Link {
+    fn flush(&mut self, now: Instant) {
+        if self.sender.poll(now, &mut self.buf) {
+            let _ = self.udp.send_to(&self.buf, self.host);
+        }
+    }
 }
 
 struct Inner {
     events: Sender<Event>,
     wake: Box<dyn Fn() + Send + Sync>,
     frames: Arc<FrameSlot>,
-    decoder: Mutex<Option<Box<dyn Decoder>>>,
-    audio: Mutex<Option<Player>>,
-    /// Why the player could not be made, when it could not.
-    audio_error: Mutex<Option<String>>,
-    /// The one notice about sound has gone out.
-    audio_warned: AtomicBool,
-    window: Mutex<Window>,
     stats: Mutex<Stats>,
     video_health: Mutex<VideoHealth>,
+    decode: Mutex<DecodeWindow>,
+    link: Mutex<Option<Link>>,
+    /// Frames waiting for the decoder, and whether it must skip to a
+    /// keyframe.
+    queue: Mutex<DecodeQueue>,
+    queue_cv: Condvar,
+    /// The TCP connection, so `stop` can unblock its reader.
+    tcp: Mutex<Option<TcpStream>>,
+    epoch: Instant,
+    /// When anything last came from the host, µs since `epoch`.
+    heard_us: AtomicU64,
+    /// Video packets the network lost in the last second, rebuilt or not,
+    /// in thousandths of a percent: what the host sizes its FEC by.
+    raw_loss_milli: AtomicU64,
     connected: AtomicBool,
+    stop: AtomicBool,
     finished: AtomicBool,
-    /// Set when the connection ended or a stop was asked for.
     done: Mutex<bool>,
     done_cv: Condvar,
+}
+
+#[derive(Default)]
+struct DecodeQueue {
+    frames: VecDeque<(InFrame, Instant)>,
+    want_keyframe: bool,
 }
 
 impl Inner {
@@ -178,9 +224,23 @@ impl Inner {
         (self.wake)();
     }
 
+    fn now_us(&self) -> u64 {
+        self.epoch.elapsed().as_micros() as u64
+    }
+
+    fn heard(&self) {
+        self.heard_us.store(self.now_us(), Ordering::Relaxed);
+    }
+
+    fn stopping(&self) -> bool {
+        self.stop.load(Ordering::Acquire)
+    }
+
     fn finish(&self) {
+        self.finished.store(true, Ordering::Release);
         *self.done.lock() = true;
         self.done_cv.notify_all();
+        (self.wake)();
     }
 }
 
@@ -196,165 +256,145 @@ pub struct Input {
     inner: Arc<Inner>,
 }
 
-/// One UTF-8 text event is kept this small: the control stream's packet
-/// buffer is 128 bytes on hosts without the newer encryption.
-const TEXT_CHUNK: usize = 32;
-
 impl Input {
     pub fn connected(&self) -> bool {
         self.inner.connected.load(Ordering::Acquire)
     }
 
+    fn send(&self, event: InputEvent) {
+        if !self.connected() {
+            return;
+        }
+        if let Some(link) = self.inner.link.lock().as_mut() {
+            link.sender.push(event);
+            link.flush(Instant::now());
+        }
+    }
+
     pub fn mouse_move(&self, dx: i16, dy: i16) {
-        send_input(&self.inner.connected, || unsafe {
-            ffi::LiSendMouseMoveEvent(dx, dy);
-        });
+        if dx != 0 || dy != 0 {
+            self.send(InputEvent::MouseMove { dx, dy });
+        }
     }
 
+    /// `x, y` in a `width × height` picture.
     pub fn mouse_position(&self, x: i16, y: i16, width: i16, height: i16) {
-        send_input(&self.inner.connected, || unsafe {
-            ffi::LiSendMousePositionEvent(x, y, width, height);
+        let clamp = |v: i16| v.max(0) as u16;
+        self.send(InputEvent::MousePosition {
+            x: clamp(x),
+            y: clamp(y),
+            width: clamp(width).max(1),
+            height: clamp(height).max(1),
         });
     }
 
-    /// `button` is one of `ffi::BUTTON_*`.
-    pub fn mouse_button(&self, button: c_int, down: bool) {
-        send_input(&self.inner.connected, || {
-            let action = if down {
-                ffi::BUTTON_ACTION_PRESS
-            } else {
-                ffi::BUTTON_ACTION_RELEASE
-            };
-            unsafe { ffi::LiSendMouseButtonEvent(action, button) };
+    /// `button` is one of `crate::input::BUTTON_*`.
+    pub fn mouse_button(&self, button: u8, down: bool) {
+        self.send(InputEvent::MouseButton { button, down });
+    }
+
+    /// `vk` is a Windows virtual-key code, `modifiers` the
+    /// `crate::input::MOD_*` bits held.
+    pub fn key(&self, vk: i16, down: bool, modifiers: u8) {
+        self.send(InputEvent::Key {
+            vk: vk as u16,
+            down,
+            modifiers,
         });
     }
 
-    /// `vk` is a Windows virtual-key code; `modifiers` a mask of `ffi::MODIFIER_*`.
-    pub fn key(&self, vk: i16, down: bool, modifiers: c_char) {
-        send_input(&self.inner.connected, || {
-            let action = if down {
-                ffi::KEY_ACTION_DOWN
-            } else {
-                ffi::KEY_ACTION_UP
-            };
-            unsafe { ffi::LiSendKeyboardEvent(vk, action, modifiers) };
-        });
-    }
-
-    /// Type `text` on the PC as it is, whatever the keyboard layouts.
     pub fn text(&self, text: &str) {
-        send_input(&self.inner.connected, || {
-            for chunk in text_chunks(text) {
-                unsafe {
-                    ffi::LiSendUtf8TextEvent(chunk.as_ptr() as *const c_char, chunk.len() as u32);
-                }
-            }
-        });
+        if !text.is_empty() {
+            self.send(InputEvent::Text(text.to_string()));
+        }
     }
 
-    /// Vertical and horizontal scroll in 1/120ths of a wheel click.
+    /// 120 per notch; up and right positive.
     pub fn scroll(&self, vertical: i16, horizontal: i16) {
-        send_input(&self.inner.connected, || {
-            if vertical != 0 {
-                unsafe { ffi::LiSendHighResScrollEvent(vertical) };
-            }
-            if horizontal != 0 {
-                unsafe { ffi::LiSendHighResHScrollEvent(horizontal) };
-            }
-        });
+        if vertical != 0 || horizontal != 0 {
+            self.send(InputEvent::Scroll {
+                vertical,
+                horizontal,
+            });
+        }
     }
-}
 
-/// `text` in pieces of at most [`TEXT_CHUNK`] bytes, cut between characters.
-fn text_chunks(text: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    while start < text.len() {
-        let mut end = (start + TEXT_CHUNK).min(text.len());
-        while end > start && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        if end == start {
-            break;
-        }
-        out.push(&text[start..end]);
-        start = end;
+    /// Lets go of every key and button the host holds for this viewer.
+    pub fn release_all(&self) {
+        self.send(InputEvent::ReleaseAll);
     }
-    out
 }
 
 impl Session {
-    /// Connect on a worker thread. `wake` is called whenever there is a new
-    /// event or frame, so a UI can repaint.
     pub fn start(
         server: Server,
         settings: Settings,
-        ri_key: [u8; 16],
-        ri_iv: [u8; 16],
         frames: Arc<FrameSlot>,
         events: Sender<Event>,
         wake: impl Fn() + Send + Sync + 'static,
-    ) -> Session {
+    ) -> Self {
         let inner = Arc::new(Inner {
             events,
             wake: Box::new(wake),
             frames,
-            decoder: Mutex::new(None),
-            audio: Mutex::new(None),
-            audio_error: Mutex::new(None),
-            audio_warned: AtomicBool::new(false),
-            window: Mutex::new(Window::default()),
             stats: Mutex::new(Stats::default()),
             video_health: Mutex::new(VideoHealth::default()),
+            decode: Mutex::new(DecodeWindow::default()),
+            link: Mutex::new(None),
+            queue: Mutex::new(DecodeQueue::default()),
+            queue_cv: Condvar::new(),
+            tcp: Mutex::new(None),
+            epoch: Instant::now(),
+            heard_us: AtomicU64::new(0),
+            raw_loss_milli: AtomicU64::new(0),
             connected: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             done: Mutex::new(false),
             done_cv: Condvar::new(),
         });
         let worker = inner.clone();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("stream".into())
-            .spawn(move || run(worker, server, settings, ri_key, ri_iv))
-            .expect("spawn stream thread");
-        Session { inner }
+            .spawn(move || {
+                run(&worker, &server, &settings);
+                worker.finish();
+            });
+        if let Err(e) = spawned {
+            inner.emit(Event::Failed {
+                stage: "starting".into(),
+                message: format!("could not start the stream thread: {e}"),
+            });
+            inner.finish();
+        }
+        Self { inner }
     }
 
     pub fn connected(&self) -> bool {
         self.inner.connected.load(Ordering::Acquire)
     }
 
-    /// The worker has torn everything down; a new session may start.
+    /// The session has ended and let go of everything.
     pub fn finished(&self) -> bool {
         self.inner.finished.load(Ordering::Acquire)
     }
 
-    /// Ask the connection to end. Returns at once; poll [`Session::finished`].
+    /// Ends the session; returns at once. [`Session::finished`] says when
+    /// it is over.
     pub fn stop(&self) {
-        if *self.inner.done.lock() {
-            return;
+        self.inner.stop.store(true, Ordering::Release);
+        if let Some(tcp) = self.inner.tcp.lock().as_ref() {
+            let _ = tcp.shutdown(Shutdown::Read);
         }
-        unsafe { ffi::bl_interrupt() };
-        self.inner.finish();
+        self.inner.queue_cv.notify_all();
     }
 
     pub fn stats(&self) -> Stats {
         let mut stats = self.inner.stats.lock().clone();
-        let health = self.inner.video_health.lock();
-        let now = Instant::now();
-        if health
-            .last_frame
-            .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(2))
-        {
-            stats.fps = 0.0;
-            stats.mbps = 0.0;
-        }
-        if self.connected() {
-            stats.video_problem = health.problem(now);
-        }
+        stats.video_problem = self.inner.video_health.lock().problem(Instant::now());
         stats
     }
 
-    /// A handle for sending input from other threads.
     pub fn input(&self) -> Input {
         Input {
             inner: self.inner.clone(),
@@ -368,447 +408,561 @@ impl Drop for Session {
     }
 }
 
-/// The bitrate to hand moonlight-common-c so the PC's encoder actually
-/// targets `target_kbps`.
-///
-/// Neither side encodes at the number it is given. moonlight-common-c
-/// (`SdpGenerator.c`) keeps 20% of the request for FEC and, on a remote
-/// stream, another 500 kbps for audio and control (Latch never flags a
-/// stream remote). Sunshine ignores that reduced figure anyway: it takes the
-/// raw request (`x-ml-video.configuredBitrateKbps`,
-/// `rtsp.cpp`) and makes its own deductions, 20% for FEC, then audio
-/// (512 kbps for high-quality stereo, at most a fifth of what is left) and
-/// 500 kbps for packet and control overhead (at most a tenth). A plain
-/// request of 20 Mbps therefore encodes at 15 Mbps, and one padded only for
-/// moonlight's 20% still lands at 18988 kbps. Latch treats the user's
-/// number as the video target, not a total budget, so this inverts the
-/// whole chain: the smallest request that survives every deduction at or
-/// above the target.
-pub fn request_bitrate_kbps(target_kbps: u32) -> u32 {
-    let target = u64::from(target_kbps);
-    // Closed form for the regime where both of Sunshine's caps are inactive
-    // (request above 5 Mbps): encoder = request * 0.8 - 512 - 500.
-    let mut request = (target + SUNSHINE_AUDIO_KBPS + SUNSHINE_CONTROL_KBPS) * 5 / 4;
-    // Settle on the exact integer: the caps make small requests deduct
-    // less, and the closed form rounds.
-    while sunshine_encoder_kbps(request) < target {
-        request += 1;
-    }
-    while request > 1 && sunshine_encoder_kbps(request - 1) >= target {
-        request -= 1;
-    }
-    (request as u32).min(MAX_REQUEST_KBPS)
+/// The codecs to offer, best first.
+fn offer(settings: &Settings) -> Vec<Codec> {
+    video::decodable()
+        .into_iter()
+        .filter(|&c| settings.hevc || c != Codec::Hevc)
+        .collect()
 }
 
-/// The most moonlight-common-c is asked for; keeps the wire budget inside
-/// what a Tailscale path is expected to carry.
-const MAX_REQUEST_KBPS: u32 = 200_000;
-/// Sunshine's deduction for high-quality stereo Opus (256 kbps a channel).
-const SUNSHINE_AUDIO_KBPS: u64 = 512;
-/// Sunshine's deduction for A/V packet and control traffic overhead.
-const SUNSHINE_CONTROL_KBPS: u64 = 500;
-
-/// What Sunshine's encoder targets for a moonlight request of `request`
-/// kbps: `rtsp.cpp`'s arithmetic on `configuredBitrateKbps`, FEC at
-/// Latch's 20% (`fec_percentage` in the engine profile), high-quality
-/// stereo audio. moonlight's own remote-stream deduction of 500 kbps only
-/// touches the figure Sunshine does not use, so it plays no part.
-fn sunshine_encoder_kbps(request: u64) -> u64 {
-    // configuredBitrateKbps /= 100.f / (100 - fec_percentage)  (float division)
-    let mut kbps = (request as f32 / (100.0 / 80.0)) as u64;
-    kbps -= SUNSHINE_AUDIO_KBPS.min(kbps / 5);
-    kbps -= SUNSHINE_CONTROL_KBPS.min(kbps / 10);
-    kbps
+/// The sentence in a refusal's `Ack` body, or the status.
+fn refusal(status: u16, body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .filter(|e| !e.is_empty())
+        .unwrap_or_else(|| format!("the host answered HTTP {status}"))
 }
 
-fn run(inner: Arc<Inner>, server: Server, s: Settings, ri_key: [u8; 16], ri_iv: [u8; 16]) {
-    let _one_at_a_time = CONNECTION.lock();
-    if *inner.done.lock() {
-        inner.finished.store(true, Ordering::Release);
+fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
+    let fail = |stage: &str, message: String| {
+        if !inner.stopping() {
+            inner.emit(Event::Failed {
+                stage: stage.into(),
+                message,
+            });
+        }
+    };
+    inner.emit(Event::Stage("Asking for the stream…".into()));
+    let bind: SocketAddr = if server.address.is_ipv6() {
+        "[::]:0".parse().expect("address")
+    } else {
+        "0.0.0.0:0".parse().expect("address")
+    };
+    let udp = match UdpSocket::bind(bind) {
+        Ok(u) => u,
+        Err(e) => return fail("connecting", format!("no UDP socket for the picture: {e}")),
+    };
+    let udp_port = udp.local_addr().map(|a| a.port()).unwrap_or(0);
+    let codecs = offer(settings);
+    let request = StreamRequest {
+        protocol: latch_proto::PROTOCOL,
+        width: settings.width,
+        height: settings.height,
+        fps: settings.fps,
+        bitrate_kbps: settings.bitrate_kbps,
+        codecs: codecs.clone(),
+        udp_port,
+        audio: settings.audio,
+        name: settings.name.clone(),
+    };
+    let body = serde_json::to_vec(&request).unwrap_or_default();
+    let host = SocketAddr::new(server.address, server.port);
+    let mut tcp = match latch_core::http::upgrade(
+        host,
+        control::PATH,
+        control::UPGRADE,
+        &body,
+        START_TIMEOUT,
+    ) {
+        Ok(Ok(tcp)) => tcp,
+        Ok(Err(reply)) => {
+            return fail(
+                "starting",
+                if reply.status == 404 {
+                    "the host runs a Latch older than 5.0 and needs updating".into()
+                } else {
+                    refusal(reply.status, &reply.body)
+                },
+            )
+        }
+        Err(e) => return fail("connecting", format!("{e:#}")),
+    };
+    let _ = tcp.set_nodelay(true);
+    let _ = tcp.set_read_timeout(Some(START_TIMEOUT));
+    *inner.tcp.lock() = tcp.try_clone().ok();
+    if inner.stopping() {
+        let _ = tcp.shutdown(Shutdown::Both);
         return;
     }
-    let address = CString::new(server.address).unwrap_or_default();
-    let app_version = CString::new(server.app_version).unwrap_or_default();
-    let gfe_version = CString::new(server.gfe_version).unwrap_or_default();
-    let rtsp_url = CString::new(server.rtsp_url).unwrap_or_default();
-    let si = ffi::ServerInfo {
-        address: address.as_ptr(),
-        app_version: app_version.as_ptr(),
-        gfe_version: gfe_version.as_ptr(),
-        rtsp_url: rtsp_url.as_ptr(),
-        codec_mode_support: server.codec_mode_support,
-    };
-    let mut formats = video::supported_formats();
-    if !s.hevc {
-        formats &= ffi::VIDEO_FORMAT_MASK_H264;
-    }
-    let cfg = ffi::StreamConfig {
-        width: s.width as c_int,
-        height: s.height as c_int,
-        fps: s.fps as c_int,
-        bitrate_kbps: request_bitrate_kbps(s.bitrate_kbps) as c_int,
-        // moonlight-common-c would cap a remote IPv4 stream at 1024-byte
-        // packets to survive raw-internet fragmentation. Latch never rides
-        // raw internet: every stream goes through a Tailscale (WireGuard)
-        // tunnel whose path MTU is a guaranteed 1280 bytes, so 1184 fits with
-        // room for RTP/UDP/IP headers, the value moonlight itself trusts on a
-        // 1280-guaranteed IPv6 path. Bigger packets mean fewer per frame,
-        // which keeps large frames inside Sunshine's four-FEC-block limit
-        // instead of shipping them unprotected and stalling on the first loss.
-        // Always LOCAL + 1184: a "remote" flag would reopen 1024-byte packets
-        // and subtract another 500 kbps, which is what made bitrate swing.
-        packet_size: 1184,
-        remote: ffi::STREAM_CFG_LOCAL,
-        video_formats: formats,
-        color_space: ffi::COLORSPACE_REC_709,
-        color_range: ffi::COLOR_RANGE_LIMITED,
-        encryption_flags: ffi::ENCFLG_ALL,
-        video_capabilities: video::capabilities(),
-        audio_capabilities: ffi::CAPABILITY_DIRECT_SUBMIT
-            | ffi::CAPABILITY_SUPPORTS_ARBITRARY_AUDIO_DURATION,
-        ri_key: ri_key.as_ptr(),
-        ri_iv: ri_iv.as_ptr(),
-    };
-    let cb = ffi::Callbacks {
-        video_setup,
-        video_cleanup,
-        video_frame,
-        audio_setup,
-        audio_cleanup,
-        audio_packet,
-        stage,
-        connected,
-        terminated,
-        status,
-        log,
-    };
-    let ctx = Arc::as_ptr(&inner) as *mut c_void;
-    *CURRENT.lock() = Some(inner.clone());
-    let rc = unsafe { ffi::bl_start(&si, &cfg, &cb, ctx) };
-    if rc == 0 {
-        let mut done = inner.done.lock();
-        while !*done {
-            inner.done_cv.wait(&mut done);
-        }
-    }
-    inner.connected.store(false, Ordering::Release);
-    {
-        let _input = INPUT.lock();
-        unsafe { ffi::bl_stop() };
-    }
-    *CURRENT.lock() = None;
-    *inner.decoder.lock() = None;
-    *inner.audio.lock() = None;
-    inner.frames.clear();
-    inner.finished.store(true, Ordering::Release);
-    (inner.wake)();
-}
-
-unsafe extern "C" fn video_setup(
-    _p: *mut c_void,
-    format: c_int,
-    w: c_int,
-    h: c_int,
-    _fps: c_int,
-) -> c_int {
-    let Some(inner) = current() else { return -1 };
-    match video::new_decoder(format) {
-        Ok(d) => {
-            let mut st = inner.stats.lock();
-            st.width = w as u32;
-            st.height = h as u32;
-            st.decoder = d.name();
-            drop(st);
-            *inner.decoder.lock() = Some(d);
-            0
-        }
+    let accept = match control::read_message(&mut tcp) {
+        Ok(Message::Accept(a)) => a,
+        Ok(Message::End(e)) => return fail("starting", e.message),
+        Ok(other) => return fail("starting", format!("the host said {other:?} first")),
         Err(e) => {
-            tracing::error!("video decoder: {e:#}");
-            -1
+            return fail(
+                "starting",
+                format!("the host did not start the stream: {e}"),
+            )
         }
-    }
-}
-
-unsafe extern "C" fn video_cleanup(_p: *mut c_void) {
-    if let Some(inner) = current() {
-        *inner.decoder.lock() = None;
-    }
-}
-
-unsafe extern "C" fn video_frame(
-    _p: *mut c_void,
-    data: *const u8,
-    len: c_int,
-    frame_type: c_int,
-    _frame_number: c_int,
-    host_latency: u16,
-    receive_us: u64,
-    enqueue_us: u64,
-) -> c_int {
-    let Some(inner) = current() else {
-        return ffi::DR_OK;
     };
-    if data.is_null() || len <= 0 {
-        return ffi::DR_OK;
-    }
-    let bytes = std::slice::from_raw_parts(data, len as usize);
-    let mut guard = inner.decoder.lock();
-    let Some(dec) = guard.as_mut() else {
-        return ffi::DR_OK;
+    let Some(token) = control::token_from_hex(&accept.token) else {
+        return fail("starting", "the host sent a malformed session token".into());
     };
-    let now_us = ffi::LiGetMicroseconds();
-    let t = Instant::now();
-    let result = dec.decode(
-        bytes,
-        frame_type == ffi::FRAME_TYPE_IDR,
-        inner.frames.spare(),
-    );
-    let decode_us = t.elapsed().as_micros() as u64;
+    if !codecs.contains(&accept.codec) {
+        return fail(
+            "starting",
+            format!("the host chose {:?}, which was not offered", accept.codec),
+        );
+    }
+    let decoder = match video::new_decoder(accept.codec) {
+        Ok(d) => d,
+        Err(e) => return fail("decoding", format!("{e:#}")),
+    };
     {
         let mut stats = inner.stats.lock();
-        stats.decoder = dec.name();
-        stats.assembly_ms = enqueue_us.saturating_sub(receive_us) as f32 / 1000.0;
-        stats.queue_ms = now_us.saturating_sub(enqueue_us) as f32 / 1000.0;
-    }
-    drop(guard);
-    match result {
-        Ok(Some(frame)) => {
-            inner
-                .video_health
-                .lock()
-                .frame(Instant::now(), frame.is_black());
-            inner.frames.publish(frame);
-            account(&inner, len as u64, decode_us, host_latency);
-            (inner.wake)();
-            ffi::DR_OK
-        }
-        Ok(None) => ffi::DR_OK,
-        Err(e) => {
-            let error = format!("{e:#}");
-            let mut health = inner.video_health.lock();
-            if health.last_error.as_ref() != Some(&error) {
-                tracing::warn!("decode: {error}");
-            }
-            health.last_error = Some(error);
-            ffi::DR_NEED_IDR
+        stats.width = accept.width;
+        stats.height = accept.height;
+        stats.decoder = decoder.name();
+        stats.encoder = accept.encoder.clone();
+        stats.codec = accept.codec.name();
+        if accept.audio.is_none() && settings.audio {
+            stats.audio = if accept.audio_problem.is_empty() {
+                "no sound from the host".into()
+            } else {
+                format!("no sound from the host: {}", accept.audio_problem)
+            };
         }
     }
-}
-
-/// Roll per-second averages into `stats`.
-fn account(inner: &Inner, bytes: u64, decode_us: u64, host_tenths: u16) {
-    let mut w = inner.window.lock();
-    let since = *w.since.get_or_insert_with(Instant::now);
-    w.frames += 1;
-    w.bytes += bytes;
-    w.decode_us += decode_us;
-    w.host_tenths += host_tenths as u64;
-    let connected = inner.connected.load(Ordering::Relaxed);
-    if w.rtp.is_none() && connected {
-        w.rtp = rtp_stats();
-    }
-    let elapsed = since.elapsed().as_secs_f32();
-    if elapsed >= 1.0 {
-        let mut st = inner.stats.lock();
-        st.fps = w.frames as f32 / elapsed;
-        st.mbps = w.bytes as f32 * 8.0 / elapsed / 1_000_000.0;
-        st.decode_ms = w.decode_us as f32 / w.frames.max(1) as f32 / 1000.0;
-        st.host_ms = w.host_tenths as f32 / w.frames.max(1) as f32 / 10.0;
-        let mut rtt = 0u32;
-        let mut var = 0u32;
-        if connected && unsafe { ffi::LiGetEstimatedRttInfo(&mut rtt, &mut var) } {
-            st.rtt_ms = rtt;
-            st.rtt_var_ms = var;
-        }
-        let now = if connected { rtp_stats() } else { None };
-        if let (Some(before), Some(after)) = (w.rtp, now) {
-            let (loss, recovered) = loss_in_window(&before, &after);
-            st.loss_pct = loss;
-            st.fec_recovered = recovered;
-        }
-        let (audio, problem) = audio_state(inner);
-        st.audio = audio;
-        drop(st);
-        if let Some(p) = problem {
-            if !inner.audio_warned.swap(true, Ordering::Relaxed) {
-                inner.emit(Event::NoAudio(p));
+    let player = accept.audio.as_ref().and_then(|a| {
+        match Player::new(a.rate, a.channels as usize, a.frame_samples as usize) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                inner.emit(Event::NoAudio(format!("{e:#}")));
+                None
             }
         }
-        *w = Window {
-            since: Some(Instant::now()),
-            rtp: now,
-            ..Default::default()
-        };
-    }
-}
-
-/// The stats phrase for sound and, when this machine cannot play it, the
-/// reason worth one notice. Silence from the PC is not a problem here:
-/// Sunshine sends nothing while nothing plays there.
-fn audio_state(inner: &Inner) -> (String, Option<String>) {
-    if let Some(e) = inner.audio_error.lock().as_ref() {
-        return (format!("no sound: {e}"), Some(e.clone()));
-    }
-    let guard = inner.audio.lock();
-    let Some(a) = guard.as_ref() else {
-        return (String::new(), None);
+    });
+    let media = SocketAddr::new(server.address, server.port);
+    let send_udp = match udp.try_clone() {
+        Ok(u) => u,
+        Err(e) => return fail("connecting", format!("{e}")),
     };
-    match a.output() {
-        Output::Failed(e) => (format!("no sound: {e}"), Some(e)),
-        _ => (a.describe(), None),
-    }
-}
-
-fn rtp_stats() -> Option<ffi::RtpVideoStats> {
-    let p = unsafe { ffi::LiGetRTPVideoStats() };
-    if p.is_null() {
-        None
-    } else {
-        Some(unsafe { *p })
-    }
-}
-
-/// Loss as a percentage of the video packets seen between two readings of
-/// the RTP counters, and how many packets FEC saved in that time.
-fn loss_in_window(before: &ffi::RtpVideoStats, after: &ffi::RtpVideoStats) -> (f32, u32) {
-    let video = after
-        .packet_count_video
-        .saturating_sub(before.packet_count_video);
-    let failed = after
-        .packet_count_fec_failed
-        .saturating_sub(before.packet_count_fec_failed);
-    let recovered = after
-        .packet_count_fec_recovered
-        .saturating_sub(before.packet_count_fec_recovered);
-    let seen = u64::from(video) + u64::from(failed);
-    let loss = if seen == 0 {
-        0.0
-    } else {
-        failed as f32 * 100.0 / seen as f32
+    *inner.link.lock() = Some(Link {
+        udp: send_udp,
+        host: media,
+        sender: InputSender::new(accept.session),
+        buf: Vec::with_capacity(latch_proto::MAX_DATAGRAM),
+    });
+    inner.heard();
+    let receiver = {
+        let inner = inner.clone();
+        let accept = accept.clone();
+        std::thread::Builder::new()
+            .name("stream-receive".into())
+            .spawn(move || receive(&inner, udp, media, &accept, token, player))
     };
-    (loss, recovered)
-}
-
-unsafe extern "C" fn audio_setup(
-    _p: *mut c_void,
-    sample_rate: c_int,
-    channels: c_int,
-    streams: c_int,
-    coupled: c_int,
-    samples_per_frame: c_int,
-    mapping: *const u8,
-) -> c_int {
-    let Some(inner) = current() else { return 0 };
-    // moonlight's mapping array contains at most eight entries. Reject
-    // invalid lengths before turning its pointer into a Rust slice.
-    if mapping.is_null() || !(1..=8).contains(&channels) {
-        *inner.audio_error.lock() = Some("invalid audio channel mapping".into());
-        return 0;
-    }
-    let mapping = std::slice::from_raw_parts(mapping, channels as usize);
-    match Player::new(
-        sample_rate as u32,
-        channels as usize,
-        streams,
-        coupled,
-        samples_per_frame as usize,
-        mapping,
-    ) {
-        Ok(pl) => {
-            *inner.audio.lock() = Some(pl);
-            0
-        }
-        Err(e) => {
-            // Streaming without sound beats not streaming; say why.
-            tracing::warn!("audio: {e:#}");
-            *inner.audio_error.lock() = Some(format!("{e:#}"));
-            0
-        }
-    }
-}
-
-unsafe extern "C" fn audio_cleanup(_p: *mut c_void) {
-    if let Some(inner) = current() {
-        *inner.audio.lock() = None;
-        *inner.audio_error.lock() = None;
-    }
-}
-
-unsafe extern "C" fn audio_packet(_p: *mut c_void, data: *const u8, len: c_int) {
-    let Some(inner) = current() else { return };
-    let packet: &[u8] = if data.is_null() || len <= 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(data, len as usize)
+    let decoding = {
+        let inner = inner.clone();
+        std::thread::Builder::new()
+            .name("stream-decode".into())
+            .spawn(move || decode(&inner, decoder))
     };
-    let mut audio = inner.audio.lock();
-    if let Some(a) = audio.as_mut() {
-        a.push(packet);
+    let outcome = control_loop(inner, &mut tcp, &accept);
+    inner.stop.store(true, Ordering::Release);
+    inner.connected.store(false, Ordering::Release);
+    inner.queue_cv.notify_all();
+    let _ = tcp.shutdown(Shutdown::Both);
+    if let Ok(r) = receiver {
+        let _ = r.join();
+    }
+    if let Ok(d) = decoding {
+        let _ = d.join();
+    }
+    *inner.link.lock() = None;
+    match outcome {
+        Outcome::Stopped => {}
+        Outcome::Failed(stage, message) => fail(&stage, message),
+        Outcome::Ended(code, message) => inner.emit(Event::Terminated { code, message }),
     }
 }
 
-unsafe extern "C" fn stage(_p: *mut c_void, stage: c_int, state: c_int, error: c_int) {
-    let Some(inner) = current() else { return };
-    let name = ffi::stage_name(stage);
-    match state {
-        0 => inner.emit(Event::Stage(name)),
-        2 => {
-            inner.emit(Event::Failed {
-                stage: name,
-                code: error,
+enum Outcome {
+    /// This side stopped.
+    Stopped,
+    /// Never got going.
+    Failed(String, String),
+    /// Ended after it started.
+    Ended(i32, String),
+}
+
+/// The control connection: keepalives and reports out, notices and the end
+/// in; and the clock that gives up on a silent host.
+fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Outcome {
+    let (messages, inbox) = mpsc::channel();
+    if let Ok(mut reader) = tcp.try_clone() {
+        let _ = reader.set_read_timeout(None);
+        let _ = std::thread::Builder::new()
+            .name("stream-control".into())
+            .spawn(move || loop {
+                match control::read_message(&mut reader) {
+                    Ok(m) => {
+                        if messages.send(m).is_err() {
+                            return;
+                        }
+                    }
+                    Err(_) => return,
+                }
             });
-            inner.finish();
+    }
+    let accepted = Instant::now();
+    let mut last_keepalive = Instant::now();
+    loop {
+        if inner.stopping() {
+            let _ = control::write_message(
+                tcp,
+                &Message::End(control::End {
+                    code: control::end::ENDED,
+                    message: String::new(),
+                }),
+            );
+            return Outcome::Stopped;
+        }
+        match inbox.recv_timeout(Duration::from_millis(100)) {
+            Ok(Message::End(e)) => {
+                let message = if e.message.is_empty() {
+                    "The host ended the stream.".to_string()
+                } else {
+                    e.message
+                };
+                return if inner.connected.load(Ordering::Acquire) {
+                    Outcome::Ended(e.code as i32, message)
+                } else {
+                    Outcome::Failed("starting".into(), message)
+                };
+            }
+            Ok(Message::Notice(n)) => {
+                inner.heard();
+                match n.kind.as_str() {
+                    "audio" => {
+                        if !n.message.is_empty() {
+                            inner.stats.lock().audio =
+                                format!("no sound from the host: {}", n.message);
+                        }
+                    }
+                    _ if !n.message.is_empty() => inner.emit(Event::Notice(n.message)),
+                    _ => {}
+                }
+            }
+            Ok(_) => inner.heard(),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if inner.stopping() {
+                    return Outcome::Stopped;
+                }
+                return if inner.connected.load(Ordering::Acquire) {
+                    Outcome::Ended(-1, "The connection to the host closed.".into())
+                } else {
+                    Outcome::Failed("starting".into(), "the host closed the connection".into())
+                };
+            }
+        }
+        let now = Instant::now();
+        if now - last_keepalive >= KEEPALIVE {
+            last_keepalive = now;
+            let stats = inner.stats.lock().clone();
+            let sent = control::write_message(tcp, &Message::Keepalive).and_then(|()| {
+                control::write_message(
+                    tcp,
+                    &Message::Report(Report {
+                        fps: stats.fps,
+                        loss_pct: inner.raw_loss_milli.load(Ordering::Relaxed) as f32 / 1000.0,
+                        decode_ms: stats.decode_ms,
+                        rtt_ms: stats.rtt_ms as f32,
+                    }),
+                )
+            });
+            if sent.is_err() && !inner.stopping() {
+                return Outcome::Ended(-1, "The connection to the host broke.".into());
+            }
+        }
+        if !inner.connected.load(Ordering::Acquire) && accepted.elapsed() >= MEDIA_TIMEOUT {
+            return Outcome::Failed(
+                "connecting".into(),
+                format!(
+                    "the host started the stream ({}), but no picture arrived: UDP port {} may be blocked between the two machines",
+                    accept.encoder,
+                    latch_core::CONTROL_PORT
+                ),
+            );
+        }
+        let silent = inner
+            .now_us()
+            .saturating_sub(inner.heard_us.load(Ordering::Relaxed));
+        if silent >= SILENT.as_micros() as u64 {
+            return Outcome::Ended(
+                control::end::VIEWER_SILENT as i32,
+                "The host stopped answering.".into(),
+            );
+        }
+    }
+}
+
+/// The receive thread: every datagram from the host, the hello and ping
+/// timers, input resends and keyframe requests, and the statistics.
+fn receive(
+    inner: &Arc<Inner>,
+    udp: UdpSocket,
+    host: SocketAddr,
+    accept: &Accept,
+    token: [u8; 16],
+    mut player: Option<Player>,
+) {
+    let session = accept.session;
+    let _ = udp.set_read_timeout(Some(Duration::from_millis(5)));
+    let mut buf = vec![0u8; latch_proto::MAX_DATAGRAM + 1];
+    let mut out = Vec::with_capacity(64);
+    let mut reassembler = Reassembler::new(session);
+    let mut audio_rx = AudioReceiver::new(session);
+    let mut keyframes = KeyframeRequests::new();
+    let mut rtt = RttEstimator::new();
+    let mut media_seen = false;
+    let mut last_hello: Option<Instant> = None;
+    let mut last_ping = Instant::now();
+    let mut window_start = Instant::now();
+    let mut window_bytes = 0u64;
+    let mut window_base = reassembler.stats();
+    let mut poor = false;
+    let mut good_windows = 0u32;
+    while !inner.stopping() {
+        let now = Instant::now();
+        let hello_every = if media_seen { HELLO_SLOW } else { HELLO_FAST };
+        if last_hello.is_none_or(|t| now - t >= hello_every) {
+            wire::write_hello(&mut out, session, Some(&token));
+            let _ = udp.send_to(&out, host);
+            last_hello = Some(now);
+        }
+        if media_seen && now - last_ping >= PING_EVERY {
+            wire::write_ping(&mut out, session, inner.now_us());
+            let _ = udp.send_to(&out, host);
+            last_ping = now;
+        }
+        if let Some(link) = inner.link.lock().as_mut() {
+            link.flush(now);
+        }
+        match udp.recv_from(&mut buf) {
+            Ok((n, from)) if from.ip() == host.ip() => {
+                if let Ok(datagram) = wire::parse(&buf[..n]) {
+                    if datagram.session() == session {
+                        inner.heard();
+                        handle(
+                            inner,
+                            &datagram,
+                            &udp,
+                            from,
+                            &mut out,
+                            &mut reassembler,
+                            &mut audio_rx,
+                            &mut rtt,
+                            player.as_mut(),
+                            &mut media_seen,
+                            &mut window_bytes,
+                            n,
+                        );
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+        let now = Instant::now();
+        while let Some(event) = reassembler.poll(now) {
+            match event {
+                Reassembled::Frame(frame) => {
+                    let mut q = inner.queue.lock();
+                    if q.frames.len() >= DECODE_QUEUE {
+                        tracing::warn!("the decoder fell behind; restarting at a keyframe");
+                        q.frames.clear();
+                        q.want_keyframe = true;
+                    }
+                    q.frames.push_back((frame, now));
+                    drop(q);
+                    inner.queue_cv.notify_one();
+                }
+                Reassembled::Lost { frame } => {
+                    tracing::debug!("video frame {frame} lost");
+                }
+            }
+        }
+        let waiting = reassembler.waiting_for_keyframe() || inner.queue.lock().want_keyframe;
+        if media_seen && keyframes.due(waiting, now, rtt.srtt()) {
+            wire::write_keyframe_request(
+                &mut out,
+                session,
+                reassembler.last_delivered().unwrap_or(0),
+            );
+            let _ = udp.send_to(&out, host);
+        }
+        if now - window_start >= Duration::from_secs(1) {
+            let stats = reassembler.stats();
+            let (loss, recovered, raw_loss) = loss_in_window(&window_base, &stats);
+            let lost_frames = stats.frames_lost > window_base.frames_lost;
+            window_base = stats;
+            inner
+                .raw_loss_milli
+                .store((raw_loss * 1000.0) as u64, Ordering::Relaxed);
+            let secs = (now - window_start).as_secs_f32();
+            window_start = now;
+            let decode = std::mem::take(&mut *inner.decode.lock());
+            let frames = decode.frames.max(1) as f32;
+            {
+                let mut s = inner.stats.lock();
+                s.fps = decode.frames as f32 / secs;
+                s.mbps = window_bytes as f32 * 8.0 / secs / 1e6;
+                s.decode_ms = decode.decode_us as f32 / frames / 1000.0;
+                s.queue_ms = decode.queue_us as f32 / frames / 1000.0;
+                s.host_ms = decode.host_tenths as f32 / frames / 10.0;
+                s.assembly_ms = decode.assembly_us as f32 / frames / 1000.0;
+                s.loss_pct = loss;
+                s.fec_recovered = recovered;
+                s.rtt_ms = rtt.srtt().map_or(0, |d| d.as_millis() as u32);
+                s.rtt_var_ms = rtt.rttvar().as_millis() as u32;
+                if let Some(p) = &player {
+                    s.audio = p.describe();
+                }
+            }
+            window_bytes = 0;
+            let bad = loss > 1.0 || lost_frames;
+            if bad && !poor {
+                poor = true;
+                good_windows = 0;
+                inner.emit(Event::Poor(true));
+            } else if !bad && poor {
+                good_windows += 1;
+                if good_windows >= 3 {
+                    poor = false;
+                    inner.emit(Event::Poor(false));
+                }
+            }
+        }
+    }
+}
+
+/// Unrecoverable loss in percent, shards FEC rebuilt, and the raw loss the
+/// network caused (rebuilt or not), between two snapshots.
+fn loss_in_window(before: &ReassemblyStats, after: &ReassemblyStats) -> (f32, u32, f32) {
+    let received = after.shards_received.saturating_sub(before.shards_received);
+    let recovered = after
+        .shards_recovered
+        .saturating_sub(before.shards_recovered);
+    let missing = after.shards_missing.saturating_sub(before.shards_missing);
+    let total = received + recovered + missing;
+    if total == 0 {
+        return (0.0, 0, 0.0);
+    }
+    (
+        missing as f32 * 100.0 / total as f32,
+        recovered.min(u32::MAX as u64) as u32,
+        (recovered + missing) as f32 * 100.0 / total as f32,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle(
+    inner: &Arc<Inner>,
+    datagram: &Datagram<'_>,
+    udp: &UdpSocket,
+    from: SocketAddr,
+    out: &mut Vec<u8>,
+    reassembler: &mut Reassembler,
+    audio_rx: &mut AudioReceiver,
+    rtt: &mut RttEstimator,
+    player: Option<&mut Player>,
+    media_seen: &mut bool,
+    window_bytes: &mut u64,
+    len: usize,
+) {
+    let session = datagram.session();
+    let now = Instant::now();
+    match datagram {
+        Datagram::Hello { .. } => {}
+        Datagram::Video { shard, .. } => {
+            *window_bytes += len as u64;
+            if !*media_seen {
+                *media_seen = true;
+                let mut health = inner.video_health.lock();
+                health.connected_at = Some(now);
+                drop(health);
+                inner.connected.store(true, Ordering::Release);
+                inner.emit(Event::Connected);
+            }
+            reassembler.push(shard, now);
+        }
+        Datagram::Audio { packet, .. } => {
+            audio_rx.push(packet, now);
+            if let Some(player) = player {
+                while let Some(out) = audio_rx.pop() {
+                    match out {
+                        AudioOut::Frame { payload, .. } => player.push(&payload),
+                        AudioOut::Missing { .. } => player.push(&[]),
+                    }
+                }
+            } else {
+                while audio_rx.pop().is_some() {}
+            }
+        }
+        Datagram::InputAck { next, .. } => {
+            if let Some(link) = inner.link.lock().as_mut() {
+                link.sender.ack(*next);
+            }
+        }
+        Datagram::Ping { time, .. } => {
+            wire::write_pong(out, session, *time);
+            let _ = udp.send_to(out, from);
+        }
+        Datagram::Pong { time, .. } => {
+            let sample = inner.now_us().saturating_sub(*time);
+            rtt.sample(Duration::from_micros(sample));
         }
         _ => {}
     }
 }
 
-unsafe extern "C" fn connected(_p: *mut c_void) {
-    let Some(inner) = current() else { return };
-    inner.video_health.lock().connected_at = Some(Instant::now());
-    inner.connected.store(true, Ordering::Release);
-    inner.emit(Event::Connected);
-}
-
-unsafe extern "C" fn terminated(_p: *mut c_void, code: c_int) {
-    let Some(inner) = current() else { return };
-    inner.connected.store(false, Ordering::Release);
-    inner.emit(Event::Terminated {
-        code,
-        message: termination_message(code),
-    });
-    inner.finish();
-}
-
-unsafe extern "C" fn status(_p: *mut c_void, status: c_int) {
-    if let Some(inner) = current() {
-        inner.emit(Event::Poor(status == ffi::CONN_STATUS_POOR));
-    }
-}
-
-unsafe extern "C" fn log(_p: *mut c_void, line: *const c_char) {
-    if !line.is_null() {
-        tracing::debug!("moonlight: {}", CStr::from_ptr(line).to_string_lossy());
-    }
-}
-
-pub fn termination_message(code: i32) -> String {
-    match code {
-        ffi::ML_ERROR_GRACEFUL_TERMINATION => "The PC ended the session.".into(),
-        ffi::ML_ERROR_NO_VIDEO_TRAFFIC => {
-            "No video arrived. UDP port 47998 to the PC is blocked, or its firewall is.".into()
+/// The decode thread: frames in order, newest picture out.
+fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
+    loop {
+        let (frame, ready) = {
+            let mut q = inner.queue.lock();
+            loop {
+                if inner.stopping() {
+                    return;
+                }
+                if let Some(next) = q.frames.pop_front() {
+                    if q.want_keyframe && !next.0.keyframe {
+                        continue;
+                    }
+                    if next.0.keyframe {
+                        q.want_keyframe = false;
+                    }
+                    break next;
+                }
+                inner.queue_cv.wait_for(&mut q, Duration::from_millis(100));
+            }
+        };
+        let start = Instant::now();
+        let spare = inner.frames.spare();
+        match decoder.decode(&frame.data, frame.keyframe, spare) {
+            Ok(Some(picture)) => {
+                let decoded = Instant::now();
+                let black = picture.is_black();
+                inner.frames.publish(picture);
+                (inner.wake)();
+                inner.video_health.lock().frame(decoded, black);
+                let mut w = inner.decode.lock();
+                w.frames += 1;
+                w.decode_us += (decoded - start).as_micros() as u64;
+                w.queue_us += (start - ready).as_micros() as u64;
+                w.host_tenths += u64::from(frame.host_delay);
+                w.assembly_us += frame.assembly.as_micros() as u64;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::debug!("decode: {e:#}");
+                inner.video_health.lock().last_error = Some(format!("{e:#}"));
+                inner.queue.lock().want_keyframe = true;
+            }
         }
-        ffi::ML_ERROR_NO_VIDEO_FRAME => {
-            "Video could not be assembled. The connection is too poor for this bitrate.".into()
-        }
-        ffi::ML_ERROR_UNEXPECTED_EARLY_TERMINATION => {
-            "The PC ended the session as soon as it started.".into()
-        }
-        ffi::ML_ERROR_PROTECTED_CONTENT => "Protected content is on the PC's screen.".into(),
-        ffi::ML_ERROR_FRAME_CONVERSION => {
-            "The PC could not convert frames (HDR or resolution mismatch).".into()
-        }
-        n => format!("Connection lost (code {n})."),
     }
 }
 
@@ -819,260 +973,69 @@ mod tests {
     #[test]
     fn video_health_distinguishes_missing_black_frozen_and_recovered_video() {
         let start = Instant::now();
-        let at = |s| start + Duration::from_secs(s);
         let mut h = VideoHealth::default();
-        assert!(
-            h.problem(at(20)).is_none(),
-            "connection setup has no video deadline"
-        );
+        assert_eq!(h.problem(start), None);
         h.connected_at = Some(start);
-        assert!(h.problem(at(4)).is_none());
-        assert!(h.problem(at(5)).unwrap().contains("no video"));
-        h.frame(at(5), true);
-        h.frame(at(9), true);
-        assert!(h.problem(at(9)).is_none());
-        assert!(h.problem(at(10)).unwrap().contains("black picture"));
-        h.frame(at(11), false);
-        assert!(h.problem(at(11)).is_none());
-        assert!(h.problem(at(16)).unwrap().contains("stopped arriving"));
-        h.last_error = Some("decode failed (-12911)".into());
-        assert!(h.problem(at(17)).unwrap().contains("-12911"));
-        h.frame(at(18), false);
-        assert!(h.problem(at(18)).is_none());
-        assert!(h.last_error.is_none());
-    }
-
-    #[test]
-    fn text_is_typed_in_small_pieces_between_characters() {
-        let short = "powershell";
-        assert_eq!(text_chunks(short), vec![short]);
-        let long = "é".repeat(40); // 80 bytes
-        let chunks = text_chunks(&long);
-        assert!(chunks.iter().all(|c| c.len() <= TEXT_CHUNK), "{chunks:?}");
-        assert!(chunks.iter().all(|c| c.chars().all(|ch| ch == 'é')));
-        assert_eq!(chunks.concat(), long);
-        assert!(text_chunks("").is_empty());
+        let later = start + Duration::from_secs(6);
+        assert!(h.problem(later).unwrap().contains("no video has arrived"));
+        h.frame(later, true);
+        assert_eq!(h.problem(later), None);
+        let black = later + Duration::from_secs(6);
+        h.frame(black, true);
+        assert!(h.problem(black).unwrap().contains("black picture"));
+        h.frame(black, false);
+        assert_eq!(h.problem(black), None);
+        let frozen = black + Duration::from_secs(6);
+        assert!(h.problem(frozen).unwrap().contains("stopped arriving"));
+        h.last_error = Some("bad slice".into());
+        assert!(h
+            .problem(frozen)
+            .unwrap()
+            .contains("cannot be decoded: bad slice"));
     }
 
     #[test]
     fn loss_is_the_share_of_packets_fec_could_not_save() {
-        let before = ffi::RtpVideoStats {
-            packet_count_video: 1000,
-            packet_count_fec_failed: 10,
-            packet_count_fec_recovered: 5,
+        let before = ReassemblyStats::default();
+        let after = ReassemblyStats {
+            shards_received: 90,
+            shards_recovered: 8,
+            shards_missing: 2,
             ..Default::default()
         };
-        let after = ffi::RtpVideoStats {
-            packet_count_video: 1900,
-            packet_count_fec_failed: 110,
-            packet_count_fec_recovered: 25,
-            ..Default::default()
-        };
-        let (loss, recovered) = loss_in_window(&before, &after);
-        assert!((loss - 10.0).abs() < 0.01, "{loss}");
-        assert_eq!(recovered, 20);
-        assert_eq!(loss_in_window(&after, &after), (0.0, 0));
-        // Counters reset (a new session): never negative, never a panic.
-        assert_eq!(loss_in_window(&after, &before), (0.0, 0));
+        let (loss, recovered, raw) = loss_in_window(&before, &after);
+        assert!((loss - 2.0).abs() < 1e-3);
+        assert_eq!(recovered, 8);
+        assert!((raw - 10.0).abs() < 1e-3);
+        assert_eq!(loss_in_window(&after, &after), (0.0, 0, 0.0));
     }
 
     #[test]
-    fn requested_bitrate_undoes_every_reduction() {
-        // Sunshine encodes at request / 1.25 - 512 - 500 (rtsp.cpp). After
-        // our compensation the encoder should land exactly on the target.
-        for target in [
-            2_000u32, 5_000, 12_000, 20_000, 35_000, 50_000, 80_000, 150_000,
-        ] {
-            let request = request_bitrate_kbps(target);
-            let encoder = sunshine_encoder_kbps(u64::from(request));
-            assert_eq!(
-                encoder,
-                u64::from(target),
-                "target={target} request={request}"
-            );
-            // And it is the smallest such request.
-            assert!(
-                sunshine_encoder_kbps(u64::from(request) - 1) < u64::from(target),
-                "target={target} request={request} is not minimal"
-            );
-        }
-        // The figures Sunshine's log showed for the old compensation: a
-        // 20 Mbps target asked for 25 000 and encoded at 18 988.
-        assert_eq!(sunshine_encoder_kbps(25_000), 18_988);
-        assert_eq!(request_bitrate_kbps(20_000), 26_265);
-        assert!(request_bitrate_kbps(500_000) <= MAX_REQUEST_KBPS, "clamped");
-    }
-
-    #[test]
-    fn stage_names_and_messages_are_readable() {
-        assert!(!ffi::stage_name(4).is_empty());
-        assert!(termination_message(0).contains("ended"));
-        assert!(termination_message(-100).contains("47998"));
-        assert!(termination_message(-7).contains("-7"));
-        assert!(!ffi::launch_query().is_empty());
-    }
-}
-
-/// Stream from the Sunshine on this machine for a few seconds:
-/// `cargo test -p latch-stream stream_real -- --ignored --nocapture`
-/// (run `pair_real` first).
-#[cfg(test)]
-mod real {
-    use super::*;
-    use crate::nvhttp::Client;
-    use std::time::Duration;
-
-    #[test]
-    #[ignore = "needs a paired Sunshine on this machine"]
-    fn stream_real() {
-        let number = |name: &str, default: u32| {
-            std::env::var(name)
-                .map(|value| value.parse::<u32>().expect(name))
-                .unwrap_or(default)
-        };
-        let width = number("LATCH_TEST_WIDTH", 1280);
-        let height = number("LATCH_TEST_HEIGHT", 720);
-        let fps = number("LATCH_TEST_FPS", 60);
-        let bitrate_kbps = number("LATCH_TEST_BITRATE_KBPS", 10_000);
-        let seconds = number("LATCH_TEST_SECONDS", 12);
-        assert!(width > 0 && height > 0 && fps > 0 && bitrate_kbps > 0 && seconds >= 12);
-        eprintln!("requested: {width}x{height} {fps} fps {bitrate_kbps} kbps duration={seconds}s");
-        let dir = std::env::var_os("LATCH_TEST_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("latch-pair-test"));
-        let identity = crate::Identity::load_or_create(&dir).unwrap();
-        let ip: std::net::IpAddr = std::env::var("LATCH_TEST_IP")
-            .unwrap_or_else(|_| "127.0.0.1".into())
-            .parse()
-            .unwrap();
-        let cert = std::fs::read(dir.join("server.der")).ok();
-        let mut client = Client::new(&identity, ip, cert).unwrap();
-        let mut info = client.server_info().unwrap();
-        if std::env::var_os("LATCH_TEST_IP").is_some() {
-            assert!(
-                info.paired,
-                "a remote PC must be reached without pairing again"
-            );
-        }
-        if !info.paired {
-            let der = client
-                .pair("4321", "latch-test", || {
-                    let _ = latch_core::http::post_json::<_, latch_core::api::Ack>(
-                        ("127.0.0.1", latch_core::CONTROL_PORT),
-                        "/v1/pin",
-                        &latch_core::api::PinRequest {
-                            pin: "4321".into(),
-                            name: "latch-test".into(),
-                        },
-                        Duration::from_secs(10),
-                    );
-                })
-                .unwrap();
-            std::fs::write(dir.join("server.der"), &der).unwrap();
-            info = client.server_info().unwrap();
-        }
-        eprintln!("{info:?}");
-        let apps = client.app_list().unwrap();
-        let desktop = apps.iter().find(|a| a.title == "Desktop").unwrap();
-        let ri_key: [u8; 16] = rand::random();
-        let ri_id: u32 = rand::random();
-        let mut ri_iv = [0u8; 16];
-        ri_iv[..4].copy_from_slice(&ri_id.to_be_bytes());
-        let resume = info.current_game != 0;
-        let rtsp = client
-            .launch(
-                desktop.id,
-                width,
-                height,
-                fps,
-                bitrate_kbps,
-                &ri_key,
-                ri_id,
-                resume,
-            )
-            .unwrap();
-        eprintln!("rtsp: {rtsp} (resume={resume})");
-        let frames = Arc::new(FrameSlot::default());
-        let (tx, rx) = std::sync::mpsc::channel();
-        let session = Session::start(
-            Server {
-                address: ip.to_string(),
-                app_version: info.app_version.clone(),
-                gfe_version: info.gfe_version.clone(),
-                rtsp_url: rtsp,
-                codec_mode_support: info.codec_mode_support,
-            },
-            Settings {
-                width,
-                height,
-                fps,
-                bitrate_kbps,
-                hevc: std::env::var_os("LATCH_TEST_HEVC").is_some(),
-            },
-            ri_key,
-            ri_iv,
-            frames.clone(),
-            tx,
-            || {},
+    fn refusals_read_the_hosts_sentence() {
+        assert_eq!(
+            refusal(406, r#"{"ok":false,"error":"this host encodes HEVC"}"#),
+            "this host encodes HEVC"
         );
-        let start = Instant::now();
-        let mut connected = false;
-        let mut sampled_second = 0;
-        while start.elapsed() < Duration::from_secs(u64::from(seconds)) {
-            while let Ok(ev) = rx.try_recv() {
-                eprintln!("{:>6.2}s {ev:?}", start.elapsed().as_secs_f32());
-                if ev == Event::Connected {
-                    connected = true;
-                }
-                if matches!(ev, Event::Failed { .. } | Event::Terminated { .. }) {
-                    panic!("session ended early: {ev:?}");
-                }
-            }
-            if connected && std::env::var_os("LATCH_TEST_MOUSE_SWEEP").is_some() {
-                // Oscillate so the cursor stays on screen while a game reading
-                // raw input sees continuous relative motion. Watch the PC's
-                // cursor (GetCursorPos) to confirm the relative injection lands.
-                let phase = (start.elapsed().as_millis() / 400) % 2;
-                session
-                    .input()
-                    .mouse_move(if phase == 0 { 40 } else { -40 }, 0);
-            }
-            if let Some(f) = frames.take() {
-                if frames.seq() % 60 == 1 {
-                    eprintln!(
-                        "frame {}x{} stride {} seq {}",
-                        f.width,
-                        f.height,
-                        f.y_stride,
-                        frames.seq()
-                    );
-                }
-                // Exercise the same buffer reuse as the renderer; discarding
-                // every frame makes this test profile fresh allocations instead.
-                frames.recycle(f);
-            }
-            let second = start.elapsed().as_secs();
-            if connected && second > sampled_second {
-                sampled_second = second;
-                eprintln!("sample {second}s: {:?}", session.stats());
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let stats = session.stats();
-        let published = frames.seq();
-        eprintln!("stats: {stats:?}, frames published: {published}");
-        session.stop();
-        let t = Instant::now();
-        while !session.finished() && t.elapsed() < Duration::from_secs(10) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        eprintln!("stopped in {:?}", t.elapsed());
-        // Leave the PC as it was found: end the app this test started.
-        if !resume {
-            let _ = client.quit();
-        }
-        assert!(connected, "never connected");
-        assert!(published > 60, "too few frames: {published}");
-        assert!(session.finished(), "session did not finish");
+        assert_eq!(refusal(500, "not json"), "the host answered HTTP 500");
+    }
+
+    #[test]
+    fn hevc_is_offered_only_when_the_settings_allow_it() {
+        let mut s = Settings {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate_kbps: 20_000,
+            hevc: false,
+            audio: true,
+            name: "test".into(),
+        };
+        assert!(!offer(&s).contains(&Codec::Hevc));
+        assert!(offer(&s).contains(&Codec::H264Baseline));
+        s.hevc = true;
+        assert_eq!(
+            offer(&s).contains(&Codec::Hevc),
+            video::decodable().contains(&Codec::Hevc)
+        );
     }
 }

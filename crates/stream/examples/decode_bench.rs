@@ -6,8 +6,8 @@
 
 use anyhow::{bail, Context, Result};
 use latch_core::update::sha256_hex;
-use latch_stream::ffi::VIDEO_FORMAT_H264;
 use latch_stream::video::{new_decoder, Decoder, Frame};
+use latch_stream::Codec;
 use serde_json::json;
 use std::fs::File;
 use std::io::Read;
@@ -249,7 +249,7 @@ fn main() -> Result<()> {
     let (fixture_bytes, is_builtin) = load_fixture(config.fixture.as_deref())?;
     validate_fixture(&fixture_bytes)?;
     let mut decoder =
-        new_decoder(VIDEO_FORMAT_H264).context("failed to instantiate H.264 decoder")?;
+        new_decoder(Codec::H264High).context("failed to instantiate H.264 decoder")?;
 
     let output = run_bench(decoder.as_mut(), &fixture_bytes, is_builtin, &config)?;
     serde_json::to_writer_pretty(std::io::stdout(), &output)?;

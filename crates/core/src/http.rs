@@ -83,13 +83,55 @@ fn max_body(path: &str) -> usize {
 pub struct Response {
     pub status: u16,
     pub body: String,
+    /// For `101 Switching Protocols`: who takes the connection over.
+    pub takeover: Option<Takeover>,
 }
+
+/// The protocol a connection switches to after its request, and the code
+/// that runs it. It gets the socket once `101 Switching Protocols` is
+/// written and keeps the connection's worker thread until it returns.
+#[derive(Clone)]
+pub struct Takeover {
+    pub protocol: String,
+    run: std::sync::Arc<std::sync::Mutex<Option<TakeoverFn>>>,
+}
+
+type TakeoverFn = Box<dyn FnOnce(TcpStream) + Send>;
+
+impl std::fmt::Debug for Takeover {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Takeover")
+            .field("protocol", &self.protocol)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for Takeover {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.run, &other.run)
+    }
+}
+
+impl Eq for Takeover {}
 
 impl Response {
     pub fn json<T: serde::Serialize>(status: u16, value: &T) -> Self {
         Self {
             status,
             body: serde_json::to_string(value).unwrap_or_else(|_| "{}".into()),
+            takeover: None,
+        }
+    }
+
+    /// `101 Switching Protocols` to `protocol`; `run` then owns the socket.
+    pub fn switching(protocol: &str, run: impl FnOnce(TcpStream) + Send + 'static) -> Self {
+        Self {
+            status: 101,
+            body: String::new(),
+            takeover: Some(Takeover {
+                protocol: protocol.to_string(),
+                run: std::sync::Arc::new(std::sync::Mutex::new(Some(Box::new(run)))),
+            }),
         }
     }
 
@@ -169,6 +211,7 @@ pub fn write_bytes(
 
 fn reason(status: u16) -> &'static str {
     match status {
+        101 => "Switching Protocols",
         200 => "OK",
         400 => "Bad Request",
         403 => "Forbidden",
@@ -243,9 +286,100 @@ where
                     &serde_json::json!({ "ok": false, "error": e.to_string() }),
                 ),
             };
+            if let (101, Some(takeover)) = (resp.status, &resp.takeover) {
+                switch(stream, takeover);
+                return;
+            }
             let _ = write_response(&mut stream, &resp);
         });
     }
+}
+
+/// Writes `101 Switching Protocols` and hands the socket over, with the
+/// HTTP timeouts lifted: the new protocol keeps its own.
+fn switch(mut stream: TcpStream, takeover: &Takeover) {
+    if validate_header("Upgrade", &takeover.protocol).is_err() {
+        return;
+    }
+    let head = format!(
+        "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: {}\r\n\r\n",
+        takeover.protocol
+    );
+    if stream.write_all(head.as_bytes()).is_err() || stream.flush().is_err() {
+        return;
+    }
+    let _ = stream.set_read_timeout(None);
+    let _ = stream.set_write_timeout(None);
+    let run = takeover.run.lock().ok().and_then(|mut run| run.take());
+    if let Some(run) = run {
+        run(stream);
+    }
+}
+
+/// Asks the server at `addr` to switch the connection to `protocol` with a
+/// POST of `body` (JSON) to `path`. `Ok(Ok(socket))` once it has; the socket
+/// holds nothing past the server's `101` head. `Ok(Err(reply))` when the
+/// server answered with anything else.
+pub fn upgrade(
+    addr: SocketAddr,
+    path: &str,
+    protocol: &str,
+    body: &[u8],
+    timeout: Duration,
+) -> Result<std::result::Result<TcpStream, Response>> {
+    validate_target("POST", path)?;
+    validate_header("Upgrade", protocol)?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(io_err)?;
+    stream.set_read_timeout(Some(timeout)).map_err(io_err)?;
+    stream.set_write_timeout(Some(timeout)).map_err(io_err)?;
+    let _ = stream.set_nodelay(true);
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: {protocol}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).map_err(io_err)?;
+    stream.write_all(body).map_err(io_err)?;
+    stream.flush().map_err(io_err)?;
+    // Byte by byte up to the blank line, so nothing the new protocol sends
+    // right behind the head is swallowed by a buffer.
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if head.len() >= MAX_HEADER {
+            bail!("reply head too large");
+        }
+        match stream.read(&mut byte).map_err(io_err)? {
+            0 => bail!("connection closed before the reply"),
+            _ => head.push(byte[0]),
+        }
+    }
+    let mut reader = BufReader::new(&head[..]);
+    let mut remaining = MAX_HEADER;
+    let line = read_line(&mut reader, &mut remaining)?.context("no HTTP status")?;
+    let mut parts = line.splitn(3, ' ');
+    if !matches!(parts.next(), Some("HTTP/1.0" | "HTTP/1.1")) {
+        bail!("invalid HTTP version");
+    }
+    let status: u16 = parts
+        .next()
+        .filter(|c| c.len() == 3 && c.bytes().all(|b| b.is_ascii_digit()))
+        .context("invalid HTTP status")?
+        .parse()?;
+    let headers = read_headers(&mut reader, &mut remaining)?;
+    if status == 101 {
+        if !header(&headers, "upgrade").is_some_and(|u| u.eq_ignore_ascii_case(protocol)) {
+            bail!("the server switched to another protocol");
+        }
+        return Ok(Ok(stream));
+    }
+    let mut body = Vec::new();
+    let mut rest = BufReader::new(&mut stream);
+    read_response_body(&mut rest, &headers, &mut body, MAX_BODY as u64, false)?;
+    Ok(Err(Response {
+        status,
+        body: String::from_utf8_lossy(&body).into_owned(),
+        takeover: None,
+    }))
 }
 
 struct ConnectionSlot(std::sync::Arc<std::sync::atomic::AtomicUsize>);
@@ -383,6 +517,7 @@ pub fn exchange_with<S: Read + Write>(
     Ok(Response {
         status,
         body: String::from_utf8_lossy(&body).into_owned(),
+        takeover: None,
     })
 }
 
@@ -620,6 +755,7 @@ mod tests {
                     ("POST", "/v1/echo") => Response {
                         status: 200,
                         body: String::from_utf8_lossy(&req.body).into_owned(),
+                        takeover: None,
                     },
                     _ => Response::json(404, &serde_json::json!({ "ok": false })),
                 }
@@ -734,5 +870,40 @@ mod tests {
         assert_eq!(e.to_string(), "connection closed");
         let e = io_err(std::io::Error::other("disk full"));
         assert!(e.to_string().contains("disk full"), "{e}");
+    }
+
+    #[test]
+    fn an_upgraded_connection_carries_the_new_protocol_both_ways() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            serve(listener, |_, req| {
+                if req.path != "/v1/stream" {
+                    return Response::json(404, &serde_json::json!({ "ok": false }));
+                }
+                let body = req.body.clone();
+                Response::switching("test-proto/1", move |mut s| {
+                    // Sent at once: must not be lost in the client's reader.
+                    s.write_all(&body).unwrap();
+                    let mut b = [0u8; 4];
+                    s.read_exact(&mut b).unwrap();
+                    s.write_all(&b).unwrap();
+                })
+            })
+        });
+        let mut s = upgrade(addr, "/v1/stream", "test-proto/1", b"hello", Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        let mut got = [0u8; 5];
+        s.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"hello");
+        s.write_all(b"ping").unwrap();
+        let mut back = [0u8; 4];
+        s.read_exact(&mut back).unwrap();
+        assert_eq!(&back, b"ping");
+        let refused = upgrade(addr, "/v1/other", "test-proto/1", b"{}", Duration::from_secs(2))
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(refused.status, 404);
     }
 }

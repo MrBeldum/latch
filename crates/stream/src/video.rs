@@ -3,11 +3,11 @@
 //! VideoToolbox produces and what the renderer's shader expects.
 
 use anyhow::Result;
+use latch_proto::control::Codec;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(not(target_os = "macos"))]
-mod openh264;
+mod software;
 #[cfg(target_os = "macos")]
 mod videotoolbox;
 
@@ -143,46 +143,83 @@ pub trait Decoder: Send {
     fn name(&self) -> &'static str;
 }
 
-/// Bit mask of `VIDEO_FORMAT_*` values this platform can decode.
-pub fn supported_formats() -> i32 {
+/// What this machine decodes, best first. HEVC and H.264 High need the
+/// platform's decoder; `latch-codec` decodes Constrained Baseline anywhere.
+pub fn decodable() -> Vec<Codec> {
     #[cfg(target_os = "macos")]
     {
-        crate::ffi::VIDEO_FORMAT_H264 | crate::ffi::VIDEO_FORMAT_H265
+        vec![Codec::Hevc, Codec::H264High, Codec::H264Baseline]
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     {
-        crate::ffi::VIDEO_FORMAT_H264
+        if mediafoundation::MfDecoder::new().is_ok() {
+            vec![Codec::H264High, Codec::H264Baseline]
+        } else {
+            vec![Codec::H264Baseline]
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        vec![Codec::H264Baseline]
     }
 }
 
-/// `CAPABILITY_*` bits for this platform's decoder.
-///
-/// Decode on the protocol's bounded decoder worker. Synchronous hardware
-/// decode and CPU texture copies must not stall UDP reception. HEVC keeps
-/// enough reference frames
-/// for the host to repair a lost frame by referencing an older one
-/// instead of sending a whole keyframe, which on a slow link is the
-/// difference between a hiccup and a two-second freeze. H.264 reference
-/// invalidation is left off: Moonlight's own Mac client does the same.
-pub fn capabilities() -> i32 {
+/// A decoder for `codec`: the platform's where there is one, else
+/// `latch-codec`'s for Constrained Baseline.
+pub fn new_decoder(codec: Codec) -> Result<Box<dyn Decoder>> {
     #[cfg(target_os = "macos")]
     {
-        crate::ffi::CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC
+        match videotoolbox::VideoToolbox::new(codec == Codec::Hevc) {
+            Ok(d) => return Ok(Box::new(d)),
+            Err(e) if codec == Codec::H264Baseline => {
+                tracing::warn!("VideoToolbox: {e:#}; decoding in software");
+            }
+            Err(e) => return Err(e),
+        }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     {
-        0
+        if codec != Codec::Hevc {
+            match mediafoundation::MfDecoder::new() {
+                Ok(d) => return Ok(Box::new(MediaFoundation(d))),
+                Err(e) if codec == Codec::H264Baseline => {
+                    tracing::warn!("Media Foundation: {e:#}; decoding in software");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    match codec {
+        Codec::H264Baseline => Ok(Box::new(software::Software::new())),
+        other => anyhow::bail!("this machine cannot decode {}", other.name()),
     }
 }
 
-pub fn new_decoder(format: i32) -> Result<Box<dyn Decoder>> {
-    #[cfg(target_os = "macos")]
-    {
-        Ok(Box::new(videotoolbox::VideoToolbox::new(format)?))
+/// Media Foundation's decoder as a [`Decoder`].
+#[cfg(windows)]
+struct MediaFoundation(mediafoundation::MfDecoder);
+
+#[cfg(windows)]
+impl Decoder for MediaFoundation {
+    fn decode(
+        &mut self,
+        annexb: &[u8],
+        _idr: bool,
+        _spare: Option<Frame>,
+    ) -> Result<Option<Frame>> {
+        Ok(self.0.decode(annexb)?.map(|d| Frame {
+            width: d.width,
+            height: d.height,
+            y: d.y,
+            y_stride: d.y_stride,
+            uv: d.uv,
+            uv_stride: d.uv_stride,
+            full_range: false,
+        }))
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Ok(Box::new(openh264::OpenH264::new(format)?))
+
+    fn name(&self) -> &'static str {
+        self.0.name()
     }
 }
 
@@ -211,27 +248,6 @@ fn nal_units(data: &[u8]) -> Vec<&[u8]> {
         }
     }
     out
-}
-
-/// Interleave I420 chroma planes into one NV12 UV plane.
-#[cfg(any(not(target_os = "macos"), test))]
-fn interleave_uv(
-    u: &[u8],
-    v: &[u8],
-    stride: usize,
-    width: usize,
-    height: usize,
-    out: &mut Vec<u8>,
-) {
-    out.clear();
-    out.reserve(width * 2 * height);
-    for row in 0..height {
-        let (ur, vr) = (&u[row * stride..], &v[row * stride..]);
-        for x in 0..width {
-            out.push(ur[x]);
-            out.push(vr[x]);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -279,15 +295,6 @@ mod tests {
         assert_eq!(nals[1], &[0x68, 3]);
         assert_eq!(nals[2], &[0x65, 4, 5, 6]);
         assert!(nal_units(&[1, 2, 3]).is_empty());
-    }
-
-    #[test]
-    fn uv_interleaving_pairs_samples() {
-        let u = [1u8, 2, 0, 3, 4, 0];
-        let v = [5u8, 6, 0, 7, 8, 0];
-        let mut out = Vec::new();
-        interleave_uv(&u, &v, 3, 2, 2, &mut out);
-        assert_eq!(out, vec![1, 5, 2, 6, 3, 7, 4, 8]);
     }
 
     #[test]
