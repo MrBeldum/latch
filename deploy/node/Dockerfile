@@ -1,14 +1,13 @@
-# Latch node: a virtual desktop plus Sunshine plus the Latch control
-# service, optionally joined to Tailscale as its own machine.
+# Latch node: a virtual desktop and the Latch service, optionally joined
+# to Tailscale as its own machine.
 #
 # Build from the repository root:
 #   docker build -f deploy/node/Dockerfile -t latch-node .
 #
-# Ubuntu 24.04 matches the pinned Sunshine .deb.
 
 FROM rust:1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake clang nasm pkg-config \
+        build-essential pkg-config \
         libasound2-dev \
         libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
         libxrandr-dev libxi-dev libx11-xcb-dev libxcb-render0-dev \
@@ -20,29 +19,16 @@ COPY . .
 RUN cargo build --locked --release -p latch-host
 
 FROM ubuntu:24.04
-ARG SUNSHINE_TAG=v2026.906.222525
-ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl python3 \
         xvfb xfce4 xfce4-terminal dbus-x11 \
         pulseaudio libasound2t64 \
-        libcap2-bin \
+        libxkbcommon0 libxkbcommon-x11-0 libvulkan1 libgl1 libegl1 \
+        libxrandr2 libxi6 libxcursor1 libx11-xcb1 \
+        libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
         iptables iproute2 \
     && rm -rf /var/lib/apt/lists/*
-
-# Sunshine Ubuntu 24.04 package for this architecture.
-RUN set -eux; \
-    arch="${TARGETARCH:-amd64}"; \
-    if [ "$arch" = "arm64" ]; then deb_arch=arm64; sha=17a20e57e9fd547a01adb818c172ec8481f2ac95cd1421ac976a96e056c5a073; \
-    else deb_arch=amd64; sha=044f68a144f2beb8c38094828c789b5c1ae376ff07a6b095c901d15abf742a32; \
-    fi; \
-    file="sunshine_${SUNSHINE_TAG#v}-1+ubuntu24.04_${deb_arch}.deb"; \
-    url="https://github.com/LizardByte/Sunshine/releases/download/${SUNSHINE_TAG}/${file}"; \
-    curl -fsSL -o /tmp/sunshine.deb "$url"; \
-    echo "${sha}  /tmp/sunshine.deb" | sha256sum -c -; \
-    apt-get update && apt-get install -y --no-install-recommends /tmp/sunshine.deb \
-    && rm -rf /tmp/sunshine.deb /var/lib/apt/lists/*
 
 # Optional Tailscale client so this container is its own node. It runs with
 # kernel networking (see docker-compose.yml), so Latch Host sees each peer's
@@ -56,9 +42,9 @@ RUN chmod +x /entrypoint.sh \
     && mkdir -p /root/.config /var/lib/tailscale
 
 ENV DISPLAY=:1 \
-    HOME=/root \
-    LATCH_USER=latch \
-    LATCH_PASS=
+    HOME=/root
+
+EXPOSE 47850/tcp 47850/udp
 
 VOLUME ["/root/.config", "/root/.local", "/var/lib/tailscale"]
 ENTRYPOINT ["/entrypoint.sh"]

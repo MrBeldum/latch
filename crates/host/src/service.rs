@@ -6,7 +6,7 @@
 //! A tagged machine (the relay VPS) belongs to no account, so it answers
 //! the members of its own tailnet. Everyone else gets a 403 and nothing
 //! more: a machine shared in from someone else's tailnet can reach the
-//! port, but may not pair, sleep the PC, read its clipboard or push it an
+//! port, but may not stream, sleep the PC, read its clipboard or push it an
 //! executable.
 //!
 //! Under userspace Tailscale (a container's tailscaled) every tailnet peer
@@ -15,17 +15,19 @@
 
 use crate::clipboard;
 use crate::config::HostConfig;
-use crate::streamer::{self, Api, Install};
+use crate::streamer;
 use crate::update;
 use crate::wake::{self, WakeInfo};
 use anyhow::{Context, Result};
 use latch_core::api::{
-    Ack, Clipboard, DisplayRequest, NatReport, PinRequest, PowerAction, PowerRequest, Status,
-    Streamer, CLIPBOARD_PATH, UPDATE_PATH,
+    Ack, Clipboard, DisplayRequest, NatReport, PowerAction, PowerRequest, Status, Streamer,
+    CLIPBOARD_PATH, UPDATE_PATH,
 };
 use latch_core::http::{self, Request, Response};
 use latch_core::tailscale::{self, is_tailnet_ip};
 use latch_core::CONTROL_PORT;
+use latch_engine::server::{Options, Server};
+use latch_proto::control::{self, end, StreamRequest};
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
@@ -39,9 +41,6 @@ const AUTH_TTL: Duration = Duration::from_secs(60);
 /// How long an answer is remembered, so the same peer is not logged again.
 const AUTH_REMEMBER: Duration = Duration::from_secs(3600);
 const AUTH_CACHE_LIMIT: usize = 256;
-/// How long a PIN the engine took counts as entered for the Mac's retries:
-/// longer than the engine waits for the handshake.
-const PIN_TAKEN_FOR: Duration = Duration::from_secs(30);
 /// Ticks (of 5 s) between runs of `tailscale netcheck`: it takes seconds
 /// and the network does not move often.
 const NETCHECK_TICKS: u64 = 120;
@@ -61,8 +60,7 @@ pub struct Service {
     /// Whether the virtual display lists every screen size a viewer can ask for;
     /// `None` on a PC without one. See `virtual_display`.
     virtual_display: Mutex<Option<bool>>,
-    install: Mutex<Option<Install>>,
-    streamer: Mutex<Streamer>,
+    server: Mutex<Option<Arc<Server>>>,
     log: Arc<Mutex<VecDeque<String>>>,
     /// `whois` answers for recent peers: when, and whether they may ask.
     auth: Mutex<HashMap<IpAddr, (Instant, bool)>>,
@@ -88,15 +86,6 @@ pub struct Service {
     nat: Mutex<Option<NatReport>>,
     nat_running: AtomicBool,
     update_running: Arc<AtomicBool>,
-    /// A PIN the engine took and is pairing with, and when: the Mac's
-    /// retries for it are answered without asking the engine again, which
-    /// is busy with that very handshake.
-    pin_taken: Mutex<Option<(String, Instant)>>,
-    /// The last PIN refusal logged.
-    pin_refused: Mutex<Option<String>>,
-    /// Since when a session runs with nobody watching, on a desktop that
-    /// follows its viewer (see [`streamer::unwatched_close`]).
-    unwatched_since: Mutex<Option<Instant>>,
 }
 
 impl Service {
@@ -108,8 +97,7 @@ impl Service {
             wake: Mutex::new(WakeInfo::default()),
             wake_seen: Mutex::new(None),
             virtual_display: Mutex::new(None),
-            install: Mutex::new(None),
-            streamer: Mutex::new(Streamer::default()),
+            server: Mutex::new(None),
             log: Arc::new(Mutex::new(VecDeque::new())),
             auth: Mutex::new(HashMap::new()),
             whois_failed: Mutex::new(None),
@@ -123,9 +111,6 @@ impl Service {
             nat: Mutex::new(None),
             nat_running: AtomicBool::new(false),
             update_running: Arc::new(AtomicBool::new(false)),
-            pin_taken: Mutex::new(None),
-            pin_refused: Mutex::new(None),
-            unwatched_since: Mutex::new(None),
         }
     }
 
@@ -133,31 +118,40 @@ impl Service {
         push_log(&self.log, msg.into());
     }
 
-    /// End a session nobody has watched for [`streamer::UNWATCHED_CLOSE`]:
-    /// the engine then runs its prep command's undo, which puts a desktop
-    /// that follows its viewer back at its idle size.
-    fn end_unwatched_session(&self, cfg: &HostConfig, session: &streamer::Session) {
-        let mut since = self.unwatched_since.lock();
-        let (end, next) = streamer::unwatched_close(session, *since, Instant::now());
-        *since = next;
-        if end {
-            Api {
-                user: &cfg.sunshine_user,
-                pass: &cfg.sunshine_pass,
-            }
-            .close_app();
-            self.log(format!(
-                "nobody has watched for {} minutes: ended the session, so the desktop is back at its idle size",
-                streamer::UNWATCHED_CLOSE.as_secs() / 60
-            ));
+    fn someone_watching(&self) -> bool {
+        self.server
+            .lock()
+            .as_ref()
+            .is_some_and(|s| s.status().viewer.is_some())
+    }
+
+    fn stop_stream(&self) {
+        if let Some(server) = self.server.lock().as_ref() {
+            server.stop(end::HOST_STOPPING, "This host is stopping.");
         }
     }
 
-    /// A viewer is connected right now. A Desktop left running for the
-    /// viewer to resume does not count: see [`streamer::Session`].
-    fn someone_watching(&self) -> bool {
-        let install = self.install.lock().clone();
-        streamer::session(install.as_ref()).watched()
+    fn streaming_status(&self) -> Streamer {
+        let server = self.server.lock();
+        let status = server.as_ref().map(|s| s.status()).unwrap_or_default();
+        let encoder = if status.encoder.is_empty() {
+            streamer::encoder_description().to_string()
+        } else {
+            status.encoder
+        };
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        Streamer {
+            kind: latch_core::STREAMER_KIND.into(),
+            installed: true,
+            running: server.is_some(),
+            api_ok: true,
+            max_fps: streamer::max_fps(&encoder, cores),
+            encoder,
+            audio_problem: status.audio_problem,
+            capture_size: streamer::capture_size(),
+            viewer: status.viewer.is_some(),
+            protocol: latch_proto::PROTOCOL,
+        }
     }
 
     pub fn run_arc(self, replacing: bool) -> Result<()> {
@@ -205,8 +199,23 @@ impl Service {
                 Err(e) => return Err(e).context(format!("bind TCP {CONTROL_PORT}")),
             }
         };
+        crate::prep::migrate()?;
+        *self.cfg.lock() = HostConfig::load();
+        let owner = Arc::downgrade(&self);
+        let log = self.log.clone();
+        *self.server.lock() = Some(Server::bind(
+            CONTROL_PORT,
+            Options {
+                prepare: Some(Box::new(move |req| {
+                    let service = owner.upgrade().context("the host is stopping")?;
+                    let cfg = service.cfg.lock().clone();
+                    crate::prep::prepare(&cfg, req)
+                })),
+                log: Box::new(move |line| push_log(&log, line)),
+            },
+        )?);
         self.log(format!(
-            "Latch Host {} listening on TCP {CONTROL_PORT}",
+            "Latch Host {} listening on TCP and UDP {CONTROL_PORT}",
             env!("CARGO_PKG_VERSION")
         ));
         if let Ok(exe) = std::env::current_exe() {
@@ -320,166 +329,6 @@ impl Service {
             self.spawn_netcheck();
         }
 
-        let install = streamer::find();
-        let running = install.is_some() && streamer::running();
-        let cfg = self.cfg.lock().clone();
-        let api_ok = if running
-            && cfg.has_creds()
-            && (tick.is_multiple_of(6) || !self.streamer.lock().api_ok)
-        {
-            Api {
-                user: &cfg.sunshine_user,
-                pass: &cfg.sunshine_pass,
-            }
-            .ok()
-        } else {
-            running && self.streamer.lock().api_ok
-        };
-        // Apply the streaming profile on any engine Latch can log into,
-        // after any old app has ended. The marker survives panel/config saves;
-        // v4 drops Linux's frame-rate floor (see setup::LINUX_ENGINE_CONF).
-        if tick.is_multiple_of(6) && api_ok && install.is_some() {
-            if let Ok(dir) = latch_core::config::data_dir() {
-                let marker = dir.join("stream-profile-v4");
-                if !marker.exists() {
-                    let api = Api {
-                        user: &cfg.sunshine_user,
-                        pass: &cfg.sunshine_pass,
-                    };
-                    match api.upgrade_stream_profile(install.as_ref()) {
-                        Ok(true) => {
-                            if let Err(e) = std::fs::write(&marker, "1") {
-                                self.log(format!("could not save stream profile version: {e}"));
-                            }
-                            self.log(if cfg!(target_os = "linux") {
-                                "stream profile ready: constant bitrate, the viewer's frame rate"
-                            } else {
-                                "stream profile ready: match client display, constant bitrate, 60 fps"
-                            });
-                        }
-                        Ok(false) => {} // Retried once nobody watches.
-                        Err(e) => self.log(format!("stream profile could not be applied: {e:#}")),
-                    }
-                } else if cfg!(windows) {
-                    // Which display the engine captures is kept current all
-                    // along: the virtual display can come or change any time.
-                    let api = Api {
-                        user: &cfg.sunshine_user,
-                        pass: &cfg.sunshine_pass,
-                    };
-                    if let Some(install) = &install {
-                        match crate::virtual_display::follow(&api, install, &dir) {
-                            Ok(Some(changed)) => self.log(changed),
-                            Ok(None) => {}
-                            Err(e) => self.log(format!("capture display could not be set: {e:#}")),
-                        }
-                    }
-                }
-            }
-        }
-        // The encoder Sunshine picked and whether it could capture audio,
-        // from its log; re-read now and then since Sunshine restarts on
-        // its own after setup and every session tries the audio device.
-        // The X screen it captures is re-read with them: a VPS desktop can
-        // be restarted at another size.
-        let (encoder, audio_problem, capture_size) =
-            if tick.is_multiple_of(12) || self.streamer.lock().encoder.is_empty() {
-                let log = install.as_ref().and_then(streamer::log_text);
-                (
-                    log.as_deref()
-                        .and_then(streamer::encoder_in)
-                        .unwrap_or_default(),
-                    log.as_deref()
-                        .and_then(streamer::audio_problem_in)
-                        .unwrap_or_default(),
-                    streamer::capture_size(),
-                )
-            } else {
-                let cur = self.streamer.lock();
-                (
-                    cur.encoder.clone(),
-                    cur.audio_problem.clone(),
-                    cur.capture_size,
-                )
-            };
-        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-        let max_fps = streamer::max_fps(&encoder, cores);
-        // Whether someone watches, every other tick: a Mac holds a host
-        // update back while they do, and a desktop that follows its viewer
-        // goes back to its idle size once nobody has watched for a while.
-        let viewer = if running && tick.is_multiple_of(2) {
-            let session = streamer::session(install.as_ref());
-            if api_ok && streamer::display_follows_viewer() {
-                self.end_unwatched_session(&cfg, &session);
-            }
-            session.watched()
-        } else {
-            running && self.streamer.lock().viewer
-        };
-        let st = Streamer {
-            kind: install
-                .as_ref()
-                .map(|i| i.kind.to_string())
-                .unwrap_or_default(),
-            installed: install.is_some(),
-            running,
-            api_ok,
-            encoder,
-            audio_problem,
-            capture_size,
-            max_fps,
-            viewer,
-        };
-        {
-            let mut cur = self.streamer.lock();
-            if (cur.installed, cur.running, cur.api_ok) != (st.installed, st.running, st.api_ok) {
-                self.log(match (&st.installed, &st.running, &st.api_ok) {
-                    (false, _, _) => "the streaming engine is not installed".to_string(),
-                    (true, false, _) => "Latch is installed but not sharing yet".to_string(),
-                    (true, true, false) => {
-                        "Latch is running; the streaming engine has no working login yet".into()
-                    }
-                    (true, true, true) => "Latch is sharing this machine".to_string(),
-                });
-            }
-            if cur.encoder != st.encoder && !st.encoder.is_empty() {
-                self.log(if st.encoder == "software" {
-                    "encoding in software (no GPU encoder); using every CPU core".into()
-                } else {
-                    format!("encoding with {}", st.encoder)
-                });
-            }
-            if cur.audio_problem != st.audio_problem {
-                self.log(if st.audio_problem.is_empty() {
-                    "audio capture is working again".into()
-                } else {
-                    format!(
-                        "no sound to send: {}. A PC with no monitor or speakers needs a virtual audio device",
-                        st.audio_problem
-                    )
-                });
-            }
-            *cur = st;
-        }
-        *self.install.lock() = install;
-        if tick.is_multiple_of(6) {
-            let install = self.install.lock().clone();
-            if let Some(install) = install {
-                #[cfg(windows)]
-                if let Err(e) = crate::cursor::start() {
-                    tracing::debug!("cursor bounds: {e:#}");
-                }
-                let audio_problem = self.streamer.lock().audio_problem.clone();
-                if !streamer::running() {
-                    if let Err(e) = streamer::start(&install) {
-                        self.log(format!("streaming engine: {e:#}"));
-                    }
-                } else if cfg!(windows) {
-                    crate::audio::retry_take_over(&audio_problem);
-                }
-            }
-        }
-
         if tick.is_multiple_of(12) {
             *self.name.lock() = latch_core::config::machine_name();
             let w = wake::probe();
@@ -552,12 +401,14 @@ impl Service {
             // launchd and systemd restart a service that failed, from the
             // path the new program is at.
             self.log("Latch was reinstalled; the service restarts into the new copy");
+            self.stop_stream();
             std::process::exit(75);
         }
         // Once: a new copy that cannot start is not retried every minute.
         self.reinstall_tried.store(true, Ordering::Release);
         match update::hand_over(stamp.path(), update::STARTUP_GRACE) {
             Ok(_) => {
+                self.stop_stream();
                 self.log("Latch was reinstalled; the new copy takes over the service");
                 std::process::exit(0);
             }
@@ -610,27 +461,13 @@ impl Service {
         let cfg = self.cfg.lock().clone();
         let ts = self.tailscale.lock();
         let wake = self.wake.lock().clone();
-        let streamer = self.streamer.lock().clone();
+        let streamer = self.streaming_status();
         let mut setup = Vec::new();
         if let Err(e) = &*ts {
             setup.push(format!("Tailscale: {e}. Install it and sign in."));
         }
-        if !streamer.installed {
-            setup.push("The streaming engine is not installed.".into());
-        } else if !streamer.running {
-            setup.push("The streaming engine is installed but not running.".into());
-        } else if !streamer.api_ok {
-            setup.push("Latch has no working login for the streaming engine.".into());
-        } else if cfg!(windows)
-            && latch_core::legacy::is_own_streamer_kind(&streamer.kind)
-            && !crate::streamer::find()
-                .is_some_and(|install| crate::brand::is_branded_cached(&install.dir))
-        {
-            setup.push(
-                "The streaming engine still shows its upstream name and icon in Task Manager."
-                    .into(),
-            );
-        }
+        #[cfg(target_os = "macos")]
+        setup.extend(crate::unix_setup::permission_items());
         if wake.magic_packet == Some(false) {
             setup.push(format!("Wake-on-LAN is off on {}.", wake.adapter));
         }
@@ -856,7 +693,7 @@ impl Service {
             ("GET", "/v1/status") => Response::json(200, &self.status(local)),
             ("GET", "/v1/display") => Response::json(200, &self.display()),
             ("POST", "/v1/display") => self.set_display(peer.ip(), req),
-            ("POST", "/v1/pin") => self.pin(peer.ip(), req),
+            ("POST", p) if p == control::PATH => self.stream(peer, req),
             ("POST", "/v1/power") => self.power(peer.ip(), req),
             ("POST", p) if p == UPDATE_PATH => self.update(peer.ip(), req),
             ("GET", p) if p == CLIPBOARD_PATH => match clipboard::read() {
@@ -871,6 +708,7 @@ impl Service {
                 Err(_) => Response::json(400, &Ack::err("expected {\"text\"}")),
             },
             ("POST", "/v1/quit") if local => {
+                self.stop_stream();
                 self.log("control panel asked the service to stop");
                 std::thread::spawn(|| {
                     std::thread::sleep(Duration::from_millis(300));
@@ -910,7 +748,7 @@ impl Service {
         if self.update_running.swap(true, Ordering::AcqRel) {
             return Response::json(409, &Ack::err("an update is already being installed"));
         }
-        let engine_running = self.streamer.lock().running;
+        let engine_running = self.server.lock().is_some();
         if update::refuse_self_update(engine_running, self.someone_watching()) {
             self.update_running.store(false, Ordering::Release);
             self.log("update deferred: a stream is running");
@@ -937,6 +775,7 @@ impl Service {
                 self.log(format!(
                     "updating to {version}: {from} sent the new Latch Host (SHA-256 {sha})"
                 ));
+                let server = self.server.lock().clone();
                 let running = self.update_running.clone();
                 let log = self.log.clone();
                 std::thread::spawn(move || {
@@ -946,6 +785,9 @@ impl Service {
                             if let Err(e) = update::start_probation(&exe, &h, &version.to_string())
                             {
                                 tracing::warn!("{e:#}");
+                            }
+                            if let Some(server) = server {
+                                server.stop(end::HOST_STOPPING, "This host is updating.");
                             }
                             tracing::info!("handing over to {version}");
                             std::process::exit(0);
@@ -966,88 +808,34 @@ impl Service {
         }
     }
 
-    fn pin(&self, from: IpAddr, req: &Request) -> Response {
-        let Ok(p) = req.json::<PinRequest>() else {
-            return Response::json(400, &Ack::err("expected {\"pin\",\"name\"}"));
+    fn stream(&self, peer: SocketAddr, req: &Request) -> Response {
+        if req.header("upgrade") != Some(control::UPGRADE) {
+            return Response::json(400, &Ack::err("expected the Latch stream Upgrade header"));
+        }
+        let request = match req.json::<StreamRequest>() {
+            Ok(request) => request,
+            Err(_) => return Response::json(400, &Ack::err("expected a stream request")),
         };
-        if p.pin.len() != 4 || !p.pin.chars().all(|c| c.is_ascii_digit()) {
-            return Response::json(400, &Ack::err("the PIN is four digits"));
-        }
-        let cfg = self.cfg.lock().clone();
-        if !cfg.has_creds() || !self.streamer.lock().api_ok {
-            return Response::json(
-                502,
-                &Ack::err(
-                    "Latch cannot log in to the streaming engine on this PC; run setup there",
-                ),
-            );
-        }
-        if self
-            .pin_taken
-            .lock()
-            .as_ref()
-            .is_some_and(|(pin, at)| *pin == p.pin && at.elapsed() < PIN_TAKEN_FOR)
-        {
-            return Response::json(200, &Ack::ok());
-        }
-        let api = Api {
-            user: &cfg.sunshine_user,
-            pass: &cfg.sunshine_pass,
+        let Some(server) = self.server.lock().clone() else {
+            return Response::json(503, &Ack::err("the stream server is not listening"));
         };
-        match api.submit_pin(&p.pin, &p.name, from) {
-            Ok(streamer::Pin::Paired) => {
-                self.log(format!("paired \"{}\"", p.name));
-                Response::json(200, &Ack::ok())
+        match server.prepare(request, peer) {
+            Ok(prepared) => {
+                Response::switching(control::UPGRADE, move |tcp| server.run(prepared, tcp))
             }
-            Ok(streamer::Pin::Taken) => {
-                *self.pin_taken.lock() = Some((p.pin.clone(), Instant::now()));
-                self.log(format!(
-                    "PIN from \"{}\" entered; it finishes pairing itself",
-                    p.name
-                ));
-                Response::json(200, &Ack::ok())
-            }
-            Ok(streamer::Pin::NotYet) => {
-                // Not an error: the Mac retries within a second. A 200 with
-                // the reason is what it shows while it waits; any other
-                // status reads to it as "Latch isn't answering".
-                Response::json(
-                    200,
-                    &Ack::err(
-                        "waiting for this machine's pairing request to reach the streaming engine",
-                    ),
-                )
-            }
-            Err(e) => {
-                // The Mac retries every second for over a minute; one line
-                // per reason, not one per retry.
-                let line = format!("PIN from \"{}\" refused: {e:#}", p.name);
-                let mut last = self.pin_refused.lock();
-                if last.as_deref() != Some(line.as_str()) {
-                    self.log(line.clone());
-                    *last = Some(line);
-                }
-                Response::json(502, &Ack::err(e.to_string()))
-            }
+            Err(refusal) => Response::json(refusal.status, &Ack::err(refusal.message)),
         }
     }
 
     /// Everything that decides whether a capture can see the desktop.
     fn display(&self) -> serde_json::Value {
-        let cfg = self.cfg.lock().clone();
         let windows =
             crate::display::probe().unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}));
         let color = crate::display::advanced_color()
             .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}));
-        let sunshine = Api {
-            user: &cfg.sunshine_user,
-            pass: &cfg.sunshine_pass,
-        }
-        .display_diagnostics();
         serde_json::json!({
             "windows": windows,
             "advanced_color": color,
-            "sunshine": sunshine,
         })
     }
 
@@ -1099,13 +887,7 @@ impl Service {
             self.log(format!("{what} requested by {from}, refused: {why}"));
             return Response::json(200, &Ack::err(why));
         }
-        if cfg.has_creds() {
-            Api {
-                user: &cfg.sunshine_user,
-                pass: &cfg.sunshine_pass,
-            }
-            .close_app();
-        }
+        self.stop_stream();
         self.log(format!("{what} requested by {from}"));
         if cfg!(target_os = "macos") && action != PowerAction::Sleep {
             // System Events answers at once, or not without someone at the
@@ -1158,7 +940,7 @@ pub fn describe_nat(n: &NatReport) -> String {
 /// The settings to run on after re-reading host.toml: the file's when it
 /// reads, else the last good ones, never defaults. A hand edit with a typo
 /// (or a read mid-save) used to move the file aside and run with remote
-/// power allowed and no engine login until someone noticed. Returns the
+/// power allowed and default settings until someone noticed. Returns the
 /// line to log: once per problem, and once when it is fixed.
 fn next_config(
     prev: HostConfig,
@@ -1549,7 +1331,7 @@ mod tests {
         assert!(pc.admits(&mac), "the owner's Mac");
         assert!(
             !pc.admits(&friend),
-            "a shared-in machine may not pair, sleep or update the PC"
+            "a shared-in machine may not stream, sleep or update the PC"
         );
         assert!(
             !pc.admits(&relay),
@@ -1646,8 +1428,6 @@ mod tests {
     fn a_damaged_host_toml_keeps_the_last_good_settings() {
         let good = HostConfig {
             power_allowed: false,
-            sunshine_user: "latch".into(),
-            sunshine_pass: "secret".into(),
             ..Default::default()
         };
         let mut problem = None;
@@ -1656,7 +1436,7 @@ mod tests {
             Err(anyhow::anyhow!("expected `=`")),
             &mut problem,
         );
-        assert_eq!(cfg, good, "power stays off and the engine login stays");
+        assert_eq!(cfg, good, "power stays off");
         assert!(line.unwrap().contains("expected `=`"));
         // The same problem every 5 s is said once.
         let (cfg, line) = next_config(cfg, Err(anyhow::anyhow!("expected `=`")), &mut problem);
@@ -1781,7 +1561,7 @@ mod tests {
     }
 
     #[test]
-    fn pin_and_power_validate_their_bodies() {
+    fn stream_and_power_validate_their_bodies() {
         let svc = Service::new();
         let local: SocketAddr = "127.0.0.1:5".parse().unwrap();
         let post = |path: &str, body: &str| Request {
@@ -1790,18 +1570,18 @@ mod tests {
             headers: json_header(),
             body: body.into(),
         };
-        assert_eq!(svc.handle(local, &post("/v1/pin", "{}")).status, 400);
+        assert_eq!(svc.handle(local, &post(control::PATH, "{}")).status, 400);
+        let mut bad = post(control::PATH, "not json");
+        bad.headers
+            .push(("upgrade".into(), control::UPGRADE.into()));
+        assert_eq!(svc.handle(local, &bad).status, 400);
         assert_eq!(
-            svc.handle(local, &post("/v1/pin", r#"{"pin":"12","name":"m"}"#))
-                .status,
-            400
+            svc.handle("192.168.1.11:5".parse().unwrap(), &bad).status,
+            403
         );
-        // Valid shape, but no Sunshine login on this box: a 502, not a crash.
-        assert_eq!(
-            svc.handle(local, &post("/v1/pin", r#"{"pin":"1234","name":"m"}"#))
-                .status,
-            502
-        );
+        bad.headers.retain(|(key, _)| key != "upgrade");
+        bad.headers.push(("upgrade".into(), "other/1".into()));
+        assert_eq!(svc.handle(local, &bad).status, 400);
         assert_eq!(
             svc.handle(local, &post("/v1/power", r#"{"action":"nap"}"#))
                 .status,
@@ -1851,7 +1631,13 @@ mod tests {
             Some("application/x-www-form-urlencoded"),
             Some("multipart/form-data; boundary=x"),
         ] {
-            for path in ["/v1/power", "/v1/quit", CLIPBOARD_PATH, UPDATE_PATH] {
+            for path in [
+                "/v1/power",
+                "/v1/quit",
+                CLIPBOARD_PATH,
+                UPDATE_PATH,
+                control::PATH,
+            ] {
                 let mut headers = Vec::new();
                 if let Some(ct) = ct {
                     headers.push(("content-type".to_string(), ct.to_string()));

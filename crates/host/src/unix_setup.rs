@@ -1,271 +1,53 @@
-//! Install and start the streaming engine on macOS and Linux.
-//!
-//! Windows still uses the elevated PowerShell script. Here there is no UAC
-//! prompt: Latch unpacks Sunshine next to its own data, writes the same
-//! conf keys, and keeps the process up from the background service.
-
+//! Sharing setup and the platform's login service.
+use crate::setup::Plan;
 use anyhow::{bail, Context, Result};
-#[cfg(target_os = "macos")]
-use latch_core::update::sha256_hex;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
 
-use crate::setup::{conceal_conf, Plan, DESKTOP_APPS_JSON};
-use crate::streamer::{self, Install};
-
-pub const MAC_DMG: &str = "Sunshine-macOS-arm64.dmg";
-pub const MAC_DMG_SHA256: &str = "b630d35a184d8eaff39c5104f3c6a0c40e91ddc447ccf7a0c5b24706465fab6a";
-
-/// Sunshine v2026.906 stores SHA-256(password + salt) as reversed uppercase
-/// hexadecimal (http::save_user_creds / util::Hex). A separate credentials file
-/// avoids modifying its paired-client state and keeps secrets out of argv.
-fn write_engine_login(path: &Path, user: &str, password: &str) -> Result<()> {
-    use std::io::Write;
-    let salt = crate::config::random_password();
-    let hash = latch_core::update::sha256_hex(format!("{password}{salt}").as_bytes());
-    let hash: String = hash
-        .as_bytes()
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .rev()
-        .map(|pair| std::str::from_utf8(pair).expect("hex"))
-        .collect::<String>()
-        .to_uppercase();
-    let body =
-        serde_json::to_vec(&serde_json::json!({"username":user, "salt":salt, "password":hash}))?;
-    let tmp = path.with_extension(format!("{}.tmp", crate::config::random_password()));
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let result = (|| -> Result<()> {
-        let mut file = options.open(&tmp)?;
-        file.write_all(&body)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&tmp, path)?;
+pub fn run(p: &Plan<'_>) -> Result<()> {
+    let result = (|| {
+        crate::prep::migrate()?;
+        #[cfg(target_os = "macos")]
+        request_permissions();
+        #[cfg(target_os = "linux")]
+        retire_engine()?;
+        set_autostart(true, p.exe)?;
+        #[cfg(target_os = "macos")]
+        if firewall_blocks(p.exe) {
+            allow_through_firewall(p.exe)?;
+        }
         Ok(())
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
+    if let Some(log) = crate::setup::log_path() {
+        let text = match &result {
+            Ok(()) => {
+                "Sharing setup finished. Permission changes may need an app restart.".to_string()
+            }
+            Err(e) => format!("Sharing setup failed: {e:#}"),
+        };
+        let _ = fs::write(log, text + "\n");
     }
     result
 }
 
-pub fn engine_dir() -> Result<PathBuf> {
-    Ok(latch_core::config::data_dir()?.join("engine"))
-}
-
-pub fn conf_path() -> Result<PathBuf> {
-    Ok(engine_dir()?.join("config").join("sunshine.conf"))
-}
-
-/// The engine login file an earlier version wrote, and what it is called now.
-const OLD_LOGIN_FILE: &str = "brolink-web.json";
-const LOGIN_FILE: &str = "latch-web.json";
-
-/// An install that an older version set up has two things in the engine's
-/// `sunshine.conf` that name it: the engine login file under its old
-/// filename wherever setup put it, and any path
-/// under the old data folder, which this copy has moved. Point both at what
-/// is there now, and rename the login file, so the engine finds the login
-/// it was set up with. Nothing happens on an install that was never moved.
-pub fn repair_adopted_engine_config() {
-    let (Ok(conf), Ok(data), Some(old)) = (
-        conf_path(),
-        latch_core::config::data_dir(),
-        latch_core::legacy::data_dir(),
-    ) else {
-        return;
-    };
-    repair_conf(
-        &conf,
-        &old.display().to_string(),
-        &data.display().to_string(),
-    );
-}
-
-/// [`repair_adopted_engine_config`] for the conf at `conf`, with the old and
-/// the new data folder as strings.
-fn repair_conf(conf: &Path, old: &str, data: &str) {
-    let Ok(text) = fs::read_to_string(conf) else {
-        return;
-    };
-    let fixed: Vec<String> = text
-        .lines()
-        .map(|line| match line.split_once('=') {
-            Some((key, value)) if key.trim() == "credentials_file" => {
-                let path = PathBuf::from(value.trim().replace(old, data));
-                if path.file_name().is_some_and(|n| n == OLD_LOGIN_FILE) {
-                    let renamed = path.with_file_name(LOGIN_FILE);
-                    if path.exists() && !renamed.exists() {
-                        let _ = fs::rename(&path, &renamed);
-                    }
-                    return format!("credentials_file = {}", renamed.display());
-                }
-                format!("credentials_file = {}", path.display())
-            }
-            _ => line.replace(old, data),
-        })
-        .collect();
-    let fixed = fixed.join("\n") + "\n";
-    if fixed != text {
-        let _ = fs::write(conf, fixed);
-    }
-}
-
-/// Candidate engine installs, Latch's copy first.
-pub fn candidates() -> Vec<Install> {
-    let mut v = Vec::new();
-    if let Ok(dir) = engine_dir() {
-        v.push(Install { kind: "Latch", dir });
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // Latch's renamed engine binary, then the distro package we wrap.
-        for p in ["/usr/local/bin", "/usr/bin"] {
-            v.push(Install {
-                kind: "Latch",
-                dir: PathBuf::from(p),
-            });
+#[cfg(target_os = "linux")]
+fn retire_engine() -> Result<()> {
+    for unit in ["latch-engine.service", "brolink-engine.service"] {
+        let _ = systemctl_user(&["disable", "--now", unit]);
+        let file = dirs_home()?.join(".config/systemd/user").join(unit);
+        if file.exists() {
+            fs::remove_file(file)?;
         }
     }
-    v
-}
-
-/// The names the engine's program may have, Latch's first, an earlier
-/// version's after it, and Sunshine's own last.
-fn engine_exe_names() -> impl Iterator<Item = &'static str> {
-    ["LatchStreaming", "latch-engine"]
-        .into_iter()
-        .chain(crate::legacy::ENGINE_EXE_NAMES)
-        .chain(std::iter::once("sunshine"))
-}
-
-pub fn exe_in(dir: &Path) -> PathBuf {
-    for name in engine_exe_names() {
-        let app = dir.join("Contents/MacOS").join(name);
-        if app.exists() {
-            return app;
-        }
-        let nested = dir.join("Sunshine.app/Contents/MacOS").join(name);
-        if nested.exists() {
-            return nested;
-        }
-        let bin = dir.join(name);
-        if bin.exists() {
-            return bin;
-        }
+    let _ = systemctl_user(&["daemon-reload"]);
+    let old = dirs_home()?.join(".config/sunshine");
+    if old.exists() {
+        fs::remove_dir_all(old)?;
     }
-    dir.join("latch-engine")
-}
-
-pub fn run(p: &Plan<'_>) -> Result<()> {
-    let log =
-        crate::setup::log_path().unwrap_or_else(|| std::env::temp_dir().join("latch-setup.log"));
-    let mut lines = Vec::new();
-    let result = run_inner(p, &mut lines);
-    let body = lines.join("\n") + "\n";
-    let _ = fs::write(&log, &body);
-    result.with_context(|| format!("see {}", log.display()))
-}
-
-fn run_inner(p: &Plan<'_>, log: &mut Vec<String>) -> Result<()> {
-    fn step(log: &mut Vec<String>, msg: impl Into<String>) {
-        let msg = msg.into();
-        tracing::info!("{msg}");
-        log.push(msg);
-    }
-
-    let dir = engine_dir()?;
-    fs::create_dir_all(dir.join("config")).context("engine config dir")?;
-    step(log, format!("engine directory {}", dir.display()));
-
-    if p.install_engine || streamer::find().is_none() {
-        install_engine(&dir, log)?;
-    }
-
-    // A native Linux node (deploy/native, stuzha) runs the engine as a
-    // systemd user unit, with the desktop's environment and its priority.
-    // Killing it there stopped the unit for good (a clean exit is no
-    // failure to restart from), and the copy started here instead lacked
-    // DISPLAY when setup ran over SSH: every stream failed while the port
-    // still answered.
-    let unit = engine_unit();
-    if unit.is_none() {
-        stop_engine();
-    }
-    let conf = conf_path()?;
-    let existing = fs::read_to_string(&conf).unwrap_or_default();
-    let credentials = conf.with_file_name(LOGIN_FILE);
-    let profile = conceal_conf(&existing)
-        .lines()
-        .filter(|line| {
-            line.split_once('=')
-                .is_none_or(|(key, _)| key.trim() != "credentials_file")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(
-        &conf,
-        format!("{profile}\ncredentials_file = {}\n", credentials.display()),
-    )
-    .context("write sunshine.conf")?;
-    let apps = conf
-        .parent()
-        .map(|p| p.join("apps.json"))
-        .unwrap_or_else(|| dir.join("config").join("apps.json"));
-    fs::write(&apps, DESKTOP_APPS_JSON).context("write apps.json")?;
-    step(
-        log,
-        "wrote streaming profile (constant bitrate, Tailscale packet size)",
-    );
-
-    let Some(install) = streamer::find() else {
-        bail!("the streaming engine is not installed");
-    };
-    if !p.sunshine_user.is_empty() && !p.sunshine_pass.is_empty() {
-        write_engine_login(&credentials, p.sunshine_user, p.sunshine_pass)?;
-        step(log, "engine login set");
-    }
-
-    if let Some(unit) = unit {
-        // Through `Requires=`, Latch's own unit restarts with it.
-        anyhow::ensure!(
-            systemctl_user(&["restart", unit])?,
-            "systemctl --user restart {unit} failed"
-        );
-        // Its start may wait for the X screen first.
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while !streamer::running() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(250));
-        }
-        anyhow::ensure!(streamer::running(), "{unit} did not start listening");
-        step(
-            log,
-            format!("restarted the streaming engine's unit, {unit}"),
-        );
-    } else {
-        stop_engine();
-        std::thread::sleep(Duration::from_millis(400));
-        streamer::start(&install).context("start streaming engine")?;
-        step(log, "streaming engine started");
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        set_autostart(true, &exe)?;
-        step(log, "Latch starts at login so others can connect");
-        #[cfg(target_os = "macos")]
-        if firewall_blocks(&exe) {
-            allow_through_firewall(&exe)?;
-            step(log, "the macOS firewall lets other machines reach Latch");
-        }
+    let engine = latch_core::config::data_dir()?.join("engine");
+    if engine.exists() {
+        fs::remove_dir_all(engine)?;
     }
     Ok(())
 }
@@ -331,204 +113,6 @@ fn firewall_allow_script(exe: &str) -> String {
     )
 }
 
-fn install_engine(dir: &Path, log: &mut Vec<String>) -> Result<()> {
-    if exe_in(dir).exists() {
-        log.push("engine already unpacked".into());
-        return Ok(());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        install_macos(dir, log)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if engine_exe_names().any(|n| which(n).is_some()) {
-            log.push("using the system streaming engine".into());
-            return Ok(());
-        }
-        bail!(
-            "the streaming engine is not installed. On this VPS use the Latch node Docker image, or run setup again."
-        );
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = (dir, log);
-        bail!("no streaming engine for this OS");
-    }
-}
-
-/// Rename the engine so it does not appear as a second app in the Dock
-/// or Activity Monitor. The on-disk `.app` folder keeps its upstream name
-/// because the engine looks up resources next to that bundle.
-pub fn conceal_info_plist(xml: &str) -> String {
-    let mut xml = set_plist_string(xml, "CFBundleName", "Latch");
-    xml = set_plist_string(&xml, "CFBundleDisplayName", "Latch");
-    xml = set_plist_string(&xml, "CFBundleExecutable", "LatchStreaming");
-    if xml.contains("LSUIElement") {
-        xml
-    } else {
-        xml.replacen("</dict>", "  <key>LSUIElement</key>\n  <true/>\n</dict>", 1)
-    }
-}
-
-fn set_plist_string(xml: &str, key: &str, value: &str) -> String {
-    let needle = format!("<key>{key}</key>");
-    let Some(at) = xml.find(&needle) else {
-        return xml.to_string();
-    };
-    let rest = &xml[at + needle.len()..];
-    let Some(s) = rest.find("<string>") else {
-        return xml.to_string();
-    };
-    let inner = s + 8;
-    let Some(e) = rest[inner..].find("</string>") else {
-        return xml.to_string();
-    };
-    let start = at + needle.len() + inner;
-    let end = start + e;
-    format!("{}{value}{}", &xml[..start], &xml[end..])
-}
-
-#[cfg(target_os = "macos")]
-fn install_macos(dir: &Path, log: &mut Vec<String>) -> Result<()> {
-    let dest = dir.join("Sunshine.app");
-    if engine_exe_names().any(|n| dest.join("Contents/MacOS").join(n).exists()) {
-        conceal_engine_bundle(&dest)?;
-        log.push("streaming engine already unpacked".into());
-        return Ok(());
-    }
-    let dmg = dir.join(MAC_DMG);
-    let url = format!(
-        "https://github.com/LizardByte/Sunshine/releases/download/{}/{MAC_DMG}",
-        crate::setup::ENGINE_TAG
-    );
-    log.push("downloading the streaming engine".into());
-    let status = Command::new("curl")
-        .args(["-fsSL", "-A", "latch", "-o"])
-        .arg(&dmg)
-        .arg(&url)
-        .status()
-        .context("download streaming engine")?;
-    anyhow::ensure!(status.success(), "download of the streaming engine failed");
-    let bytes = fs::read(&dmg).context("read engine archive")?;
-    let got = sha256_hex(&bytes);
-    anyhow::ensure!(
-        got.eq_ignore_ascii_case(MAC_DMG_SHA256),
-        "streaming engine digest mismatch: expected {MAC_DMG_SHA256}, got {got}"
-    );
-    let mount = std::env::temp_dir().join(format!("latch-engine-{}", std::process::id()));
-    let _ = fs::create_dir_all(&mount);
-    let attach = Command::new("hdiutil")
-        .args(["attach", "-nobrowse", "-readonly", "-mountpoint"])
-        .arg(&mount)
-        .arg(&dmg)
-        .status()
-        .context("hdiutil attach")?;
-    anyhow::ensure!(attach.success(), "could not mount the streaming engine");
-    let copied = (|| {
-        let src = mount.join("Sunshine.app");
-        anyhow::ensure!(src.is_dir(), "engine app missing from the disk image");
-        let _ = fs::remove_dir_all(&dest);
-        let status = Command::new("cp")
-            .args(["-R"])
-            .arg(&src)
-            .arg(&dest)
-            .status()
-            .context("copy streaming engine")?;
-        anyhow::ensure!(status.success(), "copy of the streaming engine failed");
-        Ok(())
-    })();
-    let _ = Command::new("hdiutil")
-        .args(["detach", "-quiet"])
-        .arg(&mount)
-        .status();
-    let _ = fs::remove_file(&dmg);
-    copied?;
-    conceal_engine_bundle(&dest)?;
-    log.push("streaming engine unpacked into Latch's data folder".into());
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn conceal_engine_bundle(app: &Path) -> Result<()> {
-    let macos = app.join("Contents/MacOS");
-    let dest = macos.join("LatchStreaming");
-    // Upstream's name, or the name an earlier version gave it.
-    for from in ["sunshine", "BroLinkStreaming"] {
-        let src = macos.join(from);
-        if src.exists() && !dest.exists() {
-            fs::rename(&src, &dest).context("rename engine binary")?;
-        }
-    }
-    let plist = app.join("Contents/Info.plist");
-    if plist.exists() {
-        let xml = fs::read_to_string(&plist).unwrap_or_default();
-        fs::write(&plist, conceal_info_plist(&xml)).context("write engine Info.plist")?;
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn which(name: &str) -> Option<PathBuf> {
-    Command::new("which")
-        .arg(name)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-}
-
-/// The systemd user unit that runs the engine on this machine, when there is
-/// one: then the engine is systemd's to stop and start, never Latch's.
-pub fn engine_unit() -> Option<&'static str> {
-    #[cfg(target_os = "linux")]
-    {
-        const UNIT: &str = "latch-engine.service";
-        let out = Command::new("systemctl")
-            .args([
-                "--user",
-                "show",
-                "-p",
-                "LoadState",
-                "-p",
-                "UnitFileState",
-                UNIT,
-            ])
-            .stderr(Stdio::null())
-            .output()
-            .ok()
-            .filter(|o| o.status.success())?;
-        unit_installed(&String::from_utf8_lossy(&out.stdout)).then_some(UNIT)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
-
-/// `systemctl show -p LoadState -p UnitFileState` of a unit that exists
-/// and is not masked. ("not-found" when nobody installed one.)
-#[cfg(any(target_os = "linux", test))]
-fn unit_installed(show: &str) -> bool {
-    show.lines().any(|l| l.trim() == "LoadState=loaded")
-}
-
-pub fn stop_engine() {
-    for name in engine_exe_names() {
-        let _ = Command::new("pkill")
-            .args(["-x", name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-}
-
-/// Register or remove the login item from the control panel. Turning it on
-/// also loads it now unless launchd or systemd already has it; turning it
-/// off only removes the file, so a service they are running now keeps
-/// running until logout.
 pub fn set_autostart(enable: bool, exe: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -1234,138 +818,71 @@ mod tests {
             "{script}"
         );
     }
+}
 
-    #[test]
-    fn an_engine_systemd_runs_is_left_to_systemd() {
-        assert!(unit_installed("LoadState=loaded\nUnitFileState=static\n"));
-        assert!(unit_installed("LoadState=loaded\nUnitFileState=enabled\n"));
-        assert!(!unit_installed("LoadState=not-found\nUnitFileState=\n"));
-        assert!(!unit_installed("LoadState=masked\nUnitFileState=masked\n"));
-        assert!(!unit_installed(""));
+#[cfg(target_os = "macos")]
+mod permissions {
+    use std::ffi::c_void;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRequestScreenCaptureAccess() -> bool;
     }
-
-    #[test]
-    fn an_older_installs_engine_login_is_found_under_its_new_name() {
-        let dir = std::env::temp_dir().join(format!("latch-repair-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let conf = dir.join("sunshine.conf");
-        let old_login = dir.join("brolink-web.json");
-        fs::write(&old_login, "{}").unwrap();
-        fs::write(
-            &conf,
-            format!(
-                "origin_web_ui_allowed = pc\ncredentials_file = {}\nlog_path = /old/share/brolink/sunshine.log\n",
-                old_login.display()
-            ),
-        )
-        .unwrap();
-        repair_conf(&conf, "/old/share/brolink", "/new/share/latch");
-        let fixed = fs::read_to_string(&conf).unwrap();
-        assert!(
-            fixed.contains(&format!(
-                "credentials_file = {}",
-                dir.join("latch-web.json").display()
-            )),
-            "{fixed}"
-        );
-        assert!(
-            fixed.contains("log_path = /new/share/latch/sunshine.log"),
-            "{fixed}"
-        );
-        assert!(fixed.contains("origin_web_ui_allowed = pc"), "{fixed}");
-        assert!(dir.join("latch-web.json").exists() && !old_login.exists());
-        // A second pass changes nothing.
-        repair_conf(&conf, "/old/share/brolink", "/new/share/latch");
-        assert_eq!(fs::read_to_string(&conf).unwrap(), fixed);
-        fs::remove_dir_all(&dir).unwrap();
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+        fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
+        static kAXTrustedCheckOptionPrompt: *const c_void;
     }
-
-    #[test]
-    fn engine_login_uses_sunshine_hash_format_without_plaintext() {
-        let dir =
-            std::env::temp_dir().join(format!("latch-login-{}", crate::config::random_password()));
-        fs::create_dir(&dir).unwrap();
-        let path = dir.join("login.json");
-        write_engine_login(&path, "user", "secret").unwrap();
-        let text = fs::read_to_string(&path).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert!(!text.contains("secret"));
-        assert_eq!(value["username"], "user");
-        let expected = latch_core::update::sha256_hex(
-            format!("secret{}", value["salt"].as_str().unwrap()).as_bytes(),
-        );
-        let stored = value["password"].as_str().unwrap();
-        let reversed: String = stored
-            .as_bytes()
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .rev()
-            .map(|b| std::str::from_utf8(b).unwrap())
-            .collect();
-        assert_eq!(reversed.to_lowercase(), expected);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static kCFBooleanTrue: *const c_void;
+        fn CFDictionaryCreate(
+            allocator: *const c_void,
+            keys: *const *const c_void,
+            values: *const *const c_void,
+            count: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> *const c_void;
+        fn CFRelease(value: *const c_void);
+    }
+    pub fn items() -> Vec<String> {
+        let mut items = Vec::new();
+        unsafe {
+            if !CGPreflightScreenCaptureAccess() {
+                items.push("Allow Latch to record the screen in System Settings → Privacy & Security → Screen Recording.".into());
+            }
+            if !AXIsProcessTrusted() {
+                items.push("Allow Latch in System Settings → Privacy & Security → Accessibility to use the keyboard and mouse.".into());
+            }
         }
-        fs::remove_dir_all(dir).unwrap();
+        items
     }
+    pub fn request() {
+        unsafe {
+            CGRequestScreenCaptureAccess();
+            let options = CFDictionaryCreate(
+                std::ptr::null(),
+                &kAXTrustedCheckOptionPrompt,
+                &kCFBooleanTrue,
+                1,
+                std::ptr::null(),
+                std::ptr::null(),
+            );
+            if !options.is_null() {
+                AXIsProcessTrustedWithOptions(options);
+                CFRelease(options);
+            }
+        }
+    }
+}
 
-    #[test]
-    fn mac_dmg_pin_is_64_hex() {
-        assert_eq!(MAC_DMG_SHA256.len(), 64);
-        assert_eq!(MAC_DMG, "Sunshine-macOS-arm64.dmg");
-        assert!(!crate::setup::ENGINE_TAG.is_empty());
-        assert!(crate::setup::ENGINE_CONF
-            .iter()
-            .any(|(k, v)| *k == "amd_rc" && *v == "cbr"));
-        assert!(crate::setup::ENGINE_CONF
-            .iter()
-            .any(|(k, v)| *k == "sw_preset" && *v == "ultrafast"));
-        assert!(crate::setup::ENGINE_CONF
-            .iter()
-            .any(|(k, v)| *k == "amd_quality" && *v == "speed"));
-    }
-
-    #[test]
-    fn exe_in_prefers_app_bundle_then_bare_binary() {
-        let tmp = std::env::temp_dir().join(format!("latch-exe-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(tmp.join("Sunshine.app/Contents/MacOS")).unwrap();
-        fs::write(tmp.join("Sunshine.app/Contents/MacOS/sunshine"), b"").unwrap();
-        assert!(exe_in(&tmp).ends_with("Contents/MacOS/sunshine"));
-        fs::write(tmp.join("Sunshine.app/Contents/MacOS/LatchStreaming"), b"").unwrap();
-        assert!(exe_in(&tmp).ends_with("Contents/MacOS/LatchStreaming"));
-        let _ = fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn conceal_info_plist_renames_the_engine_and_hides_it_from_the_dock() {
-        let xml = r#"<?xml version="1.0"?>
-<dict>
-  <key>CFBundleName</key>
-  <string>Sunshine</string>
-  <key>CFBundleDisplayName</key>
-  <string>Sunshine</string>
-  <key>CFBundleExecutable</key>
-  <string>sunshine</string>
-  <key>CFBundleIdentifier</key>
-  <string>dev.lizardbyte.sunshine</string>
-</dict>
-"#;
-        let got = conceal_info_plist(xml);
-        assert!(got.contains("<string>Latch</string>"), "{got}");
-        assert!(got.contains("<string>LatchStreaming</string>"), "{got}");
-        assert!(got.contains("LSUIElement"), "{got}");
-        assert!(
-            got.contains("dev.lizardbyte.sunshine"),
-            "identifier stays so the engine still finds its files:\n{got}"
-        );
-        assert_eq!(conceal_info_plist(&got), got);
-    }
+#[cfg(target_os = "macos")]
+pub fn permission_items() -> Vec<String> {
+    permissions::items()
+}
+#[cfg(target_os = "macos")]
+fn request_permissions() {
+    permissions::request();
 }

@@ -1980,6 +1980,8 @@ dependencies = [
  "image",
  "latch-client",
  "latch-core",
+ "latch-engine",
+ "latch-proto",
  "latch-ui",
  "parking_lot",
  "rand",

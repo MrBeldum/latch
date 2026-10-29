@@ -1,7 +1,5 @@
-import hashlib
-import json
-import os
 from pathlib import Path
+import os
 import tempfile
 import tomllib
 import unittest
@@ -9,37 +7,22 @@ from bootstrap import configure
 
 
 class BootstrapTest(unittest.TestCase):
-    def test_restart_preserves_login_preferences_and_pairing(self):
+    def test_restart_preserves_preferences_and_prep(self):
         with tempfile.TemporaryDirectory() as tmp:
-            host, creds = Path(tmp) / 'host.toml', Path(tmp) / 'web.json'
-            configure(host, creds, {})
-            first = tomllib.loads(host.read_text())
-            host.write_text(host.read_text().replace('power_allowed = true', 'power_allowed = false'))
-            configure(host, creds, {})
-            second = tomllib.loads(host.read_text())
-            self.assertEqual(first['sunshine_pass'], second['sunshine_pass'])
-            self.assertFalse(second['power_allowed'])
-            web = json.loads(creds.read_text())
-            self.assertEqual(web['password'], hashlib.sha256((second['sunshine_pass'] + web['salt']).encode()).digest()[::-1].hex().upper())
+            host = Path(tmp) / 'host.toml'
+            configure(host)
             self.assertEqual(os.stat(host).st_mode & 0o777, 0o600)
-
-    def test_explicit_password_and_quotes_round_trip(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            host, creds = Path(tmp) / 'host.toml', Path(tmp) / 'web.json'
-            password = 'a"b\\c\n$123'
-            configure(host, creds, {'LATCH_PASS': password})
-            self.assertEqual(tomllib.loads(host.read_text())['sunshine_pass'], password)
-            configure(host, creds, {'LATCH_PASS': 'new'})
-            self.assertEqual(tomllib.loads(host.read_text())['sunshine_pass'], 'new')
+            host.write_text('power_allowed = false\nprep_do = "resize"\n')
+            configure(host)
+            self.assertEqual(tomllib.loads(host.read_text()), {'power_allowed': False, 'prep_do': 'resize'})
 
     def test_corruption_is_not_overwritten(self):
         with tempfile.TemporaryDirectory() as tmp:
-            host, creds = Path(tmp) / 'host.toml', Path(tmp) / 'web.json'
+            host = Path(tmp) / 'host.toml'
             host.write_text('bad = [')
             with self.assertRaises(tomllib.TOMLDecodeError):
-                configure(host, creds, {})
+                configure(host)
             self.assertEqual(host.read_text(), 'bad = [')
-            self.assertFalse(creds.exists())
 
 
 if __name__ == '__main__':
