@@ -921,6 +921,9 @@ fn handle(
 
 /// The decode thread: frames in order, newest picture out.
 fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
+    // A decoder knows whether it runs on hardware only once it has a
+    // session, after the first keyframe; the stats follow it.
+    let mut named = decoder.name();
     loop {
         let (frame, ready) = {
             let mut q = inner.queue.lock();
@@ -945,6 +948,10 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
         match decoder.decode(&frame.data, frame.keyframe, spare) {
             Ok(Some(picture)) => {
                 let decoded = Instant::now();
+                if decoder.name() != named {
+                    named = decoder.name();
+                    inner.stats.lock().decoder = named;
+                }
                 let black = picture.is_black();
                 inner.frames.publish(picture);
                 (inner.wake)();
