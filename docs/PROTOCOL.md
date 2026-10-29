@@ -70,7 +70,7 @@ type byte and the payload and is at most 65 536. Payloads are JSON objects.
 | 1 | `Accept` | host → viewer | see below; always the first message |
 | 2 | `End` | either | `{"code": u32, "message": string}`; the sender closes after it |
 | 3 | `Keepalive` | either | `{}` |
-| 4 | `Notice` | host → viewer | `{"kind": "audio" \| "video", "message": string}`; `message` empty clears it |
+| 4 | `Notice` | host → viewer | `{"kind": "audio" \| "video" \| "input", "message": string}`; `message` empty clears it |
 | 5 | `Report` | viewer → host | `{"fps", "loss_pct", "decode_ms", "rtt_ms"}`, once a second, for the host's log and FEC |
 
 `Accept`:

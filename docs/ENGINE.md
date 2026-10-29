@@ -18,7 +18,11 @@ that line, because they are the platform rather than a library we chose:
 * the GPU vendors' encoders and decoders those APIs reach (NVENC, AMF,
   Quick Sync, Apple's media engine);
 * the Windows virtual display driver, which is a driver;
-* Rust crates from crates.io that contain no C, C++ or assembler files.
+* Rust crates from crates.io that compile no C, C++ or assembler files.
+  One of them, `graviola` (the TLS provider for update downloads), holds
+  formally verified assembly written as Rust inline `asm!`: `rustc`
+  compiles it, no external assembler runs, and it is the only assembly in
+  the build.
 
 No crate in the build may compile C, C++ or assembler with `cc`, `cmake`
 or `nasm`. `scripts/audit-native.sh` checks the resolved build graph and
@@ -58,12 +62,21 @@ KeyframeRequest on loss ──────────────────�
 | Viewer | Decode |
 | --- | --- |
 | macOS | VideoToolbox (HEVC or H.264) |
-| Windows | Media Foundation H.264 decoder (DXVA when present), else `latch-codec` |
+| Windows | Media Foundation H.264 decoder (DXVA when present), with `latch-codec` behind it |
 | Linux | `latch-codec` |
 
 The viewer lists what it decodes; the host picks the first it can encode.
 `latch-codec` decodes Constrained Baseline only, so a host asked for
-`h264-baseline` configures its hardware encoder for that profile.
+`h264-baseline` configures its hardware encoder for that profile. A
+Windows viewer asks for Constrained Baseline only, so that when Media
+Foundation gives no picture (the first ten access units decide) the
+stream continues in `latch-codec` from the next keyframe; a Mac viewer
+does the same for Baseline streams.
+
+The decoder's reconstruction kernels were adapted from the MIT-licensed
+`pith-h264` (see `crates/codec/src/h264/decode/SOURCE.md`); everything it
+refuses (CABAC, B slices, 8×8 transforms, interlace) was removed rather
+than left unreachable.
 
 The software encoder is built for desktops, not films: a macroblock whose
 source pixels did not change since the last frame costs a skip and no
