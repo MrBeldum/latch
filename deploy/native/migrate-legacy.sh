@@ -57,7 +57,9 @@ systemctl --user enable latch-display.service latch-desktop.service
 # Imports the owner's prep commands before removing the previous streaming
 # unit and ~/.config/sunshine. Existing host preferences move with the data.
 "$BIN" --setup
-systemctl --user enable --now latch.service
+systemctl --user enable latch.service
+# restart, not start: on an upgrade the old latch-host is still running.
+systemctl --user restart latch.service
 
 for _ in $(seq 1 30); do
 	if status="$(curl -fsS --max-time 2 http://127.0.0.1:47850/v1/status 2>/dev/null)"; then
