@@ -1,0 +1,17 @@
+Stage("Asking for the stream…")
+connected in 495.245667ms
+  1s  10.0 fps   0.63 Mbps rtt  12 ms decode 10.89 ms host 29.00 ms assembly  1.37 ms queue  4.17 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  2s  10.0 fps   0.01 Mbps rtt  14 ms decode  4.34 ms host  0.14 ms assembly  0.00 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  3s  10.0 fps   0.01 Mbps rtt  13 ms decode  2.75 ms host  0.12 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  4s  10.0 fps   0.01 Mbps rtt  13 ms decode  3.57 ms host  0.16 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  5s  10.0 fps   0.01 Mbps rtt  13 ms decode  4.19 ms host  0.15 ms assembly  0.00 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  6s  10.0 fps   0.01 Mbps rtt  13 ms decode  3.87 ms host  0.12 ms assembly  0.00 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  7s  10.0 fps   0.01 Mbps rtt  13 ms decode  3.89 ms host  0.14 ms assembly  0.00 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  8s  10.0 fps   0.01 Mbps rtt  14 ms decode  4.09 ms host  0.17 ms assembly  0.00 ms queue  0.08 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+  9s  10.0 fps   0.01 Mbps rtt  13 ms decode  2.69 ms host  0.14 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 10s  10.0 fps   0.01 Mbps rtt  13 ms decode  2.73 ms host  0.13 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 11s   9.0 fps   0.01 Mbps rtt  13 ms decode  3.81 ms host  0.18 ms assembly  0.00 ms queue  0.05 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 12s  10.0 fps   0.01 Mbps rtt  13 ms decode  3.24 ms host  0.22 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 13s  10.0 fps   0.01 Mbps rtt  13 ms decode  3.83 ms host  0.17 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 14s   9.9 fps   0.01 Mbps rtt  13 ms decode  2.71 ms host  0.14 ms assembly  0.00 ms queue  0.03 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 
+ 15s  10.0 fps   0.01 Mbps rtt  13 ms decode  3.70 ms host  0.17 ms assembly  0.00 ms queue  0.04 ms loss  0.0% fec   0 1280x720 H.264 · hardware | 

@@ -1,0 +1,16 @@
+| Content | Target Mbps | Encoder | PSNR dB | Actual Mbps | Encode ms/frame | Process wall ms/frame | Process CPU ms/frame | Max frame / budget |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| still | 8 | latch | 51.455 | 1.420 | 1.387 | 2.678 | 2.685 | 3.766 |
+| still | 8 | x264 superfast | 51.680 | 2.625 | 1.933 | 2.738 | 5.060 | — |
+| typing | 8 | latch | 51.454 | 1.432 | 2.205 | 2.976 | 3.867 | 3.766 |
+| typing | 8 | x264 superfast | 51.686 | 2.625 | 2.267 | 3.085 | 5.793 | — |
+| scroll | 8 | latch | 52.172 | 3.696 | 3.212 | 3.930 | 5.483 | 3.766 |
+| scroll | 8 | x264 superfast | 50.357 | 4.125 | 2.033 | 2.811 | 5.401 | — |
+| motion | 8 | latch | 20.125 | 8.037 | 18.181 | 19.030 | 32.276 | 3.858 |
+| motion | 8 | x264 superfast | 24.515 | 9.323 | 5.167 | 5.970 | 12.211 | — |
+| testsrc2 | 8 | latch | 43.922 | 8.015 | 5.548 | 6.107 | 7.691 | 2.146 |
+| testsrc2 | 8 | x264 superfast | 45.225 | 8.776 | 3.000 | 3.893 | 6.507 | — |
+| mandelbrot | 8 | latch | 42.755 | 8.028 | 8.752 | 9.349 | 14.456 | 2.771 |
+| mandelbrot | 8 | x264 superfast | 43.920 | 9.418 | 3.933 | 4.813 | 8.911 | — |
+Encode time: Latch encode() only; x264 FFmpeg benchmark (includes raw input I/O).
+Artifacts: /tmp/latch-motion-final-after-mac
