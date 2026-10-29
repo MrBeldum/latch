@@ -22,10 +22,12 @@ fn clip8(v: i32) -> u8 {
 /// at half position (x + ½, y): taps integer columns x−2..x+3.
 fn h_tap(ref_: &[u8], w: usize, h: usize, x: i32, y: i32) -> i32 {
     if x >= 2 && x + 3 < w as i32 {
-        let yy = y.clamp(0,h as i32-1) as usize;
-        let start = yy*w + x as usize-2;
-        let p = &ref_[start..start+6];
-        return i32::from(p[0]) - 5*i32::from(p[1]) + 20*i32::from(p[2]) + 20*i32::from(p[3]) - 5*i32::from(p[4]) + i32::from(p[5]);
+        let yy = y.clamp(0, h as i32 - 1) as usize;
+        let start = yy * w + x as usize - 2;
+        let p = &ref_[start..start + 6];
+        return i32::from(p[0]) - 5 * i32::from(p[1]) + 20 * i32::from(p[2]) + 20 * i32::from(p[3])
+            - 5 * i32::from(p[4])
+            + i32::from(p[5]);
     }
     px(ref_, w, h, x - 2, y) - 5 * px(ref_, w, h, x - 1, y)
         + 20 * px(ref_, w, h, x, y)
@@ -38,9 +40,13 @@ fn h_tap(ref_: &[u8], w: usize, h: usize, x: i32, y: i32) -> i32 {
 /// at half position (x, y + ½): taps integer rows y−2..y+3.
 fn v_tap(ref_: &[u8], w: usize, h: usize, x: i32, y: i32) -> i32 {
     if y >= 2 && y + 3 < h as i32 {
-        let xx = x.clamp(0,w as i32-1) as usize;
-        let start = (y as usize-2)*w+xx;
-        return i32::from(ref_[start]) - 5*i32::from(ref_[start+w]) + 20*i32::from(ref_[start+2*w]) + 20*i32::from(ref_[start+3*w]) - 5*i32::from(ref_[start+4*w]) + i32::from(ref_[start+5*w]);
+        let xx = x.clamp(0, w as i32 - 1) as usize;
+        let start = (y as usize - 2) * w + xx;
+        return i32::from(ref_[start]) - 5 * i32::from(ref_[start + w])
+            + 20 * i32::from(ref_[start + 2 * w])
+            + 20 * i32::from(ref_[start + 3 * w])
+            - 5 * i32::from(ref_[start + 4 * w])
+            + i32::from(ref_[start + 5 * w]);
     }
     px(ref_, w, h, x, y - 2) - 5 * px(ref_, w, h, x, y - 1)
         + 20 * px(ref_, w, h, x, y)
@@ -129,38 +135,50 @@ pub(crate) fn mc_luma(
     dst: &mut [u8],
 ) {
     if mv.0 & 3 == 0 && mv.1 & 3 == 0 {
-        let x = px0 + (mv.0 >> 2); let y = py0 + (mv.1 >> 2);
+        let x = px0 + (mv.0 >> 2);
+        let y = py0 + (mv.1 >> 2);
         if x >= 0 && y >= 0 && x as usize + pw <= rw && y as usize + ph <= rh {
             for row in 0..ph {
-                let start = (y as usize+row)*rw+x as usize;
-                dst[row*pw..(row+1)*pw].copy_from_slice(&ref_[start..start+pw]);
+                let start = (y as usize + row) * rw + x as usize;
+                dst[row * pw..(row + 1) * pw].copy_from_slice(&ref_[start..start + pw]);
             }
             return;
         }
     }
-    let fx = mv.0 & 3; let fy = mv.1 & 3;
+    let fx = mv.0 & 3;
+    let fy = mv.1 & 3;
     if (fx == 2 && fy != 0) || (fy == 2 && fx != 0) {
-        let ix = px0 + (mv.0 >> 2); let iy = py0 + (mv.1 >> 2);
-        let mut horizontal = [0i32; 16*21];
-        for row in 0..ph+5 {
+        let ix = px0 + (mv.0 >> 2);
+        let iy = py0 + (mv.1 >> 2);
+        let mut horizontal = [0i32; 16 * 21];
+        for row in 0..ph + 5 {
             for col in 0..pw {
-                horizontal[row*16+col] = h_tap(ref_,rw,rh,ix+col as i32,iy+row as i32-2);
+                horizontal[row * 16 + col] =
+                    h_tap(ref_, rw, rh, ix + col as i32, iy + row as i32 - 2);
             }
         }
         for row in 0..ph {
             for col in 0..pw {
-                let off = row*16+col;
-                let j = i32::from(clip8((horizontal[off] - 5*horizontal[off+16] + 20*horizontal[off+32] + 20*horizontal[off+48] - 5*horizontal[off+64] + horizontal[off+80] + 512) >> 10));
-                let (x,y) = (ix+col as i32,iy+row as i32);
-                let value = match (fx,fy) {
-                    (2,2) => j,
-                    (2,1) => (j + i32::from(clip8((horizontal[off+32]+16)>>5)) + 1) >> 1,
-                    (2,3) => (j + i32::from(clip8((horizontal[off+48]+16)>>5)) + 1) >> 1,
-                    (1,2) => (j + half_h(ref_,rw,rh,x,y) + 1) >> 1,
-                    (3,2) => (j + half_h(ref_,rw,rh,x+1,y) + 1) >> 1,
+                let off = row * 16 + col;
+                let j = i32::from(clip8(
+                    (horizontal[off] - 5 * horizontal[off + 16]
+                        + 20 * horizontal[off + 32]
+                        + 20 * horizontal[off + 48]
+                        - 5 * horizontal[off + 64]
+                        + horizontal[off + 80]
+                        + 512)
+                        >> 10,
+                ));
+                let (x, y) = (ix + col as i32, iy + row as i32);
+                let value = match (fx, fy) {
+                    (2, 2) => j,
+                    (2, 1) => (j + i32::from(clip8((horizontal[off + 32] + 16) >> 5)) + 1) >> 1,
+                    (2, 3) => (j + i32::from(clip8((horizontal[off + 48] + 16) >> 5)) + 1) >> 1,
+                    (1, 2) => (j + half_h(ref_, rw, rh, x, y) + 1) >> 1,
+                    (3, 2) => (j + half_h(ref_, rw, rh, x + 1, y) + 1) >> 1,
                     _ => j,
                 };
-                dst[row*pw+col] = value as u8;
+                dst[row * pw + col] = value as u8;
             }
         }
         return;
@@ -200,11 +218,12 @@ pub(crate) fn mc_chroma(
     dst: &mut [u8],
 ) {
     if mv.0 & 7 == 0 && mv.1 & 7 == 0 {
-        let x = px0 + (mv.0 >> 3); let y = py0 + (mv.1 >> 3);
+        let x = px0 + (mv.0 >> 3);
+        let y = py0 + (mv.1 >> 3);
         if x >= 0 && y >= 0 && x as usize + pw <= rw && y as usize + ph <= rh {
             for row in 0..ph {
-                let start = (y as usize+row)*rw+x as usize;
-                dst[row*pw..(row+1)*pw].copy_from_slice(&ref_[start..start+pw]);
+                let start = (y as usize + row) * rw + x as usize;
+                dst[row * pw..(row + 1) * pw].copy_from_slice(&ref_[start..start + pw]);
             }
             return;
         }
@@ -226,25 +245,58 @@ pub(crate) fn mc_chroma(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn cached_motion_matches_per_sample_scalar_at_every_fraction_and_edge() {
-        let plane=(0..32*24).map(|i| ((i*37+i/11)%256) as u8).collect::<Vec<_>>();
-        for x in [-9,-1,0,4,17,31] {
-            for y in [-8,-1,0,3,15,23] {
+        let plane = (0..32 * 24)
+            .map(|i| ((i * 37 + i / 11) % 256) as u8)
+            .collect::<Vec<_>>();
+        for x in [-9, -1, 0, 4, 17, 31] {
+            for y in [-8, -1, 0, 3, 15, 23] {
                 for fy in 0..4 {
                     for fx in 0..4 {
-                        let mut actual=[0;256]; mc_luma(&plane,32,24,x,y,(fx-8,fy-8),16,16,&mut actual);
-                        for row in 0..16 { for col in 0..16 { assert_eq!(actual[row*16+col],luma_sample(&plane,32,24,x+col as i32-2,y+row as i32-2,fx,fy)); } }
+                        let mut actual = [0; 256];
+                        mc_luma(&plane, 32, 24, x, y, (fx - 8, fy - 8), 16, 16, &mut actual);
+                        for row in 0..16 {
+                            for col in 0..16 {
+                                assert_eq!(
+                                    actual[row * 16 + col],
+                                    luma_sample(
+                                        &plane,
+                                        32,
+                                        24,
+                                        x + col as i32 - 2,
+                                        y + row as i32 - 2,
+                                        fx,
+                                        fy
+                                    )
+                                );
+                            }
+                        }
                     }
                 }
                 for fy in 0..8 {
                     for fx in 0..8 {
-                        let mut actual=[0;64]; mc_chroma(&plane,32,24,x,y,(fx-16,fy-16),8,8,&mut actual);
-                        for row in 0..8 { for col in 0..8 { assert_eq!(actual[row*8+col],chroma_sample(&plane,32,24,x+col as i32-2,y+row as i32-2,fx,fy)); } }
+                        let mut actual = [0; 64];
+                        mc_chroma(&plane, 32, 24, x, y, (fx - 16, fy - 16), 8, 8, &mut actual);
+                        for row in 0..8 {
+                            for col in 0..8 {
+                                assert_eq!(
+                                    actual[row * 8 + col],
+                                    chroma_sample(
+                                        &plane,
+                                        32,
+                                        24,
+                                        x + col as i32 - 2,
+                                        y + row as i32 - 2,
+                                        fx,
+                                        fy
+                                    )
+                                );
+                            }
+                        }
                     }
                 }
             }

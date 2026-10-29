@@ -64,11 +64,21 @@ pub(crate) struct Nal<'a> {
 pub(crate) fn split_annex_b(data: &[u8]) -> Result<Vec<Nal<'_>>> {
     let mut out = Vec::new();
     for payload in super::super::nal::iter_nal_units(data) {
-        if out.len() >= 262144 { return Err(Error::BadValue("too many NAL units in access unit")); }
-        if payload[0] & 0x80 != 0 { return Err(Error::BadValue("forbidden_zero_bit")); }
-        out.push(Nal { ref_idc: (payload[0] >> 5) & 3, unit_type: payload[0] & 31, payload: &payload[1..] });
+        if out.len() >= 262144 {
+            return Err(Error::BadValue("too many NAL units in access unit"));
+        }
+        if payload[0] & 0x80 != 0 {
+            return Err(Error::BadValue("forbidden_zero_bit"));
+        }
+        out.push(Nal {
+            ref_idc: (payload[0] >> 5) & 3,
+            unit_type: payload[0] & 31,
+            payload: &payload[1..],
+        });
     }
-    if out.is_empty() { return Err(Error::BadValue("Annex B access unit has no NAL units")); }
+    if out.is_empty() {
+        return Err(Error::BadValue("Annex B access unit has no NAL units"));
+    }
     Ok(out)
 }
 
@@ -83,12 +93,20 @@ pub(crate) fn rbsp(payload: &[u8]) -> Result<Vec<u8>> {
         let b = payload[i];
         if zeros == 2 {
             if b == 3 {
-                if payload.get(i+1).is_none_or(|&next| next > 3) { return Err(Error::BadValue("emulation prevention byte")); }
-                zeros=0; i+=1; continue;
+                if payload.get(i + 1).is_none_or(|&next| next > 3) {
+                    return Err(Error::BadValue("emulation prevention byte"));
+                }
+                zeros = 0;
+                i += 1;
+                continue;
             }
-            if b <= 2 { return Err(Error::BadValue("unescaped start code in NAL")); }
+            if b <= 2 {
+                return Err(Error::BadValue("unescaped start code in NAL"));
+            }
         }
-        out.push(b); zeros=if b==0 { zeros+1 } else { 0 }; i+=1;
+        out.push(b);
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        i += 1;
     }
     Ok(out)
 }

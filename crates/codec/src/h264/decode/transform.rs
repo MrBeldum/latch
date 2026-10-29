@@ -15,7 +15,7 @@
 //! builds. Wrapping keeps the behaviour deterministic instead of
 //! panicking; the conformance tests pin the legal-input exactness.
 
-use super::tables::{LEVEL_SCALE_4X4, QP_DIV6, QP_MOD6, scale_class};
+use super::tables::{scale_class, LEVEL_SCALE_4X4, QP_DIV6, QP_MOD6};
 use super::{Error, Result};
 
 /// 4x4 inverse transform input/output block (`i32` per spec working
@@ -78,9 +78,7 @@ pub(crate) fn dequant_4x4(coeffs: &mut [i32; 16], qp: u8) {
         let s = i64::from(m[scale_class(i % 4, i / 4)]);
         let c = i64::from(coeffs[i]);
         // Spec 8.5.12.1 (eq. 8-336): d_ij = c_ij * LevelScale << (qP/6)
-        // at every qP — the reference implementation (h264bsd
-        // levelScale[] << qpDiv, FFmpeg's quant_div6+2 table feeding a
-        // >>6 normaliser) has no low-qP branch.
+        // at every qP — spec 8.5.12.1 has no low-qP branch.
         let v = (c * s) << q6;
         coeffs[i] = v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
     }
@@ -187,146 +185,6 @@ pub(crate) fn add_residual_4x4(pred: &mut [u8], stride: usize, residual: &Block4
     for y in 0..4 {
         for x in 0..4 {
             let v = i32::from(pred[y * stride + x]) + residual[y * 4 + x];
-            pred[y * stride + x] = v.clamp(0, 255) as u8;
-        }
-    }
-}
-
-/// The 8x8 inverse quantisation scale matrix classes (spec 8.5.12.1,
-/// `v8x8` rows of Table 7-4 for each `qP % 6`). The class index per
-/// 8x8 raster position comes from [`scale_class8`].
-const LEVEL_SCALE_8X8: [[u16; 6]; 6] = [
-    [20, 18, 32, 19, 25, 24],
-    [22, 19, 35, 21, 28, 26],
-    [26, 23, 42, 24, 33, 31],
-    [28, 25, 45, 26, 35, 33],
-    [32, 28, 51, 30, 40, 38],
-    [36, 32, 58, 34, 46, 43],
-];
-
-/// Raster position -> 8x8 `LevelScale8x8` class (0..5), the pattern
-/// derived from spec 8.5.12.1's scale-position mapping (matches the
-/// reference decoder's `dequant8_coeff_init_scan`).
-const SCALE8_CLASS: [u8; 64] = [
-    0, 3, 4, 3, 0, 3, 4, 3, 3, 1, 5, 1, 3, 1, 5, 1, 4, 5, 2, 5, 4, 5, 2, 5, 3, 1, 5, 1, 3, 1, 5, 1,
-    0, 3, 4, 3, 0, 3, 4, 3, 3, 1, 5, 1, 3, 1, 5, 1, 4, 5, 2, 5, 4, 5, 2, 5, 3, 1, 5, 1, 3, 1, 5, 1,
-];
-
-/// Dequantises one 8x8 coefficient block in place (spec 8.5.12.1 with
-/// the flat-16 scaling list). The multiplicand is
-/// `LevelScale8x8(qP%6, i, j) * 16 << (qP/6)` divided by 64 — the same
-/// folded form the reference decoder applies at coefficient-decode
-/// time (`(c * qmul + 32) >> 6`). Products go through i64.
-pub(crate) fn dequant_8x8(coeffs: &mut [i32; 64], qp: u8) {
-    debug_assert!(qp < 52);
-    let m = LEVEL_SCALE_8X8[QP_MOD6[qp as usize] as usize];
-    let q6 = qp as i64 / 6;
-    for i in 0..64 {
-        let qmul = (i64::from(m[SCALE8_CLASS[i] as usize]) * 16) << q6;
-        let c = i64::from(coeffs[i]);
-        // (c * qmul + 32) >> 6 with sign-correct rounding toward -inf,
-        // matching the reference decoder's arithmetic exactly.
-        let v = (c * qmul + 32) >> 6;
-        coeffs[i] = v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-    }
-}
-
-/// 8x4 block of i32 (raster order).
-pub(crate) type Block8 = [i32; 64];
-
-/// One 8x8 inverse-transform butterfly pass on the row or column
-/// picked by `idx` (spec 8.5.12.3, the reference decoder's exact
-/// shift-sharing implementation — the `>>1`/`>>2` sub-terms are
-/// mandatory, they are not factorisations).
-fn idct8_pass(b: &mut [i32], idx: [usize; 8]) {
-    let c = [
-        b[idx[0]], b[idx[1]], b[idx[2]], b[idx[3]], b[idx[4]], b[idx[5]], b[idx[6]], b[idx[7]],
-    ];
-    let a0 = c[0].wrapping_add(c[4]);
-    let a2 = c[0].wrapping_sub(c[4]);
-    let a4 = (c[2] >> 1).wrapping_sub(c[6]);
-    let a6 = (c[6] >> 1).wrapping_add(c[2]);
-    let b0 = a0.wrapping_add(a6);
-    let b2 = a2.wrapping_add(a4);
-    let b4 = a2.wrapping_sub(a4);
-    let b6 = a0.wrapping_sub(a6);
-    let a1 = c[3]
-        .wrapping_neg()
-        .wrapping_add(c[5])
-        .wrapping_sub(c[7])
-        .wrapping_sub(c[7] >> 1);
-    let a3 = c[1]
-        .wrapping_add(c[7])
-        .wrapping_sub(c[3])
-        .wrapping_sub(c[3] >> 1);
-    let a5 = c[1]
-        .wrapping_neg()
-        .wrapping_add(c[7])
-        .wrapping_add(c[5])
-        .wrapping_add(c[5] >> 1);
-    let a7 = c[3]
-        .wrapping_add(c[5])
-        .wrapping_add(c[1])
-        .wrapping_add(c[1] >> 1);
-    let b1 = (a7 >> 2).wrapping_add(a1);
-    let b3 = a3.wrapping_add(a5 >> 2);
-    let b5 = (a3 >> 2).wrapping_sub(a5);
-    let b7 = a7.wrapping_sub(a1 >> 2);
-    b[idx[0]] = b0.wrapping_add(b7);
-    b[idx[7]] = b0.wrapping_sub(b7);
-    b[idx[1]] = b2.wrapping_add(b5);
-    b[idx[6]] = b2.wrapping_sub(b5);
-    b[idx[2]] = b4.wrapping_add(b3);
-    b[idx[5]] = b4.wrapping_sub(b3);
-    b[idx[3]] = b6.wrapping_add(b1);
-    b[idx[4]] = b6.wrapping_sub(b1);
-}
-
-/// The H.264 8x8 integer inverse transform (spec 8.5.12.3): row pass,
-/// then column pass, matching the reference decoder's `idct8_add`
-/// exactly — the passes are NOT commutative because each 1-D pass
-/// contains rounding shifts (`>>1`/`>>2`), and the reference folds the
-/// rounding constant into the DC before the passes.
-pub(crate) fn inverse_8x8(b: &mut Block8) {
-    // The reference decoder adds the rounding constant into the DC
-    // coefficient BEFORE the passes (h264idct_template.c idct8_add:
-    // `block[0] += 32;`) and stores with a plain arithmetic `>> 6`.
-    // These are NOT interchangeable with a store-time `+32` because the
-    // `>>1`/`>>2` shifts inside the butterflies round differently.
-    b[0] = b[0].wrapping_add(32);
-    // Rows first, columns second: combined with the ZIGZAG_8X8 storage
-    // (the transpose of the reference decoder's block layout) this
-    // reproduces `idct8_add` bit-exactly (see tables.rs note).
-    for i in 0..8 {
-        let idx = [
-            i * 8,
-            i * 8 + 1,
-            i * 8 + 2,
-            i * 8 + 3,
-            i * 8 + 4,
-            i * 8 + 5,
-            i * 8 + 6,
-            i * 8 + 7,
-        ];
-        idct8_pass(b, idx);
-    }
-    for i in 0..8 {
-        let idx = [i, 8 + i, 16 + i, 24 + i, 32 + i, 40 + i, 48 + i, 56 + i];
-        idct8_pass(b, idx);
-    }
-    // Final normalisation: plain arithmetic shift (the rounding
-    // constant was already folded into the DC above).
-    for v in b.iter_mut() {
-        *v >>= 6;
-    }
-}
-
-/// Adds an 8x8 residual block to a prediction region (`stride`
-/// row-major), clipping to [0, 255].
-pub(crate) fn add_residual_8x8(pred: &mut [u8], stride: usize, residual: &Block8) {
-    for y in 0..8 {
-        for x in 0..8 {
-            let v = i32::from(pred[y * stride + x]) + residual[y * 8 + x];
             pred[y * stride + x] = v.clamp(0, 255) as u8;
         }
     }

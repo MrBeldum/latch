@@ -12,8 +12,8 @@
 
 use super::{Error, Result};
 
-/// Parsed `mb_type` semantics, covering every P-, B- and I-slice code
-/// (spec Tables 7-11, 7-13, 7-14, 7-15, 7-17, 7-18).
+/// Parsed `mb_type` semantics, covering P- and I-slice codes
+/// (spec Tables 7-11, 7-14).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum MbType {
     /// I_NxN: sixteen 4x4 intra predictions.
@@ -42,7 +42,6 @@ pub(crate) enum MbType {
     P8x8Ref0,
     /// P_Skip (never parsed as an mb_type; produced by the skip run).
     PSkip,
-
 }
 
 impl MbType {
@@ -83,13 +82,9 @@ impl MbType {
             _ => Err(Error::BadValue("P-slice mb_type over 30")),
         }
     }
-
-
 }
 
-/// Sub-macroblock types: P_8x8's four codes (spec Table 7-17) and
-/// B_8x8's thirteen (Table 7-18). For B types `dirs` is bit0 = L0,
-/// bit1 = L1; `BDirect` is `B_Direct_8x8`.
+/// Sub-macroblock types: P_8x8's four codes (spec Table 7-17).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SubMbType {
     /// P_L0_8x8.
@@ -100,7 +95,6 @@ pub(crate) enum SubMbType {
     S4x8,
     /// P_L0_4x4.
     S4x4,
-
 }
 
 impl SubMbType {
@@ -116,15 +110,12 @@ impl SubMbType {
     }
 
     /// `(w4, h4)` of each sub-partition in 4x4 units, and the count.
-    /// For `BDirect` this returns the single whole-8x8 partition; the
-    /// decoder may split it into 4x4 under `direct_8x8_inference`.
     pub(crate) fn parts(self) -> ([(u8, u8); 4], usize) {
         match self {
             SubMbType::S8x8 => ([(2, 2), (0, 0), (0, 0), (0, 0)], 1),
             SubMbType::S8x4 => ([(2, 1), (2, 1), (0, 0), (0, 0)], 2),
             SubMbType::S4x8 => ([(1, 2), (1, 2), (0, 0), (0, 0)], 2),
             SubMbType::S4x4 => ([(1, 1); 4], 4),
-
         }
     }
 }
@@ -152,8 +143,6 @@ pub(crate) struct MbState {
     /// `total_coeff` per 4x4 luma block (group-major, 24 entries cover
     /// 16 luma + 8 chroma AC, in the same group-major order for the
     /// chroma 8x8 pair) — used by `nC` prediction and deblocking.
-    /// Under `transform_size_8x8` each 8x8 group's four entries all
-    /// carry the 8x8 `TotalCoeff` (spec 8.7.2.1's per-8x8 `nz` view).
     pub nz: [u8; 24],
     /// Luma motion vectors per 4x4 block for list L0 (quarter-pel).
     pub mv: [[i16; 2]; 16],
@@ -169,16 +158,11 @@ pub(crate) struct MbState {
     pub i4x4_modes: [u8; 16],
     /// `intra_chroma_pred_mode` 0..=3.
     pub chroma_pred: u8,
-    /// `mb_skip_flag` (P_Skip or B_Skip; `BDirect` does NOT count as
-    /// skipped for the CABAC `mb_skip_flag` context derivation).
+    /// `mb_skip_flag` (P_Skip).
     pub skip: bool,
-    /// `transform_size_8x8_flag` of this macroblock.
-    pub transform8x8: bool,
     /// `CodedBlockPatternLuma` (4 bits) + `CodedBlockPatternChroma`
-    /// (2 bits) as parsed: `cbp = chroma<<4 | luma` — the CABAC
-    /// `coded_block_pattern` context and ffmpeg's `cbp_table` layout.
+    /// (2 bits) as parsed: `cbp = chroma<<4 | luma` (spec Table 9-4).
     pub cbp: u8,
-
 }
 
 impl MbState {
@@ -200,7 +184,6 @@ impl MbState {
             i4x4_modes: [0xff; 16],
             chroma_pred: 0,
             skip: false,
-            transform8x8: false,
             cbp: 0,
         }
     }
@@ -228,7 +211,11 @@ pub(crate) struct MbMap {
 impl MbMap {
     /// Index of the left neighbour MB (mbAddrA), if any.
     pub(crate) fn mb_a(self) -> Option<usize> {
-        if self.x > 0 { Some(self.idx - 1) } else { None }
+        if self.x > 0 {
+            Some(self.idx - 1)
+        } else {
+            None
+        }
     }
     /// Index of the top neighbour MB (mbAddrB), if any.
     pub(crate) fn mb_b(self) -> Option<usize> {
@@ -316,4 +303,3 @@ pub(crate) fn intra4x4_neighbours(blk: usize) -> [BlockRef; 4] {
     let d = map(xi - 1, yi - 1);
     [a, b, c, d]
 }
-

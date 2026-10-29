@@ -2,45 +2,15 @@
 //! pattern maps, dequantisation scales, deblocking thresholds, scans).
 //!
 //! Every table is transcribed from the normative tables of
-//! ITU-T H.264 (V3, 2005-03) and cross-checked against the matching
-//! tables in two independent decoders (FFmpeg `libavcodec/h264_cavlc.c`,
-//! `h264data.c`, `h264_loopfilter.c` and the Hantro/OMX h264bsd
-//! reference, which are identical to these values). Table provenance is
-//! noted per item.
+//! ITU-T H.264 (V3, 2005-03). Table provenance is noted per item.
 
 /// Zig-zag scan for 4x4 blocks (spec Figure 8-8(a)): coefficient scan
 /// position -> raster index `x + 4*y` inside the 4x4 block.
 pub(crate) const ZIGZAG_4X4: [u8; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
 
-/// Field scan for 4x4 blocks (spec Figure 8-8(b)). Only reachable in
-/// interlaced content; defined for completeness of the table set.
-#[allow(dead_code)]
-pub(crate) const FIELD_4X4: [u8; 16] = [0, 4, 1, 8, 12, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15];
-
 /// Chroma DC 2x2 scan (spec 8.5.7): scan index -> `x + 2*y`.
 pub(crate) const SCAN_2X2: [u8; 4] = [0, 1, 2, 3];
 
-/// Zig-zag scan for 8x8 blocks (CABAC path): scan index -> flat index
-/// into OUR row-major residual block. The reference decoder's scan
-/// (`zigzag_scan8x8`, spec Table 8-8) stores coefficients transposed
-/// relative to raster; its `idct8_add` applies the 1-D pass ROWS
-/// FIRST then COLUMNS — combined with our row-major storage this
-/// reproduces it bit-exactly (verified 256/256 px on instrumented-ff
-/// recon, fixture t1_8x8_64x64 pic07 mb15, and 12/12 pictures).
-/// CAVLC 8x8 scan (spec Figure 8-10): the four 16-coefficient
-/// subsequences interleave the 4x4 sub-block diagonals across the
-/// whole 8x8 block — NOT a per-sub-block scan. Transcribed verbatim
-/// from the reference decoder's `zigzag_scan8x8_cavlc`.
-pub(crate) const CAVLC_SCAN_8X8: [u8; 64] = [
-    0, 9, 17, 18, 12, 40, 27, 7, 35, 57, 29, 30, 58, 38, 53, 47, 1, 2, 24, 11, 19, 48, 20, 14, 42,
-    50, 22, 37, 59, 31, 60, 55, 8, 3, 32, 4, 26, 41, 13, 21, 49, 43, 15, 44, 52, 39, 61, 62, 16,
-    10, 25, 5, 33, 34, 6, 28, 56, 36, 23, 51, 45, 46, 54, 63,
-];
-
-/// 4x4 block index -> 4x4-grid position inside the macroblock, in the
-/// 8x8-group-major order the residual/MV/deblock paths use (block
-/// index b: 8x8 group `b/4` raster over the 2x2 group grid, then 4x4
-/// `b%4` raster inside the group). Returns `(x4, y4)` in 4x4 units.
 pub(crate) fn block_xy(block: usize) -> (usize, usize) {
     let g = block / 4;
     let s = block % 4;
@@ -251,9 +221,7 @@ pub(crate) const RUN_BEFORE_BITS: [[u8; 16]; 7] = [
 
 /// `LevelScale4x4(qP % 6, c)` (spec Table 8-12 / eq. 8-335): `c` 0 is
 /// the even/even positions `{(0,0),(0,2),(2,0),(2,2)}`, `c` 1 the
-/// mixed-parity positions, `c` 2 the odd/odd positions — verified
-/// cell-for-cell against FFmpeg `ff_h264_dequant4_coeff_init` and
-/// h264bsd `levelScale`.
+/// mixed-parity positions, `c` 2 the odd/odd positions.
 pub(crate) const LEVEL_SCALE_4X4: [[u16; 3]; 6] = [
     [10, 13, 16],
     [11, 14, 18],

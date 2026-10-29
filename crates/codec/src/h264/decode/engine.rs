@@ -8,26 +8,22 @@
 //! CABAC and data partitioning surface as [`Error::Unsupported`];
 //! malformed streams surface as [`Error`] instead of panicking.
 
-
 use super::cavlc::{self, BlockKind};
 use super::deblock;
 use super::dpb::Dpb;
 use super::golomb::Br;
 use super::inter;
 use super::intra::{self, NbSamples};
-use super::mb::{MbMap, MbState, MbType, Nb, SubMbType, intra4x4_neighbours};
+use super::mb::{intra4x4_neighbours, MbMap, MbState, MbType, Nb, SubMbType};
 use super::nal::{self, Nal};
 use super::pps::{self, Pps};
 use super::slice::{self, Mmco, SliceHeader, SliceType};
 use super::sps::{self, Sps};
-use super::tables::{
-    CAVLC_SCAN_8X8, CBP_INTER, CBP_INTRA, QPC_TABLE, block_index,
-    block_xy,
-};
+use super::tables::{block_index, block_xy, CBP_INTER, CBP_INTRA, QPC_TABLE};
 use super::transform;
+use super::{Error, Result};
 use super::{Frame, Limits};
 use std::vec::Vec;
-use super::{Error, Result};
 
 /// Coded planes of one in-progress picture. Luma stride `w`, chroma
 /// stride `w/2`; both full-macroblock aligned.
@@ -69,8 +65,7 @@ struct Pic {
     chroma_off_cr: i32,
     /// `frame_num` of the picture (slice-boundary detection).
     frame_num: u32,
-    /// Picture order count of this picture (spec 8.2.1), needed for
-    /// RefPicList construction and temporal-direct scaling.
+    /// Picture order count of this picture (spec 8.2.1).
     poc: i64,
     /// `nal_ref_idc` of its slices.
     nal_ref_idc: u8,
@@ -97,7 +92,7 @@ pub struct Decoder {
     frames: Vec<Frame>,
     /// Display-order sort keys parallel to `frames`: `(epoch, poc)`
     /// where `epoch` bumps on every IDR so per-GOP POC restarts sort
-    /// inside their own GOP (B-slice streams decode out of order).
+    /// inside their own GOP.
     frame_pocs: Vec<(i64, i64)>,
     /// Current POC epoch — incremented by every decoded IDR picture.
     poc_epoch: i64,
@@ -123,8 +118,6 @@ struct SliceCx<'a> {
     /// `QPy` — updated by `mb_qp_delta`; skip MBs keep it untouched
     /// (spec 7.4.5: `QPy` carries through `mb_skip_run`).
     qp_prev: i32,
-    /// Previous MB's `mb_qp_delta` — the CABAC `mb_qp_delta` context
-    /// splits on it being zero (spec 9.3.2.7); skipped/direct MBs reset it.
     /// Slice id for `MbState::slice_id`.
     slice_id: u32,
 }
@@ -150,10 +143,16 @@ impl Decoder {
         }
     }
 
-    pub(super) fn max_input(&self) -> usize { self.limits.max_input }
+    pub(super) fn max_input(&self) -> usize {
+        self.limits.max_input
+    }
 
     pub(super) fn invalidate(&mut self) {
-        self.dpb.flush(); self.pic = None; self.frames.clear(); self.frame_pocs.clear(); self.need_idr = true;
+        self.dpb.flush();
+        self.pic = None;
+        self.frames.clear();
+        self.frame_pocs.clear();
+        self.need_idr = true;
     }
 
     /// Top-level POC derivation (spec 8.2.1): wraps the type-specific
@@ -186,9 +185,18 @@ impl Decoder {
         if nals.is_empty() {
             return Err(Error::BadValue("h264 stream with no NAL units"));
         }
-        let old_sps = self.sps_table.clone(); let old_pps = self.pps_table.clone();
-        let result = (|| { for n in &nals { self.nal(n)?; } self.end_of_stream() })();
-        if result.is_err() { self.sps_table = old_sps; self.pps_table = old_pps; }
+        let old_sps = self.sps_table.clone();
+        let old_pps = self.pps_table.clone();
+        let result = (|| {
+            for n in &nals {
+                self.nal(n)?;
+            }
+            self.end_of_stream()
+        })();
+        if result.is_err() {
+            self.sps_table = old_sps;
+            self.pps_table = old_pps;
+        }
         result
     }
 
@@ -231,15 +239,32 @@ impl Decoder {
     fn slice_nal(&mut self, n: &Nal<'_>, idr: bool) -> Result<()> {
         let rbsp = nal::rbsp(n.payload)?;
         let mut peek = Br::new(&rbsp);
-        peek.ue()?; let kind = peek.ue()?;
-        if self.need_idr && matches!(kind,0|5) { return Err(Error::MissingReference); }
+        peek.ue()?;
+        let kind = peek.ue()?;
+        if self.need_idr && matches!(kind, 0 | 5) {
+            return Err(Error::MissingReference);
+        }
         let pid = peek.ue()? as usize;
-        let pps = self.pps_table.get(pid).and_then(Option::as_ref).ok_or(Error::BadValue("unknown PPS"))?.clone();
-        let sps = self.sps_table.get(pps.sps_id as usize).and_then(Option::as_ref).ok_or(Error::BadValue("unknown SPS"))?.clone();
+        let pps = self
+            .pps_table
+            .get(pid)
+            .and_then(Option::as_ref)
+            .ok_or(Error::BadValue("unknown PPS"))?
+            .clone();
+        let sps = self
+            .sps_table
+            .get(pps.sps_id as usize)
+            .and_then(Option::as_ref)
+            .ok_or(Error::BadValue("unknown SPS"))?
+            .clone();
         let mut br = Br::new(&rbsp);
         let h = slice::parse_header(&mut br, idr, n.ref_idc, &sps, &pps)?;
-        if h.redundant_pic_cnt > 0 { return Ok(()); }
-        if self.need_idr && !idr { return Err(Error::MissingReference); }
+        if h.redundant_pic_cnt > 0 {
+            return Ok(());
+        }
+        if self.need_idr && !idr {
+            return Err(Error::MissingReference);
+        }
         self.slice_seq = self.slice_seq.wrapping_add(1);
         let slice_id = self.slice_seq;
 
@@ -254,7 +279,8 @@ impl Decoder {
                     || p.first_header.delta_poc_bottom != h.delta_poc_bottom
                     || p.first_header.delta_poc0 != h.delta_poc0
                     || p.first_header.delta_poc1 != h.delta_poc1
-                    || p.sps.width_mbs != sps.width_mbs || p.sps.height_mbs != sps.height_mbs
+                    || p.sps.width_mbs != sps.width_mbs
+                    || p.sps.height_mbs != sps.height_mbs
                     || p.sps.crop != sps.crop
                     || (h.first_mb == 0 && p.mbs[0].slice_id != u32::MAX)
                     || (idr && p.idr && p.idr_pic_id != h.idr_pic_id)
@@ -265,8 +291,13 @@ impl Decoder {
             let modulus = 1u32 << sps.log2_max_frame_num;
             let mut next = (self.prev_frame_num + 1) % modulus;
             if h.frame_num != self.prev_frame_num && h.frame_num != next {
-                if !sps.gaps_in_frame_num_allowed { return Err(Error::MissingReference); }
-                while next != h.frame_num { self.dpb.gap(next)?; next = (next + 1) % modulus; }
+                if !sps.gaps_in_frame_num_allowed {
+                    return Err(Error::MissingReference);
+                }
+                while next != h.frame_num {
+                    self.dpb.gap(next)?;
+                    next = (next + 1) % modulus;
+                }
             }
         }
         let cur_poc = if new_pic {
@@ -279,7 +310,11 @@ impl Decoder {
             if idr {
                 self.need_idr = false;
                 self.prev_frame_num = 0;
-                self.dpb.reset(1u32 << sps.log2_max_frame_num, sps.max_num_ref_frames, self.limits.max_refs);
+                self.dpb.reset(
+                    1u32 << sps.log2_max_frame_num,
+                    sps.max_num_ref_frames,
+                    self.limits.max_refs,
+                );
                 // IDR flushes the DPB unless the header asks for
                 // long-term keeping (spec 8.2.5.1).
                 if !h.idr_marking.0 {
@@ -314,9 +349,7 @@ impl Decoder {
         }
 
         let ref_order: Vec<usize> = if h.slice_type != SliceType::I {
-            let order = self
-                .dpb
-                .ref_list0(&h, h.frame_num)?;
+            let order = self.dpb.ref_list0(&h, h.frame_num)?;
             if order.is_empty() || self.dpb.refs.is_empty() {
                 return Err(Error::MissingReference);
             }
@@ -336,7 +369,11 @@ impl Decoder {
         slice_data(pic, &mut br, &mut cx, &self.dpb, &rbsp)?;
         for m in pic.mbs.iter_mut().filter(|m| m.slice_id == slice_id) {
             for (i, &r) in m.ref_idx.iter().enumerate() {
-                m.deblock_refs[i] = if r == 255 { 255 } else { *ref_order.get(r as usize).ok_or(Error::MissingReference)? as u8 };
+                m.deblock_refs[i] = if r == 255 {
+                    255
+                } else {
+                    *ref_order.get(r as usize).ok_or(Error::MissingReference)? as u8
+                };
             }
         }
         Ok(())
@@ -351,9 +388,13 @@ impl Decoder {
         let sps = &pic.sps;
         let wm = sps.width_mbs as usize;
         let hm = sps.height_mbs as usize;
-        if pic.mbs.iter().any(|m| m.slice_id == u32::MAX) { return Err(Error::BadValue("incomplete picture")); }
+        if pic.mbs.iter().any(|m| m.slice_id == u32::MAX) {
+            return Err(Error::BadValue("incomplete picture"));
+        }
         let mut mbs = pic.mbs;
-        for m in &mut mbs { m.ref_idx = m.deblock_refs; }
+        for m in &mut mbs {
+            m.ref_idx = m.deblock_refs;
+        }
         let mut buf = pic.buf;
 
         deblock::filter_frame(
@@ -370,11 +411,6 @@ impl Decoder {
         );
 
         if pic.nal_ref_idc != 0 {
-            // Colocation data for future B-slice temporal direct
-            // prediction: the picture's own L0/L1 lists (as frame_nums)
-            // plus per-MB mv/ref snapshots.
-    
-
             // Synthesised header carrying the picture's deferred
             // marking — `apply_marking` reads only these fields.
             let stub = SliceHeader {
@@ -398,10 +434,17 @@ impl Decoder {
                 offset_a: 0,
                 offset_b: 0,
             };
-            let long_term = self.dpb.apply_marking(&stub, pic.frame_num, pic.nal_ref_idc)?;
+            let long_term = self
+                .dpb
+                .apply_marking(&stub, pic.frame_num, pic.nal_ref_idc)?;
             let mmco5 = pic.marking.2.iter().any(|m| m.op == 5);
-            let slot = self.dpb.push(if mmco5 { 0 } else { pic.frame_num },
-                if mmco5 { 0 } else { pic.poc }, buf.y.clone(), buf.cb.clone(), buf.cr.clone(), buf.w);
+            let slot = self.dpb.push(
+                if mmco5 { 0 } else { pic.frame_num },
+                buf.y.clone(),
+                buf.cb.clone(),
+                buf.cr.clone(),
+                buf.w,
+            );
             self.dpb.refs[slot].long_term = long_term;
             // MMCO op 5 (spec 8.2.5.4.6): re-base POC — the just-
             // finished picture becomes the wrap reference.
@@ -420,8 +463,12 @@ impl Decoder {
         }
         self.frame_pocs.push((self.poc_epoch, pic.poc));
         let mut frame = crop_frame(sps, buf)?;
-        frame.poc = pic.poc; frame.epoch = self.poc_epoch as u64; self.frames.push(frame);
-        if pic.marking.2.iter().any(|m| m.op == 5) { self.poc_epoch += 1; }
+        frame.poc = pic.poc;
+        frame.epoch = self.poc_epoch as u64;
+        self.frames.push(frame);
+        if pic.marking.2.iter().any(|m| m.op == 5) {
+            self.poc_epoch += 1;
+        }
         Ok(())
     }
 
@@ -532,27 +579,71 @@ fn compute_poc(
 /// `frame_cropping_*_offset` values already scaled to frame units;
 /// chroma offsets are `offset` samples in each halved plane.
 fn crop_frame(sps: &Sps, mut buf: FrameBuf) -> Result<Frame> {
-    let x = sps.crop[0] as usize * 2; let y = sps.crop[2] as usize * 2;
-    let w = buf.w.checked_sub((sps.crop[0] as usize+sps.crop[1] as usize)*2).ok_or(Error::BadValue("crop width"))?;
-    let h = buf.h.checked_sub((sps.crop[2] as usize+sps.crop[3] as usize)*2).ok_or(Error::BadValue("crop height"))?;
-    if w == 0 || h == 0 { return Err(Error::BadValue("empty crop")); }
+    let x = sps.crop[0] as usize * 2;
+    let y = sps.crop[2] as usize * 2;
+    let w = buf
+        .w
+        .checked_sub((sps.crop[0] as usize + sps.crop[1] as usize) * 2)
+        .ok_or(Error::BadValue("crop width"))?;
+    let h = buf
+        .h
+        .checked_sub((sps.crop[2] as usize + sps.crop[3] as usize) * 2)
+        .ok_or(Error::BadValue("crop height"))?;
+    if w == 0 || h == 0 {
+        return Err(Error::BadValue("empty crop"));
+    }
     let mut picture = if x == 0 && y == 0 {
-        let padded_h = h.div_ceil(16)*16;
-        buf.y.truncate(buf.w*padded_h); buf.cb.truncate(buf.w*padded_h/4); buf.cr.truncate(buf.w*padded_h/4);
-        crate::Yuv420 { width: w as u32, height: h as u32, y_stride: buf.w, c_stride: buf.w/2, y: buf.y, u: buf.cb, v: buf.cr }
+        let padded_h = h.div_ceil(16) * 16;
+        buf.y.truncate(buf.w * padded_h);
+        buf.cb.truncate(buf.w * padded_h / 4);
+        buf.cr.truncate(buf.w * padded_h / 4);
+        crate::Yuv420 {
+            width: w as u32,
+            height: h as u32,
+            y_stride: buf.w,
+            c_stride: buf.w / 2,
+            y: buf.y,
+            u: buf.cb,
+            v: buf.cr,
+        }
     } else {
-        let mut output = crate::Yuv420::new(w as u32,h as u32);
-        for (dst,src,stride,sw,sh,sx,sy,ss) in [
-            (&mut output.y,&buf.y,output.y_stride,w,h,x,y,buf.w),
-            (&mut output.u,&buf.cb,output.c_stride,w/2,h/2,x/2,y/2,buf.w/2),
-            (&mut output.v,&buf.cr,output.c_stride,w/2,h/2,x/2,y/2,buf.w/2),
+        let mut output = crate::Yuv420::new(w as u32, h as u32);
+        for (dst, src, stride, sw, sh, sx, sy, ss) in [
+            (&mut output.y, &buf.y, output.y_stride, w, h, x, y, buf.w),
+            (
+                &mut output.u,
+                &buf.cb,
+                output.c_stride,
+                w / 2,
+                h / 2,
+                x / 2,
+                y / 2,
+                buf.w / 2,
+            ),
+            (
+                &mut output.v,
+                &buf.cr,
+                output.c_stride,
+                w / 2,
+                h / 2,
+                x / 2,
+                y / 2,
+                buf.w / 2,
+            ),
         ] {
-            for (row,d) in dst.chunks_mut(stride).take(sh).enumerate() { let start=(sy+row)*ss+sx; d[..sw].copy_from_slice(&src[start..start+sw]); }
+            for (row, d) in dst.chunks_mut(stride).take(sh).enumerate() {
+                let start = (sy + row) * ss + sx;
+                d[..sw].copy_from_slice(&src[start..start + sw]);
+            }
         }
         output
     };
     picture.pad_edges();
-    Ok(Frame { picture, poc: 0, epoch: 0 })
+    Ok(Frame {
+        picture,
+        poc: 0,
+        epoch: 0,
+    })
 }
 
 /// The macroblock-layer loop of `slice_data` (spec 7.3.4).
@@ -563,7 +654,9 @@ fn slice_data(
     dpb: &Dpb,
     _rbsp: &[u8],
 ) -> Result<()> {
-    if cx.pps.cabac { return Err(Error::Unsupported("CABAC")); }
+    if cx.pps.cabac {
+        return Err(Error::Unsupported("CABAC"));
+    }
     let wm = cx.sps.width_mbs as usize;
     let total = (cx.sps.width_mbs * sps_height(cx)) as usize;
     let mut mb_idx = cx.h.first_mb as usize;
@@ -577,7 +670,9 @@ fn slice_data(
                 if mb_idx >= total {
                     return Err(Error::BadValue("mb_skip_run past picture"));
                 }
-                if pic.mbs[mb_idx].slice_id != u32::MAX { return Err(Error::BadValue("overlapping slices")); }
+                if pic.mbs[mb_idx].slice_id != u32::MAX {
+                    return Err(Error::BadValue("overlapping slices"));
+                }
                 p_skip(pic, cx, dpb, mb_idx, wm)?;
                 mb_idx += 1;
             }
@@ -585,7 +680,9 @@ fn slice_data(
                 break;
             }
         }
-        if mb_idx >= total || pic.mbs[mb_idx].slice_id != u32::MAX { return Err(Error::BadValue("overlapping slices")); }
+        if mb_idx >= total || pic.mbs[mb_idx].slice_id != u32::MAX {
+            return Err(Error::BadValue("overlapping slices"));
+        }
         mb_decode(pic, br, cx, dpb, mb_idx, wm)?;
         mb_idx += 1;
         if mb_idx >= total || br.no_more_rbsp_data() {
@@ -664,8 +761,6 @@ fn p_skip(pic: &mut Pic, cx: &mut SliceCx<'_>, dpb: &Dpb, idx: usize, wm: usize)
     Ok(())
 }
 
-/// B_Skip / B_Direct_16x16 reconstruction: temporal or spatial direct
-/// prediction per 8x8 region, no residual, no coded motion.
 /// Full macroblock decode: syntax parse then reconstruction.
 fn mb_decode(
     pic: &mut Pic,
@@ -699,55 +794,27 @@ fn mb_decode(
     // Inter partitions as `(x4, y4, w4, h4, ref_idx, mvd)` on the
     // 4x4-block grid.
     let mut inter_parts: Vec<(usize, usize, usize, usize, u8, [i16; 2])> = Vec::new();
-    let sub_direct_allowed_8x8 = true;
-    let mut sub_blocks_8x8 = false;
     match mb_type {
         MbType::I4x4 => {
-            // transform_8x8_mode_flag (spec 7.3.5 mb_pred) — the
-            // High-profile I_8x8 syntax, gated on
-            // `pps.transform_8x8_mode_flag` alone (the CABAC/ctx399
-            // gate additionally fires on direct_8x8_inference).
-            let t8x8_allowed = cx.pps.transform_8x8_mode;
-            if t8x8_allowed && br.bit()? {
-                m.transform8x8 = true;
-            }
-            if m.transform8x8 {
-                // One mode per 8x8 group (spec 7.3.5.1
-                // prev_intra8x8_pred_mode_flag); the mode fills the
-                // group's four 4x4 cache cells so the 8x8 MPM reads
-                // neighbours like the reference decoder.
-                for blk in 0..4 {
-                    let g = blk * 4;
-                    let mpm = i4x4_mpm(&pic.mbs, &m, map, g, cx.pps.constrained_intra_pred);
-                    let flag = br.bit()?;
-                    let mode = if flag {
-                        mpm
+            // Parsed in luma4x4BlkIdx (group-major) order; stored
+            // raster-indexed for neighbour lookup.
+            for blk in 0..16 {
+                let (bx, by) = block_xy(blk);
+                let r = by * 4 + bx;
+                let mpm = i4x4_mpm(&pic.mbs, &m, map, blk, cx.pps.constrained_intra_pred);
+                let flag = br.bit()?;
+                let mode = if flag {
+                    mpm
+                } else {
+                    let rem = br.bits(3)? as u8;
+                    if rem < mpm {
+                        rem
                     } else {
-                        let rem = br.bits(3)? as u8;
-                        if rem < mpm { rem } else { rem + 1 }
-                    };
-                    for i in 0..4 {
-                        let (bx, by) = block_xy(g + i);
-                        m.i4x4_modes[by * 4 + bx] = mode;
+                        rem + 1
                     }
-                }
-            } else {
-                // Parsed in luma4x4BlkIdx (group-major) order; stored
-                // raster-indexed for neighbour lookup.
-                for blk in 0..16 {
-                    let (bx, by) = block_xy(blk);
-                    let r = by * 4 + bx;
-                    let mpm = i4x4_mpm(&pic.mbs, &m, map, blk, cx.pps.constrained_intra_pred);
-                    let flag = br.bit()?;
-                    let mode = if flag {
-                        mpm
-                    } else {
-                        let rem = br.bits(3)? as u8;
-                        if rem < mpm { rem } else { rem + 1 }
-                    };
-                    let _ = (blk, r);
-                    m.i4x4_modes[r] = mode;
-                }
+                };
+                let _ = (blk, r);
+                m.i4x4_modes[r] = mode;
             }
             m.chroma_pred = br.ue()? as u8;
             if m.chroma_pred > 3 {
@@ -766,13 +833,6 @@ fn mb_decode(
             let mut sub_types = [SubMbType::S8x8; 4];
             for st in sub_types.iter_mut() {
                 *st = SubMbType::from_code(br.ue()?)?;
-            }
-            // ffmpeg ff_h264_p_sub_mb_type_info (h264data.c): sub code
-            // 3 (4x4 partitions) maps to MB_TYPE_8x8 which *blocks*
-            // the flag — the flag bit exists only when every sub is
-            // an 8x8 partition.
-            if sub_types.iter().any(|st| !matches!(st, SubMbType::S8x8)) {
-                sub_blocks_8x8 = true;
             }
             // ref_idx_l0 coded once per 8x8 sub-mb (spec 7.3.5.1);
             // P_8x8ref0 implies zero.
@@ -829,8 +889,6 @@ fn mb_decode(
     }
 
     // ---- coded_block_pattern + mb_qp_delta (spec 7.3.5) ----
-    // B_Direct_16x16 codes cbp like any other inter MB (see the
-    // CABAC twin of this block).
     let (mut cbp_luma, mut cbp_chroma) = (0u8, 0u8);
     if mb_type != MbType::IPcm {
         if let MbType::I16x16 {
@@ -855,28 +913,7 @@ fn mb_decode(
             cbp_chroma = v / 16;
         }
     }
-    // `MbState::cbp` feeds the deblocker's residual gates (deblock.rs
-    // `compute_bs`: the `edges = mask_edge==3 && !(cbp&15)` shortcut and
-    // the 8x8DCT `cbp&7==7` bypass read it for CAVLC MBs too — the
-    // CABAC twin stores it at the same point).
     m.cbp = (cbp_chroma << 4) | cbp_luma;
-    // transform_size_8x8_flag (ffmpeg h264_cabac.c:2347:
-    // `dct8x8_allowed && (cbp&15) && !IS_INTRA`; dct8x8_allowed is the
-    // PPS flag narrowed by get_dct8x8_allowed for P_8x8/B_8x8).
-    let dct8x8_allowed = cx.pps.transform_8x8_mode
-        && !matches!(mb_type, MbType::I16x16 { .. } | MbType::IPcm)
-        && !sub_blocks_8x8
-        && (sub_direct_allowed_8x8 || cx.sps.direct_8x8_inference)
-        ;
-    let t8x8 = dct8x8_allowed && cbp_luma > 0 && !mb_type.is_intra() && br.bit()?;
-
-    // Intra keeps the I_8x8 flag read during mb_pred (ffmpeg
-    // h264_cavlc.c:797); inter takes the read here.
-    m.transform8x8 = if mb_type.is_intra() {
-        m.transform8x8
-    } else {
-        t8x8
-    };
     let coded = cbp_luma > 0 || cbp_chroma > 0 || matches!(mb_type, MbType::I16x16 { .. });
     let mut qp_y = cx.qp_prev;
     if coded && mb_type != MbType::IPcm {
@@ -894,7 +931,6 @@ fn mb_decode(
     // `pic.mbs` (fully decoded MBs) and same-MB reads from `nz_acc`.
     let mut nz_acc = [0u8; 24];
     let mut luma_res = [[0i32; 16]; 16];
-    let mut luma_res8 = [[0i32; 64]; 4];
     let mut dc_y = [0i32; 16];
     let mut chroma_ac = [[[0i32; 16]; 4]; 2];
     let mut chroma_dc = [[0i32; 4]; 2];
@@ -923,36 +959,19 @@ fn mb_decode(
                 }
             }
         } else if cbp_luma > 0 {
-            for (g, res8) in luma_res8.iter_mut().enumerate() {
+            for g in 0..4usize {
                 if cbp_luma & (1 << g) == 0 {
                     continue;
                 }
-                if m.transform8x8 {
-                    // CAVLC 8x8: four 16-coefficient reads per group
-                    // (spec 7.3.5.3.2), each scattered into the 8x8
-                    // coefficient grid by `CAVLC_SCAN_8X8` — the same
-                    // `zigzag_scan8x8_cavlc` the reference decoder uses.
-                    for s4 in 0..4usize {
-                        let blk = g * 4 + s4;
-                        let nc = nc_value(&pic.mbs, &nz_acc, map, blk, Plane::Luma);
-                        let r = cavlc::decode_block(br, nc, BlockKind::LumaOrChromaAc4x4)?;
-                        for k in 0..16 {
-                            let ri = CAVLC_SCAN_8X8[16 * s4 + k] as usize;
-                            res8[ri] = r.levels[k];
-                        }
-                        nz_acc[blk] = r.total_coeff;
+                for s4 in 0..4usize {
+                    let blk = g * 4 + s4;
+                    let nc = nc_value(&pic.mbs, &nz_acc, map, blk, Plane::Luma);
+                    let r = cavlc::decode_block(br, nc, BlockKind::LumaOrChromaAc4x4)?;
+                    for s in 0..16 {
+                        let ri = cavlc::raster_index(BlockKind::LumaOrChromaAc4x4, s);
+                        luma_res[blk][ri] = r.levels[s];
                     }
-                } else {
-                    for s4 in 0..4usize {
-                        let blk = g * 4 + s4;
-                        let nc = nc_value(&pic.mbs, &nz_acc, map, blk, Plane::Luma);
-                        let r = cavlc::decode_block(br, nc, BlockKind::LumaOrChromaAc4x4)?;
-                        for s in 0..16 {
-                            let ri = cavlc::raster_index(BlockKind::LumaOrChromaAc4x4, s);
-                            luma_res[blk][ri] = r.levels[s];
-                        }
-                        nz_acc[blk] = r.total_coeff;
-                    }
+                    nz_acc[blk] = r.total_coeff;
                 }
             }
         }
@@ -993,57 +1012,32 @@ fn mb_decode(
             }
             for plane in [&mut pic.buf.cb, &mut pic.buf.cr] {
                 for row in 0..8 {
-                    for x in 0..8 { let o = (py0/2+row)*(pic.buf.w/2)+px0/2+x; plane[o] = br.byte()?; }
+                    for x in 0..8 {
+                        let o = (py0 / 2 + row) * (pic.buf.w / 2) + px0 / 2 + x;
+                        plane[o] = br.byte()?;
+                    }
                 }
             }
             m.nz = [16; 24];
         }
         MbType::I4x4 => {
-            if m.transform8x8 {
-                // I_8x8: predict one 8x8 group at a time in raster
-                // order — each group reads the reconstructed samples
-                // of the earlier groups (spec 8.3.5.2 availability).
-                for (g, raw_resid) in luma_res8.iter().enumerate() {
-                    let nb = gather_luma8x8(&pic.buf, &pic.mbs, map, g, cx.pps);
-                    // Top-left 4x4 cell of this 8x8 group on the raster
-                    // mode grid: y*4 + x with (x, y) = (2*(g%2), 2*(g/2)).
-                    let mode = m.i4x4_modes[8 * (g / 2) + 2 * (g % 2)];
-                    let mut pred = [0u8; 64];
-                    intra::pred8x8(mode, &nb, &mut pred);
-
-                    let mut resid = *raw_resid;
-                    if coded && cbp_luma & (1 << g) != 0 {
-                        transform::dequant_8x8(&mut resid, m.qp_y);
-                        transform::inverse_8x8(&mut resid);
-                    }
-                    let (bx, by) = ((g % 2) * 8, (g / 2) * 8);
-                    for yy in 0..8 {
-                        for xx in 0..8 {
-                            let v = i32::from(pred[yy * 8 + xx]) + resid[yy * 8 + xx];
-                            pic.buf.y[(py0 + by + yy) * pic.buf.w + px0 + bx + xx] =
-                                v.clamp(0, 255) as u8;
-                        }
-                    }
+            // Reconstruct in group-major coding order.
+            for (blk, raw_resid) in luma_res.iter().enumerate() {
+                let (bx, by) = block_xy(blk);
+                let r = by * 4 + bx;
+                let nb = gather4x4(&pic.buf, &pic.mbs, map, bx, by, blk, cx.pps);
+                let mut pred = [0u8; 16];
+                intra::pred4x4(m.i4x4_modes[r], &nb, &mut pred)?;
+                let mut resid = *raw_resid;
+                if coded {
+                    transform::dequant_4x4(&mut resid, m.qp_y);
+                    transform::inverse_4x4(&mut resid)?;
                 }
-            } else {
-                // Reconstruct in group-major coding order.
-                for (blk, raw_resid) in luma_res.iter().enumerate() {
-                    let (bx, by) = block_xy(blk);
-                    let r = by * 4 + bx;
-                    let nb = gather4x4(&pic.buf, &pic.mbs, map, bx, by, blk, cx.pps);
-                    let mut pred = [0u8; 16];
-                    intra::pred4x4(m.i4x4_modes[r], &nb, &mut pred)?;
-                    let mut resid = *raw_resid;
-                    if coded {
-                        transform::dequant_4x4(&mut resid, m.qp_y);
-                        transform::inverse_4x4(&mut resid)?;
-                    }
-                    for yy in 0..4 {
-                        for xx in 0..4 {
-                            let v = i32::from(pred[yy * 4 + xx]) + resid[yy * 4 + xx];
-                            pic.buf.y[(py0 + by * 4 + yy) * pic.buf.w + px0 + bx * 4 + xx] =
-                                v.clamp(0, 255) as u8;
-                        }
+                for yy in 0..4 {
+                    for xx in 0..4 {
+                        let v = i32::from(pred[yy * 4 + xx]) + resid[yy * 4 + xx];
+                        pic.buf.y[(py0 + by * 4 + yy) * pic.buf.w + px0 + bx * 4 + xx] =
+                            v.clamp(0, 255) as u8;
                     }
                 }
             }
@@ -1088,10 +1082,7 @@ fn mb_decode(
             // Inter: per partition MVP + MC, then residual add.
             for &(x4, y4, w4, h4, ref_idx, mvd) in &inter_parts {
                 let mvp = mvp_l0_parts(&pic.mbs, Some(&m), map, x4, y4, w4, h4, ref_idx);
-                let mv = [
-                    mvp[0].wrapping_add(mvd[0]),
-                    mvp[1].wrapping_add(mvd[1]),
-                ];
+                let mv = [mvp[0].wrapping_add(mvd[0]), mvp[1].wrapping_add(mvd[1])];
                 for yy in y4..y4 + h4 {
                     for xx in x4..x4 + w4 {
                         let b = block_index(xx, yy);
@@ -1113,33 +1104,17 @@ fn mb_decode(
                 )?;
             }
             // Add luma residual where cbp says coefficients exist.
-
-            if m.transform8x8 {
-                for (g, raw_resid) in luma_res8.iter().enumerate() {
-                    if raw_resid.iter().all(|&v| v == 0) {
-                        continue;
-                    }
-                    let (bx, by) = ((g % 2) * 8, (g / 2) * 8);
-                    let mut resid = *raw_resid;
-                    transform::dequant_8x8(&mut resid, m.qp_y);
-
-                    transform::inverse_8x8(&mut resid);
-                    let o = (py0 + by) * pic.buf.w + px0 + bx;
-                    transform::add_residual_8x8(&mut pic.buf.y[o..], pic.buf.w, &resid);
+            for (blk, raw_resid) in luma_res.iter().enumerate() {
+                if raw_resid.iter().all(|&v| v == 0) {
+                    continue;
                 }
-            } else {
-                for (blk, raw_resid) in luma_res.iter().enumerate() {
-                    if raw_resid.iter().all(|&v| v == 0) {
-                        continue;
-                    }
-                    let (bx, by) = block_xy(blk);
-                    let mut resid = *raw_resid;
-                    transform::dequant_4x4(&mut resid, m.qp_y);
+                let (bx, by) = block_xy(blk);
+                let mut resid = *raw_resid;
+                transform::dequant_4x4(&mut resid, m.qp_y);
 
-                    transform::inverse_4x4(&mut resid)?;
-                    let o = (py0 + by * 4) * pic.buf.w + px0 + bx * 4;
-                    transform::add_residual_4x4(&mut pic.buf.y[o..], pic.buf.w, &resid);
-                }
+                transform::inverse_4x4(&mut resid)?;
+                let o = (py0 + by * 4) * pic.buf.w + px0 + bx * 4;
+                transform::add_residual_4x4(&mut pic.buf.y[o..], pic.buf.w, &resid);
             }
             chroma_recon(
                 pic, cx, map, &m, &chroma_ac, &chroma_dc, cbp_chroma, px0, py0,
@@ -1154,8 +1129,10 @@ fn mb_decode(
 /// `mvd` clamped to the representable quarter-pel range (a hostile
 /// `se()` can produce values far beyond i16).
 fn clamp_mvd(mvd: [i32; 2]) -> Result<[i16; 2]> {
-    Ok([i16::try_from(mvd[0]).map_err(|_| Error::BadValue("horizontal motion difference"))?,
-        i16::try_from(mvd[1]).map_err(|_| Error::BadValue("vertical motion difference"))?])
+    Ok([
+        i16::try_from(mvd[0]).map_err(|_| Error::BadValue("horizontal motion difference"))?,
+        i16::try_from(mvd[1]).map_err(|_| Error::BadValue("vertical motion difference"))?,
+    ])
 }
 
 /// Chroma reconstruction shared by all MB types: intra MBs predict
@@ -1247,11 +1224,10 @@ fn mc_partition(
         .ref_order
         .get(ri)
         .ok_or(Error::BadValue("ref_idx past active list"))?;
-    let rf = dpb
-        .refs
-        .get(ref_slot)
-        .ok_or(Error::MissingReference)?;
-    if rf.width != buf.w || rf.y.len() != buf.w * buf.h { return Err(Error::MissingReference); }
+    let rf = dpb.refs.get(ref_slot).ok_or(Error::MissingReference)?;
+    if rf.width != buf.w || rf.y.len() != buf.w * buf.h {
+        return Err(Error::MissingReference);
+    }
     let mut luma = [0u8; 256];
     inter::mc_luma(
         &rf.y,
@@ -1306,7 +1282,11 @@ enum Plane {
 
 impl Plane {
     fn chroma(c: usize) -> Plane {
-        if c == 0 { Plane::Cb } else { Plane::Cr }
+        if c == 0 {
+            Plane::Cb
+        } else {
+            Plane::Cr
+        }
     }
     /// Index into `MbState::nz` / the in-flight accumulator.
     fn nz_idx(self, blk: usize) -> usize {
@@ -1463,12 +1443,8 @@ fn mvp_l0_parts(
     let ri = i32::from(ref_idx);
 
     // Directional single-candidate rules are MB-partition-only (spec
-    // 8.4.1.1 "If MbPartWidth is 16 and MbPartHeight is 8..." / the
-    // 8x16 analogue; ffmpeg keeps them in pred_16x8/pred_8x16_motion,
-    // called only from MB-partition decode). Sub-mb partitions
-    // (8x8/8x4/4x8/4x4) always take the median path — the previous
-    // 8x4/4x8 cases generalised the rules down to sub-mbs and broke
-    // every mixed-sub P8x8 MB in t2 (t2_8x8_part frame 1+).
+    // 8.4.1.1 and 8.4.1.2). Sub-mb partitions (8x8/8x4/4x8/4x4) always
+    // take the median path.
     if w4 == 4 && h4 == 2 {
         if y4 == 0 && ref_b == ri {
             return mv_b;
@@ -1756,104 +1732,3 @@ fn gather8x8(plane: &[u8], mbs: &[MbState], map: MbMap, pps: &Pps, cw: usize) ->
     }
     nb
 }
-
-fn gather_luma8x8(buf: &FrameBuf, mbs: &[MbState], map: MbMap, g: usize, pps: &Pps) -> NbSamples {
-    let gx = (g % 2) * 2;
-    let gy = (g / 2) * 2;
-    let px = map.x * 16 + gx * 4;
-    let py = map.y * 16 + gy * 4;
-    let mut nb = NbSamples {
-        left: [0; 16],
-        top: [0; 16],
-        top_right: None,
-        top_left: None,
-        has_left: false,
-        has_top: false,
-    };
-    let ok = |i: Option<usize>| -> bool {
-        i.and_then(|j| mbs.get(j))
-            .map(|s| intra_ok(s, pps, map.sid))
-            .unwrap_or(false)
-    };
-    // LEFT column (px-1, py..py+7): group 1/3 read the previous
-    // same-MB group (always available — intra MBs reconstruct in
-    // group order); group 0/2 read mbA's right edge.
-    if g % 2 == 1 || (px > 0 && ok(map.mb_a())) {
-        nb.has_left = true;
-        for i in 0..8 {
-            nb.left[i] = buf.y[(py + i) * buf.w + px - 1];
-        }
-    }
-    // TOP row (px..px+7, py-1): groups 2/3 read the same-MB group
-    // above; groups 0/1 read mbB's bottom row.
-    if g >= 2 || (py > 0 && ok(map.mb_b())) {
-        nb.has_top = true;
-        for i in 0..8 {
-            nb.top[i] = buf.y[(py - 1) * buf.w + px + i];
-        }
-    }
-    // TOP_LEFT sample (px-1, py-1): g0 -> mbD, g1 -> mbB, g2 -> mbA,
-    // g3 -> the same-MB group-0 corner (already reconstructed).
-    let tl: Option<u8> = match g {
-        0 => {
-            if px > 0 && py > 0 && ok(map.mb_d()) {
-                Some(buf.y[(py - 1) * buf.w + px - 1])
-            } else {
-                None
-            }
-        }
-        1 => {
-            if py > 0 && ok(map.mb_b()) {
-                Some(buf.y[(py - 1) * buf.w + px - 1])
-            } else {
-                None
-            }
-        }
-        2 => {
-            if px > 0 && ok(map.mb_a()) {
-                Some(buf.y[(py - 1) * buf.w + px - 1])
-            } else {
-                None
-            }
-        }
-        _ => Some(buf.y[(py - 1) * buf.w + px - 1]),
-    };
-    nb.top_left = tl;
-    // TOP_RIGHT row (px+8..px+15, py-1): g0 -> mbB's right half;
-    // g1 -> mbC's left half; g2 -> same-MB group-1's bottom row
-    // (reconstructed already); g3 -> the not-yet-decoded right MB.
-    nb.top_right = match g {
-        0 => {
-            if py > 0 && ok(map.mb_b()) {
-                let mut t = [0u8; 16];
-                for (i, tv) in t.iter_mut().enumerate().take(8) {
-                    *tv = buf.y[(py - 1) * buf.w + px + 8 + i];
-                }
-                Some(t)
-            } else {
-                None
-            }
-        }
-        1 => {
-            if py > 0 && ok(map.mb_c()) {
-                let mut t = [0u8; 16];
-                for (i, tv) in t.iter_mut().enumerate().take(8) {
-                    *tv = buf.y[(py - 1) * buf.w + px + 8 + i];
-                }
-                Some(t)
-            } else {
-                None
-            }
-        }
-        2 => {
-            let mut t = [0u8; 16];
-            for (i, tv) in t.iter_mut().enumerate().take(8) {
-                *tv = buf.y[(py - 1) * buf.w + px + 8 + i];
-            }
-            Some(t)
-        }
-        _ => None,
-    };
-    nb
-}
-

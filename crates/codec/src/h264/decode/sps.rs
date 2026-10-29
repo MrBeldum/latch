@@ -6,20 +6,17 @@ use super::{Error, Result};
 /// The `profile_idc` values this crate understands, named for error
 /// reporting. Every profile outside [`Profile::Baseline`],
 /// [`Profile::Main`], [`Profile::Extended`] and [`Profile::High`] is
-/// refused with the profile named — the decoder covers the 8-bit 4:2:0
-/// Main profile feature set plus the 8x8 transform.
+/// refused with the profile named — the decoder targets Constrained Baseline.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Profile {
     /// `profile_idc` 66 (Baseline and Constrained Baseline — the
     /// constraint flags are checked separately).
     Baseline,
-    /// `profile_idc` 77 (Main): CAVLC + CABAC, I/P/B slices.
+    /// `profile_idc` 77 (Main).
     Main,
-    /// `profile_idc` 88 (Extended). Same subset as Main for decoding.
+    /// `profile_idc` 88 (Extended).
     Extended,
-    /// `profile_idc` 100 (High): the Main set plus the 8x8 luma
-    /// transform. Scaling matrices, non-4:2:0 chroma and other bit
-    /// depths are refused at SPS parse.
+    /// `profile_idc` 100 (High).
     High,
 }
 
@@ -101,7 +98,9 @@ pub(crate) fn parse(payload: &[u8]) -> Result<Sps> {
     let mut b = Br::new(payload);
     let profile_idc = b.bits(8)? as u8;
     let constraint_flags = b.bits(8)?;
-    if constraint_flags & 3 != 0 { return Err(Error::BadValue("reserved SPS constraint bits")); }
+    if constraint_flags & 3 != 0 {
+        return Err(Error::BadValue("reserved SPS constraint bits"));
+    }
     let level_idc = b.bits(8)? as u8;
     let sps_id = b.ue()?;
     if sps_id > 31 {
@@ -163,7 +162,9 @@ pub(crate) fn parse(payload: &[u8]) -> Result<Sps> {
 
     // Non-High profiles have chroma_format_idc implicitly 1 (4:2:0).
     let frame_num_minus4 = b.ue()?;
-    if frame_num_minus4 > 12 { return Err(Error::BadValue("log2_max_frame_num")); }
+    if frame_num_minus4 > 12 {
+        return Err(Error::BadValue("log2_max_frame_num"));
+    }
     let log2_max_frame_num = frame_num_minus4 + 4;
     if !(4..=16).contains(&log2_max_frame_num) {
         return Err(Error::BadValue("log2_max_frame_num out of range"));
@@ -177,7 +178,9 @@ pub(crate) fn parse(payload: &[u8]) -> Result<Sps> {
     match pic_order_cnt_type {
         0 => {
             let poc_minus4 = b.ue()?;
-            if poc_minus4 > 12 { return Err(Error::BadValue("log2_max_poc_lsb")); }
+            if poc_minus4 > 12 {
+                return Err(Error::BadValue("log2_max_poc_lsb"));
+            }
             log2_max_poc_lsb = poc_minus4 + 4;
             if !(4..=16).contains(&log2_max_poc_lsb) {
                 return Err(Error::BadValue("log2_max_pic_order_cnt_lsb out of range"));
@@ -202,32 +205,37 @@ pub(crate) fn parse(payload: &[u8]) -> Result<Sps> {
     }
 
     let max_num_ref_frames = b.ue()?;
-    if max_num_ref_frames > 16 { return Err(Error::BadValue("max_num_ref_frames over 16")); }
+    if max_num_ref_frames > 16 {
+        return Err(Error::BadValue("max_num_ref_frames over 16"));
+    }
     let gaps_in_frame_num_allowed = b.bit()?;
     let width_mbs = b.ue()? + 1;
     let height_mbs = b.ue()? + 1;
-    if width_mbs > 512 || height_mbs > 512 || u64::from(width_mbs)*u64::from(height_mbs) > 139264 {
+    if width_mbs > 512 || height_mbs > 512 || u64::from(width_mbs) * u64::from(height_mbs) > 139264
+    {
         return Err(Error::BadValue("coded picture size absurd"));
     }
-    let (max_picture_mbs,max_dpb_mbs) = match level_idc {
-        9 | 10 => (99,396),
-        11 if constraint_flags & 0x10 != 0 => (99,396),
-        11 => (396,900),
-        12 | 13 | 20 => (396,2376),
-        21 => (792,4752),
-        22 | 30 => (1620,8100),
-        31 => (3600,18000),
-        32 => (5120,20480),
-        40 | 41 => (8192,32768),
-        42 => (8704,34816),
-        50 => (22080,110400),
-        51 | 52 => (36864,184320),
-        60..=62 => (139264,696320),
+    let (max_picture_mbs, max_dpb_mbs) = match level_idc {
+        9 | 10 => (99, 396),
+        11 if constraint_flags & 0x10 != 0 => (99, 396),
+        11 => (396, 900),
+        12 | 13 | 20 => (396, 2376),
+        21 => (792, 4752),
+        22 | 30 => (1620, 8100),
+        31 => (3600, 18000),
+        32 => (5120, 20480),
+        40 | 41 => (8192, 32768),
+        42 => (8704, 34816),
+        50 => (22080, 110400),
+        51 | 52 => (36864, 184320),
+        60..=62 => (139264, 696320),
         _ => return Err(Error::Unsupported("H.264 level")),
     };
-    let picture_mbs=width_mbs*height_mbs;
-    if picture_mbs>max_picture_mbs || picture_mbs*max_num_ref_frames>max_dpb_mbs {
-        return Err(Error::BadValue("picture or reference allocation exceeds level"));
+    let picture_mbs = width_mbs * height_mbs;
+    if picture_mbs > max_picture_mbs || picture_mbs * max_num_ref_frames > max_dpb_mbs {
+        return Err(Error::BadValue(
+            "picture or reference allocation exceeds level",
+        ));
     }
     let frame_mbs_only = b.bit()?;
     if !frame_mbs_only {
@@ -391,50 +399,40 @@ mod tests {
     #[test]
     fn high_profile_extension_arms() {
         // chroma_format_idc != 1 named refusal.
-        assert!(
-            sps_with(100, |w| {
-                w.ue(0); // chroma 4:0:0
-            })
-            .is_err()
-        );
+        assert!(sps_with(100, |w| {
+            w.ue(0); // chroma 4:0:0
+        })
+        .is_err());
         // bit_depth_luma > 8.
-        assert!(
-            sps_with(100, |w| {
-                w.ue(1); // chroma 4:2:0
-                w.ue(1); // bit_depth_luma_minus4 -> 9
-            })
-            .is_err()
-        );
+        assert!(sps_with(100, |w| {
+            w.ue(1); // chroma 4:2:0
+            w.ue(1); // bit_depth_luma_minus4 -> 9
+        })
+        .is_err());
         // bit_depth_chroma > 8.
-        assert!(
-            sps_with(100, |w| {
-                w.ue(1);
-                w.ue(0);
-                w.ue(1);
-            })
-            .is_err()
-        );
+        assert!(sps_with(100, |w| {
+            w.ue(1);
+            w.ue(0);
+            w.ue(1);
+        })
+        .is_err());
         // qpprime bypass.
-        assert!(
-            sps_with(100, |w| {
-                w.ue(1);
-                w.ue(0);
-                w.ue(0);
-                w.bit(1);
-            })
-            .is_err()
-        );
+        assert!(sps_with(100, |w| {
+            w.ue(1);
+            w.ue(0);
+            w.ue(0);
+            w.bit(1);
+        })
+        .is_err());
         // scaling matrix present.
-        assert!(
-            sps_with(100, |w| {
-                w.ue(1);
-                w.ue(0);
-                w.ue(0);
-                w.bit(0);
-                w.bit(1);
-            })
-            .is_err()
-        );
+        assert!(sps_with(100, |w| {
+            w.ue(1);
+            w.ue(0);
+            w.ue(0);
+            w.bit(0);
+            w.bit(1);
+        })
+        .is_err());
         // Fully valid High SPS: every High-extension field parses and
         // the stream reaches (or passes) the trailing fields.
         let high = sps_with(100, |w| {
@@ -484,37 +482,31 @@ mod tests {
             assert_eq!(sps.offset_for_ref_frame, std::vec![7, -7]);
         }
         // poc type 3 reject.
-        assert!(
-            sps_with(66, |w| {
-                w.ue(0);
-                w.ue(3);
-            })
-            .is_err()
-        );
+        assert!(sps_with(66, |w| {
+            w.ue(0);
+            w.ue(3);
+        })
+        .is_err());
         // interlaced reject (poc type 2, no lsb field).
-        assert!(
-            sps_with(66, |w| {
-                w.ue(0); // log2 fn
-                w.ue(2); // poc type
-                w.ue(1); // max refs
-                w.bit(0); // gaps
-                w.ue(0); // width
-                w.ue(0); // height
-                w.bit(0); // frame_mbs_only = 0
-            })
-            .is_err()
-        );
+        assert!(sps_with(66, |w| {
+            w.ue(0); // log2 fn
+            w.ue(2); // poc type
+            w.ue(1); // max refs
+            w.bit(0); // gaps
+            w.ue(0); // width
+            w.ue(0); // height
+            w.bit(0); // frame_mbs_only = 0
+        })
+        .is_err());
         // absurd size reject.
-        assert!(
-            sps_with(66, |w| {
-                w.ue(0);
-                w.ue(2);
-                w.ue(3000); // width mbs
-                w.ue(0);
-                w.bit(1);
-            })
-            .is_err()
-        );
+        assert!(sps_with(66, |w| {
+            w.ue(0);
+            w.ue(2);
+            w.ue(3000); // width mbs
+            w.ue(0);
+            w.bit(1);
+        })
+        .is_err());
         // unrecognised profile reject.
         assert!(sps_with(250, |_w| {}).is_err());
         // crop erasing the picture rejects; the u64 widening covers
