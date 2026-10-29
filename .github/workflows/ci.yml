@@ -139,3 +139,25 @@ jobs:
       - uses: actions/checkout@v4
       - name: relay installer selftest
         run: bash deploy/relay/selftest.sh
+
+  # Nothing Latch builds may compile C, C++ or assembler (docs/ENGINE.md).
+  native-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: no C, C++ or assembler in the build graph
+        run: bash scripts/audit-native.sh
+
+  # The H.264 decoder against the ITU-T H.264.1 conformance bitstreams:
+  # every picture must equal the reference decoder's output byte for byte.
+  codec-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: fetch the conformance bitstreams
+        run: sh scripts/fetch-h264-conformance.sh
+      - name: decode them
+        run: cargo test --locked --release -p latch-codec --test conformance -- --nocapture
