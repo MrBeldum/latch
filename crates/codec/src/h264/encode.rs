@@ -168,6 +168,38 @@ impl Encoder {
         };
         let mut qp = (proposed.round() as u8).clamp(lo, hi);
         let mut suppression = ((proposed - qp as f64).max(0.) / 6.).floor().min(10.) as u8;
+        let is_motion = if let Some(old) = &self.source {
+            let pw = picture.padded_width();
+            let ph = picture.padded_height();
+            let mb_cols = pw / 16;
+            let mb_rows = ph / 16;
+            let total_mbs = mb_cols * mb_rows;
+            let mut changed_mbs = 0;
+            for my in 0..mb_rows {
+                let y = my * 16 + 8;
+                let s_row = y * picture.y_stride;
+                let o_row = y * old.y_stride;
+                for mx in 0..mb_cols {
+                    let x = mx * 16 + 8;
+                    if picture.y[s_row + x] != old.y[o_row + x] {
+                        changed_mbs += 1;
+                    }
+                }
+            }
+            changed_mbs * 2 > total_mbs
+        } else {
+            false
+        };
+        let half_pel = if !idr && self.subpixel {
+            Some(Arc::new(predict::compute_half_pel(
+                &self.reconstruction.y,
+                self.reconstruction.y_stride,
+                self.reconstruction.padded_width(),
+                self.reconstruction.padded_height(),
+            )))
+        } else {
+            None
+        };
         let (data, rec, mbs, skipped, qp_sum) = loop {
             let rows = picture.padded_height() / 16;
             let width = picture.padded_width() / 16;
@@ -181,12 +213,14 @@ impl Encoder {
                         source: source.clone(),
                         previous: self.source.clone(),
                         reference: self.reconstruction.clone(),
+                        half_pel: half_pel.clone(),
                         quality: self.quality.clone(),
                         first: i * rows / self.workers.len(),
                         end: (i + 1) * rows / self.workers.len(),
                         qp,
                         suppression,
                         subpixel: self.subpixel,
+                        is_motion,
                         idr,
                         frame_num,
                         idr_id: self.idr_id,

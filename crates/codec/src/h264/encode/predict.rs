@@ -301,3 +301,456 @@ pub(super) fn luma_mc(
         _ => avg(h(x, y + fy / 2), v(x + fx / 2, y)),
     }) as u8
 }
+
+#[inline(always)]
+pub(super) fn sad16x8(
+    src: &[u8],
+    src_stride: usize,
+    src_offset: usize,
+    ref_plane: &[u8],
+    ref_stride: usize,
+    ref_offset: usize,
+) -> u32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        use std::arch::aarch64::*;
+        unsafe {
+            let mut acc = vdupq_n_u16(0);
+            for i in 0..8 {
+                let so = src_offset + (i * 2) * src_stride;
+                let ro = ref_offset + (i * 2) * ref_stride;
+                let va = vld1q_u8(src.as_ptr().add(so));
+                let vb = vld1q_u8(ref_plane.as_ptr().add(ro));
+                let diff_l = vabdl_u8(vget_low_u8(va), vget_low_u8(vb));
+                let diff_h = vabdl_high_u8(va, vb);
+                acc = vaddq_u16(acc, vaddq_u16(diff_l, diff_h));
+            }
+            vaddlvq_u16(acc) as u32
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::*;
+        unsafe {
+            let mut acc = _mm_setzero_si128();
+            for i in 0..8 {
+                let so = src_offset + (i * 2) * src_stride;
+                let ro = ref_offset + (i * 2) * ref_stride;
+                let va = _mm_loadu_si128(src.as_ptr().add(so) as *const __m128i);
+                let vb = _mm_loadu_si128(ref_plane.as_ptr().add(ro) as *const __m128i);
+                acc = _mm_add_epi64(acc, _mm_sad_epu8(va, vb));
+            }
+            let lo = _mm_cvtsi128_si32(acc) as u32;
+            let hi = _mm_cvtsi128_si32(_mm_srli_si128(acc, 8)) as u32;
+            lo + hi
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        sad16x8_scalar(
+            src, src_stride, src_offset, ref_plane, ref_stride, ref_offset,
+        )
+    }
+}
+
+#[inline(always)]
+#[allow(dead_code)]
+pub(super) fn sad16x8_scalar(
+    src: &[u8],
+    src_stride: usize,
+    src_offset: usize,
+    ref_plane: &[u8],
+    ref_stride: usize,
+    ref_offset: usize,
+) -> u32 {
+    let mut sum = 0u32;
+    for i in 0..8 {
+        let so = src_offset + (i * 2) * src_stride;
+        let ro = ref_offset + (i * 2) * ref_stride;
+        for j in 0..16 {
+            sum += src[so + j].abs_diff(ref_plane[ro + j]) as u32;
+        }
+    }
+    sum
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HalfPelPlanes {
+    pub h: Vec<u8>,
+    pub v: Vec<u8>,
+    pub d: Vec<u8>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum SubpelPlane {
+    Int,
+    H,
+    V,
+    D,
+}
+
+pub(super) fn subpel_sources(
+    fx: i32,
+    fy: i32,
+) -> (
+    SubpelPlane,
+    usize,
+    usize,
+    Option<(SubpelPlane, usize, usize)>,
+) {
+    match (fx, fy) {
+        (0, 0) => (SubpelPlane::Int, 0, 0, None),
+        (2, 0) => (SubpelPlane::H, 0, 0, None),
+        (0, 2) => (SubpelPlane::V, 0, 0, None),
+        (2, 2) => (SubpelPlane::D, 0, 0, None),
+        (1, 0) => (SubpelPlane::Int, 0, 0, Some((SubpelPlane::H, 0, 0))),
+        (3, 0) => (SubpelPlane::H, 0, 0, Some((SubpelPlane::Int, 1, 0))),
+        (0, 1) => (SubpelPlane::Int, 0, 0, Some((SubpelPlane::V, 0, 0))),
+        (0, 3) => (SubpelPlane::V, 0, 0, Some((SubpelPlane::Int, 0, 1))),
+        (2, 1) => (SubpelPlane::H, 0, 0, Some((SubpelPlane::D, 0, 0))),
+        (2, 3) => (SubpelPlane::D, 0, 0, Some((SubpelPlane::H, 0, 1))),
+        (1, 2) => (SubpelPlane::V, 0, 0, Some((SubpelPlane::D, 0, 0))),
+        (3, 2) => (SubpelPlane::D, 0, 0, Some((SubpelPlane::V, 1, 0))),
+        (1, 1) => (SubpelPlane::H, 0, 0, Some((SubpelPlane::V, 0, 0))),
+        (3, 1) => (SubpelPlane::H, 0, 0, Some((SubpelPlane::V, 1, 0))),
+        (1, 3) => (SubpelPlane::H, 0, 1, Some((SubpelPlane::V, 0, 0))),
+        (3, 3) => (SubpelPlane::H, 0, 1, Some((SubpelPlane::V, 1, 0))),
+        _ => unreachable!(),
+    }
+}
+
+pub fn compute_half_pel(plane: &[u8], stride: usize, width: usize, height: usize) -> HalfPelPlanes {
+    let mut h = vec![0u8; stride * height];
+    let mut v = vec![0u8; stride * height];
+    let mut d = vec![0u8; stride * height];
+    let mut raw_h = vec![0i32; stride * height];
+
+    let tap = |v0: i32, v1: i32, v2: i32, v3: i32, v4: i32, v5: i32| {
+        v0 - 5 * v1 + 20 * v2 + 20 * v3 - 5 * v4 + v5
+    };
+
+    for y in 0..height {
+        let y_off = y * stride;
+        for x in 0..2.min(width) {
+            let s = |dx: i32| -> i32 {
+                let cx = (x as i32 + dx).clamp(0, width as i32 - 1) as usize;
+                plane[y_off + cx] as i32
+            };
+            let rh = tap(s(-2), s(-1), s(0), s(1), s(2), s(3));
+            raw_h[y_off + x] = rh;
+            h[y_off + x] = ((rh + 16) >> 5).clamp(0, 255) as u8;
+        }
+        let row = &plane[y_off..y_off + width];
+        let mid_end = width.saturating_sub(3);
+        for x in 2..mid_end {
+            let rh = tap(
+                row[x - 2] as i32,
+                row[x - 1] as i32,
+                row[x] as i32,
+                row[x + 1] as i32,
+                row[x + 2] as i32,
+                row[x + 3] as i32,
+            );
+            raw_h[y_off + x] = rh;
+            h[y_off + x] = ((rh + 16) >> 5).clamp(0, 255) as u8;
+        }
+        for x in mid_end.max(2)..width {
+            let s = |dx: i32| -> i32 {
+                let cx = (x as i32 + dx).clamp(0, width as i32 - 1) as usize;
+                plane[y_off + cx] as i32
+            };
+            let rh = tap(s(-2), s(-1), s(0), s(1), s(2), s(3));
+            raw_h[y_off + x] = rh;
+            h[y_off + x] = ((rh + 16) >> 5).clamp(0, 255) as u8;
+        }
+    }
+
+    for y in 0..height {
+        let y_off = y * stride;
+        let y0 = (y as i32 - 2).clamp(0, height as i32 - 1) as usize * stride;
+        let y1 = (y as i32 - 1).clamp(0, height as i32 - 1) as usize * stride;
+        let y2 = y * stride;
+        let y3 = (y as i32 + 1).clamp(0, height as i32 - 1) as usize * stride;
+        let y4 = (y as i32 + 2).clamp(0, height as i32 - 1) as usize * stride;
+        let y5 = (y as i32 + 3).clamp(0, height as i32 - 1) as usize * stride;
+
+        let r0 = &plane[y0..y0 + width];
+        let r1 = &plane[y1..y1 + width];
+        let r2 = &plane[y2..y2 + width];
+        let r3 = &plane[y3..y3 + width];
+        let r4 = &plane[y4..y4 + width];
+        let r5 = &plane[y5..y5 + width];
+
+        let rh0 = &raw_h[y0..y0 + width];
+        let rh1 = &raw_h[y1..y1 + width];
+        let rh2 = &raw_h[y2..y2 + width];
+        let rh3 = &raw_h[y3..y3 + width];
+        let rh4 = &raw_h[y4..y4 + width];
+        let rh5 = &raw_h[y5..y5 + width];
+
+        let v_row = &mut v[y_off..y_off + width];
+        let d_row = &mut d[y_off..y_off + width];
+
+        for x in 0..width {
+            let rv = tap(
+                r0[x] as i32,
+                r1[x] as i32,
+                r2[x] as i32,
+                r3[x] as i32,
+                r4[x] as i32,
+                r5[x] as i32,
+            );
+            v_row[x] = ((rv + 16) >> 5).clamp(0, 255) as u8;
+
+            let rd = tap(rh0[x], rh1[x], rh2[x], rh3[x], rh4[x], rh5[x]);
+            d_row[x] = ((rd + 512) >> 10).clamp(0, 255) as u8;
+        }
+    }
+
+    HalfPelPlanes { h, v, d }
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn sad16x8_avg(
+    src: &[u8],
+    src_stride: usize,
+    src_offset: usize,
+    p1: &[u8],
+    p2: &[u8],
+    ref_stride: usize,
+    ro1: usize,
+    ro2: usize,
+) -> u32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        use std::arch::aarch64::*;
+        unsafe {
+            let mut acc = vdupq_n_u16(0);
+            for i in 0..8 {
+                let so = src_offset + (i * 2) * src_stride;
+                let o1 = ro1 + (i * 2) * ref_stride;
+                let o2 = ro2 + (i * 2) * ref_stride;
+                let va = vld1q_u8(p1.as_ptr().add(o1));
+                let vb = vld1q_u8(p2.as_ptr().add(o2));
+                let avg = vrhaddq_u8(va, vb);
+                let vsrc = vld1q_u8(src.as_ptr().add(so));
+                let diff_l = vabdl_u8(vget_low_u8(vsrc), vget_low_u8(avg));
+                let diff_h = vabdl_high_u8(vsrc, avg);
+                acc = vaddq_u16(acc, vaddq_u16(diff_l, diff_h));
+            }
+            vaddlvq_u16(acc) as u32
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::*;
+        unsafe {
+            let mut acc = _mm_setzero_si128();
+            for i in 0..8 {
+                let so = src_offset + (i * 2) * src_stride;
+                let o1 = ro1 + (i * 2) * ref_stride;
+                let o2 = ro2 + (i * 2) * ref_stride;
+                let va = _mm_loadu_si128(p1.as_ptr().add(o1) as *const __m128i);
+                let vb = _mm_loadu_si128(p2.as_ptr().add(o2) as *const __m128i);
+                let avg = _mm_avg_epu8(va, vb);
+                let vsrc = _mm_loadu_si128(src.as_ptr().add(so) as *const __m128i);
+                acc = _mm_add_epi64(acc, _mm_sad_epu8(vsrc, avg));
+            }
+            let lo = _mm_cvtsi128_si32(acc) as u32;
+            let hi = _mm_cvtsi128_si32(_mm_srli_si128(acc, 8)) as u32;
+            lo + hi
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        sad16x8_avg_scalar(src, src_stride, src_offset, p1, p2, ref_stride, ro1, ro2)
+    }
+}
+
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn sad16x8_avg_scalar(
+    src: &[u8],
+    src_stride: usize,
+    src_offset: usize,
+    p1: &[u8],
+    p2: &[u8],
+    ref_stride: usize,
+    ro1: usize,
+    ro2: usize,
+) -> u32 {
+    let mut sum = 0u32;
+    for i in 0..8 {
+        let so = src_offset + (i * 2) * src_stride;
+        let o1 = ro1 + (i * 2) * ref_stride;
+        let o2 = ro2 + (i * 2) * ref_stride;
+        for j in 0..16 {
+            let avg = ((p1[o1 + j] as u16 + p2[o2 + j] as u16 + 1) >> 1) as u8;
+            sum += src[so + j].abs_diff(avg) as u32;
+        }
+    }
+    sum
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn copy_subpel_16x16(
+    dst: &mut [u8],
+    dst_stride: usize,
+    dst_offset: usize,
+    p1: &[u8],
+    p2: Option<&[u8]>,
+    ref_stride: usize,
+    ro1: usize,
+    ro2: usize,
+) {
+    if let Some(p2) = p2 {
+        #[cfg(target_arch = "aarch64")]
+        {
+            use std::arch::aarch64::*;
+            unsafe {
+                for i in 0..16 {
+                    let d = dst_offset + i * dst_stride;
+                    let o1 = ro1 + i * ref_stride;
+                    let o2 = ro2 + i * ref_stride;
+                    let va = vld1q_u8(p1.as_ptr().add(o1));
+                    let vb = vld1q_u8(p2.as_ptr().add(o2));
+                    let avg = vrhaddq_u8(va, vb);
+                    vst1q_u8(dst.as_mut_ptr().add(d), avg);
+                }
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            use std::arch::x86_64::*;
+            unsafe {
+                for i in 0..16 {
+                    let d = dst_offset + i * dst_stride;
+                    let o1 = ro1 + i * ref_stride;
+                    let o2 = ro2 + i * ref_stride;
+                    let va = _mm_loadu_si128(p1.as_ptr().add(o1) as *const __m128i);
+                    let vb = _mm_loadu_si128(p2.as_ptr().add(o2) as *const __m128i);
+                    let avg = _mm_avg_epu8(va, vb);
+                    _mm_storeu_si128(dst.as_mut_ptr().add(d) as *mut __m128i, avg);
+                }
+            }
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        {
+            for i in 0..16 {
+                let d = dst_offset + i * dst_stride;
+                let o1 = ro1 + i * ref_stride;
+                let o2 = ro2 + i * ref_stride;
+                for j in 0..16 {
+                    dst[d + j] = ((p1[o1 + j] as u16 + p2[o2 + j] as u16 + 1) >> 1) as u8;
+                }
+            }
+        }
+    } else {
+        for i in 0..16 {
+            let d = dst_offset + i * dst_stride;
+            let o1 = ro1 + i * ref_stride;
+            dst[d..d + 16].copy_from_slice(&p1[o1..o1 + 16]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sad16x8_matches_scalar() {
+        let mut a = vec![0u8; 16 * 16];
+        let mut b = vec![0u8; 16 * 16];
+        let mut seed = 0x12345678u32;
+        for _ in 0..20 {
+            for v in a.iter_mut().chain(b.iter_mut()) {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                *v = (seed >> 16) as u8;
+            }
+            let sim = sad16x8(&a, 16, 0, &b, 16, 0);
+            let sca = sad16x8_scalar(&a, 16, 0, &b, 16, 0);
+            assert_eq!(sim, sca);
+        }
+    }
+
+    #[test]
+    fn half_pel_and_subpel_match_luma_mc() {
+        let width = 32;
+        let height = 32;
+        let stride = 32;
+        let mut plane = vec![0u8; stride * height];
+        let mut seed = 0xabcdef01u32;
+        for v in &mut plane {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            *v = (seed >> 16) as u8;
+        }
+        let hp = compute_half_pel(&plane, stride, width, height);
+
+        for y in 0..height as i32 {
+            for x in 0..width as i32 {
+                let h_mc = luma_mc(&plane, stride, width, height, x, y, (2, 0));
+                assert_eq!(
+                    hp.h[y as usize * stride + x as usize],
+                    h_mc,
+                    "h mismatch at {},{}",
+                    x,
+                    y
+                );
+                let v_mc = luma_mc(&plane, stride, width, height, x, y, (0, 2));
+                assert_eq!(
+                    hp.v[y as usize * stride + x as usize],
+                    v_mc,
+                    "v mismatch at {},{}",
+                    x,
+                    y
+                );
+                let d_mc = luma_mc(&plane, stride, width, height, x, y, (2, 2));
+                assert_eq!(
+                    hp.d[y as usize * stride + x as usize],
+                    d_mc,
+                    "d mismatch at {},{}",
+                    x,
+                    y
+                );
+            }
+        }
+
+        // Test all 16 subpel positions against luma_mc
+        for fy in 0..4 {
+            for fx in 0..4 {
+                let (p1, ox1, oy1, p2) = subpel_sources(fx, fy);
+                let get_p = |p: SubpelPlane| match p {
+                    SubpelPlane::Int => &plane,
+                    SubpelPlane::H => &hp.h,
+                    SubpelPlane::V => &hp.v,
+                    SubpelPlane::D => &hp.d,
+                };
+                let plane1 = get_p(p1);
+                let plane2 = p2.map(|(p, _, _)| get_p(p));
+                let (ox2, oy2) = p2.map(|(_, ox, oy)| (ox, oy)).unwrap_or((0, 0));
+
+                for y in 0..(height - 2) {
+                    for x in 0..(width - 2) {
+                        let sample1 = plane1[(y + oy1) * stride + (x + ox1)];
+                        let actual = if let Some(p2) = plane2 {
+                            let sample2 = p2[(y + oy2) * stride + (x + ox2)];
+                            ((sample1 as u16 + sample2 as u16 + 1) >> 1) as u8
+                        } else {
+                            sample1
+                        };
+                        let expected =
+                            luma_mc(&plane, stride, width, height, x as i32, y as i32, (fx, fy));
+                        assert_eq!(
+                            actual, expected,
+                            "subpel ({},{}) mismatch at {},{}",
+                            fx, fy, x, y
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
