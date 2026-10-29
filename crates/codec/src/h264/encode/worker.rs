@@ -1,0 +1,919 @@
+use super::{
+    bits::{signed_bits, Bits},
+    cavlc, predict,
+    transform::{self, SCAN},
+};
+use crate::Yuv420;
+use std::sync::Arc;
+
+#[derive(Clone, Default)]
+pub(super) struct Mb {
+    pub intra: bool,
+    pub mv: (i32, i32),
+    pub nz: [u8; 16],
+    pub cnz: [[u8; 4]; 2],
+    pub modes: [u8; 16],
+    pub qp: u8,
+    pub quality: u8,
+}
+pub(super) struct Job {
+    pub source: Arc<Yuv420>,
+    pub previous: Option<Arc<Yuv420>>,
+    pub reference: Arc<Yuv420>,
+    pub quality: Arc<Vec<u8>>,
+    pub first: usize,
+    pub end: usize,
+    pub qp: u8,
+    pub suppression: u8,
+    pub subpixel: bool,
+    pub idr: bool,
+    pub frame_num: u32,
+    pub idr_id: u32,
+    pub refresh: usize,
+    pub refresh_start: usize,
+}
+pub(super) struct Band {
+    pub first: usize,
+    pub picture: Yuv420,
+    pub mbs: Vec<Mb>,
+    pub nal: Vec<u8>,
+    pub skipped: u32,
+    pub qp_sum: u32,
+}
+fn pos(i: usize) -> (usize, usize) {
+    (
+        ((i / 4) % 2) * 8 + (i % 2) * 4,
+        (i / 8) * 8 + ((i / 2) % 2) * 4,
+    )
+}
+fn neighbours(mbs: &[Mb], w: usize, index: usize) -> (Option<&Mb>, Option<&Mb>, Option<&Mb>) {
+    let a = if !index.is_multiple_of(w) {
+        Some(&mbs[index - 1])
+    } else {
+        None
+    };
+    let b = if index >= w {
+        Some(&mbs[index - w])
+    } else {
+        None
+    };
+    let c = if index >= w && index % w + 1 < w {
+        Some(&mbs[index - w + 1])
+    } else if index >= w && !index.is_multiple_of(w) {
+        Some(&mbs[index - w - 1])
+    } else {
+        None
+    };
+    (a, b, c)
+}
+fn mv_predict(mbs: &[Mb], w: usize, index: usize, skip: bool) -> (i32, i32) {
+    let (a, b, c) = neighbours(mbs, w, index);
+    if skip
+        && (a.is_none()
+            || b.is_none()
+            || a.is_some_and(|m| !m.intra && m.mv == (0, 0))
+            || b.is_some_and(|m| !m.intra && m.mv == (0, 0)))
+    {
+        return (0, 0);
+    }
+    let valid = |m: Option<&Mb>| m.filter(|m| !m.intra).map(|m| m.mv);
+    let (a, b, c) = (valid(a), valid(b), valid(c));
+    if b.is_none() && c.is_none() {
+        return a.unwrap_or_default();
+    }
+    let vals = [a, b, c];
+    if vals.iter().flatten().count() == 1 {
+        return *vals.iter().flatten().next().unwrap();
+    }
+    let mut x = vals.map(|v| v.unwrap_or_default().0);
+    let mut y = vals.map(|v| v.unwrap_or_default().1);
+    x.sort_unstable();
+    y.sort_unstable();
+    (x[1], y[1])
+}
+fn equal_mb(a: &Yuv420, b: &Yuv420, x: usize, y: usize) -> bool {
+    equal_at(a, b, (x, y), (x, y))
+}
+fn equal_at(a: &Yuv420, b: &Yuv420, (x, y): (usize, usize), (rx, ry): (usize, usize)) -> bool {
+    for (ap, bp, as_, bs, n) in [
+        (&a.y, &b.y, a.y_stride, b.y_stride, 16),
+        (&a.u, &b.u, a.c_stride, b.c_stride, 8),
+        (&a.v, &b.v, a.c_stride, b.c_stride, 8),
+    ] {
+        let xx = x * n / 16;
+        let yy = y * n / 16;
+        for r in 0..n {
+            if ap[(yy + r) * as_ + xx..(yy + r) * as_ + xx + n]
+                != bp
+                    [(ry * n / 16 + r) * bs + rx * n / 16..(ry * n / 16 + r) * bs + rx * n / 16 + n]
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+fn copy_mc(
+    dst: &mut Yuv420,
+    reference: &Yuv420,
+    x: usize,
+    y: usize,
+    global_y: usize,
+    mv: (i32, i32),
+) {
+    let rx = x as i32 + mv.0 / 4;
+    let ry = global_y as i32 + mv.1 / 4;
+    if mv.0 % 8 == 0
+        && mv.1 % 8 == 0
+        && rx >= 0
+        && ry >= 0
+        && rx + 16 <= reference.padded_width() as i32
+        && ry + 16 <= reference.padded_height() as i32
+    {
+        for (dp, rp, ds, rs, n) in [
+            (
+                &mut dst.y,
+                &reference.y,
+                dst.y_stride,
+                reference.y_stride,
+                16,
+            ),
+            (
+                &mut dst.u,
+                &reference.u,
+                dst.c_stride,
+                reference.c_stride,
+                8,
+            ),
+            (
+                &mut dst.v,
+                &reference.v,
+                dst.c_stride,
+                reference.c_stride,
+                8,
+            ),
+        ] {
+            for row in 0..n {
+                let d = (y * n / 16 + row) * ds + x * n / 16;
+                let r = (ry as usize * n / 16 + row) * rs + rx as usize * n / 16;
+                dp[d..d + n].copy_from_slice(&rp[r..r + n]);
+            }
+        }
+        return;
+    }
+    for yy in 0..16 {
+        for xx in 0..16 {
+            dst.y[(y + yy) * dst.y_stride + x + xx] = predict::luma_mc(
+                &reference.y,
+                reference.y_stride,
+                reference.padded_width(),
+                reference.padded_height(),
+                (x + xx) as i32,
+                (global_y + yy) as i32,
+                mv,
+            );
+        }
+    }
+    for (dp, rp) in [(&mut dst.u, &reference.u), (&mut dst.v, &reference.v)] {
+        for yy in 0..8 {
+            for xx in 0..8 {
+                dp[(y / 2 + yy) * dst.c_stride + x / 2 + xx] = predict::chroma_mc(
+                    rp,
+                    reference.c_stride,
+                    reference.padded_width() / 2,
+                    reference.padded_height() / 2,
+                    (x / 2 + xx) as i32,
+                    (global_y / 2 + yy) as i32,
+                    mv,
+                );
+            }
+        }
+    }
+}
+fn context(mbs: &[Mb], w: usize, index: usize, bx: usize, by: usize, plane: usize) -> i32 {
+    let n = if plane == 0 { 4 } else { 2 };
+    let get = |m: &Mb, x: usize, y: usize| {
+        if plane == 0 {
+            m.nz[y * n + x]
+        } else {
+            m.cnz[plane - 1][y * n + x]
+        }
+    };
+    let a = if bx > 0 {
+        Some(get(&mbs[index], bx - 1, by))
+    } else if !index.is_multiple_of(w) {
+        Some(get(&mbs[index - 1], n - 1, by))
+    } else {
+        None
+    };
+    let b = if by > 0 {
+        Some(get(&mbs[index], bx, by - 1))
+    } else if index >= w {
+        Some(get(&mbs[index - w], bx, n - 1))
+    } else {
+        None
+    };
+    match (a, b) {
+        (Some(a), Some(b)) => (a as i32 + b as i32 + 1) >> 1,
+        (Some(v), None) | (None, Some(v)) => v as i32,
+        _ => 0,
+    }
+}
+fn mode_predict(mbs: &[Mb], w: usize, index: usize, bx: usize, by: usize) -> u8 {
+    let a = if bx > 0 {
+        Some(mbs[index].modes[by * 4 + bx - 1])
+    } else if !index.is_multiple_of(w) {
+        Some(mbs[index - 1].modes[by * 4 + 3])
+    } else {
+        None
+    };
+    let b = if by > 0 {
+        Some(mbs[index].modes[(by - 1) * 4 + bx])
+    } else if index >= w {
+        Some(mbs[index - w].modes[12 + bx])
+    } else {
+        None
+    };
+    match (a, b) {
+        (Some(a), Some(b)) => a.min(b),
+        _ => 2,
+    }
+}
+fn motion_cost(
+    src: &Yuv420,
+    r: &Yuv420,
+    x: usize,
+    y: usize,
+    mv: (i32, i32),
+    pred: (i32, i32),
+    lambda: u32,
+) -> u32 {
+    let mut cost = lambda * (signed_bits(mv.0 - pred.0) + signed_bits(mv.1 - pred.1));
+    for yy in (0..16).step_by(2) {
+        for xx in 0..16 {
+            cost += 2 * src.y[(y + yy) * src.y_stride + x + xx].abs_diff(predict::luma_mc(
+                &r.y,
+                r.y_stride,
+                r.padded_width(),
+                r.padded_height(),
+                (x + xx) as i32,
+                (y + yy) as i32,
+                mv,
+            )) as u32;
+        }
+    }
+    cost
+}
+fn scroll(job: &Job) -> (i32, i32) {
+    let Some(old) = job.previous.as_ref() else {
+        return (0, 0);
+    };
+    let src = &job.source;
+    let width = src.padded_width();
+    let start = job.first * 16;
+    let end = job.end * 16;
+    let mut changed = 0;
+    let mut samples = 0;
+    for y in (start..end).step_by(8) {
+        for x in (0..width).step_by(16) {
+            samples += 1;
+            changed += usize::from(src.y[y * src.y_stride + x] != old.y[y * old.y_stride + x]);
+        }
+    }
+    if changed * 256 < samples {
+        return (0, 0);
+    }
+    let hash = |p: &Yuv420, row: usize| -> u64 {
+        p.y[row * p.y_stride..row * p.y_stride + width]
+            .iter()
+            .fold(0xcbf29ce484222325u64, |h, &v| {
+                (h ^ v as u64).wrapping_mul(0x100000001b3)
+            })
+    };
+    let mut hist = [0u32; 257];
+    let old_hash: Vec<_> = (0..old.padded_height()).map(|y| hash(old, y)).collect();
+    for y in (start..end).step_by(8) {
+        let h = hash(src, y);
+        for dy in -128i32..=128 {
+            let yy = y as i32 + dy;
+            if yy >= 0 && (yy as usize) < old_hash.len() && old_hash[yy as usize] == h {
+                hist[(dy + 128) as usize] += 1;
+            }
+        }
+    }
+    let best = (0..257)
+        .max_by_key(|&i| (hist[i], std::cmp::Reverse(i.abs_diff(128))))
+        .unwrap();
+    if best != 128 && hist[best] > hist[128] + 2 {
+        return (0, (best as i32 - 128) * 4);
+    }
+    let mut best = (0, 0);
+    let mut best_cost = u64::MAX;
+    for dx in -128i32..=128 {
+        let mut cost = 0u64;
+        for y in (start..end).step_by(32) {
+            for x in (128..width.saturating_sub(128)).step_by(16) {
+                cost += src.y[y * src.y_stride + x]
+                    .abs_diff(old.y[y * old.y_stride + (x as i32 + dx) as usize])
+                    as u64;
+            }
+        }
+        if cost < best_cost {
+            best_cost = cost;
+            best = (dx * 4, 0);
+        }
+    }
+    best
+}
+#[allow(clippy::too_many_arguments)]
+fn motion(
+    job: &Job,
+    mbs: &[Mb],
+    w: usize,
+    index: usize,
+    x: usize,
+    y: usize,
+    pred: (i32, i32),
+    scroll: (i32, i32),
+    lambda: u32,
+) -> ((i32, i32), u32) {
+    let mut candidates = vec![(0, 0), pred, scroll];
+    let (a, b, c) = neighbours(mbs, w, index);
+    for m in [a, b, c].into_iter().flatten() {
+        if !m.intra {
+            candidates.push(m.mv);
+        }
+    }
+    let round = |v: (i32, i32)| ((v.0 / 4) * 4, (v.1 / 4) * 4);
+    let cost = |mv| motion_cost(&job.source, &job.reference, x, y, mv, pred, lambda);
+    let mut best = (0, 0);
+    let mut score = u32::MAX;
+    for v in candidates {
+        let v = round(v);
+        let s = cost(v);
+        if s < score {
+            score = s;
+            best = v;
+        }
+    }
+    if score < 32 + lambda * 2 {
+        return (best, score);
+    }
+    let centre = best;
+    for step in [8, 4, 2, 1] {
+        for _ in 0..4 {
+            let mut next = best;
+            for (dx, dy) in [(step * 4, 0), (-step * 4, 0), (0, step * 4), (0, -step * 4)] {
+                let v = (best.0 + dx, best.1 + dy);
+                if (v.0 - centre.0).abs() > 64 || (v.1 - centre.1).abs() > 64 {
+                    continue;
+                }
+                let s = cost(v);
+                if s < score {
+                    score = s;
+                    next = v;
+                }
+            }
+            if next == best {
+                break;
+            }
+            best = next;
+        }
+    }
+    if job.subpixel && score > lambda * 64 {
+        for step in [2, 1] {
+            let centre = best;
+            for dy in [-step, 0, step] {
+                for dx in [-step, 0, step] {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let v = (centre.0 + dx, centre.1 + dy);
+                    let s = cost(v);
+                    if s + lambda * 2 < score {
+                        score = s;
+                        best = v;
+                    }
+                }
+            }
+        }
+    }
+    (best, score)
+}
+
+pub(super) fn header(first: usize, idr: bool, frame_num: u32, idr_id: u32, qp: u8) -> Bits {
+    let mut b = Bits::default();
+    b.ue(first as u32);
+    b.ue(if idr { 2 } else { 0 });
+    b.ue(0);
+    b.put(frame_num, 16);
+    if idr {
+        b.ue(idr_id);
+    } else {
+        b.bit(false);
+        b.bit(false);
+    }
+    if idr {
+        b.bit(false);
+        b.bit(false);
+    } else {
+        b.bit(false);
+    }
+    b.se(qp as i32 - 26);
+    b.ue(0);
+    b.se(0);
+    b.se(0);
+    b
+}
+
+pub(super) fn encode(job: Job) -> Band {
+    let w = job.source.padded_width() / 16;
+    let rows = job.end - job.first;
+    let mut rec = Yuv420::new(job.source.width, rows as u32 * 16);
+    let mut mbs = vec![Mb::default(); w * rows];
+    let mut b = header(job.first * w, job.idr, job.frame_num, job.idr_id, job.qp);
+    let mut skip_run = 0;
+    let mut skipped = 0;
+    let mut qpy = job.qp;
+    let mut qp_sum = 0;
+    let global = scroll(&job);
+    let lambda = (0.85 * 2f64.powf((job.qp as f64 - 12.) / 6.))
+        .sqrt()
+        .round() as u32;
+    for index in 0..mbs.len() {
+        let x = (index % w) * 16;
+        let y = (index / w) * 16;
+        let gy = y + job.first * 16;
+        let gi = job.first * w + index;
+        mbs[index].modes = [2; 16];
+        let same = !job.idr
+            && job
+                .previous
+                .as_ref()
+                .is_some_and(|old| equal_mb(&job.source, old, x, gy));
+        let mut reuse = if same {
+            Some(((0, 0), job.quality[gi]))
+        } else {
+            None
+        };
+        if reuse.is_none()
+            && !job.idr
+            && global != (0, 0)
+            && global.0 % 64 == 0
+            && global.1 % 64 == 0
+        {
+            let rx = x as i32 + global.0 / 4;
+            let ry = gy as i32 + global.1 / 4;
+            if rx >= 0
+                && ry >= 0
+                && rx + 16 <= job.source.padded_width() as i32
+                && ry + 16 <= job.source.padded_height() as i32
+                && job.previous.as_ref().is_some_and(|old| {
+                    equal_at(&job.source, old, (x, gy), (rx as usize, ry as usize))
+                })
+            {
+                reuse = Some((
+                    global,
+                    job.quality[(ry as usize / 16) * w + rx as usize / 16],
+                ));
+            }
+        }
+        let previous_quality = reuse.map_or(job.quality[gi], |v| v.1);
+        let refine = reuse.is_some()
+            && previous_quality > 18
+            && (gi + job.quality.len() - job.refresh_start) % job.quality.len() < job.refresh;
+        let qp = if refine {
+            previous_quality.saturating_sub(4).max(18).min(job.qp)
+        } else {
+            job.qp
+        };
+        let pred = mv_predict(&mbs, w, index, false);
+        let skip_mv = mv_predict(&mbs, w, index, true);
+        if let Some((mv, quality)) = reuse.filter(|_| !refine) {
+            copy_mc(&mut rec, &job.reference, x, y, gy, mv);
+            mbs[index].mv = mv;
+            mbs[index].qp = qpy;
+            mbs[index].quality = quality;
+            if skip_mv == mv {
+                skip_run += 1;
+                skipped += 1;
+            } else {
+                b.ue(skip_run);
+                skip_run = 0;
+                b.ue(0);
+                b.se(mv.0 - pred.0);
+                b.se(mv.1 - pred.1);
+                b.ue(0);
+            }
+            qp_sum += qpy as u32;
+            continue;
+        }
+        let (mv, inter_cost) = if job.idr {
+            ((0, 0), u32::MAX)
+        } else {
+            motion(&job, &mbs, w, index, x, gy, pred, global, lambda)
+        };
+        // A single DC trial avoids evaluating every intra mode for an obvious temporal match.
+        let intra_trial = predict::intra_plane(&rec.y, rec.y_stride, x, y, 16, 2, false);
+        let mut intra_cost = 0;
+        for yy in (0..16).step_by(2) {
+            for xx in 0..16 {
+                intra_cost += 2 * job.source.y[(gy + yy) * job.source.y_stride + x + xx]
+                    .abs_diff(intra_trial[yy * 16 + xx]) as u32;
+            }
+        }
+        let intra = job.idr || intra_cost + lambda * 24 < inter_cost;
+        mbs[index].intra = intra;
+        mbs[index].mv = if intra { (0, 0) } else { mv };
+        mbs[index].quality = if job.suppression == 0 { qp } else { 45 };
+        if !intra {
+            copy_mc(&mut rec, &job.reference, x, y, gy, mv);
+        }
+        let mut coeffs = [[0i32; 16]; 16];
+        let mut modes = [(2u8, 2u8); 16];
+        let mut cbp = 0u32;
+        let mut cost4 = 0;
+        let mut best16 = (u32::MAX, 2u8, Vec::new());
+        if intra {
+            for mode in 0..4 {
+                if (mode == 0 && y == 0)
+                    || (mode == 1 && x == 0)
+                    || (mode == 3 && (x == 0 || y == 0))
+                {
+                    continue;
+                }
+                let p = predict::intra_plane(&rec.y, rec.y_stride, x, y, 16, mode, false);
+                let mut cost = lambda * 8;
+                for i in 0..16 {
+                    let (bx, by) = pos(i);
+                    let mut block = [0; 16];
+                    for yy in 0..4 {
+                        block[yy * 4..yy * 4 + 4]
+                            .copy_from_slice(&p[(by + yy) * 16 + bx..(by + yy) * 16 + bx + 4]);
+                    }
+                    cost += transform::satd(
+                        &job.source.y,
+                        job.source.y_stride,
+                        (gy + by) * job.source.y_stride + x + bx,
+                        &block,
+                    );
+                }
+                if cost < best16.0 {
+                    best16 = (cost, mode, p);
+                }
+            }
+        }
+        let fast16 = intra && best16.0 <= lambda * 16;
+        for i in 0..if fast16 { 0 } else { 16 } {
+            let (bx, by) = pos(i);
+            let off = (y + by) * rec.y_stride + x + bx;
+            let so = (gy + by) * job.source.y_stride + x + bx;
+            let predicted = mode_predict(&mbs, w, index, bx / 4, by / 4);
+            let p = if intra {
+                let tr =
+                    !(bx == 4 && by % 8 == 4 || bx == 12 && by > 0) && x + bx + 8 <= rec.y_stride;
+                let (mode, p, cost) = predict::intra4(
+                    &job.source.y,
+                    job.source.y_stride,
+                    so,
+                    &rec.y,
+                    rec.y_stride,
+                    x + bx,
+                    y + by,
+                    tr,
+                    predicted,
+                    lambda,
+                );
+                cost4 += cost;
+                mbs[index].modes[by / 4 * 4 + bx / 4] = mode;
+                modes[i] = (mode, predicted);
+                p
+            } else {
+                let mut p = [0; 16];
+                for yy in 0..4 {
+                    p[yy * 4..yy * 4 + 4].copy_from_slice(
+                        &rec.y[off + yy * rec.y_stride..off + yy * rec.y_stride + 4],
+                    );
+                }
+                p
+            };
+            let (c, r) = transform::block(
+                &job.source.y,
+                job.source.y_stride,
+                so,
+                &p,
+                qp,
+                intra,
+                job.suppression,
+            );
+            coeffs[i] = c;
+            if c.iter().any(|&v| v != 0) {
+                cbp |= 1 << (i / 4);
+            }
+            for yy in 0..4 {
+                rec.y[off + yy * rec.y_stride..off + yy * rec.y_stride + 4]
+                    .copy_from_slice(&r[yy * 4..yy * 4 + 4]);
+            }
+        }
+        let intra16 = intra && (fast16 || best16.0 <= cost4);
+        let mut ldc = [0i32; 16];
+        if intra16 {
+            cbp = 0;
+            mbs[index].modes = [2; 16];
+            if best16.0 == lambda * 8 {
+                for yy in 0..16 {
+                    rec.y[(y + yy) * rec.y_stride + x..(y + yy) * rec.y_stride + x + 16]
+                        .copy_from_slice(&best16.2[yy * 16..yy * 16 + 16]);
+                }
+            } else {
+                let mut transforms = [[0; 16]; 16];
+                let mut dc = [0; 16];
+                for (i, transformed) in transforms.iter_mut().enumerate() {
+                    let (bx, by) = pos(i);
+                    let mut residual = [0; 16];
+                    for yy in 0..4 {
+                        for xx in 0..4 {
+                            residual[yy * 4 + xx] = job.source.y
+                                [(gy + by + yy) * job.source.y_stride + x + bx + xx]
+                                as i32
+                                - best16.2[(by + yy) * 16 + bx + xx] as i32;
+                        }
+                    }
+                    *transformed = transform::forward(residual);
+                    dc[(by / 4) * 4 + bx / 4] = transformed[0];
+                }
+                let dc = transform::hadamard(dc).map(|v| {
+                    transform::suppress(
+                        transform::quant((v + 1) >> 1, qp, 0, true, 1),
+                        job.suppression,
+                    )
+                });
+                for i in 0..16 {
+                    ldc[i] = dc[SCAN[i]];
+                }
+                let dci = transform::luma_dc_inverse(dc, qp);
+                for i in 0..16 {
+                    let (bx, by) = pos(i);
+                    let mut dq = [0; 16];
+                    dq[0] = dci[(by / 4) * 4 + bx / 4];
+                    coeffs[i] = [0; 16];
+                    for (j, &s) in SCAN.iter().enumerate().skip(1) {
+                        let q = transform::suppress(
+                            transform::quant(transforms[i][s], qp, s, true, 0),
+                            job.suppression,
+                        );
+                        coeffs[i][j] = q;
+                        dq[s] = transform::dequant(q, qp, s);
+                    }
+                    if coeffs[i][1..].iter().any(|&v| v != 0) {
+                        cbp = 15;
+                    }
+                    let residual = transform::inverse(dq);
+                    for yy in 0..4 {
+                        for xx in 0..4 {
+                            rec.y[(y + by + yy) * rec.y_stride + x + bx + xx] =
+                                (best16.2[(by + yy) * 16 + bx + xx] as i32 + residual[yy * 4 + xx])
+                                    .clamp(0, 255) as u8;
+                        }
+                    }
+                }
+            }
+        }
+        let mut cc = [[[0i32; 16]; 4]; 2];
+        let mut dc = [[0i32; 4]; 2];
+        let cqp = transform::chroma_qp(qp);
+        let mut cmode = 0;
+        if intra {
+            let mut best = u32::MAX;
+            for mode in 0..4 {
+                if (mode == 1 && x == 0)
+                    || (mode == 2 && y == 0)
+                    || (mode == 3 && (x == 0 || y == 0))
+                {
+                    continue;
+                }
+                let mut cost = 0;
+                for (dp, sp) in [(&rec.u, &job.source.u), (&rec.v, &job.source.v)] {
+                    let p = predict::intra_plane(dp, rec.c_stride, x / 2, y / 2, 8, mode, true);
+                    for yy in 0..8 {
+                        for xx in 0..8 {
+                            cost += sp[(gy / 2 + yy) * job.source.c_stride + x / 2 + xx]
+                                .abs_diff(p[yy * 8 + xx])
+                                as u32;
+                        }
+                    }
+                }
+                if cost < best {
+                    best = cost;
+                    cmode = mode;
+                }
+            }
+            for dp in [&mut rec.u, &mut rec.v] {
+                let p = predict::intra_plane(dp, rec.c_stride, x / 2, y / 2, 8, cmode, true);
+                for yy in 0..8 {
+                    dp[(y / 2 + yy) * rec.c_stride + x / 2
+                        ..(y / 2 + yy) * rec.c_stride + x / 2 + 8]
+                        .copy_from_slice(&p[yy * 8..yy * 8 + 8]);
+                }
+            }
+        }
+        let mut chroma_cbp = 0;
+        for (plane, (dp, sp)) in [(&mut rec.u, &job.source.u), (&mut rec.v, &job.source.v)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut transformed = [[0; 16]; 4];
+            let mut predictions = [[0; 16]; 4];
+            for i in 0..4 {
+                let bx = (i % 2) * 4;
+                let by = (i / 2) * 4;
+                let off = (y / 2 + by) * rec.c_stride + x / 2 + bx;
+                let mut input = [0; 16];
+                for yy in 0..4 {
+                    for xx in 0..4 {
+                        let j = yy * 4 + xx;
+                        let p = dp[off + yy * rec.c_stride + xx];
+                        predictions[i][j] = p;
+                        input[j] = sp[(gy / 2 + by + yy) * job.source.c_stride + x / 2 + bx + xx]
+                            as i32
+                            - p as i32;
+                    }
+                }
+                transformed[i] = transform::forward(input);
+            }
+            dc[plane] = transform::chroma_dc(transformed.map(|c| c[0])).map(|v| {
+                transform::suppress(transform::quant(v, cqp, 0, intra, 1), job.suppression)
+            });
+            if dc[plane].iter().any(|&v| v != 0) {
+                chroma_cbp = chroma_cbp.max(1);
+            }
+            let dci = transform::chroma_dc_inverse(dc[plane], cqp);
+            for i in 0..4 {
+                let mut dq = [0; 16];
+                dq[0] = dci[i];
+                for (j, &s) in SCAN.iter().enumerate().skip(1) {
+                    cc[plane][i][j] = transform::suppress(
+                        transform::quant(transformed[i][s], cqp, s, intra, 0),
+                        job.suppression,
+                    );
+                    dq[s] = transform::dequant(cc[plane][i][j], cqp, s);
+                }
+                if cc[plane][i][1..].iter().any(|&v| v != 0) {
+                    chroma_cbp = 2;
+                }
+                let r = transform::inverse(dq);
+                let bx = (i % 2) * 4;
+                let by = (i / 2) * 4;
+                for yy in 0..4 {
+                    for xx in 0..4 {
+                        let j = yy * 4 + xx;
+                        dp[(y / 2 + by + yy) * rec.c_stride + x / 2 + bx + xx] =
+                            (predictions[i][j] as i32 + r[j]).clamp(0, 255) as u8;
+                    }
+                }
+            }
+        }
+        cbp |= chroma_cbp * 16;
+        if !job.idr && !intra && cbp == 0 && mv == skip_mv {
+            skip_run += 1;
+            skipped += 1;
+            mbs[index].qp = qpy;
+            qp_sum += qpy as u32;
+            continue;
+        }
+        if !job.idr {
+            b.ue(skip_run);
+            skip_run = 0;
+        }
+        b.ue(if intra {
+            let base = if intra16 {
+                1 + best16.1 as u32 + 4 * chroma_cbp + if cbp & 15 != 0 { 12 } else { 0 }
+            } else {
+                0
+            };
+            base + if job.idr { 0 } else { 5 }
+        } else {
+            0
+        });
+        if intra {
+            if !intra16 {
+                for (mode, predicted) in modes {
+                    b.bit(mode == predicted);
+                    if mode != predicted {
+                        b.put(if mode < predicted { mode } else { mode - 1 } as u32, 3);
+                    }
+                }
+            }
+            b.ue(cmode as u32);
+        } else {
+            b.se(mv.0 - pred.0);
+            b.se(mv.1 - pred.1);
+        }
+        const INTRA: [u8; 48] = [
+            47, 31, 15, 0, 23, 27, 29, 30, 7, 11, 13, 14, 39, 43, 45, 46, 16, 3, 5, 10, 12, 19, 21,
+            26, 28, 35, 37, 42, 44, 1, 2, 4, 8, 17, 18, 20, 24, 6, 9, 22, 25, 32, 33, 34, 36, 40,
+            38, 41,
+        ];
+        const INTER: [u8; 48] = [
+            0, 16, 1, 2, 4, 8, 32, 3, 5, 10, 12, 15, 47, 7, 11, 13, 14, 6, 9, 31, 35, 37, 42, 44,
+            33, 34, 36, 40, 39, 43, 45, 46, 17, 18, 20, 24, 19, 21, 26, 28, 23, 27, 29, 30, 22, 25,
+            38, 41,
+        ];
+        let table = if intra { INTRA } else { INTER };
+        if !intra16 {
+            b.ue(table.iter().position(|&v| v as u32 == cbp).unwrap() as u32);
+        }
+        if cbp != 0 || intra16 {
+            b.se(qp as i32 - qpy as i32);
+            qpy = qp;
+        }
+        mbs[index].qp = qpy;
+        qp_sum += qpy as u32;
+        if intra16 {
+            let nc = context(&mbs, w, index, 0, 0, 0);
+            cavlc::write(&mut b, &ldc, nc);
+        }
+        for (i, c) in coeffs.iter().enumerate() {
+            if cbp & (1 << (i / 4)) != 0 {
+                let (bx, by) = pos(i);
+                let nc = context(&mbs, w, index, bx / 4, by / 4, 0);
+                let count = cavlc::write(&mut b, if intra16 { &c[1..] } else { c }, nc);
+                mbs[index].nz[by / 4 * 4 + bx / 4] = count;
+            }
+        }
+        if chroma_cbp > 0 {
+            for d in &dc {
+                cavlc::write(&mut b, d, -1);
+            }
+        }
+        if chroma_cbp == 2 {
+            for (plane, coeff) in cc.iter().enumerate() {
+                for (i, c) in coeff.iter().enumerate() {
+                    let nc = context(&mbs, w, index, i % 2, i / 2, plane + 1);
+                    mbs[index].cnz[plane][i] = cavlc::write(&mut b, &c[1..], nc);
+                }
+            }
+        }
+    }
+    if !job.idr && skip_run > 0 {
+        b.ue(skip_run);
+    }
+    let mut nal = Vec::new();
+    b.nal(if job.idr { 0x65 } else { 0x41 }, &mut nal);
+    Band {
+        first: job.first,
+        picture: rec,
+        mbs,
+        nal,
+        skipped,
+        qp_sum,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn sixty_four_pixel_scrolls_are_exact_in_both_directions() {
+        let mut old = Yuv420::new(640, 368);
+        let mut seed = 7u32;
+        for v in &mut old.y {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            *v = seed as u8;
+        }
+        for delta in [(0, 64), (64, 0), (0, -64), (-64, 0)] {
+            let mut source = old.clone();
+            for y in 0..368 {
+                for x in 0..640 {
+                    source.y[y * 640 + x] = predict::sample(
+                        &old.y,
+                        640,
+                        640,
+                        368,
+                        x as i32 + delta.0,
+                        y as i32 + delta.1,
+                    ) as u8;
+                }
+            }
+            let job = Job {
+                source: Arc::new(source),
+                previous: Some(Arc::new(old.clone())),
+                reference: Arc::new(old.clone()),
+                quality: Arc::new(vec![18; 40 * 23]),
+                first: 0,
+                end: 23,
+                qp: 30,
+                suppression: 0,
+                subpixel: false,
+                idr: false,
+                frame_num: 1,
+                idr_id: 0,
+                refresh: 0,
+                refresh_start: 0,
+            };
+            assert_eq!(scroll(&job), (delta.0 * 4, delta.1 * 4));
+        }
+    }
+}
