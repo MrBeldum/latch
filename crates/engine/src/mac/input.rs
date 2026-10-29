@@ -3,7 +3,13 @@
 use super::ffi::{Owned, Ref};
 use crate::input::{DisplayRect, Event, Held, InputSink};
 use anyhow::{bail, ensure, Result};
-use std::ptr;
+use std::{
+    ptr,
+    time::{Duration, Instant},
+};
+
+#[link(name = "AppKit", kind = "framework")]
+extern "C" {}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -47,12 +53,41 @@ pub fn open() -> Result<Box<dyn InputSink>> {
         held: Held::default(),
         caps_lock: false,
         posting: true,
+        clicks: ClickCounter::new(),
     }))
 }
 struct Sink {
     held: Held,
     caps_lock: bool,
     posting: bool,
+    clicks: ClickCounter,
+}
+struct ClickCounter {
+    last: Option<(u32, Instant, Point)>,
+    counts: [i64; 5],
+    interval: Duration,
+}
+impl ClickCounter {
+    fn new() -> Self {
+        // SAFETY: this class method reads the system preference and needs no NSApplication.
+        let seconds: f64 = unsafe { objc2::msg_send![objc2::class!(NSEvent), doubleClickInterval] };
+        Self {
+            last: None,
+            counts: [1; 5],
+            interval: Duration::from_secs_f64(seconds),
+        }
+    }
+    fn down(&mut self, button: u32, now: Instant, point: Point) -> i64 {
+        let repeat = self.last.is_some_and(|(b, time, p)| {
+            b == button
+                && now.saturating_duration_since(time) <= self.interval
+                && (point.x - p.x).powi(2) + (point.y - p.y).powi(2) <= 16.0
+        });
+        let count = &mut self.counts[button as usize];
+        *count = if repeat { count.saturating_add(1) } else { 1 };
+        self.last = Some((button, now, point));
+        *count
+    }
 }
 fn clamp(point: Point, display: DisplayRect) -> Point {
     Point {
@@ -144,13 +179,20 @@ impl Sink {
                 }
                 Event::MouseButton { button, down } => {
                     let number = button_number(*button)?;
+                    let point = clamp(current, display);
                     let e = Owned::new(CGEventCreateMouseEvent(
                         ptr::null(),
                         button_type(number, *down),
-                        clamp(current, display),
+                        point,
                         number,
                     ))?;
                     if self.held.note(event) {
+                        let count = if *down {
+                            self.clicks.down(number, Instant::now(), point)
+                        } else {
+                            self.clicks.counts[number as usize]
+                        };
+                        CGEventSetIntegerValueField(e.0, 1, count); // kCGMouseEventClickState
                         events.push(e);
                     }
                 }
@@ -184,7 +226,7 @@ impl Sink {
                         0,
                         2,
                         pixels(*vertical),
-                        pixels(*horizontal),
+                        -pixels(*horizontal),
                         0,
                     ))?);
                 }
@@ -233,7 +275,13 @@ impl Sink {
             }
         }
         // SAFETY: this only constructs an event; the type/button combination agrees with CoreGraphics.
-        Owned::new(unsafe { CGEventCreateMouseEvent(ptr::null(), kind, point, number) })
+        unsafe {
+            let event = Owned::new(CGEventCreateMouseEvent(ptr::null(), kind, point, number))?;
+            if kind != 5 {
+                CGEventSetIntegerValueField(event.0, 1, self.clicks.counts[number as usize]);
+            }
+            Ok(event)
+        }
     }
     fn current() -> Result<Point> {
         // SAFETY: reading the cursor location does not inject input. Owned balances the Create.
@@ -304,6 +352,7 @@ mod tests {
             held: Held::default(),
             caps_lock: false,
             posting: false,
+            clicks: ClickCounter::new(),
         }
     }
     fn display() -> DisplayRect {
@@ -373,7 +422,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(CGEventGetIntegerValueField(scroll[0].0, 96), 40);
-            assert_eq!(CGEventGetIntegerValueField(scroll[0].0, 97), -40);
+            assert_eq!(CGEventGetIntegerValueField(scroll[0].0, 97), 40);
             let absolute = sink
                 .build(
                     &Event::MousePosition {
@@ -388,6 +437,52 @@ mod tests {
                 .unwrap();
             assert_eq!(CGEventGetLocation(absolute[0].0), Point { x: 0., y: 70. });
         }
+    }
+    #[test]
+    fn click_counts_use_time_distance_and_button_and_survive_up_and_drag() {
+        let mut sink = sink();
+        let now = Instant::now();
+        let p = Point { x: 0., y: 40. };
+        sink.clicks.interval = Duration::from_millis(500);
+        assert_eq!(sink.clicks.down(0, now, p), 1);
+        assert_eq!(sink.clicks.down(0, now + Duration::from_millis(100), p), 2);
+        let events = sink
+            .build(
+                &Event::MouseButton {
+                    button: 1,
+                    down: true,
+                },
+                display(),
+                p,
+            )
+            .unwrap();
+        let drag = sink
+            .build(&Event::MouseMove { dx: 1, dy: 1 }, display(), p)
+            .unwrap();
+        let up = sink
+            .build(
+                &Event::MouseButton {
+                    button: 1,
+                    down: false,
+                },
+                display(),
+                p,
+            )
+            .unwrap();
+        // SAFETY: inspection only, no event is posted.
+        unsafe {
+            for event in [&events[0], &drag[0], &up[0]] {
+                assert_eq!(CGEventGetIntegerValueField(event.0, 1), 3);
+            }
+        }
+        assert_eq!(sink.clicks.down(0, now + Duration::from_secs(1), p), 1);
+        assert_eq!(
+            sink.clicks
+                .down(0, now + Duration::from_millis(1100), Point { x: 10., ..p }),
+            1
+        );
+        assert_eq!(sink.clicks.down(1, now + Duration::from_millis(1200), p), 1);
+        assert_eq!(sink.clicks.down(0, now + Duration::from_millis(1300), p), 1);
     }
     #[test]
     fn unicode_and_modifier_flags_without_keymap_or_posting() {

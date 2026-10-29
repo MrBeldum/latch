@@ -94,6 +94,7 @@ extern "C" {
 #[link(name = "VideoToolbox", kind = "framework")]
 extern "C" {
     pub static kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: Ref;
+    pub static kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: Ref;
     pub static kVTVideoEncoderSpecification_EnableLowLatencyRateControl: Ref;
     pub static kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder: Ref;
     pub static kVTCompressionPropertyKey_RealTime: Ref;
@@ -227,6 +228,8 @@ extern "C" {
 extern "C" {
     pub fn CGPreflightScreenCaptureAccess() -> bool;
     pub fn CGMainDisplayID() -> u32;
+    pub static kCGColorBlack: Ref;
+    pub fn CGColorGetConstantColor(name: Ref) -> Ref;
 }
 #[link(name = "CoreMedia", kind = "framework")]
 extern "C" {

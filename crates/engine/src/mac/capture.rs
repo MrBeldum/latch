@@ -173,6 +173,23 @@ impl Capture {
             config.setShowsCursor(true);
             config.setScalesToFit(true);
             config.setPreservesAspectRatio(true);
+            // Constant CGColors live for the process; SCK borrows this colour.
+            // The untyped send avoids adding a CoreGraphics binding dependency.
+            let black = CGColorGetConstantColor(kCGColorBlack);
+            let _: () = msg_send![&config, setBackgroundColor: black];
+            let fitted = DisplayRect {
+                width: rect.size.width as u32,
+                height: rect.size.height as u32,
+                ..Default::default()
+            }
+            .fitted(width, height);
+            config.setDestinationRect(objc2_core_foundation::CGRect::new(
+                objc2_core_foundation::CGPoint::new(f64::from(fitted.x), f64::from(fitted.y)),
+                objc2_core_foundation::CGSize::new(
+                    f64::from(fitted.width),
+                    f64::from(fitted.height),
+                ),
+            ));
             config.setColorMatrix(
                 &*(kCVImageBufferYCbCrMatrix_ITU_R_709_2 as *const objc2_core_foundation::CFString),
             );

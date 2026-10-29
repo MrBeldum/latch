@@ -17,13 +17,18 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
     capture::permission()?;
     let encoder = Encoder::new(config)?;
     let capture = Capture::new(config.width, config.height, config.fps, false)?;
-    Ok(Box::new(Video {
+    let mut video = Video {
         capture,
         encoder,
         config: config.clone(),
         generation: 0,
         sent: None,
-    }))
+        pending: None,
+    };
+    // Some virtual Macs advertise hardware that fails only on the first encode.
+    // Resolve that fallback before the server snapshots VideoInfo for status.
+    video.pending = Some(video.next(true, Duration::ZERO)?);
+    Ok(Box::new(video))
 }
 pub fn open_audio() -> Result<Box<dyn AudioCapture>> {
     Ok(Box::new(Audio {
@@ -54,6 +59,7 @@ struct Video {
     config: VideoConfig,
     generation: u64,
     sent: Option<Instant>,
+    pending: Option<EncodedVideo>,
 }
 impl VideoPipeline for Video {
     fn info(&self) -> VideoInfo {
@@ -74,6 +80,9 @@ impl VideoPipeline for Video {
         }
     }
     fn next(&mut self, mut keyframe: bool, idle: Duration) -> Result<EncodedVideo> {
+        if let Some(frame) = self.pending.take() {
+            return Ok(frame);
+        }
         let interval = Duration::from_secs_f64(1.0 / f64::from(self.config.fps));
         let start = Instant::now();
         loop {
@@ -112,8 +121,14 @@ impl VideoPipeline for Video {
                     let frame =
                         self.encoder
                             .encode(image.0, captured, keyframe || self.sent.is_none())?;
+                    // A real-time encoder may drop under load. Pace the retry and
+                    // preserve a pending IDR request until a picture is emitted.
                     self.sent = Some(Instant::now());
-                    return Ok(frame);
+                    if let Some(frame) = frame {
+                        return Ok(frame);
+                    }
+                    keyframe = true;
+                    continue;
                 }
             }
             if state.picture.is_none() && start.elapsed() >= Duration::from_secs(10) {

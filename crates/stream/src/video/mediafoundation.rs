@@ -3,7 +3,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use std::{collections::VecDeque, mem::ManuallyDrop, sync::mpsc, thread};
 use windows::{
-    core::{Interface, VARIANT},
+    core::Interface,
     Win32::{
         Foundation::HMODULE,
         Graphics::{Direct3D::*, Direct3D11::*, Dxgi::Common::*},
@@ -352,9 +352,13 @@ impl State {
             let transform: IMFTransform =
                 CoCreateInstance(&CLSID_MSH264DecoderMFT, None, CLSCTX_INPROC_SERVER)
                     .context("create Microsoft H.264 decoder")?;
-            if let Ok(api) = transform.cast::<ICodecAPI>() {
-                let _ = api.SetValue(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true));
-            }
+            // The H.264 decoder exposes this as a UINT32 transform attribute,
+            // not the VT_BOOL encoder property on ICodecAPI. Set it before types.
+            transform
+                .GetAttributes()
+                .context("decoder attributes")?
+                .SetUINT32(&CODECAPI_AVLowLatencyMode, 1)
+                .context("enable decoder low-latency mode")?;
             let gpu = if dxva {
                 Some(Gpu::new(&transform)?)
             } else {

@@ -452,7 +452,14 @@ mod tests {
                         );
                     }
                 }
-                if let Some(decoded) = decoder.decode(&annexb)? {
+                let decoded = decoder.decode(&annexb)?;
+                if i == 0 {
+                    assert!(
+                        decoded.is_some(),
+                        "first IDR must decode immediately in low-latency mode"
+                    );
+                }
+                if let Some(decoded) = decoded {
                     assert_eq!((decoded.width, decoded.height), (160, 98));
                     let mut error = 0f64;
                     let mut count = 0;
