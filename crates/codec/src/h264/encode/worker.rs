@@ -20,12 +20,14 @@ pub(super) struct Job {
     pub source: Arc<Yuv420>,
     pub previous: Option<Arc<Yuv420>>,
     pub reference: Arc<Yuv420>,
+    pub half_pel: Option<Arc<predict::HalfPelPlanes>>,
     pub quality: Arc<Vec<u8>>,
     pub first: usize,
     pub end: usize,
     pub qp: u8,
     pub suppression: u8,
     pub subpixel: bool,
+    pub is_motion: bool,
     pub idr: bool,
     pub frame_num: u32,
     pub idr_id: u32,
@@ -116,20 +118,18 @@ fn equal_at(a: &Yuv420, b: &Yuv420, (x, y): (usize, usize), (rx, ry): (usize, us
 fn copy_mc(
     dst: &mut Yuv420,
     reference: &Yuv420,
+    hp: Option<&predict::HalfPelPlanes>,
     x: usize,
     y: usize,
     global_y: usize,
     mv: (i32, i32),
 ) {
-    let rx = x as i32 + mv.0 / 4;
-    let ry = global_y as i32 + mv.1 / 4;
-    if mv.0 % 8 == 0
-        && mv.1 % 8 == 0
-        && rx >= 0
-        && ry >= 0
-        && rx + 16 <= reference.padded_width() as i32
-        && ry + 16 <= reference.padded_height() as i32
-    {
+    let rx = x as i32 + mv.0.div_euclid(4);
+    let ry = global_y as i32 + mv.1.div_euclid(4);
+    let pw = reference.padded_width() as i32;
+    let ph = reference.padded_height() as i32;
+
+    if mv.0 % 8 == 0 && mv.1 % 8 == 0 && rx >= 0 && ry >= 0 && rx + 16 <= pw && ry + 16 <= ph {
         for (dp, rp, ds, rs, n) in [
             (
                 &mut dst.y,
@@ -161,19 +161,58 @@ fn copy_mc(
         }
         return;
     }
-    for yy in 0..16 {
-        for xx in 0..16 {
-            dst.y[(y + yy) * dst.y_stride + x + xx] = predict::luma_mc(
-                &reference.y,
-                reference.y_stride,
-                reference.padded_width(),
-                reference.padded_height(),
-                (x + xx) as i32,
-                (global_y + yy) as i32,
-                mv,
-            );
+
+    if mv.0 % 4 == 0 && mv.1 % 4 == 0 && rx >= 0 && ry >= 0 && rx + 16 <= pw && ry + 16 <= ph {
+        for row in 0..16 {
+            let d = (y + row) * dst.y_stride + x;
+            let r = (ry as usize + row) * reference.y_stride + rx as usize;
+            dst.y[d..d + 16].copy_from_slice(&reference.y[r..r + 16]);
+        }
+    } else if let Some(hp) = hp.filter(|_| rx >= 0 && ry >= 0 && rx + 17 <= pw && ry + 17 <= ph) {
+        let fx = mv.0.rem_euclid(4);
+        let fy = mv.1.rem_euclid(4);
+        let (p1, ox1, oy1, p2) = predict::subpel_sources(fx, fy);
+        let get_p = |p: predict::SubpelPlane| -> &[u8] {
+            match p {
+                predict::SubpelPlane::Int => &reference.y,
+                predict::SubpelPlane::H => &hp.h,
+                predict::SubpelPlane::V => &hp.v,
+                predict::SubpelPlane::D => &hp.d,
+            }
+        };
+        let plane1 = get_p(p1);
+        let ro1 = (ry as usize + oy1) * reference.y_stride + (rx as usize + ox1);
+        let plane2 = p2.map(|(p, _, _)| get_p(p));
+        let ro2 = p2
+            .map(|(_, ox, oy)| (ry as usize + oy) * reference.y_stride + (rx as usize + ox))
+            .unwrap_or(0);
+        let d = y * dst.y_stride + x;
+        predict::copy_subpel_16x16(
+            &mut dst.y,
+            dst.y_stride,
+            d,
+            plane1,
+            plane2,
+            reference.y_stride,
+            ro1,
+            ro2,
+        );
+    } else {
+        for yy in 0..16 {
+            for xx in 0..16 {
+                dst.y[(y + yy) * dst.y_stride + x + xx] = predict::luma_mc(
+                    &reference.y,
+                    reference.y_stride,
+                    reference.padded_width(),
+                    reference.padded_height(),
+                    (x + xx) as i32,
+                    (global_y + yy) as i32,
+                    mv,
+                );
+            }
         }
     }
+
     for (dp, rp) in [(&mut dst.u, &reference.u), (&mut dst.v, &reference.v)] {
         for yy in 0..8 {
             for xx in 0..8 {
@@ -239,9 +278,11 @@ fn mode_predict(mbs: &[Mb], w: usize, index: usize, bx: usize, by: usize) -> u8 
         _ => 2,
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn motion_cost(
     src: &Yuv420,
     r: &Yuv420,
+    hp: Option<&predict::HalfPelPlanes>,
     x: usize,
     y: usize,
     mv: (i32, i32),
@@ -249,6 +290,63 @@ fn motion_cost(
     lambda: u32,
 ) -> u32 {
     let mut cost = lambda * (signed_bits(mv.0 - pred.0) + signed_bits(mv.1 - pred.1));
+    let pw = r.padded_width() as i32;
+    let ph = r.padded_height() as i32;
+    if mv.0 % 4 == 0 && mv.1 % 4 == 0 {
+        let rx = x as i32 + mv.0 / 4;
+        let ry = y as i32 + mv.1 / 4;
+        if rx >= 0 && ry >= 0 && rx + 16 <= pw && ry + 16 <= ph {
+            let so = y * src.y_stride + x;
+            let ro = ry as usize * r.y_stride + rx as usize;
+            cost += 2 * predict::sad16x8(&src.y, src.y_stride, so, &r.y, r.y_stride, ro);
+            return cost;
+        }
+        for yy in (0..16).step_by(2) {
+            let sy = (ry + yy as i32).clamp(0, ph - 1) as usize;
+            let r_row = sy * r.y_stride;
+            let s_row = (y + yy) * src.y_stride + x;
+            for xx in 0..16 {
+                let sx = (rx + xx as i32).clamp(0, pw - 1) as usize;
+                cost += 2 * src.y[s_row + xx].abs_diff(r.y[r_row + sx]) as u32;
+            }
+        }
+        return cost;
+    }
+    if let Some(hp) = hp {
+        let rx = x as i32 + mv.0.div_euclid(4);
+        let ry = y as i32 + mv.1.div_euclid(4);
+        if rx >= 0 && ry >= 0 && rx + 17 <= pw && ry + 17 <= ph {
+            let fx = mv.0.rem_euclid(4);
+            let fy = mv.1.rem_euclid(4);
+            let (p1, ox1, oy1, p2) = predict::subpel_sources(fx, fy);
+            let get_p = |p: predict::SubpelPlane| match p {
+                predict::SubpelPlane::Int => &r.y,
+                predict::SubpelPlane::H => &hp.h,
+                predict::SubpelPlane::V => &hp.v,
+                predict::SubpelPlane::D => &hp.d,
+            };
+            let plane1 = get_p(p1);
+            let so = y * src.y_stride + x;
+            let ro1 = (ry as usize + oy1) * r.y_stride + (rx as usize + ox1);
+            if let Some((p2_type, ox2, oy2)) = p2 {
+                let plane2 = get_p(p2_type);
+                let ro2 = (ry as usize + oy2) * r.y_stride + (rx as usize + ox2);
+                cost += 2 * predict::sad16x8_avg(
+                    &src.y,
+                    src.y_stride,
+                    so,
+                    plane1,
+                    plane2,
+                    r.y_stride,
+                    ro1,
+                    ro2,
+                );
+            } else {
+                cost += 2 * predict::sad16x8(&src.y, src.y_stride, so, plane1, r.y_stride, ro1);
+            }
+            return cost;
+        }
+    }
     for yy in (0..16).step_by(2) {
         for xx in 0..16 {
             cost += 2 * src.y[(y + yy) * src.y_stride + x + xx].abs_diff(predict::luma_mc(
@@ -328,6 +426,7 @@ fn scroll(job: &Job) -> (i32, i32) {
 #[allow(clippy::too_many_arguments)]
 fn motion(
     job: &Job,
+    is_motion: bool,
     mbs: &[Mb],
     w: usize,
     index: usize,
@@ -345,7 +444,18 @@ fn motion(
         }
     }
     let round = |v: (i32, i32)| ((v.0 / 4) * 4, (v.1 / 4) * 4);
-    let cost = |mv| motion_cost(&job.source, &job.reference, x, y, mv, pred, lambda);
+    let cost = |mv| {
+        motion_cost(
+            &job.source,
+            &job.reference,
+            job.half_pel.as_deref(),
+            x,
+            y,
+            mv,
+            pred,
+            lambda,
+        )
+    };
     let mut best = (0, 0);
     let mut score = u32::MAX;
     for v in candidates {
@@ -356,12 +466,18 @@ fn motion(
             best = v;
         }
     }
-    if score < 32 + lambda * 2 {
+    let early_exit_cost = if is_motion {
+        256 + lambda * 4
+    } else {
+        32 + lambda * 2
+    };
+    if score < early_exit_cost {
         return (best, score);
     }
+    let max_iter = if is_motion { 2 } else { 4 };
     let centre = best;
     for step in [8, 4, 2, 1] {
-        for _ in 0..4 {
+        for _ in 0..max_iter {
             let mut next = best;
             for (dx, dy) in [(step * 4, 0), (-step * 4, 0), (0, step * 4), (0, -step * 4)] {
                 let v = (best.0 + dx, best.1 + dy);
@@ -374,13 +490,21 @@ fn motion(
                     next = v;
                 }
             }
-            if next == best {
+            if next == best || (is_motion && score < early_exit_cost) {
                 break;
             }
             best = next;
         }
+        if is_motion && score < early_exit_cost {
+            break;
+        }
     }
-    if job.subpixel && score > lambda * 64 {
+    let subpel_allowed = if is_motion {
+        score > lambda * 96 && score < 4000
+    } else {
+        score > lambda * 64
+    };
+    if job.subpixel && subpel_allowed {
         for step in [2, 1] {
             let centre = best;
             for dy in [-step, 0, step] {
@@ -490,7 +614,15 @@ pub(super) fn encode(job: Job) -> Band {
         let pred = mv_predict(&mbs, w, index, false);
         let skip_mv = mv_predict(&mbs, w, index, true);
         if let Some((mv, quality)) = reuse.filter(|_| !refine) {
-            copy_mc(&mut rec, &job.reference, x, y, gy, mv);
+            copy_mc(
+                &mut rec,
+                &job.reference,
+                job.half_pel.as_deref(),
+                x,
+                y,
+                gy,
+                mv,
+            );
             mbs[index].mv = mv;
             mbs[index].qp = qpy;
             mbs[index].quality = quality;
@@ -508,10 +640,11 @@ pub(super) fn encode(job: Job) -> Band {
             qp_sum += qpy as u32;
             continue;
         }
+        let is_motion = job.is_motion && global == (0, 0);
         let (mv, inter_cost) = if job.idr {
             ((0, 0), u32::MAX)
         } else {
-            motion(&job, &mbs, w, index, x, gy, pred, global, lambda)
+            motion(&job, is_motion, &mbs, w, index, x, gy, pred, global, lambda)
         };
         // A single DC trial avoids evaluating every intra mode for an obvious temporal match.
         let intra_trial = predict::intra_plane(&rec.y, rec.y_stride, x, y, 16, 2, false);
@@ -527,7 +660,15 @@ pub(super) fn encode(job: Job) -> Band {
         mbs[index].mv = if intra { (0, 0) } else { mv };
         mbs[index].quality = if job.suppression == 0 { qp } else { 45 };
         if !intra {
-            copy_mc(&mut rec, &job.reference, x, y, gy, mv);
+            copy_mc(
+                &mut rec,
+                &job.reference,
+                job.half_pel.as_deref(),
+                x,
+                y,
+                gy,
+                mv,
+            );
         }
         let mut coeffs = [[0i32; 16]; 16];
         let mut modes = [(2u8, 2u8); 16];
@@ -563,7 +704,8 @@ pub(super) fn encode(job: Job) -> Band {
                 }
             }
         }
-        let fast16 = intra && best16.0 <= lambda * 16;
+        let skip_intra4 = is_motion && (best16.0 <= lambda * 48 || inter_cost <= lambda * 48);
+        let fast16 = intra && (skip_intra4 || best16.0 <= lambda * 16);
         for i in 0..if fast16 { 0 } else { 16 } {
             let (bx, by) = pos(i);
             let off = (y + by) * rec.y_stride + x + bx;
@@ -901,12 +1043,14 @@ mod tests {
                 source: Arc::new(source),
                 previous: Some(Arc::new(old.clone())),
                 reference: Arc::new(old.clone()),
+                half_pel: None,
                 quality: Arc::new(vec![18; 40 * 23]),
                 first: 0,
                 end: 23,
                 qp: 30,
                 suppression: 0,
                 subpixel: false,
+                is_motion: false,
                 idr: false,
                 frame_num: 1,
                 idr_id: 0,
