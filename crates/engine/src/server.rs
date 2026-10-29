@@ -605,7 +605,7 @@ fn receive(server: Weak<Server>) {
             token: Some(token), ..
         } = datagram
         {
-            if token == session.token {
+            if *token == session.token {
                 let mut addr = session.addr.lock();
                 if *addr != Some(from) {
                     if addr.is_some() {
