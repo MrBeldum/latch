@@ -17,6 +17,7 @@ use latch_proto::rtt::RttEstimator;
 use latch_proto::video::{fec_percent_for_loss, OutFrame, Packetizer, DEFAULT_FEC_PERCENT};
 use latch_proto::wire::{self, Datagram};
 use parking_lot::{Condvar, Mutex};
+use std::collections::VecDeque;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -24,9 +25,9 @@ use std::sync::mpsc;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-/// A still screen still gets a (nearly empty) frame this often, so a viewer
-/// notices a lost last frame and the stream never looks dead.
-const IDLE_REPEAT: Duration = Duration::from_millis(250);
+/// Short still-screen repeats also bound keyframe-request latency while
+/// next() waits for damage; pipelines still enforce the configured fps.
+const IDLE_REPEAT: Duration = Duration::from_millis(25);
 const KEEPALIVE: Duration = Duration::from_secs(1);
 /// A viewer heard from neither over TCP nor UDP for this long is gone.
 const SILENT: Duration = Duration::from_secs(10);
@@ -37,7 +38,13 @@ const PING_EVERY: Duration = Duration::from_millis(500);
 const KEYFRAME_GAP: Duration = Duration::from_millis(50);
 /// How long a new session waits for the one it replaces to let go of the
 /// screen and the encoder.
-const TAKEOVER_WAIT: Duration = Duration::from_secs(5);
+/// Initial capture can wait 10 seconds; undo commands can take another 15.
+const TAKEOVER_WAIT: Duration = Duration::from_secs(30);
+const VIDEO_RECOVERY_WINDOW: Duration = Duration::from_secs(60);
+const VIDEO_RECOVERIES: usize = 3;
+/// Capture supplies 10 ms; each coded packet carries 5 ms to fit the MTU,
+/// including the parity packet's extra two length bytes.
+const AUDIO_FRAME: usize = 240;
 
 /// Readies the desktop for a session (for example, sizes it to the
 /// viewer); returns what undoes that when the session ends.
@@ -94,7 +101,7 @@ pub struct Server {
     current: Mutex<Option<Arc<Session>>>,
     /// Held while a session is being opened, so two requests cannot both
     /// take the screen.
-    opening: Mutex<()>,
+    opening: Arc<Opening>,
     status: Mutex<ServerStatus>,
 }
 
@@ -110,7 +117,7 @@ impl Server {
             epoch: Instant::now(),
             options,
             current: Mutex::new(None),
-            opening: Mutex::new(()),
+            opening: Arc::new(Opening::default()),
             status: Mutex::new(ServerStatus::default()),
         });
         let weak = Arc::downgrade(&server);
@@ -170,7 +177,7 @@ impl Server {
                 ),
             ));
         };
-        let _opening = self.opening.lock();
+        let opening = self.opening.lock();
         let running = self.current.lock().clone();
         if let Some(old) = running {
             self.log(format!(
@@ -202,6 +209,7 @@ impl Server {
             codec,
             req,
             peer,
+            opening: Some(opening),
         };
         let config = VideoConfig {
             width: even(prepared.req.width.clamp(64, 8192)),
@@ -240,6 +248,7 @@ impl Server {
             announced: SocketAddr::new(prepared.peer.ip(), prepared.req.udp_port),
             addr: Mutex::new(None),
             ended: Mutex::new(None),
+            audio_notice: Mutex::new(None),
             stop: AtomicBool::new(false),
             finished: Mutex::new(false),
             finished_cv: Condvar::new(),
@@ -255,10 +264,10 @@ impl Server {
             frames: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
         });
-        let replaced = self.current.lock().replace(session.clone());
-        if let Some(old) = replaced {
-            old.end(end::TAKEN_OVER, "Another device took this stream over.");
-        }
+        // prepare owns the reservation until installation, so a second
+        // prepare must see this session and wait for its undo before opening.
+        *self.current.lock() = Some(session.clone());
+        prepared.opening.take();
         {
             let mut status = self.status.lock();
             status.encoder = info.encoder.clone();
@@ -278,7 +287,7 @@ impl Server {
             audio: audio.as_ref().map(|_| AudioFormat {
                 rate: audio::RATE,
                 channels: audio::CHANNELS as u32,
-                frame_samples: audio::FRAME as u32,
+                frame_samples: AUDIO_FRAME as u32,
                 codec: "lpcm-rice".into(),
             }),
             audio_problem: prepared.audio_problem.clone(),
@@ -309,14 +318,14 @@ impl Server {
                     let session = session.clone();
                     std::thread::Builder::new()
                         .name("stream-video".into())
-                        .spawn(move || send_video(&server, &session, pipeline, config))
+                        .spawn(move || send_video(&server, &session, pipeline, config, video::open))
                 };
                 let audio = audio.map(|capture| {
                     let server = server.clone();
                     let session = session.clone();
                     std::thread::Builder::new()
                         .name("stream-audio".into())
-                        .spawn(move || send_audio(&server, &session, capture))
+                        .spawn(move || send_audio(&server, &session, capture, audio::open))
                 });
                 (video.ok(), audio.and_then(Result::ok))
             }
@@ -399,6 +408,20 @@ impl Server {
                 let _ = control::write_message(&mut writer, &Message::End(e.clone()));
                 break e.message;
             }
+            let audio_notice = session.audio_notice.lock().take();
+            if let Some(message) = audio_notice {
+                if control::write_message(
+                    &mut writer,
+                    &Message::Notice(Notice {
+                        kind: "audio".into(),
+                        message,
+                    }),
+                )
+                .is_err()
+                {
+                    break "the viewer's connection broke".to_string();
+                }
+            }
             match inbox.recv_timeout(Duration::from_millis(20)) {
                 Ok(Message::End(e)) => {
                     break if e.message.is_empty() {
@@ -471,6 +494,33 @@ impl Server {
     }
 }
 
+/// An owned reservation, since Prepared crosses the HTTP upgrade callback.
+#[derive(Default)]
+struct Opening {
+    busy: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl Opening {
+    fn lock(self: &Arc<Self>) -> OpeningGuard {
+        let mut busy = self.busy.lock();
+        while *busy {
+            self.cv.wait(&mut busy);
+        }
+        *busy = true;
+        OpeningGuard(self.clone())
+    }
+}
+
+struct OpeningGuard(Arc<Opening>);
+
+impl Drop for OpeningGuard {
+    fn drop(&mut self) {
+        *self.0.busy.lock() = false;
+        self.0.cv.notify_one();
+    }
+}
+
 /// What [`Server::prepare`] opened, for [`Server::run`]. Dropped unused, it
 /// undoes the desktop preparation.
 pub struct Prepared {
@@ -484,6 +534,7 @@ pub struct Prepared {
     codec: Codec,
     req: StreamRequest,
     peer: SocketAddr,
+    opening: Option<OpeningGuard>,
 }
 
 impl Prepared {
@@ -494,9 +545,15 @@ impl Prepared {
 
 impl Drop for Prepared {
     fn drop(&mut self) {
+        // Release capture before restoring the display, and keep the
+        // reservation until both resource cleanup and undo have finished.
+        self.pipeline.take();
+        self.audio.take();
+        self.input.take();
         if let Some(undo) = self.undo.take() {
             undo();
         }
+        self.opening.take();
     }
 }
 
@@ -516,6 +573,7 @@ struct Session {
     addr: Mutex<Option<SocketAddr>>,
     /// Set once to end the session, with what to tell the viewer.
     ended: Mutex<Option<End>>,
+    audio_notice: Mutex<Option<String>>,
     /// The media threads stop.
     stop: AtomicBool,
     finished: Mutex<bool>,
@@ -665,13 +723,18 @@ fn send_video(
     session: &Session,
     mut pipeline: Box<dyn VideoPipeline>,
     config: VideoConfig,
+    mut reopen: impl FnMut(&VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>>,
 ) {
     let mut packetizer = Packetizer::new(session.id);
     let mut last_keyframe: Option<Instant> = None;
-    let mut reopened = false;
+    let mut info = pipeline.info();
+    let mut recoveries = VecDeque::new();
     while !session.stopping() {
         let due = last_keyframe.is_none_or(|t| t.elapsed() >= KEYFRAME_GAP);
         let keyframe = due && session.keyframe.swap(false, Ordering::AcqRel);
+        // Short idle repeats bound how long a request arriving inside next
+        // waits. Send every returned frame: discarding an encoded repeat
+        // would discard a reference needed by subsequent P-frames.
         let frame = match pipeline.next(keyframe, IDLE_REPEAT) {
             Ok(f) => f,
             Err(e) => {
@@ -679,13 +742,15 @@ fn send_video(
                     return;
                 }
                 server.log(format!("video stopped: {e:#}; starting it again"));
-                if !reopened {
-                    reopened = true;
-                    if let Ok(p) = video::open(&config) {
+                // Some capture APIs allow only one owner of an output.
+                drop(pipeline);
+                let now = Instant::now();
+                recoveries.retain(|t| now - *t < VIDEO_RECOVERY_WINDOW);
+                if recoveries.len() < VIDEO_RECOVERIES {
+                    recoveries.push_back(now);
+                    if let Ok(p) = reopen(&config) {
                         pipeline = p;
                         session.keyframe.store(true, Ordering::Release);
-                        let mut state = session.input.lock();
-                        state.display = pipeline.info().display;
                         continue;
                     }
                 }
@@ -696,6 +761,18 @@ fn send_video(
                 return;
             }
         };
+        let next_info = pipeline.info();
+        if next_info != info {
+            if next_info.display != info.display {
+                session.input.lock().display = next_info.display;
+            }
+            if next_info.encoder != info.encoder || next_info.hardware != info.hardware {
+                let mut status = server.status.lock();
+                status.encoder = next_info.encoder.clone();
+                status.hardware = next_info.hardware;
+            }
+            info = next_info;
+        }
         if keyframe && !frame.keyframe {
             // The pipeline could not make this one a keyframe; ask again.
             session.keyframe.store(true, Ordering::Release);
@@ -723,29 +800,85 @@ fn send_video(
     }
 }
 
-fn send_audio(server: &Server, session: &Session, mut capture: Box<dyn AudioCapture>) {
+fn send_audio(
+    server: &Server,
+    session: &Session,
+    capture: Box<dyn AudioCapture>,
+    mut reopen: impl FnMut() -> anyhow::Result<Box<dyn AudioCapture>>,
+) {
     let mut packetizer = AudioPacketizer::new(session.id);
     let mut pcm = [0i16; audio::FRAME * audio::CHANNELS];
     let mut coded = Vec::with_capacity(2048);
+    let mut capture = Some(capture);
+    let mut backoff = Duration::from_millis(100);
+    let mut problem = false;
     while !session.stopping() {
-        match capture.read(&mut pcm, Duration::from_millis(100)) {
-            Ok(true) => {}
+        if capture.is_none() {
+            // Check stop during backoff so takeover never waits for a retry.
+            let retry_at = Instant::now() + backoff;
+            while !session.stopping() && Instant::now() < retry_at {
+                std::thread::sleep(
+                    Duration::from_millis(20)
+                        .min(retry_at.saturating_duration_since(Instant::now())),
+                );
+            }
+            if session.stopping() {
+                return;
+            }
+            match reopen() {
+                Ok(c) => capture = Some(c),
+                Err(e) => {
+                    audio_problem(server, session, format!("{e:#}"));
+                    backoff = (backoff * 2).min(Duration::from_secs(5));
+                    continue;
+                }
+            }
+        }
+        match capture
+            .as_mut()
+            .expect("open audio")
+            .read(&mut pcm, Duration::from_millis(100))
+        {
+            Ok(true) => {
+                if problem {
+                    audio_problem(server, session, String::new());
+                    problem = false;
+                }
+                backoff = Duration::from_millis(100);
+            }
             Ok(false) => continue,
             Err(e) => {
                 server.log(format!("sound stopped: {e:#}"));
-                return;
+                capture.take();
+                audio_problem(server, session, format!("{e:#}"));
+                problem = true;
+                backoff = (backoff * 2).min(Duration::from_secs(5));
+                continue;
             }
         }
         let Some(addr) = *session.addr.lock() else {
             continue;
         };
-        coded.clear();
-        latch_codec::audio::encode(&pcm, &mut coded);
         let pts = server.now_us() as u32;
-        packetizer.packetize(pts, &coded, |datagram| {
-            send(&server.udp, datagram, addr);
-        });
+        for (i, half) in pcm
+            .as_chunks::<{ AUDIO_FRAME * audio::CHANNELS }>()
+            .0
+            .iter()
+            .enumerate()
+        {
+            coded.clear();
+            latch_codec::audio::encode(half, &mut coded);
+            let pts = pts.wrapping_add((i as u32) * 5_000);
+            packetizer.packetize(pts, &coded, |datagram| {
+                send(&server.udp, datagram, addr);
+            });
+        }
     }
+}
+
+fn audio_problem(server: &Server, session: &Session, message: String) {
+    server.status.lock().audio_problem = message.clone();
+    *session.audio_notice.lock() = Some(message);
 }
 
 /// One datagram, retried briefly when the socket's buffer is full (macOS
@@ -802,3 +935,7 @@ fn human_duration(d: Duration) -> String {
         format!("{} h {} min", s / 3600, s / 60 % 60)
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/lifecycle.rs"]
+mod tests;
