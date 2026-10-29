@@ -869,9 +869,12 @@ fn send_audio(
             coded.clear();
             latch_codec::audio::encode(half, &mut coded);
             let pts = pts.wrapping_add((i as u32) * 5_000);
-            packetizer.packetize(pts, &coded, |datagram| {
+            // 240 samples always fit (lpcm-rice's worst case is 965 bytes);
+            // a refusal would mean the codec changed underneath.
+            let fits = packetizer.packetize(pts, &coded, |datagram| {
                 send(&server.udp, datagram, addr);
             });
+            debug_assert!(fits, "a coded 5 ms audio frame outgrew a datagram");
         }
     }
 }
