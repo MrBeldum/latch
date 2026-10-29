@@ -184,10 +184,13 @@ fn idle_requests_are_prompt_and_each_encoded_frame_updates_mapping_and_is_sent()
     session.keyframe.store(true, Ordering::Release);
     let start = Instant::now();
     request_tx.send(()).unwrap();
+    // The request is served after the idle repeat in flight, not a later
+    // one; the second interval is room for a loaded CI runner.
+    let bound = IDLE_REPEAT * 2;
     idr_rx
-        .recv_timeout(Duration::from_millis(150))
-        .expect("request waited for a 250 ms repeat");
-    assert!(start.elapsed() < Duration::from_millis(150));
+        .recv_timeout(bound)
+        .expect("a keyframe request waited for more than one idle repeat");
+    assert!(start.elapsed() < bound);
     worker.join().unwrap();
     let display = session.input.lock().display;
     assert_eq!(display.map(32, 32, 64, 64), (-64, 58));

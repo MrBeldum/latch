@@ -79,39 +79,53 @@ fn relay(host_port: u16, impairment: Impairment) -> u16 {
         }
     });
     // Viewer → relay socket → host from a second socket, so the host sees
-    // the relay as the viewer.
+    // the relay as the viewer. One thread per direction, each blocked on its
+    // own socket: polling both with short timeouts starved the relay on
+    // Windows, whose socket timeouts are coarse (about 15 ms), so the relay
+    // itself dropped what the test meant to deliver. Whatever the link holds
+    // back is delivered on the thread's next wake-up, at most 5 ms later.
     let to_host = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
     let viewer: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
-    let up = Arc::new(Mutex::new(Link::new(impairment, 7)));
-    let down = Arc::new(Mutex::new(Link::new(impairment, 11)));
-    udp.set_read_timeout(Some(Duration::from_millis(1)))
-        .unwrap();
-    to_host
-        .set_read_timeout(Some(Duration::from_millis(1)))
-        .unwrap();
-    std::thread::spawn(move || {
+    for socket in [&udp, &to_host] {
+        socket
+            .set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
+    }
+    let up = {
+        let from_viewer = udp.try_clone().unwrap();
+        let to_host = to_host.try_clone().unwrap();
+        let viewer = viewer.clone();
+        move || {
+            let mut link = Link::new(impairment, 7);
+            let mut buf = [0u8; 2048];
+            loop {
+                if let Ok((n, from)) = from_viewer.recv_from(&mut buf) {
+                    *viewer.lock() = Some(from);
+                    link.send(Instant::now(), &buf[..n]);
+                }
+                for d in link.receive(Instant::now()) {
+                    let _ = to_host.send_to(&d, host_addr);
+                }
+            }
+        }
+    };
+    let down = move || {
+        let mut link = Link::new(impairment, 11);
         let mut buf = [0u8; 2048];
         loop {
-            let now = Instant::now();
-            if let Ok((n, from)) = udp.recv_from(&mut buf) {
-                *viewer.lock() = Some(from);
-                up.lock().send(now, &buf[..n]);
-            }
             if let Ok((n, _)) = to_host.recv_from(&mut buf) {
-                down.lock().send(now, &buf[..n]);
-            }
-            let now = Instant::now();
-            for d in up.lock().receive(now) {
-                let _ = to_host.send_to(&d, host_addr);
+                link.send(Instant::now(), &buf[..n]);
             }
             if let Some(v) = *viewer.lock() {
-                for d in down.lock().receive(now) {
+                for d in link.receive(Instant::now()) {
                     let _ = udp.send_to(&d, v);
                 }
             }
         }
-    });
+    };
+    std::thread::spawn(up);
+    std::thread::spawn(down);
     port
 }
 
