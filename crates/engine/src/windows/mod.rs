@@ -123,7 +123,7 @@ impl MfPipeline {
 }
 enum Pipeline {
     Mf(Box<MfPipeline>),
-    Software(SoftwarePipeline<Capture>),
+    Software(Box<SoftwarePipeline<Capture>>),
     Failed(VideoInfo),
 }
 impl Pipeline {
@@ -156,7 +156,9 @@ impl Pipeline {
                 }
             }
         }
-        Ok(Self::Software(SoftwarePipeline::new(capture, config)?))
+        Ok(Self::Software(Box::new(SoftwarePipeline::new(
+            capture, config,
+        )?)))
     }
     fn info(&self) -> VideoInfo {
         match self {
@@ -195,7 +197,7 @@ impl Pipeline {
             } = *p;
             let software =
                 SoftwarePipeline::new(capture, &config).context("open Latch software fallback")?;
-            *self = Self::Software(software);
+            *self = Self::Software(Box::new(software));
         }
         match self {
             Self::Software(p) => p.next(true, idle),
