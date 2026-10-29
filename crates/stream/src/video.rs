@@ -2,6 +2,7 @@
 //! and an interleaved UV plane at half resolution), which is what
 //! VideoToolbox produces and what the renderer's shader expects.
 
+#[cfg(windows)] pub mod mediafoundation;
 use anyhow::Result;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
