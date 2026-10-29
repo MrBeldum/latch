@@ -390,8 +390,7 @@ pub(crate) fn filter_frame(
                     let lx = e * 2; // luma edge index 0 or 2
                                     // Chroma sample row r of this edge coincides with
                                     // luma rows 2r..2r+1 => luma bS band r/2 of luma
-                                    // edge `lx` (spec 8.7.2.4; ffmpeg hands the luma
-                                    // edge's own 4-entry bS array to edgecv).
+                                    // edge `lx` (spec 8.7.2.4 eq. 8-463).
                     let x = mb_x * 8 + e * 4;
                     let mut qp_p = [0u8; 4];
                     if e == 0 {

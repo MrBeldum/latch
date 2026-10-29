@@ -19,7 +19,7 @@ use super::nal::{self, Nal};
 use super::pps::{self, Pps};
 use super::slice::{self, Mmco, SliceHeader, SliceType};
 use super::sps::{self, Sps};
-use super::tables::{block_index, block_xy, CAVLC_SCAN_8X8, CBP_INTER, CBP_INTRA, QPC_TABLE};
+use super::tables::{block_index, block_xy, CBP_INTER, CBP_INTRA, QPC_TABLE};
 use super::transform;
 use super::{Error, Result};
 use super::{Frame, Limits};
@@ -65,8 +65,7 @@ struct Pic {
     chroma_off_cr: i32,
     /// `frame_num` of the picture (slice-boundary detection).
     frame_num: u32,
-    /// Picture order count of this picture (spec 8.2.1), needed for
-    /// RefPicList construction and temporal-direct scaling.
+    /// Picture order count of this picture (spec 8.2.1).
     poc: i64,
     /// `nal_ref_idc` of its slices.
     nal_ref_idc: u8,
@@ -93,7 +92,7 @@ pub struct Decoder {
     frames: Vec<Frame>,
     /// Display-order sort keys parallel to `frames`: `(epoch, poc)`
     /// where `epoch` bumps on every IDR so per-GOP POC restarts sort
-    /// inside their own GOP (B-slice streams decode out of order).
+    /// inside their own GOP.
     frame_pocs: Vec<(i64, i64)>,
     /// Current POC epoch — incremented by every decoded IDR picture.
     poc_epoch: i64,
@@ -119,8 +118,6 @@ struct SliceCx<'a> {
     /// `QPy` — updated by `mb_qp_delta`; skip MBs keep it untouched
     /// (spec 7.4.5: `QPy` carries through `mb_skip_run`).
     qp_prev: i32,
-    /// Previous MB's `mb_qp_delta` — the CABAC `mb_qp_delta` context
-    /// splits on it being zero (spec 9.3.2.7); skipped/direct MBs reset it.
     /// Slice id for `MbState::slice_id`.
     slice_id: u32,
 }
@@ -414,10 +411,6 @@ impl Decoder {
         );
 
         if pic.nal_ref_idc != 0 {
-            // Colocation data for future B-slice temporal direct
-            // prediction: the picture's own L0/L1 lists (as frame_nums)
-            // plus per-MB mv/ref snapshots.
-
             // Synthesised header carrying the picture's deferred
             // marking — `apply_marking` reads only these fields.
             let stub = SliceHeader {
@@ -447,7 +440,6 @@ impl Decoder {
             let mmco5 = pic.marking.2.iter().any(|m| m.op == 5);
             let slot = self.dpb.push(
                 if mmco5 { 0 } else { pic.frame_num },
-                if mmco5 { 0 } else { pic.poc },
                 buf.y.clone(),
                 buf.cb.clone(),
                 buf.cr.clone(),
@@ -769,8 +761,6 @@ fn p_skip(pic: &mut Pic, cx: &mut SliceCx<'_>, dpb: &Dpb, idx: usize, wm: usize)
     Ok(())
 }
 
-/// B_Skip / B_Direct_16x16 reconstruction: temporal or spatial direct
-/// prediction per 8x8 region, no residual, no coded motion.
 /// Full macroblock decode: syntax parse then reconstruction.
 fn mb_decode(
     pic: &mut Pic,
@@ -804,63 +794,27 @@ fn mb_decode(
     // Inter partitions as `(x4, y4, w4, h4, ref_idx, mvd)` on the
     // 4x4-block grid.
     let mut inter_parts: Vec<(usize, usize, usize, usize, u8, [i16; 2])> = Vec::new();
-    let sub_direct_allowed_8x8 = true;
-    let mut sub_blocks_8x8 = false;
     match mb_type {
         MbType::I4x4 => {
-            // transform_8x8_mode_flag (spec 7.3.5 mb_pred) — the
-            // High-profile I_8x8 syntax, gated on
-            // `pps.transform_8x8_mode_flag` alone (the CABAC/ctx399
-            // gate additionally fires on direct_8x8_inference).
-            let t8x8_allowed = cx.pps.transform_8x8_mode;
-            if t8x8_allowed && br.bit()? {
-                m.transform8x8 = true;
-            }
-            if m.transform8x8 {
-                // One mode per 8x8 group (spec 7.3.5.1
-                // prev_intra8x8_pred_mode_flag); the mode fills the
-                // group's four 4x4 cache cells so the 8x8 MPM reads
-                // neighbours like the reference decoder.
-                for blk in 0..4 {
-                    let g = blk * 4;
-                    let mpm = i4x4_mpm(&pic.mbs, &m, map, g, cx.pps.constrained_intra_pred);
-                    let flag = br.bit()?;
-                    let mode = if flag {
-                        mpm
+            // Parsed in luma4x4BlkIdx (group-major) order; stored
+            // raster-indexed for neighbour lookup.
+            for blk in 0..16 {
+                let (bx, by) = block_xy(blk);
+                let r = by * 4 + bx;
+                let mpm = i4x4_mpm(&pic.mbs, &m, map, blk, cx.pps.constrained_intra_pred);
+                let flag = br.bit()?;
+                let mode = if flag {
+                    mpm
+                } else {
+                    let rem = br.bits(3)? as u8;
+                    if rem < mpm {
+                        rem
                     } else {
-                        let rem = br.bits(3)? as u8;
-                        if rem < mpm {
-                            rem
-                        } else {
-                            rem + 1
-                        }
-                    };
-                    for i in 0..4 {
-                        let (bx, by) = block_xy(g + i);
-                        m.i4x4_modes[by * 4 + bx] = mode;
+                        rem + 1
                     }
-                }
-            } else {
-                // Parsed in luma4x4BlkIdx (group-major) order; stored
-                // raster-indexed for neighbour lookup.
-                for blk in 0..16 {
-                    let (bx, by) = block_xy(blk);
-                    let r = by * 4 + bx;
-                    let mpm = i4x4_mpm(&pic.mbs, &m, map, blk, cx.pps.constrained_intra_pred);
-                    let flag = br.bit()?;
-                    let mode = if flag {
-                        mpm
-                    } else {
-                        let rem = br.bits(3)? as u8;
-                        if rem < mpm {
-                            rem
-                        } else {
-                            rem + 1
-                        }
-                    };
-                    let _ = (blk, r);
-                    m.i4x4_modes[r] = mode;
-                }
+                };
+                let _ = (blk, r);
+                m.i4x4_modes[r] = mode;
             }
             m.chroma_pred = br.ue()? as u8;
             if m.chroma_pred > 3 {
@@ -879,13 +833,6 @@ fn mb_decode(
             let mut sub_types = [SubMbType::S8x8; 4];
             for st in sub_types.iter_mut() {
                 *st = SubMbType::from_code(br.ue()?)?;
-            }
-            // ffmpeg ff_h264_p_sub_mb_type_info (h264data.c): sub code
-            // 3 (4x4 partitions) maps to MB_TYPE_8x8 which *blocks*
-            // the flag — the flag bit exists only when every sub is
-            // an 8x8 partition.
-            if sub_types.iter().any(|st| !matches!(st, SubMbType::S8x8)) {
-                sub_blocks_8x8 = true;
             }
             // ref_idx_l0 coded once per 8x8 sub-mb (spec 7.3.5.1);
             // P_8x8ref0 implies zero.
@@ -942,8 +889,6 @@ fn mb_decode(
     }
 
     // ---- coded_block_pattern + mb_qp_delta (spec 7.3.5) ----
-    // B_Direct_16x16 codes cbp like any other inter MB (see the
-    // CABAC twin of this block).
     let (mut cbp_luma, mut cbp_chroma) = (0u8, 0u8);
     if mb_type != MbType::IPcm {
         if let MbType::I16x16 {
@@ -968,27 +913,7 @@ fn mb_decode(
             cbp_chroma = v / 16;
         }
     }
-    // `MbState::cbp` feeds the deblocker's residual gates (deblock.rs
-    // `compute_bs`: the `edges = mask_edge==3 && !(cbp&15)` shortcut and
-    // the 8x8DCT `cbp&7==7` bypass read it for CAVLC MBs too — the
-    // CABAC twin stores it at the same point).
     m.cbp = (cbp_chroma << 4) | cbp_luma;
-    // transform_size_8x8_flag (ffmpeg h264_cabac.c:2347:
-    // `dct8x8_allowed && (cbp&15) && !IS_INTRA`; dct8x8_allowed is the
-    // PPS flag narrowed by get_dct8x8_allowed for P_8x8/B_8x8).
-    let dct8x8_allowed = cx.pps.transform_8x8_mode
-        && !matches!(mb_type, MbType::I16x16 { .. } | MbType::IPcm)
-        && !sub_blocks_8x8
-        && (sub_direct_allowed_8x8 || cx.sps.direct_8x8_inference);
-    let t8x8 = dct8x8_allowed && cbp_luma > 0 && !mb_type.is_intra() && br.bit()?;
-
-    // Intra keeps the I_8x8 flag read during mb_pred (ffmpeg
-    // h264_cavlc.c:797); inter takes the read here.
-    m.transform8x8 = if mb_type.is_intra() {
-        m.transform8x8
-    } else {
-        t8x8
-    };
     let coded = cbp_luma > 0 || cbp_chroma > 0 || matches!(mb_type, MbType::I16x16 { .. });
     let mut qp_y = cx.qp_prev;
     if coded && mb_type != MbType::IPcm {
@@ -1006,7 +931,6 @@ fn mb_decode(
     // `pic.mbs` (fully decoded MBs) and same-MB reads from `nz_acc`.
     let mut nz_acc = [0u8; 24];
     let mut luma_res = [[0i32; 16]; 16];
-    let mut luma_res8 = [[0i32; 64]; 4];
     let mut dc_y = [0i32; 16];
     let mut chroma_ac = [[[0i32; 16]; 4]; 2];
     let mut chroma_dc = [[0i32; 4]; 2];
@@ -1035,36 +959,19 @@ fn mb_decode(
                 }
             }
         } else if cbp_luma > 0 {
-            for (g, res8) in luma_res8.iter_mut().enumerate() {
+            for g in 0..4usize {
                 if cbp_luma & (1 << g) == 0 {
                     continue;
                 }
-                if m.transform8x8 {
-                    // CAVLC 8x8: four 16-coefficient reads per group
-                    // (spec 7.3.5.3.2), each scattered into the 8x8
-                    // coefficient grid by `CAVLC_SCAN_8X8` — the same
-                    // `zigzag_scan8x8_cavlc` the reference decoder uses.
-                    for s4 in 0..4usize {
-                        let blk = g * 4 + s4;
-                        let nc = nc_value(&pic.mbs, &nz_acc, map, blk, Plane::Luma);
-                        let r = cavlc::decode_block(br, nc, BlockKind::LumaOrChromaAc4x4)?;
-                        for k in 0..16 {
-                            let ri = CAVLC_SCAN_8X8[16 * s4 + k] as usize;
-                            res8[ri] = r.levels[k];
-                        }
-                        nz_acc[blk] = r.total_coeff;
+                for s4 in 0..4usize {
+                    let blk = g * 4 + s4;
+                    let nc = nc_value(&pic.mbs, &nz_acc, map, blk, Plane::Luma);
+                    let r = cavlc::decode_block(br, nc, BlockKind::LumaOrChromaAc4x4)?;
+                    for s in 0..16 {
+                        let ri = cavlc::raster_index(BlockKind::LumaOrChromaAc4x4, s);
+                        luma_res[blk][ri] = r.levels[s];
                     }
-                } else {
-                    for s4 in 0..4usize {
-                        let blk = g * 4 + s4;
-                        let nc = nc_value(&pic.mbs, &nz_acc, map, blk, Plane::Luma);
-                        let r = cavlc::decode_block(br, nc, BlockKind::LumaOrChromaAc4x4)?;
-                        for s in 0..16 {
-                            let ri = cavlc::raster_index(BlockKind::LumaOrChromaAc4x4, s);
-                            luma_res[blk][ri] = r.levels[s];
-                        }
-                        nz_acc[blk] = r.total_coeff;
-                    }
+                    nz_acc[blk] = r.total_coeff;
                 }
             }
         }
@@ -1114,51 +1021,23 @@ fn mb_decode(
             m.nz = [16; 24];
         }
         MbType::I4x4 => {
-            if m.transform8x8 {
-                // I_8x8: predict one 8x8 group at a time in raster
-                // order — each group reads the reconstructed samples
-                // of the earlier groups (spec 8.3.5.2 availability).
-                for (g, raw_resid) in luma_res8.iter().enumerate() {
-                    let nb = gather_luma8x8(&pic.buf, &pic.mbs, map, g, cx.pps);
-                    // Top-left 4x4 cell of this 8x8 group on the raster
-                    // mode grid: y*4 + x with (x, y) = (2*(g%2), 2*(g/2)).
-                    let mode = m.i4x4_modes[8 * (g / 2) + 2 * (g % 2)];
-                    let mut pred = [0u8; 64];
-                    intra::pred8x8(mode, &nb, &mut pred);
-
-                    let mut resid = *raw_resid;
-                    if coded && cbp_luma & (1 << g) != 0 {
-                        transform::dequant_8x8(&mut resid, m.qp_y);
-                        transform::inverse_8x8(&mut resid);
-                    }
-                    let (bx, by) = ((g % 2) * 8, (g / 2) * 8);
-                    for yy in 0..8 {
-                        for xx in 0..8 {
-                            let v = i32::from(pred[yy * 8 + xx]) + resid[yy * 8 + xx];
-                            pic.buf.y[(py0 + by + yy) * pic.buf.w + px0 + bx + xx] =
-                                v.clamp(0, 255) as u8;
-                        }
-                    }
+            // Reconstruct in group-major coding order.
+            for (blk, raw_resid) in luma_res.iter().enumerate() {
+                let (bx, by) = block_xy(blk);
+                let r = by * 4 + bx;
+                let nb = gather4x4(&pic.buf, &pic.mbs, map, bx, by, blk, cx.pps);
+                let mut pred = [0u8; 16];
+                intra::pred4x4(m.i4x4_modes[r], &nb, &mut pred)?;
+                let mut resid = *raw_resid;
+                if coded {
+                    transform::dequant_4x4(&mut resid, m.qp_y);
+                    transform::inverse_4x4(&mut resid)?;
                 }
-            } else {
-                // Reconstruct in group-major coding order.
-                for (blk, raw_resid) in luma_res.iter().enumerate() {
-                    let (bx, by) = block_xy(blk);
-                    let r = by * 4 + bx;
-                    let nb = gather4x4(&pic.buf, &pic.mbs, map, bx, by, blk, cx.pps);
-                    let mut pred = [0u8; 16];
-                    intra::pred4x4(m.i4x4_modes[r], &nb, &mut pred)?;
-                    let mut resid = *raw_resid;
-                    if coded {
-                        transform::dequant_4x4(&mut resid, m.qp_y);
-                        transform::inverse_4x4(&mut resid)?;
-                    }
-                    for yy in 0..4 {
-                        for xx in 0..4 {
-                            let v = i32::from(pred[yy * 4 + xx]) + resid[yy * 4 + xx];
-                            pic.buf.y[(py0 + by * 4 + yy) * pic.buf.w + px0 + bx * 4 + xx] =
-                                v.clamp(0, 255) as u8;
-                        }
+                for yy in 0..4 {
+                    for xx in 0..4 {
+                        let v = i32::from(pred[yy * 4 + xx]) + resid[yy * 4 + xx];
+                        pic.buf.y[(py0 + by * 4 + yy) * pic.buf.w + px0 + bx * 4 + xx] =
+                            v.clamp(0, 255) as u8;
                     }
                 }
             }
@@ -1225,33 +1104,17 @@ fn mb_decode(
                 )?;
             }
             // Add luma residual where cbp says coefficients exist.
-
-            if m.transform8x8 {
-                for (g, raw_resid) in luma_res8.iter().enumerate() {
-                    if raw_resid.iter().all(|&v| v == 0) {
-                        continue;
-                    }
-                    let (bx, by) = ((g % 2) * 8, (g / 2) * 8);
-                    let mut resid = *raw_resid;
-                    transform::dequant_8x8(&mut resid, m.qp_y);
-
-                    transform::inverse_8x8(&mut resid);
-                    let o = (py0 + by) * pic.buf.w + px0 + bx;
-                    transform::add_residual_8x8(&mut pic.buf.y[o..], pic.buf.w, &resid);
+            for (blk, raw_resid) in luma_res.iter().enumerate() {
+                if raw_resid.iter().all(|&v| v == 0) {
+                    continue;
                 }
-            } else {
-                for (blk, raw_resid) in luma_res.iter().enumerate() {
-                    if raw_resid.iter().all(|&v| v == 0) {
-                        continue;
-                    }
-                    let (bx, by) = block_xy(blk);
-                    let mut resid = *raw_resid;
-                    transform::dequant_4x4(&mut resid, m.qp_y);
+                let (bx, by) = block_xy(blk);
+                let mut resid = *raw_resid;
+                transform::dequant_4x4(&mut resid, m.qp_y);
 
-                    transform::inverse_4x4(&mut resid)?;
-                    let o = (py0 + by * 4) * pic.buf.w + px0 + bx * 4;
-                    transform::add_residual_4x4(&mut pic.buf.y[o..], pic.buf.w, &resid);
-                }
+                transform::inverse_4x4(&mut resid)?;
+                let o = (py0 + by * 4) * pic.buf.w + px0 + bx * 4;
+                transform::add_residual_4x4(&mut pic.buf.y[o..], pic.buf.w, &resid);
             }
             chroma_recon(
                 pic, cx, map, &m, &chroma_ac, &chroma_dc, cbp_chroma, px0, py0,
@@ -1580,12 +1443,8 @@ fn mvp_l0_parts(
     let ri = i32::from(ref_idx);
 
     // Directional single-candidate rules are MB-partition-only (spec
-    // 8.4.1.1 "If MbPartWidth is 16 and MbPartHeight is 8..." / the
-    // 8x16 analogue; ffmpeg keeps them in pred_16x8/pred_8x16_motion,
-    // called only from MB-partition decode). Sub-mb partitions
-    // (8x8/8x4/4x8/4x4) always take the median path — the previous
-    // 8x4/4x8 cases generalised the rules down to sub-mbs and broke
-    // every mixed-sub P8x8 MB in t2 (t2_8x8_part frame 1+).
+    // 8.4.1.1 and 8.4.1.2). Sub-mb partitions (8x8/8x4/4x8/4x4) always
+    // take the median path.
     if w4 == 4 && h4 == 2 {
         if y4 == 0 && ref_b == ri {
             return mv_b;
@@ -1871,105 +1730,5 @@ fn gather8x8(plane: &[u8], mbs: &[MbState], map: MbMap, pps: &Pps, cw: usize) ->
             nb.top_left = Some(plane[(py - 1) * cw + px - 1]);
         }
     }
-    nb
-}
-
-fn gather_luma8x8(buf: &FrameBuf, mbs: &[MbState], map: MbMap, g: usize, pps: &Pps) -> NbSamples {
-    let gx = (g % 2) * 2;
-    let gy = (g / 2) * 2;
-    let px = map.x * 16 + gx * 4;
-    let py = map.y * 16 + gy * 4;
-    let mut nb = NbSamples {
-        left: [0; 16],
-        top: [0; 16],
-        top_right: None,
-        top_left: None,
-        has_left: false,
-        has_top: false,
-    };
-    let ok = |i: Option<usize>| -> bool {
-        i.and_then(|j| mbs.get(j))
-            .map(|s| intra_ok(s, pps, map.sid))
-            .unwrap_or(false)
-    };
-    // LEFT column (px-1, py..py+7): group 1/3 read the previous
-    // same-MB group (always available — intra MBs reconstruct in
-    // group order); group 0/2 read mbA's right edge.
-    if g % 2 == 1 || (px > 0 && ok(map.mb_a())) {
-        nb.has_left = true;
-        for i in 0..8 {
-            nb.left[i] = buf.y[(py + i) * buf.w + px - 1];
-        }
-    }
-    // TOP row (px..px+7, py-1): groups 2/3 read the same-MB group
-    // above; groups 0/1 read mbB's bottom row.
-    if g >= 2 || (py > 0 && ok(map.mb_b())) {
-        nb.has_top = true;
-        for i in 0..8 {
-            nb.top[i] = buf.y[(py - 1) * buf.w + px + i];
-        }
-    }
-    // TOP_LEFT sample (px-1, py-1): g0 -> mbD, g1 -> mbB, g2 -> mbA,
-    // g3 -> the same-MB group-0 corner (already reconstructed).
-    let tl: Option<u8> = match g {
-        0 => {
-            if px > 0 && py > 0 && ok(map.mb_d()) {
-                Some(buf.y[(py - 1) * buf.w + px - 1])
-            } else {
-                None
-            }
-        }
-        1 => {
-            if py > 0 && ok(map.mb_b()) {
-                Some(buf.y[(py - 1) * buf.w + px - 1])
-            } else {
-                None
-            }
-        }
-        2 => {
-            if px > 0 && ok(map.mb_a()) {
-                Some(buf.y[(py - 1) * buf.w + px - 1])
-            } else {
-                None
-            }
-        }
-        _ => Some(buf.y[(py - 1) * buf.w + px - 1]),
-    };
-    nb.top_left = tl;
-    // TOP_RIGHT row (px+8..px+15, py-1): g0 -> mbB's right half;
-    // g1 -> mbC's left half; g2 -> same-MB group-1's bottom row
-    // (reconstructed already); g3 -> the not-yet-decoded right MB.
-    nb.top_right = match g {
-        0 => {
-            if py > 0 && ok(map.mb_b()) {
-                let mut t = [0u8; 16];
-                for (i, tv) in t.iter_mut().enumerate().take(8) {
-                    *tv = buf.y[(py - 1) * buf.w + px + 8 + i];
-                }
-                Some(t)
-            } else {
-                None
-            }
-        }
-        1 => {
-            if py > 0 && ok(map.mb_c()) {
-                let mut t = [0u8; 16];
-                for (i, tv) in t.iter_mut().enumerate().take(8) {
-                    *tv = buf.y[(py - 1) * buf.w + px + 8 + i];
-                }
-                Some(t)
-            } else {
-                None
-            }
-        }
-        2 => {
-            let mut t = [0u8; 16];
-            for (i, tv) in t.iter_mut().enumerate().take(8) {
-                *tv = buf.y[(py - 1) * buf.w + px + 8 + i];
-            }
-            Some(t)
-        }
-        _ => None,
-    };
     nb
 }

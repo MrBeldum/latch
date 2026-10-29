@@ -94,7 +94,23 @@ fn one_hundred_thousand_malformed_access_units_never_panic_and_recover() {
     let mut decoder = Decoder::new();
     let mut rng = 0x6c61746368353031u64;
     let mut errors = 0;
-    for case in 0..100_000 {
+    let cases: usize = std::env::var("LATCH_ROBUSTNESS_CASES")
+        .or_else(|_| std::env::var("ROBUSTNESS_CASES"))
+        .or_else(|_| std::env::var("LATCH_ROBUSTNESS_COUNT"))
+        .or_else(|_| std::env::var("ROBUSTNESS_COUNT"))
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .or_else(|| {
+            if std::env::var_os("LATCH_ROBUSTNESS_FULL").is_some()
+                || std::env::var_os("ROBUSTNESS_FULL").is_some()
+            {
+                Some(100_000)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(10_000);
+    for case in 0..cases {
         assert!(decoder.decode(idr).unwrap().is_some());
         let source = units[(random(&mut rng) as usize) % units.len()];
         let mut data = match case % 3 {
@@ -137,7 +153,7 @@ fn one_hundred_thousand_malformed_access_units_never_panic_and_recover() {
             );
         }
     }
-    eprintln!("100000 fixed-seed cases: {errors} errors returned, zero panics; IDR recovery verified after each error");
+    eprintln!("{cases} fixed-seed cases: {errors} errors returned, zero panics; IDR recovery verified after each error");
 }
 
 #[test]

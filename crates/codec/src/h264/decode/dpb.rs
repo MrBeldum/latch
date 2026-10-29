@@ -16,8 +16,7 @@ use super::slice::SliceHeader;
 use super::{Error, Result};
 use std::vec::Vec;
 
-/// One reference picture in the DPB: planes + PicNum/POC bookkeeping
-/// and the colocation data B-slice direct prediction needs.
+/// One reference picture in the DPB: planes + PicNum bookkeeping.
 #[derive(Clone, Debug)]
 pub(crate) struct RefFrame {
     /// `frame_num` the picture was coded with.
@@ -25,9 +24,6 @@ pub(crate) struct RefFrame {
     /// `PicNum` of the *current* decode pass: `FrameNum` adjusted by
     /// `FrameNumWrap` (spec 8.2.4.1); recomputed per slice.
     pub pic_num: i32,
-    /// Picture order count (spec 8.2.1): RefPicList1 ordering,
-    /// temporal-direct `DistScaleFactor` and implicit weighted
-    /// prediction all key on POC, not `frame_num`.
 
     /// Luma plane (coded width × coded height, row-major).
     pub y: Vec<u8>,
@@ -201,7 +197,7 @@ impl Dpb {
     pub(crate) fn gap(&mut self, frame_num: u32) -> Result<()> {
         self.set_pic_nums(frame_num);
         self.make_room()?;
-        self.push(frame_num, 0, Vec::new(), Vec::new(), Vec::new(), 0);
+        self.push(frame_num, Vec::new(), Vec::new(), Vec::new(), 0);
         Ok(())
     }
 
@@ -211,7 +207,6 @@ impl Dpb {
     pub(crate) fn push(
         &mut self,
         frame_num: u32,
-        _poc: i64,
         y: Vec<u8>,
         cb: Vec<u8>,
         cr: Vec<u8>,
@@ -229,15 +224,14 @@ impl Dpb {
         self.refs.len() - 1
     }
 
-    /// Builds the initial RefPicList0 for a P or B slice and applies
+    /// Builds the initial RefPicList0 for a P slice and applies
     /// the slice's reordering commands (spec 8.2.4.2 + 8.2.4.3.1).
     ///
     /// Returns indices into `self.refs` in list order.
     pub(crate) fn ref_list0(&mut self, h: &SliceHeader, frame_num: u32) -> Result<Vec<usize>> {
         self.set_pic_nums(frame_num);
-        // Short-term first (spec 8.2.4.2.1/8.2.4.2.3), long-term after:
-        // P slices order the short-term set by PicNum descending, B
-        // slices by the before/after-POC halves; long-term pictures
+        // Short-term first (spec 8.2.4.2.1), long-term after (spec 8.2.4.2.3):
+        // P slices order the short-term set by PicNum descending; long-term pictures
         // then follow in ascending LongTermFrameIdx.
         let mut st: Vec<usize> = (0..self.refs.len())
             .filter(|&i| self.refs[i].long_term.is_none())
@@ -261,8 +255,9 @@ impl Dpb {
         while order.len() < cap {
             order.push(usize::MAX);
         }
-        // ffmpeg's ref list is always exactly `num_ref_idx_active`
-        // entries; the reorder shift window must not see the tail.
+        // RefPicList0 has exactly `num_ref_idx_l0_active` entries
+        // (spec 8.2.4.2.1); the reorder shift window (spec 8.2.4.3.1)
+        // must not see beyond this cap.
         order.truncate(cap);
         self.apply_reorder(&mut order, &h.reorder_l0, frame_num, cap)?;
         Ok(order)

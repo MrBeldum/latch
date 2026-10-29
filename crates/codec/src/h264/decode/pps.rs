@@ -20,15 +20,10 @@ pub(crate) struct Pps {
     pub bottom_field_pic_order: bool,
     /// `num_ref_idx_l0_active_minus1` + 1.
     pub num_ref_idx_l0_active: u32,
-    /// `num_ref_idx_l1_active_minus1` + 1 (B-slices only); parsed to
-    /// keep the syntax complete — this crate refuses B slices before
-    /// it could be read.
+    /// `num_ref_idx_l1_active_minus1` + 1; parsed to keep the syntax complete.
     #[allow(dead_code)]
     pub num_ref_idx_l1_active: u32,
-    /// `weighted_pred_flag` (P-slice weighted prediction).
-
-    /// `weighted_bipred_idc` (B-slices only); parsed for syntax
-    /// completeness.
+    /// `weighted_bipred_idc`; parsed for syntax completeness.
     #[allow(dead_code)]
     pub weighted_bipred_idc: u32,
     /// `pic_init_qp_minus26` + 26.
@@ -51,9 +46,6 @@ pub(crate) struct Pps {
     /// the slice header instead.
     #[allow(dead_code)]
     pub redundant_pic_cnt: bool,
-    /// `transform_8x8_mode_flag` (extension tail): permits the 8x8
-    /// integer transform on luma residual blocks.
-    pub transform_8x8_mode: bool,
 }
 
 /// Parses a PPS RBSP. `have_more_rbsp` — this crate parses the
@@ -109,11 +101,9 @@ pub(crate) fn parse(payload: &[u8]) -> Result<Pps> {
 
     let mut second_chroma_offset = chroma_qp_index_offset;
     // Extension tail (more_rbsp_data): transform_8x8_mode_flag,
-    // pic_scaling_matrix, second chroma offset. Baseline streams do not
-    // send it.
-    let mut transform_8x8_mode = false;
+    // pic_scaling_matrix, second chroma offset.
     if !b.no_more_rbsp_data() {
-        transform_8x8_mode = b.bit()?;
+        let transform_8x8_mode = b.bit()?;
         if transform_8x8_mode {
             return Err(Error::Unsupported("transform_8x8"));
         }
@@ -147,7 +137,6 @@ pub(crate) fn parse(payload: &[u8]) -> Result<Pps> {
         deblocking_control,
         constrained_intra_pred,
         redundant_pic_cnt,
-        transform_8x8_mode,
     })
 }
 

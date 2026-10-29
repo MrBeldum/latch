@@ -6,20 +6,17 @@ use super::{Error, Result};
 /// The `profile_idc` values this crate understands, named for error
 /// reporting. Every profile outside [`Profile::Baseline`],
 /// [`Profile::Main`], [`Profile::Extended`] and [`Profile::High`] is
-/// refused with the profile named — the decoder covers the 8-bit 4:2:0
-/// Main profile feature set plus the 8x8 transform.
+/// refused with the profile named — the decoder targets Constrained Baseline.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Profile {
     /// `profile_idc` 66 (Baseline and Constrained Baseline — the
     /// constraint flags are checked separately).
     Baseline,
-    /// `profile_idc` 77 (Main): CAVLC + CABAC, I/P/B slices.
+    /// `profile_idc` 77 (Main).
     Main,
-    /// `profile_idc` 88 (Extended). Same subset as Main for decoding.
+    /// `profile_idc` 88 (Extended).
     Extended,
-    /// `profile_idc` 100 (High): the Main set plus the 8x8 luma
-    /// transform. Scaling matrices, non-4:2:0 chroma and other bit
-    /// depths are refused at SPS parse.
+    /// `profile_idc` 100 (High).
     High,
 }
 
