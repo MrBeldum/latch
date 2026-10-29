@@ -16,7 +16,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// How long the result of an action (an unpair, a driver install) stays.
+/// How long the result of an action stays on the page.
 const NOTE_FOR: Duration = Duration::from_secs(10);
 
 /// What the background threads know, read by the UI every frame.
@@ -146,7 +146,6 @@ impl HostApp {
         }
     }
 
-    #[cfg_attr(not(feature = "client"), allow(dead_code))]
     pub(crate) fn shared(&self) -> parking_lot::MutexGuard<'_, Shared> {
         self.shared.lock()
     }
@@ -322,7 +321,6 @@ const STOPPED: &str = "Stopped from this window.";
 
 impl Shared {
     /// The service is down because someone pressed Stop, not by accident.
-    #[cfg_attr(not(feature = "client"), allow(dead_code))]
     pub(crate) fn stopped_by_user(&self) -> bool {
         self.service_error.as_deref() == Some(STOPPED)
     }
@@ -805,7 +803,7 @@ impl HostApp {
             ui::setting_row(
                 ui,
                 "Repair sharing",
-                Some("Runs setup again: reapplies display matching and clears stale bitrate limits. Paired devices stay paired."),
+                Some("Runs setup again: the firewall rules, Wake-on-LAN, the virtual display's sizes and the power settings."),
                 |ui| {
                     let clicked = ui
                         .add_enabled_ui(!setup_running, |ui| {
@@ -842,14 +840,6 @@ impl HostApp {
                     }
                 },
             );
-        });
-    }
-}
-
-impl eframe::App for HostApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.page(ui);
         });
     }
 }
@@ -1204,7 +1194,7 @@ mod tests {
 ///
 /// Nothing here reads or writes real settings or reaches the service: the
 /// window and the page are both built headless.
-#[cfg(all(test, feature = "client"))]
+#[cfg(test)]
 mod snapshots {
     use super::*;
     use crate::product::NodeApp;
@@ -1536,16 +1526,13 @@ mod snapshots {
     }
 
     #[test]
-    fn unpair_asks_first_and_a_headless_page_touches_nothing() {
+    fn a_headless_page_touches_nothing() {
         let tall = egui::vec2(1280.0, 2400.0);
         let mut h = build(ready(), Os::Windows, tall, 1.0, false);
-        h.get_all_by_label("Unpair…").next().unwrap().click();
-        h.run_steps(3);
         assert!(
-            h.query_by_label("Unpair").is_some(),
-            "the confirming button"
+            h.query_by_label_contains("Unpair").is_none(),
+            "Latch 5 has no pairing to undo"
         );
-        assert!(h.query_by_label("Keep").is_some());
         h.get_by_label("Run setup again").click();
         h.run_steps(3);
         assert!(

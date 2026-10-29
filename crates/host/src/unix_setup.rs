@@ -1,9 +1,10 @@
 //! Sharing setup and the platform's login service.
 use crate::setup::Plan;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 pub fn run(p: &Plan<'_>) -> Result<()> {
@@ -510,7 +511,7 @@ pub fn adopt_legacy_bundle(background: bool) -> Result<()> {
     }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let error = Command::new(&exe).args(args).exec();
-    bail!("could not start {}: {error}", exe.display())
+    anyhow::bail!("could not start {}: {error}", exe.display())
 }
 
 /// The launch agent: start at login, and restart only after a failure. A

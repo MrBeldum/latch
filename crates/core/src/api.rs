@@ -199,14 +199,6 @@ pub struct Streamer {
     pub protocol: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PinRequest {
-    /// The 4 digits the Mac is pairing with.
-    pub pin: String,
-    /// Legacy viewer name; retained until the Latch 4 client migration lands.
-    pub name: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PowerAction {

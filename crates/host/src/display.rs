@@ -398,8 +398,6 @@ mod tests {
         assert!(status["monitor_ids"].is_array());
         assert!(status["desktop_monitors"].is_array());
         assert!(status["gpus"].is_array());
-        assert!(status["sunshine"].is_array());
-        assert!(status["sunshine_service"].is_array());
         // Every section reports its own failure rather than losing the rest.
         assert!(status["errors"].is_object());
         let desktop = &status["desktop"];

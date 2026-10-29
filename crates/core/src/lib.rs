@@ -26,5 +26,3 @@ pub const CONTROL_PORT: u16 = 47850;
 /// TCP port a Mac serves a Latch Host install from, on its Tailscale IP,
 /// for a PC whose host is too old to take `/v1/update`.
 pub const HANDOVER_PORT: u16 = 47851;
-/// Latch 4 compatibility port; retained until the viewer migration lands.
-pub const SUNSHINE_PORT: u16 = 47989;

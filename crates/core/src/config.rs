@@ -18,8 +18,8 @@ static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 ///
 /// `LATCH_DATA_DIR` replaces it when set. The workspace's
 /// `.cargo/config.toml` sets it for `cargo test` and `cargo run`, so a test
-/// run on a machine with Latch installed leaves that install's settings,
-/// pairing identity and logs alone.
+/// run on a machine with Latch installed leaves that install's settings
+/// and logs alone.
 ///
 /// The first call by a copy that finds the folder 4.0 and older used, and
 /// none of its own, takes that folder over: see [`adopt`].
@@ -59,9 +59,8 @@ pub fn data_dir() -> Result<PathBuf> {
 }
 
 /// Make the folder an older install left at `old` the one at `new`, when
-/// `old` exists and `new` does not. Settings, the pairing identity, the
-/// paired devices and the streaming engine all come along. Returns whether
-/// it did.
+/// `old` exists and `new` does not. Everything in it comes along (settings,
+/// logs, and whatever an older version kept there). Returns whether it did.
 ///
 /// A folder is moved. On Windows the old one holds the running
 /// `latch-host.exe` of an install that has not been set up again, and
@@ -294,7 +293,7 @@ fn put(root: &mut toml::Table, path: &[String], value: toml::Value) {
 }
 
 /// Apply a read-modify-write transaction without allowing another in-process
-/// settings, discovery, or pairing writer to replace the snapshot underneath it.
+/// settings or discovery writer to replace the snapshot underneath it.
 /// A file that exists but cannot be read is left alone: the edit fails
 /// rather than replace it with defaults.
 pub fn update<T: Serialize + DeserializeOwned + Default + PartialEq>(
@@ -432,7 +431,7 @@ mod tests {
     }
 
     /// A newer build's choice ("P720" read by a build without it) used to
-    /// cost the whole file: every pairing certificate and wake address.
+    /// cost the whole file: every saved machine and wake address.
     #[test]
     fn one_value_this_build_cannot_read_costs_only_that_value() {
         let stem = format!("salvage-{}", std::process::id());

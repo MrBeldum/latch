@@ -117,8 +117,8 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
         let exe = q(&p.exe.display().to_string());
         let log = log_path().unwrap_or_else(|| std::env::temp_dir().join("latch-setup.log"));
         // UAC may run the helper as another administrator, whose profile
-        // holds no host.toml: pass this user's folder so the engine login
-        // and setup.log stay with the account that shares the machine.
+        // holds no host.toml: pass this user's folder so setup.log stays
+        // with the account that shares the machine.
         let args = elevated_args(
             std::env::var_os("LOCALAPPDATA")
                 .filter(|dir| !dir.is_empty())
@@ -198,42 +198,6 @@ fn elevated_args(local_app_data: Option<&str>) -> String {
 /// expanded.
 fn q(s: &str) -> String {
     s.replace('\'', "''")
-}
-
-// Only the Windows setup path is compiled in a release build; tests use it everywhere.
-#[cfg_attr(not(windows), allow(dead_code))]
-/// `powershell -EncodedCommand` takes the script as base64 of UTF-16LE.
-fn encoded_command(script: &str) -> String {
-    let bytes: Vec<u8> = script
-        .encode_utf16()
-        .flat_map(|unit| unit.to_le_bytes())
-        .collect();
-    base64(&bytes)
-}
-
-// Only the Windows setup path is compiled in a release build; tests use it everywhere.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        out.push(TABLE[(n >> 18 & 63) as usize] as char);
-        out.push(TABLE[(n >> 12 & 63) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(n >> 6 & 63) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[(n & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
 }
 
 /// Generate and run the setup script. Called from `--setup-elevated` after
@@ -412,8 +376,6 @@ mod tests {
             "'--setup-elevated', '--local-app-data', '\"C:\\Users\\Ada Lovelace\"'"
         );
         assert!(run_value(Path::new("C:/a b/latch-host.exe")).starts_with('\"'));
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(encoded_command("A"), "QQA=");
     }
 
     #[test]
