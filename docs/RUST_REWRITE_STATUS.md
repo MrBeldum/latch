@@ -36,25 +36,39 @@ Each line names evidence that does not rest on the code's own claims.
 | Independent review | Four reviewers read the protocol, the session lifecycle, security and the platform code without the authors' notes; a fifth tried to refute each of their 40 findings and confirmed 37. All 37 are fixed, most with a regression test that failed before the fix |
 | It builds and passes everywhere | CI on commit `1f4a0a7`: all eight jobs green — Linux x86-64 and ARM64, Windows and macOS (clippy denying warnings, every test, both end-to-end sessions on each), the conformance suite, the native audit, and the deployment self-tests. On the Windows runner that includes Media Foundation encoding into the Media Foundation decoder, a Desktop Duplication frame, WASAPI loopback, and the setup script's retirement of a dummy Latch 4 engine; on the macOS runner, VideoToolbox's fallback to its software encoder when the virtual Mac has no hardware one |
 
+## Verified on the real machines (2026-10-29, evening)
+
+- **Windows, on Hermes** (Windows 11, AMD Radeon RX 6600, the Virtual
+  Display Driver): DXGI capture of the virtual display through AMD's
+  Media Foundation encoder (`AMDh264Encoder`) to the Mac at 1080p60;
+  SendInput landing where the letterboxed picture says (a point at
+  480,270 of 1920×1080 reached 133,150 of the 800×600 desktop); the same
+  PC as a viewer decoding with Media Foundation on the GPU (DXVA), a key
+  press reaching the picture in 171 ms over a 142 ms round trip to
+  Korea. Then the real install, over SSH, as a user would: the old
+  BroLink-era engine, its folder, service, tasks and firewall rules
+  retired (a backup kept in `C:\Users\Daniel\latch4-backup-20261029`),
+  Latch 5 started in the signed-in session, Tailscale authorization, and
+  the virtual display set to the viewer's 1920×1080 for the session and
+  back to 800×600 after it. The install found three faults, fixed before
+  merging: Windows' own Block rules for a new `latch-host.exe` beat
+  setup's Allow rules; the installer could not name the user from SSH;
+  the retire step left Latch 4's cursor-guard task.
+- **Linux, on stuzha and the VPS relay node**, upgraded by
+  `deploy/native/migrate-legacy.sh` (backups in `~/latch4-backup-20261029`):
+  the owner's own display and desktop units kept, the engine unit
+  retired, Sunshine's configuration moved aside, stuzha's display script
+  imported and run per session. Two faults found and fixed: the
+  migration started rather than restarted the running service, and
+  `--setup` alone left a drop-in requiring the removed engine unit.
+
 ## Not verified
 
-Nothing below has been observed; each needs the named machine or person.
-
-- **Windows on real hardware.** Hermes, the only Windows PC, has been
-  offline. CI's Windows runner compiled everything, ran the Media
-  Foundation encode → decode round trip, a Desktop Duplication frame,
-  WASAPI loopback, and both end-to-end sessions in software. Untested:
-  capture on a real GPU and the virtual display driver, a hardware
-  (NVENC/AMF/Quick Sync) Media Foundation encoder, SendInput on a real
-  desktop, the setup script's retirement of an actual Latch 4 engine
-  install, and the update that a 5.0 Mac pushes to a 4.x PC.
-- **A Mac as a host with Screen Recording granted.** This shell has
-  neither Screen Recording nor Accessibility permission, so live
-  ScreenCaptureKit capture and CoreGraphics input injection have not run
-  (the VideoToolbox encoder has, with synthetic frames, for all three
-  codecs).
-- **HEVC end to end** (Mac host to Mac viewer) depends on the above.
-- **Hours-long sessions and energy.** The longest session ran ten minutes;
+- **A Mac as a host.** It needs Screen Recording and Accessibility granted
+  to Latch.app by the owner (setup asks); this shell has neither, so live
+  ScreenCaptureKit capture, CoreGraphics input and HEVC end to end have
+  not run.
+- **Sessions of hours, and energy.** The longest session ran ten minutes;
   no energy measurement was taken.
 - **Full-motion encoding on the ARM host at 1080p**: about 3.5× x264's
   time; 720p meets 30 fps at the median with spikes above budget on a
@@ -62,13 +76,9 @@ Nothing below has been observed; each needs the named machine or person.
 
 ## Rollout
 
-Nothing has been released or installed. stuzha, the Mac and Hermes still
-run 4.1.1. A 5.0 viewer offers a Latch 4 Windows PC the update it can
-already receive and says what to do for the others; a 4.x viewer finds no
-stream on a 5.0 host and offers its own update. Because a Latch 4 viewer
-cannot watch a Latch 5 host, the order is: the Mac app first, then each
-host. Hermes should be updated by hand the first time, with its 4.1.1
-executable kept, since its Windows path is the least observed.
+Released as 5.0.0. Hermes, stuzha and the relay node were upgraded on
+2026-10-29 as above; the Mac takes the release app. A Latch 4 viewer
+finds no stream on a Latch 5 host and offers its own update.
 
 ## Commands
 
