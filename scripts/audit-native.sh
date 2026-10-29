@@ -121,6 +121,21 @@ for target in targets:
                 if dep_id not in visited:
                     queue.append(dep_id)
 
+    # `cargo metadata` resolves optional dependencies that no feature in
+    # this build turns on (ring through rustls-webpki, say). `cargo tree`
+    # follows the real feature resolution, so only what it lists is built.
+    tree = subprocess.run(
+        ['cargo', 'tree', '--locked', '-p', 'latch-host', '--target', target,
+         '-e', 'normal,build', '--prefix', 'none', '--format', '{p}'],
+        cwd=repo_root, capture_output=True, text=True, check=True,
+    ).stdout
+    built = set()
+    for line in tree.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            built.add((parts[0], parts[1].lstrip('v')))
+    visited = {i for i in visited if (pkgs[i]['name'], pkgs[i]['version']) in built}
+
     # Inspect each reachable package
     target_findings = []
     for pkg_id in visited:
@@ -138,12 +153,9 @@ for target in targets:
                 if dep_pkg_name in BUILD_TOOL_NAMES or 'bindgen' in dep_pkg_name or 'autotools' in dep_pkg_name:
                     build_deps.append(dep_pkg_name)
 
-        # Also check manifest dependencies for declared build tools
-        for d in pkg.get('dependencies', []):
-            if d.get('kind') == 'build':
-                d_name = d.get('name', '')
-                if (d_name in BUILD_TOOL_NAMES or 'bindgen' in d_name or 'autotools' in d_name) and d_name not in build_deps:
-                    build_deps.append(d_name)
+        # Only build tools this build compiles count (resolved above);
+        # an optional `bindgen` nobody enables runs nothing.
+        build_deps = [d for d in build_deps if any(b[0] == d for b in built)]
 
         # Check native source files in manifest directory
         native_files = []

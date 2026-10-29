@@ -7,3 +7,13 @@
 #   <crate-name>    <reason>
 #
 # Lines starting with '#' and blank lines are ignored.
+# Each entry below was checked on 2026-10-29: the files ship in the crate's
+# tarball, but nothing in Latch's build compiles them.
+objc-sys                  headers for the GNUstep/ObjFW runtimes; build.rs only links Apple's system libobjc unless the unstable-exception feature (off) is on
+ttf-parser                testing-tools/ (a Qt font viewer) in the tarball; no build.rs
+webbrowser                an iOS test app's header in tests/; no build.rs
+alsa-sys                  wrapper.h is for the optional use-bindgen feature (off); build.rs only asks pkg-config for the system libasound (Linux's sound API)
+cc                        src/detect_compiler_family.c is cc's own probe file; cc is built only as wayland-backend's build dependency and is never run (see below)
+nix                       a kernel-module test fixture in test/; no build.rs
+wayland-backend           log_shim.c is compiled only with the log feature (off); without it build.rs compiles nothing
+wayland-protocols-plasma  an upstream autotest in plasma-wayland-protocols/; no build.rs
