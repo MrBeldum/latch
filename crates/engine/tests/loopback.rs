@@ -161,9 +161,17 @@ fn the_picture_arrives_and_keys_show_up_in_it() {
     let (mut seq, first) =
         next_frame(&frames, 0, Duration::from_secs(5)).expect("no frame arrived");
     assert_eq!((first.width, first.height), (W, H));
-    let psnr = luma_psnr(&first, &reference_luma(Motion::Still), W as usize, H as usize);
+    let psnr = luma_psnr(
+        &first,
+        &reference_luma(Motion::Still),
+        W as usize,
+        H as usize,
+    );
     eprintln!("first frame: luma PSNR {psnr:.1} dB against the drawn pattern");
-    assert!(psnr > 30.0, "picture does not match what was drawn: {psnr:.1} dB");
+    assert!(
+        psnr > 30.0,
+        "picture does not match what was drawn: {psnr:.1} dB"
+    );
     let mut white = square_is_white(&first);
     frames.recycle(first);
 
@@ -205,7 +213,10 @@ fn the_picture_arrives_and_keys_show_up_in_it() {
     session.stop();
     let start = Instant::now();
     while !session.finished() {
-        assert!(start.elapsed() < Duration::from_secs(5), "the session never ended");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the session never ended"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }

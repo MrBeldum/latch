@@ -2,6 +2,8 @@
 //! and an interleaved UV plane at half resolution), which is what
 //! VideoToolbox produces and what the renderer's shader expects.
 
+#[cfg(windows)]
+pub mod mediafoundation;
 use anyhow::Result;
 use latch_proto::control::Codec;
 use parking_lot::Mutex;

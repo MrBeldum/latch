@@ -18,4 +18,18 @@ serde_json.workspace = true
 # Sound out through the OS mixer (CoreAudio, WASAPI, ALSA).
 cpal = "0.18"
 
+[target.'cfg(windows)'.dependencies]
+# Media Foundation's H.264 decoder (DXVA when the GPU has it).
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Variant",
+] }
+
 [dev-dependencies]

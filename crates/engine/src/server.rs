@@ -187,9 +187,8 @@ impl Server {
             }
         }
         let undo = match &self.options.prepare {
-            Some(prepare) => prepare(&req).map_err(|e| {
-                Refusal::new(500, format!("could not prepare the desktop: {e:#}"))
-            })?,
+            Some(prepare) => prepare(&req)
+                .map_err(|e| Refusal::new(500, format!("could not prepare the desktop: {e:#}")))?,
             None => None,
         };
         let mut prepared = Prepared {
@@ -559,7 +558,11 @@ impl Session {
         let deadline = Instant::now() + timeout;
         let mut finished = self.finished.lock();
         while !*finished {
-            if self.finished_cv.wait_until(&mut finished, deadline).timed_out() {
+            if self
+                .finished_cv
+                .wait_until(&mut finished, deadline)
+                .timed_out()
+            {
                 return *finished;
             }
         }
@@ -751,7 +754,9 @@ fn send(udp: &UdpSocket, datagram: &[u8], to: SocketAddr) {
     for _ in 0..3 {
         match udp.send_to(datagram, to) {
             Ok(_) => return,
-            Err(e) if e.raw_os_error() == Some(55) || e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e)
+                if e.raw_os_error() == Some(55) || e.kind() == std::io::ErrorKind::WouldBlock =>
+            {
                 std::thread::sleep(Duration::from_micros(200));
             }
             Err(_) => return,

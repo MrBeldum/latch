@@ -891,9 +891,15 @@ mod tests {
                 })
             })
         });
-        let mut s = upgrade(addr, "/v1/stream", "test-proto/1", b"hello", Duration::from_secs(2))
-            .unwrap()
-            .unwrap();
+        let mut s = upgrade(
+            addr,
+            "/v1/stream",
+            "test-proto/1",
+            b"hello",
+            Duration::from_secs(2),
+        )
+        .unwrap()
+        .unwrap();
         let mut got = [0u8; 5];
         s.read_exact(&mut got).unwrap();
         assert_eq!(&got, b"hello");
@@ -901,9 +907,15 @@ mod tests {
         let mut back = [0u8; 4];
         s.read_exact(&mut back).unwrap();
         assert_eq!(&back, b"ping");
-        let refused = upgrade(addr, "/v1/other", "test-proto/1", b"{}", Duration::from_secs(2))
-            .unwrap()
-            .unwrap_err();
+        let refused = upgrade(
+            addr,
+            "/v1/other",
+            "test-proto/1",
+            b"{}",
+            Duration::from_secs(2),
+        )
+        .unwrap()
+        .unwrap_err();
         assert_eq!(refused.status, 404);
     }
 }
