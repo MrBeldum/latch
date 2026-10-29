@@ -15,7 +15,9 @@ tracing.workspace = true
 directories.workspace = true
 if-addrs = "0.15"
 # Release lookup and download from GitHub over HTTPS.
-rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+# Pure-Rust TLS with no C, C++ or external assembler (graviola uses Rust inline assembly).
+rustls = { version = "0.23.45", default-features = false, features = ["std", "tls12"] }
+rustls-graviola = "0.4.0"
 webpki-roots = "1"
 semver = "1"
 sha2 = "0.10"

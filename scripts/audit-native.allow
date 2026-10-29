@@ -1,0 +1,9 @@
+# scripts/audit-native.allow
+#
+# Packages permitted to have build dependencies on C/C++/asm compilers (cc, cmake,
+# nasm-rs, bindgen, autotools) or ship C/C++/assembly source files.
+#
+# Format:
+#   <crate-name>    <reason>
+#
+# Lines starting with '#' and blank lines are ignored.

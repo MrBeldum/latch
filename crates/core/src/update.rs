@@ -389,7 +389,9 @@ fn tls_config() -> Result<Arc<rustls::ClientConfig>> {
     let roots = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
-    let provider = rustls::crypto::ring::default_provider();
+    // Pure-Rust crypto provider using s2n-bignum verified assembly via Rust inline
+    // assembly (core::arch::asm!), compiled directly by rustc without cc or nasm.
+    let provider = rustls_graviola::default_provider();
     let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
         .with_safe_default_protocol_versions()?
         .with_root_certificates(roots)
@@ -582,5 +584,13 @@ mod tests {
         assert!(!dest.exists());
         assert!(!dest.with_extension("part").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "talks to real GitHub API over the network"]
+    fn real_github_latest_release_fetch() {
+        let rel = latest(None).expect("fetching latest release from GitHub API should succeed");
+        assert!(!rel.tag.is_empty(), "release tag must not be empty");
+        assert!(!rel.assets.is_empty(), "release assets must not be empty");
     }
 }
