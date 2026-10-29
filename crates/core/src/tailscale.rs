@@ -343,8 +343,15 @@ pub fn whois(ip: std::net::IpAddr) -> Result<WhoIs> {
 /// relays each tailnet peer's TCP connection from loopback and remembers
 /// which peer every local port belongs to. `Ok(None)` when it knows of
 /// none: a process on this machine made the connection.
+///
+/// With no Tailscale installed, or its daemon not running, nothing can be
+/// relaying a peer into this machine, so the answer is "nobody" rather
+/// than an error: the machine's own window must keep working while
+/// Tailscale is off. Any other failure stays an error, which admits no one.
 pub fn whois_addr(addr: std::net::SocketAddr) -> Result<Option<WhoIs>> {
-    let cli = cli().ok_or_else(|| anyhow::anyhow!("Tailscale is not installed"))?;
+    let Some(cli) = cli() else {
+        return Ok(None);
+    };
     let out = run_limited(
         Command::new(cli).args(["whois", "--json", "--proto=tcp", &addr.to_string()]),
         Duration::from_secs(2),
@@ -353,9 +360,18 @@ pub fn whois_addr(addr: std::net::SocketAddr) -> Result<Option<WhoIs>> {
         Ok(out) => serde_json::from_str(&out)
             .map(Some)
             .context("parse tailscale whois"),
-        Err(e) if no_such_peer(&e.to_string()) => Ok(None),
+        Err(e) if no_such_peer(&e.to_string()) || daemon_not_running(&e.to_string()) => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+/// The CLI's answers when tailscaled is not running, on each platform.
+fn daemon_not_running(err: &str) -> bool {
+    let err = err.to_ascii_lowercase();
+    err.contains("doesn't appear to be running")
+        || err.contains("failed to connect to local tailscaled")
+        || err.contains("failed to connect to local tailscale daemon")
+        || err.contains("is tailscale running")
 }
 
 /// The CLI's answer for an address no peer is behind: it logs
@@ -992,6 +1008,19 @@ mod tests {
         assert!(no_such_peer("no match for IP:port 127.0.0.1:5"));
         assert!(!no_such_peer("tailscale timed out"));
         assert!(!no_such_peer("failed to connect to local Tailscale daemon"));
+    }
+
+    #[test]
+    fn tailscale_off_means_nobody_is_relayed() {
+        for line in [
+            "failed to connect to local tailscaled; it doesn't appear to be running",
+            "Failed to connect to local Tailscale daemon for /localapi/v0/whois; not running?",
+            "is Tailscale running?",
+        ] {
+            assert!(daemon_not_running(line), "{line}");
+        }
+        assert!(!daemon_not_running("permission denied"));
+        assert!(!daemon_not_running("timed out"));
     }
 
     #[test]
