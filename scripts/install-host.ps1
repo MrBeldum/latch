@@ -88,7 +88,9 @@ if ((Get-Process -Id $PID).SessionId -eq 0) {
     $up = $false
     try {
         $action = New-ScheduledTaskAction -Execute $DestExe -Argument "--background" -WorkingDirectory $DestDir
-        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+        # USERDOMAIN is not set in an SSH session; the token's own name is.
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
         $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Priority 5
         Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
         Start-ScheduledTask -TaskName $TaskName

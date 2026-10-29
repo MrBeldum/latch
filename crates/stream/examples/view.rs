@@ -6,6 +6,7 @@
 //!
 //!     view HOST [--port 47860] [--width 1280] [--height 720] [--fps 60]
 //!          [--kbps 10000] [--seconds 30] [--keys 0] [--hevc] [--audio]
+//!          [--point X,Y]   (one absolute pointer position, in picture pixels)
 
 use latch_stream::{Event, Frame, FrameSlot, Session, Settings};
 use std::net::IpAddr;
@@ -104,6 +105,15 @@ fn main() -> anyhow::Result<()> {
     eprintln!("connected in {:?}", asked.elapsed());
     let cpu0 = cpu_seconds();
     let t0 = Instant::now();
+
+    if let Some((x, y)) = arg("--point", "")
+        .split_once(',')
+        .and_then(|(x, y)| Some((x.parse::<i16>().ok()?, y.parse::<i16>().ok()?)))
+    {
+        std::thread::sleep(Duration::from_millis(500));
+        session.input().mouse_position(x, y, width as i16, height as i16);
+        eprintln!("pointer sent to {x},{y} of {width}x{height}");
+    }
 
     let mut presses = Vec::new();
     if keys > 0 {

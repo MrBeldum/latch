@@ -14,7 +14,14 @@ pub fn retire_windows_ps() -> String {
             r"C:\Program Files\BroLink\engine",
         ],
         &["LatchStream", "BroLinkStream"],
-        &["LatchEngineUser", "BroLinkEngineUser"],
+        // The engine starter and Latch 4's cursor guard, which ran the old
+        // executable in the signed-in session.
+        &[
+            "LatchEngineUser",
+            "BroLinkEngineUser",
+            "LatchCursorUser",
+            "BroLinkCursorUser",
+        ],
         &[
             "Latch Streaming TCP",
             "Latch Streaming UDP",
@@ -100,6 +107,7 @@ mod tests {
             "BroLinkStream",
             "LatchEngineUser",
             "BroLinkEngineUser",
+            "LatchCursorUser",
             "Latch Streaming TCP",
             "Latch Streaming UDP",
         ] {
