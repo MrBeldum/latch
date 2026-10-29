@@ -212,20 +212,46 @@ pub fn run_as_admin() -> Result<()> {
             adapter: &wake.adapter,
             adapter_description: &wake.description,
         };
-        // %SystemRoot%\Temp is writable by administrators only, so the
-        // script this elevated process writes cannot be swapped by a process
-        // running as the plain user before PowerShell reads it.
         let tmp_dir = std::env::var_os("SystemRoot")
             .map(|root| PathBuf::from(root).join("Temp"))
             .filter(|dir| dir.is_dir())
             .unwrap_or_else(std::env::temp_dir);
-        let tmp = tmp_dir.join(format!("latch-setup-{}.ps1", std::process::id()));
         // PowerShell 5.1 reads a BOM-less file as the system ANSI code page, so
         // a Korean/Japanese username or adapter name ("이더넷") would be mangled
         // and the firewall rule would point at a path that does not exist.
+        // We write to a file rather than piping to stdin or -EncodedCommand to preserve
+        // reliable UTF-8 BOM detection and avoid Windows command-line length limits.
+        //
+        // Standard users can create files in %SystemRoot%\Temp. Using create_new(true)
+        // with an unpredictable 128-bit random nonce ensures we never open or overwrite an
+        // attacker-precreated file (which would preserve the attacker's ownership and DACL,
+        // allowing a TOCTOU overwrite before PowerShell reads it). When the elevated process
+        // creates a new file here, it inherits administrator-only write permissions.
+        use std::io::Write;
         let mut bytes = b"\xEF\xBB\xBF".to_vec();
         bytes.extend(script(&plan).as_bytes());
-        std::fs::write(&tmp, &bytes)?;
+        let mut tmp = None;
+        for _ in 0..5 {
+            let candidate = tmp_dir.join(format!(
+                "latch-setup-{}-{:032x}.ps1",
+                std::process::id(),
+                rand::random::<u128>()
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(mut file) => {
+                    file.write_all(&bytes)?;
+                    tmp = Some(candidate);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e).context("create setup script in %SystemRoot%\\Temp"),
+            }
+        }
+        let tmp = tmp.context("could not allocate unique setup script path")?;
         let log = log_path().unwrap_or_else(|| std::env::temp_dir().join("latch-setup.log"));
         let out = std::fs::File::create(&log)?;
         let err = out.try_clone()?;

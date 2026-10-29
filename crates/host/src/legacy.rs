@@ -58,6 +58,22 @@ foreach ($service in @({services})) {{
         if ($LASTEXITCODE -notin 0, 1060, 1072) {{ $setupFailed = $true }}
     }}
 }}
+$sunshine = Get-CimInstance Win32_Service -Filter "Name = 'SunshineService'" -ErrorAction SilentlyContinue
+if ($sunshine) {{
+    $sunPath = if ($sunshine.PathName) {{ $sunshine.PathName.Trim('"` \t') }} else {{ '' }}
+    $underRetired = $false
+    foreach ($dir in @({dirs})) {{
+        if ($sunPath -like ($dir + '\*')) {{
+            $underRetired = $true
+            break
+        }}
+    }}
+    if ($underRetired) {{
+        try {{ Stop-Service -Name 'SunshineService' -Force -ErrorAction Stop }} catch {{ Write-Output "  stop SunshineService : $_"; $setupFailed = $true }}
+        sc.exe delete 'SunshineService' | Out-Null
+        if ($LASTEXITCODE -notin 0, 1060, 1072) {{ $setupFailed = $true }}
+    }}
+}}
 foreach ($dir in @({dirs})) {{
     if (Test-Path -LiteralPath $dir) {{
         Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {{ $_.ExecutablePath -like ($dir + '\*') }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
@@ -89,6 +105,7 @@ mod tests {
         ] {
             assert!(s.contains(&format!("'{name}'")), "{name}");
         }
+        assert!(s.contains("SunshineService"));
         assert!(s.contains("if (Test-Path -LiteralPath $dir)"));
         assert!(s.contains("Remove-Item -LiteralPath $dir -Recurse"));
         assert!(!s.contains("Move-Item"));
@@ -99,9 +116,6 @@ mod tests {
         let Ok(out) = std::env::var("LATCH_DUMP_RETIRE_SCRIPT") else {
             return;
         };
-        let dir = std::env::var("LATCH_DUMP_RETIRE_OLD").unwrap();
-        let service = std::env::var("LATCH_DUMP_RETIRE_SERVICE").unwrap();
-        let script = retire_windows_ps_with(&[&dir], &[&service], &[], &[]);
-        std::fs::write(out, format!("function Step($m) {{ Write-Output $m }}\n$setupFailed = $false\n{script}\nif ($setupFailed) {{ exit 1 }}\nexit 0\n")).unwrap();
+        std::fs::write(out, retire_windows_ps()).expect("write retire script");
     }
 }

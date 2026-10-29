@@ -49,7 +49,7 @@ fn run(script: &str, size: [u32; 3], limit: Duration) -> Result<()> {
     let mut cmd = {
         use std::os::windows::process::CommandExt;
         let mut cmd = Command::new("cmd.exe");
-        cmd.args(["/D", "/S", "/C", script])
+        cmd.raw_arg(format!("/D /S /C \"{script}\""))
             .creation_flags(0x0800_0000);
         cmd
     };
@@ -153,7 +153,7 @@ pub fn migrate() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn migrate_from(source: &std::path::Path) -> Result<()> {
-    if !HostConfig::try_load()?.prep_do.trim().is_empty() {
+    if !HostConfig::load().prep_do.trim().is_empty() {
         return Ok(());
     }
     let conf = match std::fs::read_to_string(source) {
