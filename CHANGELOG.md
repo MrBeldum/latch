@@ -4,7 +4,34 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
-## Unreleased
+## 5.0.0 (unreleased)
+
+- **Pure-Rust streaming engine.** Latch 5 replaces Sunshine (C++),
+  moonlight-common-c (C), OpenH264 (C++), and libopus (C) with a custom,
+  in-process streaming engine compiled directly into `latch-host`
+  (`latch-engine`, `latch-proto`, `latch-codec`, and `latch-stream`).
+  No C/C++ or assembler build dependencies (`cmake`, `nasm`, `clang`)
+  are required.
+- **Latch stream protocol 1.** Streaming runs over UDP with Reed-Solomon
+  forward error correction and loss-triggered keyframe requests. Audio is
+  coded losslessly at 48 kHz stereo with `lpcm-rice`. Video uses hardware
+  encoders where available (VideoToolbox on macOS, Media Foundation on
+  Windows) or the built-in `latch-codec` H.264 Constrained Baseline encoder.
+- **Control server and session handover.** Control server runs on TCP
+  47850 and binds UDP on the same port at startup. Streaming sessions
+  upgrade via `POST /v1/stream` with `Upgrade: latch-stream/1`.
+  Status reports (`/v1/status`) reflect the in-process streamer state,
+  active viewers, and display capture dimensions.
+- **No pairing PINs.** Authentication is enforced directly through Tailscale
+  identity over WireGuard; pairing dialogs and certificates are retired.
+- **Display sizing and prep commands.** Desktops follow the viewer's screen
+  size per session via `prep_do` / `prep_undo` commands in `host.toml`
+  (invoked with `LATCH_CLIENT_WIDTH`, `HEIGHT`, and `FPS`), or via
+  the engine's display resize logic. On Linux, existing Sunshine
+  `global_prep_cmd` settings are automatically migrated on first run.
+- **Automated legacy retirement.** Windows and Linux setup scripts
+  clean up legacy Latch 4 and BroLink engine services, scheduled tasks,
+  firewall rules, and engine folders.
 
 - **Updates after a stream.** A Windows PC took any Desktop left running
   after a viewer had gone for a live stream and turned down every pushed

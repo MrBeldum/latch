@@ -4,15 +4,14 @@
 //! * no flags: the window — a list of machines to connect to, and setup
 //!   to share this one.
 //!
-//! `--replaces <pid>` is how an update hands over. `--brand-engine` is
-//! Windows setup rewriting the streaming engine's name and icon.
+//! `--replaces <pid>` is how an update hands over.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use anyhow::Result;
 use clap::Parser;
 use latch_core::config::data_dir;
-use latch_host::brand;
 use latch_host::logfile::RotatingLog;
+#[cfg(feature = "client")]
 use latch_host::product::NodeApp;
 use latch_host::service::{self, Service};
 
@@ -26,10 +25,6 @@ struct Args {
     /// Run the control service with no window.
     #[arg(long)]
     background: bool,
-    /// Keep the streamed Windows cursor visible; runs in the user's desktop.
-    #[cfg(windows)]
-    #[arg(long, hide = true, conflicts_with_all = ["background", "setup", "setup_elevated", "brand_engine"])]
-    cursor_guard: Option<u32>,
     /// Started by an update: wait for this process to give up the port.
     #[arg(long, requires = "background")]
     replaces: Option<u32>,
@@ -47,19 +42,14 @@ struct Args {
     probation_version: Option<String>,
     #[arg(long, hide = true)]
     probation_exe: Option<std::path::PathBuf>,
-    /// Give the streaming engine in DIR Latch's name and icon. Run by
-    /// setup, elevated, with the engine stopped; exits non-zero with the
-    /// reason on stderr.
-    #[arg(long, value_name = "DIR", conflicts_with = "background")]
-    brand_engine: Option<std::path::PathBuf>,
-    /// Install and start the streaming engine, then exit. Used by Mac/Linux
+    /// Set up sharing, then exit. Used by Mac/Linux
     /// setup and by the Docker node; on Windows this is the same path as
     /// Share this machine (UAC).
-    #[arg(long, conflicts_with_all = ["background", "brand_engine"])]
+    #[arg(long, conflicts_with_all = ["background"])]
     setup: bool,
     /// Run setup as administrator. The unelevated panel launches this so
     /// the script is generated after UAC, not from a user-writable file.
-    #[arg(long, conflicts_with_all = ["background", "brand_engine"])]
+    #[arg(long, conflicts_with_all = ["background"])]
     setup_elevated: bool,
     /// The launching user's %LOCALAPPDATA%, so an elevated setup approved
     /// with another administrator's password still uses that user's
@@ -72,14 +62,6 @@ fn main() -> Result<()> {
     // Before anything can replace it: which file this process is.
     let _ = service::started_from();
     let args = Args::parse();
-    #[cfg(windows)]
-    if let Some(parent) = args.cursor_guard {
-        init_logging("cursor.log");
-        return latch_host::cursor::run(parent).map_err(|e| {
-            tracing::error!("cursor guard: {e:#}");
-            e
-        });
-    }
     if let Some(dir) = &args.local_app_data {
         // Before any thread or data_dir() call; edition 2021, so set_var is safe.
         std::env::set_var("LOCALAPPDATA", dir);
@@ -93,10 +75,6 @@ fn main() -> Result<()> {
     };
     init_logging(log);
     install_panic_hook(data_dir().ok().map(|d| d.join(log)));
-    // init_logging has just called data_dir(), which takes over an older
-    // install's folder; the engine's config inside still names the old one.
-    #[cfg(not(windows))]
-    latch_host::unix_setup::repair_adopted_engine_config();
     #[cfg(target_os = "macos")]
     if let Err(e) = latch_host::unix_setup::adopt_legacy_bundle(args.background) {
         // Only returns when there was nothing to move or the move failed;
@@ -123,38 +101,33 @@ fn main() -> Result<()> {
     if args.setup_elevated {
         return latch_host::setup::run_as_admin();
     }
-    if let Some(dir) = &args.brand_engine {
-        return brand::brand(dir).map_err(|e| {
-            tracing::error!("brand engine at {}: {e:#}", dir.display());
-            e
-        });
-    }
     if service::starts_with_window(&latch_host::config::HostConfig::load()) {
         service::ensure_service_running();
     }
-    eframe::run_native(
-        "Latch",
-        latch_client::native_options(),
-        Box::new(|cc| Ok(Box::new(NodeApp::new(cc)))),
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))
+    #[cfg(feature = "client")]
+    {
+        eframe::run_native(
+            "Latch",
+            latch_client::native_options(),
+            Box::new(|cc| Ok(Box::new(NodeApp::new(cc)))),
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+    #[cfg(not(feature = "client"))]
+    {
+        eframe::run_native(
+            "Latch",
+            native_options(),
+            Box::new(|cc| Ok(Box::new(latch_host::app::HostApp::new(cc)))),
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))
+    }
 }
 
 fn run_setup() -> Result<()> {
-    let mut cfg = latch_host::config::HostConfig::load();
-    if !cfg.has_creds() {
-        cfg.sunshine_user = "latch".into();
-        cfg.sunshine_pass = latch_host::config::random_password();
-        cfg.save()?;
-    }
     let exe = std::env::current_exe()?;
     latch_host::setup::run(&latch_host::setup::Plan {
         exe: &exe,
-        install_engine: true,
-        migrate: false,
-        dry_run: false,
-        sunshine_user: &cfg.sunshine_user,
-        sunshine_pass: &cfg.sunshine_pass,
         adapter: "",
         adapter_description: "",
     })
@@ -223,6 +196,35 @@ fn init_logging(file: &str) {
         .with_ansi(false)
         .with_writer(std::sync::Mutex::new(sink))
         .init();
+}
+
+#[cfg(not(feature = "client"))]
+fn native_options() -> eframe::NativeOptions {
+    use eframe::egui;
+    let icon = if cfg!(target_os = "macos") {
+        egui::IconData::default()
+    } else {
+        egui::IconData {
+            rgba: latch_core::icon::render(64),
+            width: 64,
+            height: 64,
+        }
+    };
+    eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1100.0, 720.0])
+            .with_min_inner_size([640.0, 420.0])
+            .with_title("Latch")
+            .with_icon(icon),
+        renderer: eframe::Renderer::Wgpu,
+        vsync: false,
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            present_mode: eframe::egui_wgpu::wgpu::PresentMode::AutoNoVsync,
+            desired_maximum_frame_latency: Some(1),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]

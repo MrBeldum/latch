@@ -7,7 +7,7 @@
 //! | Method | Path        | Body            | Reply        |
 //! |--------|-------------|-----------------|--------------|
 //! | GET    | /v1/status  |                 | [`Status`]   |
-//! | POST   | /v1/pin     | [`PinRequest`]  | [`Ack`]      |
+//! | POST   | /v1/stream  | stream request | TCP upgrade |
 //! | POST   | /v1/power   | [`PowerRequest`]| [`Ack`]      |
 //! | POST   | /v1/quit    |                 | [`Ack`] (loopback only) |
 //! | POST   | /v1/update  | `latch-host.exe` bytes | [`Ack`]     |
@@ -168,19 +168,13 @@ pub struct Streamer {
     /// "Latch" when sharing is set up; empty when no engine is installed.
     pub kind: String,
     pub installed: bool,
-    /// Its GameStream port answers.
+    /// The media server is bound.
     pub running: bool,
-    /// The host can log in to its web API with the saved credentials, which
-    /// is what auto-pairing needs.
+    /// The built-in streaming control API is ready.
     pub api_ok: bool,
-    /// The encoder family the engine settled on ("nvenc", "amf", "quicksync",
-    /// "software"), read from its log; empty when unknown. Software
-    /// encoding is why a stream can be slow on a fast network.
+    /// The running or last session's encoder, or the platform's expected encoder.
     pub encoder: String,
-    /// Why Sunshine has no sound to send, in its own words from its log
-    /// (3.1+); empty when audio capture works or nothing is known. A PC
-    /// with no monitor or speakers has no audio device, and Sunshine then
-    /// streams silence.
+    /// Why the running or last session had no audio; empty when capture works.
     pub audio_problem: String,
     /// The desktop the engine captures, `[width, height]`, when its size is
     /// fixed whatever a viewer asks for: a Linux X screen. Absent when the
@@ -195,12 +189,12 @@ pub struct Streamer {
     /// asking for more only drops frames. A viewer asking for fewer pixels
     /// raises it in proportion.
     pub max_fps: u32,
-    /// A viewer is connected right now, from the engine's own log. A Mac
+    /// A viewer is connected right now. A Mac
     /// holds a host update back while it is true, instead of sending the
     /// whole executable to be turned down. False from older hosts.
     pub viewer: bool,
     /// The Latch stream protocol this host speaks (`docs/PROTOCOL.md`); 0
-    /// from a Latch 4 host, which speaks only GameStream to Sunshine.
+    /// from a Latch 4 host; that host needs an update.
     #[serde(default)]
     pub protocol: u32,
 }
@@ -209,7 +203,7 @@ pub struct Streamer {
 pub struct PinRequest {
     /// The 4 digits the Mac is pairing with.
     pub pin: String,
-    /// Shown in Sunshine's client list.
+    /// Legacy viewer name; retained until the Latch 4 client migration lands.
     pub name: String,
 }
 
@@ -328,7 +322,7 @@ mod tests {
         // Fits a request body once serialised.
         assert!(serde_json::to_string(&c).unwrap().len() < 64 * 1024);
         // Old hosts have neither `nat` nor `encoder`.
-        let s: Status = serde_json::from_str(r#"{"streamer":{"kind":"Sunshine"}}"#).unwrap();
+        let s: Status = serde_json::from_str(r#"{"streamer":{"kind":"Latch"}}"#).unwrap();
         assert_eq!(s.nat, None);
         assert_eq!(s.streamer.encoder, "");
         assert_eq!(s.streamer.audio_problem, "");

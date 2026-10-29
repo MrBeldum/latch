@@ -15,9 +15,15 @@ path = "src/lib.rs"
 name = "latch-host"
 path = "src/main.rs"
 
+[features]
+default = []
+client = ["dep:latch-client"]
+
 [dependencies]
 latch-core.workspace = true
-latch-client.workspace = true
+latch-engine.workspace = true
+latch-proto.workspace = true
+latch-client = { workspace = true, optional = true }
 latch-ui.workspace = true
 anyhow.workspace = true
 serde = { workspace = true }

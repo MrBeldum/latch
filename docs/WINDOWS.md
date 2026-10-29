@@ -1,9 +1,9 @@
 # Windows
 
 `latch-host.exe` is Latch on Windows: a background service other
-machines talk to over Tailscale, and a window that lists every machine on
-your account (Connect opens their desktop) and shares this PC. The
-streaming engine, which ships in the same zip, does the capture.
+machines talk to over Tailscale, a window that lists every machine on
+your account (Connect opens their desktop) and shares this PC, and the
+built-in streaming engine that captures and streams the desktop.
 
 ## Requirements
 
@@ -16,25 +16,19 @@ streaming engine, which ships in the same zip, does the capture.
 ## Install
 
 1. Unzip the release and run `latch-host.exe`, or run `install-host.ps1`
-   to copy it (and the bundled engine archive) to `%LOCALAPPDATA%\Latch`,
-   add shortcuts, and register the background service to start at logon.
-   The script stops a running Latch Host to replace it and starts the
-   service again; `-NoStart` only keeps the window closed.
+   to copy it to `%LOCALAPPDATA%\Latch`, add shortcuts, and register
+   the background service to start at logon. The script stops a running
+   Latch Host to replace it and starts the service again; `-NoStart` only
+   keeps the window closed.
 2. Open the **Sharing** tab and click **Set up as administrator**. One UAC
    prompt runs a script that:
-   - unpacks the bundled engine archive into
-     `%ProgramFiles%\Latch\engine` (downloads that pinned release if the
-     archive is not beside the exe, or is not that release), and gives
-     its executables Latch's name and icon so Task Manager and the volume
-     mixer show "Latch Streaming" (their copyright and licence strings are
-     kept);
-   - writes the engine's settings: tray and toasts off, web UI on loopback
-     only, the PC's display switched to the size and frame rate a Mac asks
-     for and put back at disconnect, no bitrate ceiling, and frames kept
-     flowing while the desktop is still;
-   - gives Latch a login to the engine and restarts the engine service;
-   - adds firewall rules: TCP 47850 inbound from `100.64.0.0/10` only, UDP 9
-     for the wake-packet listener, and the streaming ports from the tailnet;
+   - retires legacy Latch 4 and BroLink engine services (`LatchStream`,
+     `BroLinkStream`), tasks (`LatchEngineUser`, `BroLinkEngineUser`),
+     engine directories (`%ProgramFiles%\Latch\engine`), and old firewall
+     rules;
+   - adds firewall rules: TCP 47850 inbound and UDP 47850 inbound for
+     `latch-host.exe` from `100.64.0.0/10` only, and UDP 9 for the
+     wake-packet listener;
    - on a PC with the [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver),
      lists every screen size a Mac can ask for in its `vdd_settings.xml`
      (a minimal file when there is none; everything else in it is kept)
@@ -112,7 +106,7 @@ requests, all JSON:
 | Request | Effect |
 |---------|--------|
 | `GET /v1/status` | Name, Tailscale login and IP, LAN IP and MAC, wake state, Fast Startup state, seconds since the last wake packet arrived, engine state and the encoder it uses, this PC's NAT report |
-| `POST /v1/pin {"pin","name"}` | Passes the PIN to the streaming engine, so pairing never needs the PC's screen |
+| `POST /v1/stream` | Initiates streaming session via HTTP Upgrade to `latch-stream/1` |
 | `POST /v1/power {"action"}` | `sleep`, `restart`, or `shutdown` (closes the running app first) |
 | `GET /v1/clipboard` | The clipboard as text, with Windows' clipboard sequence number |
 | `POST /v1/clipboard {"text"}` | Replaces the clipboard, so a ⌘V on the Mac pastes the Mac's text |

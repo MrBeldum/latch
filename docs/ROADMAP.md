@@ -41,6 +41,21 @@ Moonlight and launched it; Latch itself did wake, pairing and power.
 - [x] `deploy/node/` Docker kit and `deploy/native/` units for a VPS desktop
 - [x] The chosen bitrate is the one the PC's encoder targets
 
+## v5.0
+
+- [x] Pure-Rust in-process streaming engine (`latch-engine`, `latch-proto`,
+      `latch-codec`, `latch-stream`); retired Sunshine, Moonlight, OpenH264,
+      and Opus
+- [x] Latch stream protocol version 1 over UDP with Reed-Solomon FEC and
+      lossless `lpcm-rice` audio
+- [x] WireGuard encryption and authentication via Tailscale identity; no
+      separate PIN pairing layer
+- [x] Desktop follows viewer sizing per session via prep commands and
+      in-engine display sizing
+- [x] Idempotent retirement of Latch 4 engine services, tasks, firewall
+      rules, and directories
+- [x] Zero C/C++/assembler build dependencies in the build graph
+
 ## Later
 
 - [ ] AV1 decode on M3 and newer (moonlight-common-c negotiates it; the

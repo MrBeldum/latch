@@ -2,10 +2,10 @@
 //!
 //! A black stream has several causes that look identical from the Mac: no
 //! monitor attached, a monitor that is powered down, a locked session, or a
-//! capture that Sunshine cannot read. The probe answers all of them at once.
+//! capture that Latch cannot read. The probe answers all of them at once.
 //! It reads the desktop's own brightness as a handful of sampled pixels —
 //! numbers, never an image — so a black picture can be blamed on the PC's
-//! desktop or on Sunshine's capture without anyone looking at the screen.
+//! desktop or on Latch's capture without anyone looking at the screen.
 
 use anyhow::Result;
 use serde_json::Value;
@@ -433,7 +433,7 @@ mod tests {
 /// build leaves one error behind instead of losing the whole report.
 // Compiled into tests everywhere, so the service names it looks for are
 // checked against setup's on a Mac too.
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 const PROBE: &str = r#"
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -493,21 +493,6 @@ try {
                       CurrentRefreshRate,CurrentBitsPerPixel,VideoModeDescription,Status,Availability)
 } catch { $errors['gpus'] = $_.Exception.Message }
 
-$sunshine = @()
-try {
-    $sunshine = @(Get-CimInstance Win32_Process -Filter "Name='sunshine.exe'" -ErrorAction Stop |
-        Select-Object ProcessId,SessionId,ExecutablePath)
-} catch { $errors['sunshine'] = $_.Exception.Message }
-
-# The engine's service under every name it has had (Latch's, the one
-# before 4.1, upstream's) and any other whose program is the engine's
-# service wrapper. PathName shows which engine folder each one runs.
-$service = @()
-try {
-    $service = @(Get-CimInstance Win32_Service -Filter "Name='LatchStream' OR Name='BroLinkStream' OR Name like '%unshine%' OR PathName like '%sunshinesvc.exe%'" -ErrorAction Stop |
-        Select-Object Name,State,StartMode,ProcessId,StartName,PathName)
-} catch { $errors['sunshine_service'] = $_.Exception.Message }
-
 # The desktop's own brightness, as sampled numbers rather than a picture:
 # black here means the PC has nothing to show, not that capture failed.
 $desktop = $null
@@ -555,23 +540,6 @@ try {
   desktop_monitors=$desktopMonitors;
   connections=$connections;
   gpus=$gpus;
-  sunshine=$sunshine;
-  sunshine_service=$service;
   desktop=$desktop;
   errors=$errors} | ConvertTo-Json -Depth 6 -Compress
 "#;
-
-#[cfg(test)]
-mod probe_tests {
-    #[test]
-    fn the_probe_finds_the_engine_service_under_every_name_latch_gave_it() {
-        for name in [crate::setup::SERVICE, crate::legacy::WINDOWS_SERVICE] {
-            assert!(
-                super::PROBE.contains(&format!("Name='{name}'")),
-                "{name} is not looked for"
-            );
-        }
-        assert!(super::PROBE.contains("Name like '%unshine%'"));
-        assert!(super::PROBE.contains("PathName like '%sunshinesvc.exe%'"));
-    }
-}

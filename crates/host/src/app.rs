@@ -1,11 +1,10 @@
 //! The Sharing page: setup for sharing this machine, what it reports, the
-//! devices paired with it, its options and diagnostics. The unified window
+//! its options and diagnostics. The unified window
 //! shows it as a tab (see `product.rs`); background threads keep
 //! [`Shared`] current and the page reads it once per frame.
 
-use crate::config::{self, HostConfig};
+use crate::config::HostConfig;
 use crate::setup;
-use crate::streamer::Api;
 use eframe::egui;
 use latch_core::api::Status;
 use latch_core::http;
@@ -25,8 +24,6 @@ const NOTE_FOR: Duration = Duration::from_secs(10);
 pub struct Shared {
     pub status: Option<Status>,
     pub service_error: Option<String>,
-    pub clients: Vec<(String, String)>,
-    pub gamepad_driver: Option<bool>,
     pub setup_running: bool,
     pub setup_result: Option<Result<(), String>>,
     pub setup_log: Vec<String>,
@@ -48,9 +45,6 @@ impl Shared {
         self.rev = self.rev.wrapping_add(1);
     }
 }
-
-/// A one-line result from a worker thread.
-type Note = Arc<Mutex<Option<(Tone, String)>>>;
 
 /// Which OS the page describes. Compiled in for the running app; set by
 /// tests to render the other platforms' pages.
@@ -92,16 +86,12 @@ pub struct HostApp {
     cfg: HostConfig,
     autostart: bool,
     dirty: bool,
-    confirm_unpair: Option<String>,
     busy_since: Option<Instant>,
-    /// The engine archive sits beside the exe, so setup needs no download.
-    bundled_engine: bool,
-    /// Actions reach the system: setup runs, devices unpair, the service
+    /// Actions reach the system: setup runs, the service
     /// stops. Off when the page is only rendered, in tests.
     live: bool,
     os: Os,
     note: Option<(Tone, String, Instant)>,
-    pending: Option<Note>,
 }
 
 impl HostApp {
@@ -118,7 +108,6 @@ impl HostApp {
         Self {
             cfg,
             autostart: setup::starts_with_windows(),
-            bundled_engine: std::env::current_exe().is_ok_and(|e| setup::bundled_engine(&e)),
             live: true,
             ..Self::headless(shared, Os::HERE)
         }
@@ -133,13 +122,10 @@ impl HostApp {
             cfg: HostConfig::default(),
             autostart: true,
             dirty: false,
-            confirm_unpair: None,
             busy_since: None,
-            bundled_engine: os == Os::Windows,
             live: false,
             os,
             note: None,
-            pending: None,
         }
     }
 
@@ -160,32 +146,12 @@ impl HostApp {
         }
     }
 
+    #[cfg_attr(not(feature = "client"), allow(dead_code))]
     pub(crate) fn shared(&self) -> parking_lot::MutexGuard<'_, Shared> {
         self.shared.lock()
     }
 
-    /// Run `job` off the UI thread and show what it returns under the
-    /// page's header.
-    fn later(
-        &mut self,
-        ctx: &egui::Context,
-        job: impl FnOnce() -> (Tone, String) + Send + 'static,
-    ) {
-        let note: Note = Arc::default();
-        let out = note.clone();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            *out.lock() = Some(job());
-            ctx.request_repaint();
-        });
-        self.pending = Some(note);
-    }
-
     fn poll_note(&mut self, ctx: &egui::Context) {
-        if let Some(done) = self.pending.as_ref().and_then(|n| n.lock().take()) {
-            self.note = Some((done.0, done.1, Instant::now()));
-            self.pending = None;
-        }
         if let Some((_, _, at)) = &self.note {
             match NOTE_FOR.checked_sub(at.elapsed()) {
                 Some(left) => ctx.request_repaint_after(left),
@@ -194,20 +160,8 @@ impl HostApp {
         }
     }
 
-    /// The engine's login, for a worker thread.
-    fn creds(&self) -> Option<(String, String)> {
-        self.cfg.has_creds().then(|| {
-            (
-                self.cfg.sunshine_user.clone(),
-                self.cfg.sunshine_pass.clone(),
-            )
-        })
-    }
-
-    /// Generate a Sunshine login if there is none, save it, and run the
-    /// setup on a thread.
+    /// Run sharing setup on a thread.
     fn start_setup(&mut self, ctx: &egui::Context, status: &Status) {
-        let migrate = crate::migrate::uses_old_engine(&status.streamer.kind);
         let shared = self.shared.clone();
         {
             let mut s = shared.lock();
@@ -219,19 +173,7 @@ impl HostApp {
         if !self.live {
             return;
         }
-        if !self.cfg.has_creds() && !migrate {
-            self.cfg.sunshine_user = "latch".into();
-            self.cfg.sunshine_pass = config::random_password();
-            if let Err(e) = self.cfg.save() {
-                tracing::warn!("could not save engine login: {e:#}");
-            }
-        }
-        let cfg = self.cfg.clone();
         let ctx = ctx.clone();
-        let install_engine = !status.streamer.installed
-            || migrate
-            || !status.streamer.running
-            || crate::streamer::find().is_some_and(|i| crate::streamer::in_old_folder(&i));
         let adapter = status.wake_adapter.clone();
         let desc = status.wake_adapter_description.clone();
         std::thread::spawn(move || {
@@ -240,11 +182,6 @@ impl HostApp {
                 .and_then(|exe| {
                     setup::run(&setup::Plan {
                         exe: &exe,
-                        install_engine,
-                        migrate,
-                        dry_run: false,
-                        sunshine_user: &cfg.sunshine_user,
-                        sunshine_pass: &cfg.sunshine_pass,
                         adapter: &adapter,
                         adapter_description: &desc,
                     })
@@ -335,16 +272,14 @@ impl HostApp {
         s.touch();
     }
 
-    /// Stop the service and the engine it started: nothing is shared and
+    /// Stop the service: nothing is shared and
     /// nothing of Latch keeps running once the window closes.
     fn stop_sharing(&mut self) {
         self.stop_service();
         #[cfg(not(windows))]
         if self.live {
             std::thread::spawn(|| {
-                // After the service has gone, or it starts the engine again.
                 std::thread::sleep(Duration::from_millis(800));
-                crate::unix_setup::stop_engine();
             });
         }
     }
@@ -387,6 +322,7 @@ const STOPPED: &str = "Stopped from this window.";
 
 impl Shared {
     /// The service is down because someone pressed Stop, not by accident.
+    #[cfg_attr(not(feature = "client"), allow(dead_code))]
     pub(crate) fn stopped_by_user(&self) -> bool {
         self.service_error.as_deref() == Some(STOPPED)
     }
@@ -400,8 +336,6 @@ impl HostApp {
         let shared = self.shared.lock();
         let status = shared.status.clone();
         let service_error = shared.service_error.clone();
-        let clients = shared.clients.clone();
-        let gamepad = shared.gamepad_driver;
         let setup_running = shared.setup_running;
         let setup_result = shared.setup_result.clone();
         let setup_log = shared.setup_log.clone();
@@ -465,8 +399,7 @@ impl HostApp {
             );
         }
         self.setup_card(ui, &s, setup_running, setup_result.as_ref(), &setup_log);
-        self.overview(ui, &s, gamepad);
-        self.paired(ui, &clients);
+        self.overview(ui, &s);
         self.options(ui);
         self.diagnostics(ui, &s, setup_running);
         self.commit();
@@ -566,7 +499,6 @@ impl HostApp {
             }
             return;
         }
-        let migrate = crate::migrate::uses_old_engine(&s.streamer.kind);
         let tone = if done && !matches!(result, Some(Err(_))) {
             Tone::Success
         } else if matches!(result, Some(Err(_))) {
@@ -576,20 +508,16 @@ impl HostApp {
         };
         let (title, how) = match self.os {
             Os::Windows => (
-                if migrate {
-                    "Update the streaming engine"
-                } else {
-                    "Share this PC"
-                },
+                "Share this PC",
                 "One administrator prompt does everything listed here. Nothing else needs configuring.",
             ),
             Os::Mac => (
                 "Share this Mac",
-                "Latch installs the streaming engine for you. macOS then asks once to let it record the screen.",
+                "Allow Screen Recording and Accessibility for Latch when macOS asks.",
             ),
             Os::Linux => (
                 "Share this machine",
-                "Latch installs the streaming engine for this user and keeps it running.",
+                "Latch shares this desktop from its background service.",
             ),
         };
         let title = if done { "Sharing is set up" } else { title };
@@ -627,22 +555,20 @@ impl HostApp {
                 let secs = self.busy_since.map(|t| t.elapsed().as_secs()).unwrap_or(0);
                 let what = match self.os {
                     Os::Windows => "Waiting for the administrator prompt and the setup steps",
-                    _ => "Installing and starting the streaming engine",
+                    _ => "Setting up sharing",
                 };
                 ui::empty_state(ui, &format!("{what}… {secs} s"), true);
             } else if !done || result.is_some() {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = space::MD;
-                    let label = if migrate {
-                        "Update the engine"
-                    } else if admin_items.is_empty() {
+                    let label = if admin_items.is_empty() {
                         "Run setup again"
                     } else if self.os == Os::Windows {
                         "Set up as administrator"
                     } else {
                         "Set up sharing"
                     };
-                    let primary = !admin_items.is_empty() || migrate;
+                    let primary = !admin_items.is_empty();
                     let clicked = if primary {
                         ui::primary_button(ui, label).clicked()
                     } else {
@@ -650,19 +576,6 @@ impl HostApp {
                     };
                     if clicked {
                         self.start_setup(ui.ctx(), s);
-                    }
-                    let note = if migrate {
-                        Some("Keeps this PC's pairings and web login.")
-                    } else if !s.streamer.installed {
-                        Some(match (self.os, self.bundled_engine) {
-                            (Os::Windows, true) => "Installs the engine that ships with Latch.",
-                            _ => "Downloads the streaming engine and installs it.",
-                        })
-                    } else {
-                        None
-                    };
-                    if let Some(n) = note {
-                        ui::small_print(ui, n);
                     }
                 });
             }
@@ -711,7 +624,7 @@ impl HostApp {
         });
     }
 
-    fn overview(&mut self, ui: &mut egui::Ui, s: &Status, gamepad: Option<bool>) {
+    fn overview(&mut self, ui: &mut egui::Ui, s: &Status) {
         let noun = self.os.noun();
         let (ts_tone, tailscale) = match (&s.tailscale_ip, &s.tailscale_login) {
             (Some(ip), Some(login)) => (Tone::Success, format!("{ip} · {login}")),
@@ -805,106 +718,11 @@ impl HostApp {
                 s.lan_ip.clone().unwrap_or_else(|| "None".into()),
             ));
         }
-        if self.os == Os::Windows {
-            let (tone, text) = match gamepad {
-                Some(true) => (Tone::Success, "Virtual controller driver installed"),
-                Some(false) => (Tone::Warning, "Virtual controller driver missing"),
-                None => (Tone::Neutral, "Known once the streaming engine runs"),
-            };
-            rows.push(Kv::new("Game controllers", text).tone(tone));
-        }
         let heading = format!("This {noun}");
         ui::section(ui, &heading, |ui| {
             ui.add_space(space::MD);
             ui::kv_grid(ui, &rows);
-            if self.os == Os::Windows && gamepad == Some(false) {
-                ui.add_space(space::SM);
-                if ui::secondary_button(ui, "Install controller driver").clicked() {
-                    self.install_gamepad_driver(ui.ctx());
-                }
-            }
             ui.add_space(space::MD);
-        });
-    }
-
-    fn install_gamepad_driver(&mut self, ctx: &egui::Context) {
-        let Some((user, pass)) = self.creds().filter(|_| self.live) else {
-            return;
-        };
-        self.later(ctx, move || {
-            let api = Api {
-                user: &user,
-                pass: &pass,
-            };
-            match api.install_gamepad_driver() {
-                Ok(()) => (
-                    Tone::Success,
-                    "The controller driver is installing. Windows may ask to confirm.".into(),
-                ),
-                Err(e) => {
-                    tracing::warn!("ViGEmBus install: {e:#}");
-                    (
-                        Tone::Danger,
-                        format!("Couldn't install the controller driver: {e}."),
-                    )
-                }
-            }
-        });
-    }
-
-    fn paired(&mut self, ui: &mut egui::Ui, clients: &[(String, String)]) {
-        ui::section(ui, "Paired devices", |ui| {
-            if clients.is_empty() {
-                ui.add_space(space::MD);
-                ui::muted(ui, "None yet. A machine pairs itself the first time it connects; nothing needs typing here.");
-                ui.add_space(space::MD);
-                return;
-            }
-            for (i, (name, uuid)) in clients.iter().enumerate() {
-                if i > 0 {
-                    ui::row_separator(ui);
-                }
-                let id = format!("ID {}", &uuid[..uuid.len().min(8)]);
-                ui::list_row(ui, None, name, &id, |ui| {
-                    if self.confirm_unpair.as_deref() == Some(uuid) {
-                        if ui::ghost_button(ui, "Keep").clicked() {
-                            self.confirm_unpair = None;
-                        }
-                        if ui::destructive_button(ui, "Unpair").clicked() {
-                            self.unpair(ui.ctx(), name, uuid);
-                            self.confirm_unpair = None;
-                        }
-                    } else if ui::danger_button(ui, "Unpair…")
-                        .on_hover_text("It pairs again by itself the next time it connects.")
-                        .clicked()
-                    {
-                        self.confirm_unpair = Some(uuid.clone());
-                    }
-                });
-            }
-        });
-    }
-
-    fn unpair(&mut self, ctx: &egui::Context, name: &str, uuid: &str) {
-        let Some((user, pass)) = self.creds().filter(|_| self.live) else {
-            return;
-        };
-        let (name, uuid) = (name.to_string(), uuid.to_string());
-        self.later(ctx, move || {
-            let api = Api {
-                user: &user,
-                pass: &pass,
-            };
-            match api.unpair(&uuid) {
-                Ok(()) => (
-                    Tone::Success,
-                    format!("Unpaired {name}. It pairs again the next time it connects."),
-                ),
-                Err(e) => {
-                    tracing::warn!("unpair: {e:#}");
-                    (Tone::Danger, format!("Couldn't unpair {name}: {e}."))
-                }
-            }
         });
     }
 
@@ -1024,6 +842,14 @@ impl HostApp {
                     }
                 },
             );
+        });
+    }
+}
+
+impl eframe::App for HostApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.page(ui);
         });
     }
 }
@@ -1181,8 +1007,7 @@ impl Respawn {
     }
 }
 
-/// Poll the service every second; refresh Sunshine's client list now and
-/// then; restart the service after an update. The window repaints only
+/// Poll the service every second; restart it after an update. The window repaints only
 /// when an answer differs from the last.
 /// Whether `new` is `old` a little later: the wake packet's age only counts
 /// up, and the Sharing page redraws that clock itself while it is shown.
@@ -1201,7 +1026,6 @@ fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
         let mut failures = 0u32;
         let mut respawn = Respawn::new();
         let mut quick_exit: Option<String> = None;
-        let mut tick = 0u64;
         let mut restarted_service = false;
         loop {
             // Repaint only when something the page shows has changed: an
@@ -1247,19 +1071,6 @@ fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
                             }
                         }
                         _ => {}
-                    }
-                    let cfg = HostConfig::load();
-                    if st.streamer.api_ok && cfg.has_creds() && tick.is_multiple_of(10) {
-                        let api = Api {
-                            user: &cfg.sunshine_user,
-                            pass: &cfg.sunshine_pass,
-                        };
-                        let clients = api.clients();
-                        let gamepad = api.gamepad_driver();
-                        let mut s = shared.lock();
-                        changed |= s.clients != clients || s.gamepad_driver != gamepad;
-                        s.clients = clients;
-                        s.gamepad_driver = gamepad;
                     }
                     let mut s = shared.lock();
                     changed |= !s.status.as_ref().is_some_and(|old| only_aged(old, &st));
@@ -1307,7 +1118,6 @@ fn spawn_poller(shared: Arc<Mutex<Shared>>, ctx: egui::Context) {
                 shared.lock().touch();
                 ctx.request_repaint();
             }
-            tick += 1;
             std::thread::sleep(Duration::from_secs(1));
         }
     });
@@ -1366,8 +1176,7 @@ mod tests {
         assert_eq!(pill(None, None).0, "Starting");
         let mut s = Status::default();
         assert_eq!(pill(Some(&s), None), ("Shared", Tone::Success));
-        s.setup
-            .push("The streaming engine is not installed.".into());
+        s.setup.push("Sharing setup needs attention.".into());
         assert_eq!(pill(Some(&s), None), ("Needs setup", Tone::Warning));
         s.setup.push("Tailscale: not running".into());
         assert_eq!(pill(Some(&s), None), ("Tailscale off", Tone::Danger));
@@ -1395,7 +1204,7 @@ mod tests {
 ///
 /// Nothing here reads or writes real settings or reaches the service: the
 /// window and the page are both built headless.
-#[cfg(test)]
+#[cfg(all(test, feature = "client"))]
 mod snapshots {
     use super::*;
     use crate::product::NodeApp;
@@ -1473,12 +1282,12 @@ mod snapshots {
             }),
             setup: vec![],
             log: vec![
-                "Latch 4.1.1 listening on TCP 47850".into(),
+                "Latch 5.0.0 listening on TCP and UDP 47850".into(),
                 "listening for wake packets on UDP 9".into(),
                 "Tailscale up as user@example.com (100.64.0.10)".into(),
-                "the streaming engine is running and Latch is signed in".into(),
+                "Latch is sharing this machine".into(),
                 "Wake-on-LAN ready on Ethernet (02:00:00:00:00:01)".into(),
-                "paired \"MacBook-Pro\"".into(),
+                "a viewer connected".into(),
             ],
         }
     }
@@ -1486,11 +1295,6 @@ mod snapshots {
     fn ready() -> Shared {
         Shared {
             status: Some(ready_status("windows")),
-            clients: vec![
-                ("MacBook-Pro".into(), "0000000000000001".into()),
-                ("Studio".into(), "0000000000000002".into()),
-            ],
-            gamepad_driver: Some(false),
             ..Default::default()
         }
     }
@@ -1501,13 +1305,12 @@ mod snapshots {
         st.wake_ready = Some(false);
         st.fast_startup = Some(true);
         st.setup = vec![
-            "The streaming engine is not installed.".into(),
+            "Sharing setup needs attention.".into(),
             "Wake-on-LAN is off on Ethernet.".into(),
             "Fast Startup is on, so the PC cannot be woken after a shutdown.".into(),
         ];
         Shared {
             status: Some(st),
-            gamepad_driver: None,
             ..Default::default()
         }
     }
@@ -1519,15 +1322,15 @@ mod snapshots {
         st.streamer = Streamer::default();
         st.setup = vec![
             "Tailscale: Tailscale is not installed. Install it and sign in.".into(),
-            "The streaming engine is not installed.".into(),
+            "Sharing setup needs attention.".into(),
         ];
         Shared {
             status: Some(st),
             setup_result: Some(Err("the administrator prompt was declined or setup failed (see C:\\Users\\Example User\\AppData\\Local\\Latch\\setup.log)".into())),
             setup_log: vec![
                 "[14:02:11] Latch setup started".into(),
-                "[14:02:11] Downloading the streaming engine".into(),
-                "  engine: curl: (6) Could not resolve host: api.github.com".into(),
+                "[14:02:11] Setting up sharing".into(),
+                "  setup: could not register the login item".into(),
             ],
             ..Default::default()
         }
@@ -1569,7 +1372,7 @@ mod snapshots {
                     status: Some({
                         let mut s = ready_status("macOS");
                         s.streamer = Streamer::default();
-                        s.setup = vec!["The streaming engine is not installed.".into()];
+                        s.setup = vec!["Sharing setup needs attention.".into()];
                         s
                     }),
                     ..Default::default()
