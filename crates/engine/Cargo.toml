@@ -23,8 +23,10 @@ pulseaudio = "0.3.2"
 futures = "0.3"
 
 [target.'cfg(windows)'.dependencies]
+windows-core = "0.58"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_Devices_Display",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D_Fxc",
     "Win32_Graphics_Direct3D11",
