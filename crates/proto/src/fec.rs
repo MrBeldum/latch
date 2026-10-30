@@ -49,6 +49,7 @@ fn inv(x: u8) -> u8 {
 
 #[inline(always)]
 fn addmul(dst: &mut [u8], src: &[u8], c: u8) {
+    assert_eq!(dst.len(), src.len());
     if c == 0 {
         return;
     }
@@ -58,17 +59,44 @@ fn addmul(dst: &mut [u8], src: &[u8], c: u8) {
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
-        if c == 1 {
-            for (d, &s) in dst.iter_mut().zip(src) {
-                *d ^= s;
-            }
-            return;
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("ssse3") {
+            // SAFETY: feature detected and equal slice lengths checked above.
+            return unsafe { addmul_ssse3(dst, src, c) };
         }
-        let row = &TABLES.2[c as usize];
-        for (d, &s) in dst.iter_mut().zip(src) {
-            *d ^= row[s as usize];
-        }
+        addmul_scalar(dst, src, c);
     }
+}
+
+#[cfg(any(test, not(target_arch = "aarch64")))]
+fn addmul_scalar(dst: &mut [u8], src: &[u8], c: u8) {
+    let row = &TABLES.2[c as usize];
+    for (d, &s) in dst.iter_mut().zip(src) {
+        *d ^= row[s as usize];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn addmul_ssse3(dst: &mut [u8], src: &[u8], c: u8) {
+    use std::arch::x86_64::*;
+    let row = &TABLES.2[c as usize];
+    let hi: [u8; 16] = std::array::from_fn(|i| row[i << 4]);
+    let lo = _mm_loadu_si128(row.as_ptr().cast());
+    let hi = _mm_loadu_si128(hi.as_ptr().cast());
+    let mask = _mm_set1_epi8(15);
+    let mut i = 0;
+    while i + 16 <= dst.len() {
+        let s = _mm_loadu_si128(src.as_ptr().add(i).cast());
+        let product = _mm_xor_si128(
+            _mm_shuffle_epi8(lo, _mm_and_si128(s, mask)),
+            _mm_shuffle_epi8(hi, _mm_and_si128(_mm_srli_epi16::<4>(s), mask)),
+        );
+        let d = dst.as_mut_ptr().add(i).cast();
+        _mm_storeu_si128(d, _mm_xor_si128(_mm_loadu_si128(d), product));
+        i += 16;
+    }
+    addmul_scalar(&mut dst[i..], &src[i..], c);
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -279,6 +307,7 @@ impl ReedSolomon {
             }
             matrix[r][d + r] = 1;
         }
+        let mut row = vec![0; d * 2];
         for col in 0..d {
             let pivot = (col..d)
                 .find(|&r| matrix[r][col] != 0)
@@ -288,7 +317,7 @@ impl ReedSolomon {
             for v in &mut matrix[col] {
                 *v = TABLES.2[scale as usize][*v as usize];
             }
-            let row = matrix[col].clone();
+            row.copy_from_slice(&matrix[col]);
             for (r, other) in matrix.iter_mut().enumerate() {
                 if r != col {
                     let c = other[col];
@@ -320,6 +349,30 @@ impl ReedSolomon {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn multiply_accumulate_matches_scalar_for_all_coefficients() {
+        let mut seed = 0x12345678u32;
+        for len in [0, 1, 15, 16, 17, 31, 32, 33, 255, 1172] {
+            for offset in 0..16 {
+                let mut src = vec![0; len + offset];
+                let mut original = vec![0; len + offset + 17];
+                for v in src.iter_mut().chain(original.iter_mut()) {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    *v = seed as u8;
+                }
+                for c in 0..=255 {
+                    let mut actual = original.clone();
+                    let mut expected = original.clone();
+                    addmul(&mut actual[offset..offset + len], &src[offset..], c);
+                    addmul_scalar(&mut expected[offset..offset + len], &src[offset..], c);
+                    assert_eq!(actual, expected, "len={len} offset={offset} c={c}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn exhaustive_small() {
