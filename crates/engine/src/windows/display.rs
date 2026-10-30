@@ -34,10 +34,9 @@ impl Drop for DpiAwareness {
     }
 }
 
-// Previous's shared contract contains dimensions only. Keep the display name
-// here so a primary-monitor change cannot make restore resize another output.
+// Previous's shared contract contains dimensions only. Keep the full topology
+// here so disconnect restores paths by adapter/target identity, not DISPLAYn.
 struct Saved {
-    name: [u16; 32],
     previous: Previous,
     paths: Vec<DISPLAYCONFIG_PATH_INFO>,
     modes: Vec<DISPLAYCONFIG_MODE_INFO>,
@@ -359,7 +358,6 @@ pub(super) fn prepare(width: u32, height: u32, fps: u32) -> Result<Option<Previo
         return Err(e);
     }
     *saved = Some(Saved {
-        name: output.desc.DeviceName,
         previous: previous.clone(),
         paths,
         modes,
@@ -368,24 +366,18 @@ pub(super) fn prepare(width: u32, height: u32, fps: u32) -> Result<Option<Previo
 }
 pub(super) fn restore(previous: &Previous) -> Result<()> {
     let mut saved = SAVED.lock();
-    let name = if let Some(state) = saved.as_ref().filter(|state| &state.previous == previous) {
-        let name = &state.name;
-        // A removed virtual adapter's DISPLAYn name can be reused by a physical
-        // monitor. Recheck the monitor identity before applying the saved mode.
-        if !outputs()?
-            .iter()
-            .any(|o| o.desc.DeviceName == *name && o.virtual_display)
-        {
-            return Ok(());
-        }
-        *name
-    } else {
-        let output = select()?;
-        if !output.virtual_display {
-            return Ok(());
-        }
-        output.desc.DeviceName
-    };
+    if let Some(state) = saved.as_ref().filter(|state| &state.previous == previous) {
+        // The snapshot includes the original modes and adapter/target identities.
+        // Restore them atomically rather than resizing an intermediate topology.
+        apply_topology(&state.paths, &state.modes)?;
+        *saved = None;
+        return Ok(());
+    }
+    let output = select()?;
+    if !output.virtual_display {
+        return Ok(());
+    }
+    let name = output.desc.DeviceName;
     let mode = DEVMODEW {
         dmSize: std::mem::size_of::<DEVMODEW>() as u16,
         dmFields: DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY,
@@ -395,10 +387,6 @@ pub(super) fn restore(previous: &Previous) -> Result<()> {
         ..Default::default()
     };
     change(&name, &mode)?;
-    if let Some(state) = saved.as_ref() {
-        apply_topology(&state.paths, &state.modes)?;
-    }
-    *saved = None;
     Ok(())
 }
 #[cfg(test)]
