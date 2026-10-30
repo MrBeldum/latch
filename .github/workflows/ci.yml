@@ -42,13 +42,16 @@ jobs:
           $env:LATCH_DUMP_UNINSTALL_SCRIPT = $uninstall
           cargo test -q --locked -p latch-host --lib the_generated_script_can_be_dumped_for_a_syntax_check
           if ($LASTEXITCODE -ne 0) { throw "dumping the setup script failed" }
-          $files = @('scripts\install-host.ps1', $out, $stage, "$stage.launch.ps1", $uninstall, "$uninstall.user.ps1")
+          $files = @('scripts\install-host.ps1', 'scripts\setup-protection.ps1', 'scripts\test-setup-protection.ps1', $out, $stage, "$stage.launch.ps1", $uninstall, "$uninstall.user.ps1")
           foreach ($f in $files) {
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errors) | Out-Null
             if ($errors.Count -gt 0) { $errors | Format-List | Out-String | Write-Host; throw "$f does not parse" }
             Write-Host "parses: $f"
           }
+      - name: setup rejects writable paths and reparse points
+        shell: powershell
+        run: scripts/test-setup-protection.ps1
       # Exercise cleanup on an isolated folder and a dummy service, twice.
       - name: retire the previous streaming service
         shell: powershell
@@ -66,6 +69,7 @@ jobs:
           Set-Content -LiteralPath (Join-Path $old 'old-state.json') -Value '{}'
           sc.exe create $svc binPath= "$env:WINDIR\System32\cmd.exe" start= demand | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "dummy service creation failed" }
+          if ((Get-Service -Name $svc).Status -ne 'Stopped') { throw "dummy service must start stopped" }
           foreach ($attempt in 1..2) {
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script
             if ($LASTEXITCODE -ne 0) { throw "retirement failed" }
@@ -178,6 +182,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: node kit selftest
         run: bash deploy/node/selftest.sh
+  native-display-selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y xauth
+      - run: bash deploy/native/selftest.sh
   relay-selftest:
     runs-on: ubuntu-latest
     steps:
