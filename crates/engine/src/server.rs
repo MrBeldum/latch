@@ -361,7 +361,7 @@ impl Server {
         });
         {
             let mut state = session.input.lock();
-            if let Some(sink) = state.sink.as_mut() {
+            if let Some(mut sink) = state.sink.take() {
                 sink.release_all();
             }
         }
@@ -395,6 +395,9 @@ impl Server {
             Option<std::thread::JoinHandle<()>>,
         ),
     ) -> String {
+        if let Err(e) = tcp.set_write_timeout(Some(Duration::from_secs(2))) {
+            return format!("cannot bound control writes: {e}");
+        }
         let _ = tcp.set_nodelay(true);
         let mut writer = match tcp.try_clone() {
             Ok(w) => w,
@@ -770,18 +773,23 @@ fn receive(server: Weak<Server>) {
             Datagram::Input { first, events, .. } => {
                 let next = {
                     let mut guard = session.input.lock();
+                    if session.stopping() {
+                        continue;
+                    }
                     let state = &mut *guard;
                     let display = state.display;
                     let sink = &mut state.sink;
-                    state.receiver.receive(first, events.iter(), |event| {
+                    state.receiver.try_receive(first, events.iter(), |event| {
                         let Some(sink) = sink.as_mut() else {
-                            return;
+                            return Ok(());
                         };
                         if event == input::Event::ReleaseAll {
                             sink.release_all();
                         } else if let Err(e) = sink.apply(&event, display) {
-                            tracing::debug!("input {event:?}: {e:#}");
+                            tracing::warn!("input {event:?}: {e:#}");
+                            return Err(e);
                         }
+                        Ok(())
                     })
                 };
                 wire::write_input_ack(&mut out, session.id, next);
@@ -864,21 +872,35 @@ fn encode_video(
                 server.log(format!("video stopped: {e:#}; starting it again"));
                 // Some capture APIs allow only one owner of an output.
                 drop(pipeline);
-                let now = Instant::now();
-                recoveries.retain(|t| now - *t < VIDEO_RECOVERY_WINDOW);
-                if recoveries.len() < VIDEO_RECOVERIES {
+                let mut failure = e;
+                loop {
+                    if session.stopping() {
+                        return;
+                    }
+                    let now = Instant::now();
+                    recoveries.retain(|t| now - *t < VIDEO_RECOVERY_WINDOW);
+                    if recoveries.len() >= VIDEO_RECOVERIES {
+                        session.end(
+                            end::CAPTURE_FAILED,
+                            &format!("The host could not capture its screen: {failure:#}"),
+                        );
+                        return;
+                    }
                     recoveries.push_back(now);
-                    if let Ok(p) = reopen(&config) {
-                        pipeline = p;
-                        session.keyframe.store(true, Ordering::Release);
-                        continue;
+                    match reopen(&config) {
+                        Ok(p) => {
+                            pipeline = p;
+                            break;
+                        }
+                        Err(e) => {
+                            server.log(format!("video reopen failed: {e:#}"));
+                            failure = e;
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
                     }
                 }
-                session.end(
-                    end::CAPTURE_FAILED,
-                    &format!("The host could not capture its screen: {e:#}"),
-                );
-                return;
+                session.keyframe.store(true, Ordering::Release);
+                continue;
             }
         };
         let next_info = pipeline.info();

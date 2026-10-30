@@ -91,6 +91,28 @@ impl VideoPipeline for Video {
 }
 
 #[test]
+fn video_reopen_failure_uses_remaining_budget() {
+    let server = Server::bind(0, Options::default()).unwrap();
+    let session = session("127.0.0.1:9".parse().unwrap());
+    let mut attempts = 0;
+    let pipeline = || {
+        Box::new(Video {
+            info: info(),
+            held: Arc::new(AtomicBool::new(true)),
+            next: Box::new(|_, _, _| anyhow::bail!("capture lost")),
+        }) as Box<dyn VideoPipeline>
+    };
+    send_video(&server, &session, pipeline(), config(), |_| {
+        attempts += 1;
+        if attempts == 1 {
+            anyhow::bail!("temporarily busy");
+        }
+        Ok(pipeline())
+    });
+    assert_eq!(attempts, VIDEO_RECOVERIES);
+}
+
+#[test]
 fn repeated_video_errors_release_exclusive_capture_and_have_a_retry_budget() {
     let server = Server::bind(0, Options::default()).unwrap();
     let session = session("127.0.0.1:9".parse().unwrap());
