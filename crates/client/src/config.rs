@@ -259,23 +259,34 @@ impl ClientConfig {
 
     /// The window owns preferences; discovery owns `pcs`. The
     /// window's copy of `pcs` is refreshed from the file at the same time, so
-    /// a PC seen during the run is known to the window too.
+    /// a PC seen during the run is known to the window too. Non-UI fields on
+    /// disk (such as `github_token`) are also refreshed.
     pub fn save(&mut self) -> anyhow::Result<()> {
         let mut pcs = None;
+        let mut github_token = None;
         Self::update(|current| {
             current.apply_preferences(self);
             pcs = Some(current.pcs.clone());
+            github_token = current.github_token.clone();
         })?;
         if let Some(pcs) = pcs {
             self.pcs = pcs;
+        }
+        if let Some(token) = github_token {
+            self.github_token = Some(token);
         }
         Ok(())
     }
 
     fn apply_preferences(&mut self, settings: &Self) {
-        let pcs = std::mem::take(&mut self.pcs);
-        *self = settings.clone();
-        self.pcs = pcs;
+        self.stream = settings.stream.clone();
+        self.sleep_prompt = settings.sleep_prompt;
+        self.cmd_is_ctrl = settings.cmd_is_ctrl;
+        self.capture_mouse = settings.capture_mouse;
+        self.auto_update = settings.auto_update;
+        if settings.github_token.is_some() {
+            self.github_token = settings.github_token.clone();
+        }
     }
 
     /// One read-modify-write of the file, under the process-wide config lock.
@@ -310,6 +321,15 @@ mod tests {
         disk.apply_preferences(&window);
         assert!(!disk.stream.fullscreen);
         assert_eq!(disk.pcs["pc"].mac.as_deref(), Some("02:00:00:00:00:01"));
+    }
+
+    #[test]
+    fn non_ui_fields_like_github_token_are_preserved_across_preference_updates() {
+        let window = ClientConfig::default();
+        let mut disk = window.clone();
+        disk.github_token = Some("ghp_secret".into());
+        disk.apply_preferences(&window);
+        assert_eq!(disk.github_token.as_deref(), Some("ghp_secret"));
     }
 
     #[test]
