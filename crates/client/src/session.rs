@@ -642,8 +642,8 @@ pub fn fit_to_host(
 ) -> (u32, u32, u32) {
     let fixed = fixed_desktop(capture_size);
     let (w, h) = match fixed {
-        Some(c) if wanted.0 > c.0 || wanted.1 > c.1 => c,
-        _ => wanted,
+        Some(c) => (wanted.0.min(c.0), wanted.1.min(c.1)),
+        None => wanted,
     };
     let fps = if max_fps > 0 {
         let (rw, rh) = fixed.unwrap_or((1920, 1080));
@@ -1164,6 +1164,17 @@ mod tests {
         );
         assert_eq!(
             fit_to_host((1920, 1080), 60, Some([100_000, 1080]), 0),
+            (1920, 1080, 60)
+        );
+    }
+
+    #[test]
+    fn fit_to_host_clamps_each_dimension_without_inflating() {
+        let ultrawide = (Some([2560, 1080]), 60);
+        // Height exceeds fixed desktop (1200 > 1080), but width (1920) is within 2560.
+        // Width must not be inflated to 2560.
+        assert_eq!(
+            fit_to_host((1920, 1200), 60, ultrawide.0, ultrawide.1),
             (1920, 1080, 60)
         );
     }
