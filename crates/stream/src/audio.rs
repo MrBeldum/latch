@@ -11,9 +11,10 @@ use anyhow::{bail, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Queued sound beyond this is cut back to [`KEEP_MS`]. Low, so sound stays
 /// close to the picture; a Wi-Fi hiccup longer than this is a click.
@@ -25,6 +26,8 @@ const MAX_CHANNELS: usize = 8;
 /// pitch change too small to hear and ten times the drift of two ordinary
 /// sound clocks.
 const MAX_TRIM: f64 = 0.002;
+/// How soon a missing or refusing output device is tried again.
+const OUTPUT_RETRY: Duration = Duration::from_secs(1);
 
 /// The output device, as the output thread found it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,10 +190,8 @@ fn phrase(output: &Output, packets: u64, lost: u64, pulled: u64) -> String {
 }
 
 /// cpal streams are not `Send` everywhere, so the output stream lives on a
-/// thread of its own for as long as the player does. The device is opened
-/// at its own rate, channel count and sample format and [`Mixer`] converts;
-/// asking a device for 48 kHz stereo f32 it does not offer was silence
-/// with the reason only in the log.
+/// thread of its own for as long as the player does, opened again on the
+/// current default device when the one it played on goes away.
 fn output_thread(
     source_rate: u32,
     source_channels: u16,
@@ -202,82 +203,185 @@ fn output_thread(
     std::thread::Builder::new()
         .name("audio-out".into())
         .spawn(move || {
-            let fail = |why: String| {
-                tracing::warn!("audio output: {why}");
-                *output.lock() = Output::Failed(why);
-            };
-            let Some(device) = cpal::default_host().default_output_device() else {
-                fail("this Mac has no audio output device".into());
+            let rebuild = Arc::new(AtomicBool::new(false));
+            keep_open(&stop, &rebuild, OUTPUT_RETRY, || {
+                open_output(
+                    source_rate,
+                    source_channels,
+                    &queue,
+                    &output,
+                    &pulled,
+                    &rebuild,
+                )
+            });
+        })
+        .expect("spawn audio thread");
+}
+
+/// Holds what `open` returns until `stop` disconnects (the player was
+/// dropped). Opens again at once when `rebuild` is raised, and `retry`
+/// after `open` failed.
+fn keep_open<S>(
+    stop: &mpsc::Receiver<()>,
+    rebuild: &AtomicBool,
+    retry: Duration,
+    mut open: impl FnMut() -> Option<S>,
+) {
+    loop {
+        rebuild.store(false, Ordering::Relaxed);
+        let stream = open();
+        let opened = Instant::now();
+        loop {
+            match stop.recv_timeout(Duration::from_millis(100)) {
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                _ => return,
+            }
+            if rebuild.load(Ordering::Relaxed) || (stream.is_none() && opened.elapsed() >= retry) {
+                break;
+            }
+        }
+        drop(stream);
+    }
+}
+
+/// What an error from the output stream means for it. CoreAudio moves a
+/// default-device stream to the new default by itself and reports
+/// `DeviceChanged`: only the name shown needs to follow (it used to be
+/// logged as a warning and the stats kept naming the device sound had
+/// left). A stream whose device is gone (`DeviceNotAvailable`; CoreAudio
+/// also pauses it when no output is left) or that no longer follows the
+/// default (`StreamInvalidated`: WASAPI never moves a stream) is opened
+/// again on the current default, at that device's rate and channels.
+fn on_output_error(
+    e: &cpal::Error,
+    output: &Mutex<Output>,
+    rebuild: &AtomicBool,
+    default_name: impl FnOnce() -> Option<String>,
+) {
+    match e.kind() {
+        cpal::ErrorKind::DeviceChanged => {
+            let Some(now) = default_name().filter(|n| !n.is_empty()) else {
                 return;
             };
-            let name = {
-                let s = device.to_string();
-                if s.is_empty() {
-                    "the output device".into()
-                } else {
-                    s
-                }
-            };
-            let supported = match device.default_output_config() {
-                Ok(c) => c,
+            tracing::info!("audio: now playing on {now}");
+            if let Output::Playing { device, .. } = &mut *output.lock() {
+                *device = now;
+            }
+        }
+        cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated => {
+            tracing::info!("audio output: {e}; opening the default output again");
+            rebuild.store(true, Ordering::Relaxed);
+        }
+        _ => tracing::warn!("audio output: {e}"),
+    }
+}
+
+/// Opens the default output device at its own rate, channel count and
+/// sample format, and [`Mixer`] converts; asking a device for 48 kHz stereo
+/// f32 it does not offer was silence with the reason only in the log.
+fn open_output(
+    source_rate: u32,
+    source_channels: u16,
+    queue: &Arc<Mutex<VecDeque<f32>>>,
+    output: &Arc<Mutex<Output>>,
+    pulled: &Arc<AtomicU64>,
+    rebuild: &Arc<AtomicBool>,
+) -> Option<cpal::Stream> {
+    let fail = |why: String| {
+        let mut state = output.lock();
+        // Tried again every second: say it once.
+        if !matches!(&*state, Output::Failed(w) if *w == why) {
+            tracing::warn!("audio output: {why}");
+        }
+        *state = Output::Failed(why);
+    };
+    let Some(device) = cpal::default_host().default_output_device() else {
+        fail("this Mac has no audio output device".into());
+        return None;
+    };
+    let name = {
+        let s = device.to_string();
+        if s.is_empty() {
+            "the output device".into()
+        } else {
+            s
+        }
+    };
+    let supported = match device.default_output_config() {
+        Ok(c) => c,
+        Err(e) => {
+            fail(format!("{name} has no output configuration: {e}"));
+            return None;
+        }
+    };
+    let rate = supported.sample_rate().max(8_000);
+    let channels = supported.channels().max(1);
+    let config = cpal::StreamConfig {
+        channels,
+        sample_rate: rate,
+        buffer_size: cpal::BufferSize::Default,
+    };
+    let mixer = || {
+        Mixer::new(
+            source_rate,
+            source_channels as usize,
+            rate,
+            channels as usize,
+            queue.clone(),
+            pulled.clone(),
+            source_rate as usize * source_channels as usize * 40 / 1000,
+        )
+    };
+    let err_fn = {
+        let (output, rebuild) = (output.clone(), rebuild.clone());
+        move |e: cpal::Error| {
+            on_output_error(&e, &output, &rebuild, || {
+                cpal::default_host()
+                    .default_output_device()
+                    .map(|d| d.to_string())
+            })
+        }
+    };
+    let stream = match supported.sample_format() {
+        cpal::SampleFormat::F32 => {
+            let mut m = mixer();
+            device.build_output_stream(
+                config,
+                move |out: &mut [f32], _| m.fill(out),
+                err_fn.clone(),
+                None,
+            )
+        }
+        cpal::SampleFormat::I16 => {
+            let mut m = mixer();
+            device.build_output_stream(
+                config,
+                move |out: &mut [i16], _| m.fill_i16(out),
+                err_fn.clone(),
+                None,
+            )
+        }
+        cpal::SampleFormat::I32 => {
+            let mut m = mixer();
+            device.build_output_stream(
+                config,
+                move |out: &mut [i32], _| m.fill_i32(out),
+                err_fn.clone(),
+                None,
+            )
+        }
+        other => {
+            // Most leftover formats still accept f32 or i16.
+            let mut m = mixer();
+            match device.build_output_stream(
+                config,
+                move |out: &mut [f32], _| m.fill(out),
+                err_fn.clone(),
+                None,
+            ) {
+                Ok(s) => Ok(s),
                 Err(e) => {
-                    fail(format!("{name} has no output configuration: {e}"));
-                    return;
-                }
-            };
-            let rate = supported.sample_rate().max(8_000);
-            let channels = supported.channels().max(1);
-            let config = cpal::StreamConfig {
-                channels,
-                sample_rate: rate,
-                buffer_size: cpal::BufferSize::Default,
-            };
-            let mixer = || {
-                Mixer::new(
-                    source_rate,
-                    source_channels as usize,
-                    rate,
-                    channels as usize,
-                    queue.clone(),
-                    pulled.clone(),
-                    source_rate as usize * source_channels as usize * 40 / 1000,
-                )
-            };
-            // CoreAudio moves a default-device stream to the new default by
-            // itself and reports it as an error; only the name shown needs
-            // to follow. It used to be logged as a warning and the stats kept
-            // naming the device sound had left.
-            let err_fn = {
-                let output = output.clone();
-                move |e: cpal::Error| {
-                    if e.kind() != cpal::ErrorKind::DeviceChanged {
-                        tracing::warn!("audio output: {e}");
-                        return;
-                    }
-                    let Some(now) = cpal::default_host()
-                        .default_output_device()
-                        .map(|d| d.to_string())
-                        .filter(|n| !n.is_empty())
-                    else {
-                        return;
-                    };
-                    tracing::info!("audio: now playing on {now}");
-                    if let Output::Playing { device, .. } = &mut *output.lock() {
-                        *device = now;
-                    }
-                }
-            };
-            let stream = match supported.sample_format() {
-                cpal::SampleFormat::F32 => {
-                    let mut m = mixer();
-                    device.build_output_stream(
-                        config,
-                        move |out: &mut [f32], _| m.fill(out),
-                        err_fn.clone(),
-                        None,
-                    )
-                }
-                cpal::SampleFormat::I16 => {
+                    tracing::warn!("audio output: {other} as f32 failed ({e}); trying i16");
                     let mut m = mixer();
                     device.build_output_stream(
                         config,
@@ -286,61 +390,29 @@ fn output_thread(
                         None,
                     )
                 }
-                cpal::SampleFormat::I32 => {
-                    let mut m = mixer();
-                    device.build_output_stream(
-                        config,
-                        move |out: &mut [i32], _| m.fill_i32(out),
-                        err_fn.clone(),
-                        None,
-                    )
-                }
-                other => {
-                    // Most leftover formats still accept f32 or i16.
-                    let mut m = mixer();
-                    match device.build_output_stream(
-                        config,
-                        move |out: &mut [f32], _| m.fill(out),
-                        err_fn.clone(),
-                        None,
-                    ) {
-                        Ok(s) => Ok(s),
-                        Err(e) => {
-                            tracing::warn!("audio output: {other} as f32 failed ({e}); trying i16");
-                            let mut m = mixer();
-                            device.build_output_stream(
-                                config,
-                                move |out: &mut [i16], _| m.fill_i16(out),
-                                err_fn.clone(),
-                                None,
-                            )
-                        }
-                    }
-                }
-            };
-            let stream = match stream {
-                Ok(s) => s,
-                Err(e) => {
-                    fail(format!(
-                        "{name} refused {rate} Hz, {channels} channels: {e}"
-                    ));
-                    return;
-                }
-            };
-            if let Err(e) = stream.play() {
-                fail(format!("{name} would not start: {e}"));
-                return;
             }
-            tracing::info!("audio: playing on {name} at {rate} Hz, {channels} channels");
-            *output.lock() = Output::Playing {
-                device: name,
-                rate,
-                channels,
-            };
-            // Returns when the player, and with it the sender, is dropped.
-            let _ = stop.recv();
-        })
-        .expect("spawn audio thread");
+        }
+    };
+    let stream = match stream {
+        Ok(s) => s,
+        Err(e) => {
+            fail(format!(
+                "{name} refused {rate} Hz, {channels} channels: {e}"
+            ));
+            return None;
+        }
+    };
+    if let Err(e) = stream.play() {
+        fail(format!("{name} would not start: {e}"));
+        return None;
+    }
+    tracing::info!("audio: playing on {name} at {rate} Hz, {channels} channels");
+    *output.lock() = Output::Playing {
+        device: name,
+        rate,
+        channels,
+    };
+    Some(stream)
 }
 
 /// Pulls stream frames from the queue for the device: linear
@@ -592,6 +664,82 @@ mod tests {
             phrase(&Output::Failed("no output device".into()), 120, 0, 0),
             "no sound: no output device"
         );
+    }
+
+    #[test]
+    fn output_errors_rename_on_a_reroute_and_reopen_on_a_lost_device() {
+        let playing = |device: &str| Output::Playing {
+            device: device.into(),
+            rate: 48_000,
+            channels: 2,
+        };
+        let output = Mutex::new(playing("Speakers"));
+        let rebuild = AtomicBool::new(false);
+        // CoreAudio already moved the stream to the new default.
+        let changed = cpal::ErrorKind::DeviceChanged.into();
+        on_output_error(&changed, &output, &rebuild, || Some("Headphones".into()));
+        assert_eq!(*output.lock(), playing("Headphones"));
+        on_output_error(&cpal::ErrorKind::Xrun.into(), &output, &rebuild, || None);
+        assert!(!rebuild.load(Ordering::Relaxed));
+        // WASAPI keeps playing on the old device after a new default; the
+        // only output unplugged pauses a CoreAudio stream for good.
+        for kind in [
+            cpal::ErrorKind::StreamInvalidated,
+            cpal::ErrorKind::DeviceNotAvailable,
+        ] {
+            rebuild.store(false, Ordering::Relaxed);
+            on_output_error(&kind.into(), &output, &rebuild, || None);
+            assert!(rebuild.load(Ordering::Relaxed), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn the_output_is_opened_again_until_the_player_is_dropped() {
+        struct Held(Arc<AtomicU64>);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+        let (stop, stopped) = mpsc::channel::<()>();
+        let rebuild = Arc::new(AtomicBool::new(false));
+        let (opens, live) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        let thread = {
+            let (rebuild, opens, live) = (rebuild.clone(), opens.clone(), live.clone());
+            std::thread::spawn(move || {
+                keep_open(&stopped, &rebuild, Duration::from_millis(10), || {
+                    assert_eq!(
+                        live.load(Ordering::Relaxed),
+                        0,
+                        "the old stream is closed first"
+                    );
+                    // No device at first, then one.
+                    if opens.fetch_add(1, Ordering::Relaxed) == 0 {
+                        return None;
+                    }
+                    live.fetch_add(1, Ordering::Relaxed);
+                    Some(Held(live.clone()))
+                })
+            })
+        };
+        let wait_for = |n: u64| {
+            let start = Instant::now();
+            while opens.load(Ordering::Relaxed) < n {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10),
+                    "never opened {n} times"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        wait_for(2);
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(opens.load(Ordering::Relaxed), 2, "a playing stream is kept");
+        rebuild.store(true, Ordering::Relaxed);
+        wait_for(3);
+        drop(stop);
+        thread.join().unwrap();
+        assert_eq!(live.load(Ordering::Relaxed), 0);
     }
 
     #[test]
