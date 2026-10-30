@@ -156,13 +156,22 @@ impl Server {
         status
     }
 
+    /// Includes a prepared stream waiting for its HTTP upgrade.
+    pub fn busy(&self) -> bool {
+        *self.opening.busy.lock() || self.current.lock().is_some()
+    }
+
     /// Ends the running session, if any.
-    pub fn stop(&self, code: u32, message: &str) {
+    pub fn stop(&self, code: u32, message: &str) -> bool {
         let current = self.current.lock().clone();
         if let Some(session) = current {
             session.end(code, message);
-            session.wait_finished(TAKEOVER_WAIT);
+            if !session.wait_finished(TAKEOVER_WAIT) {
+                self.log("stream cleanup did not finish before the stop deadline".into());
+                return false;
+            }
         }
+        !self.busy()
     }
 
     fn log(&self, line: String) {
@@ -521,7 +530,9 @@ impl Server {
             }
             let addr = *session.addr.lock();
             match addr {
-                None if now - last_hello >= HELLO_EVERY => {
+                None if !session.announced.ip().is_loopback()
+                    && now - last_hello >= HELLO_EVERY =>
+                {
                     let mut buf = Vec::with_capacity(16);
                     wire::write_hello(&mut buf, session.id, None);
                     let _ = self.udp.send_to(&buf, session.announced);
@@ -678,6 +689,10 @@ impl TransportState {
 
 impl Session {
     fn end(&self, code: u32, message: &str) {
+        let mut input = self.input.lock();
+        if let Some(mut sink) = input.sink.take() {
+            sink.release_all();
+        }
         let mut ended = self.ended.lock();
         if ended.is_none() {
             *ended = Some(End {

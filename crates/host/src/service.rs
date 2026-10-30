@@ -123,17 +123,12 @@ impl Service {
     }
 
     fn someone_watching(&self) -> bool {
-        self.server
-            .lock()
-            .as_ref()
-            .is_some_and(|s| s.status().viewer.is_some())
+        self.server.lock().as_ref().is_some_and(|s| s.busy())
     }
 
-    fn stop_stream(&self) {
+    fn stop_stream(&self) -> bool {
         let server = self.server.lock().clone();
-        if let Some(server) = server {
-            server.stop(end::HOST_STOPPING, "This host is stopping.");
-        }
+        server.is_none_or(|server| server.stop(end::HOST_STOPPING, "This host is stopping."))
     }
 
     fn streaming_status(&self) -> Streamer {
@@ -727,7 +722,9 @@ impl Service {
                 Err(_) => Response::json(400, &Ack::err("expected {\"text\"}")),
             },
             ("POST", "/v1/quit") if local => {
-                self.stop_stream();
+                if !self.stop_stream() {
+                    return Response::json(409, &Ack::err("stream cleanup is still running"));
+                }
                 self.log("control panel asked the service to stop");
                 std::thread::spawn(|| {
                     std::thread::sleep(Duration::from_millis(300));
@@ -844,6 +841,11 @@ impl Service {
         let Some(server) = self.server.lock().clone() else {
             return Response::json(503, &Ack::err("the stream server is not listening"));
         };
+        let peer = if peer.ip().is_loopback() {
+            media_peer(peer, tailscale::whois_addr(peer).ok().flatten())
+        } else {
+            peer
+        };
         match server.prepare(request, peer) {
             Ok(prepared) => {
                 Response::switching(control::UPGRADE, move |tcp| server.run(prepared, tcp))
@@ -923,8 +925,7 @@ impl Service {
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(400));
             if let Some(server) = server {
-                server.stop(end::HOST_STOPPING, "This host is stopping.");
-                if server.status().viewer.is_some() {
+                if !server.stop(end::HOST_STOPPING, "This host is stopping.") {
                     push_log(
                         &log,
                         "power action cancelled: stream cleanup did not finish".into(),
@@ -1011,6 +1012,16 @@ impl Caller {
             Caller::Peer { allowed } => allowed,
         }
     }
+}
+
+fn media_peer(peer: SocketAddr, who: Option<tailscale::WhoIs>) -> SocketAddr {
+    let ip = who.and_then(|w| {
+        w.node.addresses.into_iter().find_map(|s| {
+            let ip: IpAddr = s.split('/').next()?.parse().ok()?;
+            (ip.is_ipv4() && tailscale::is_tailnet_ip(ip)).then_some(ip)
+        })
+    });
+    ip.map_or(peer, |ip| SocketAddr::new(ip, peer.port()))
 }
 
 /// Who is behind a loopback connection. Only with userspace networking
@@ -1312,6 +1323,32 @@ fn push_log(log: &Mutex<VecDeque<String>>, msg: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn userspace_media_announcement_uses_the_whois_tailnet_address() {
+        let peer = "127.0.0.1:1234".parse().unwrap();
+        let who = serde_json::from_str(
+            r#"{"Node":{"Addresses":["fd7a:115c:a1e0::1/128","100.64.0.3/32"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            media_peer(peer, Some(who)),
+            "100.64.0.3:1234".parse().unwrap()
+        );
+        assert_eq!(media_peer(peer, None), peer);
+    }
+
+    #[test]
+    fn pending_update_and_power_refuse_streams_before_preparation() {
+        let svc = Service::new();
+        let req = Request::default();
+        let peer = "100.64.0.1:1234".parse().unwrap();
+        svc.update_running.store(true, Ordering::Release);
+        assert_eq!(svc.stream(peer, &req).status, 409);
+        svc.update_running.store(false, Ordering::Release);
+        svc.power_pending.store(true, Ordering::Release);
+        assert_eq!(svc.stream(peer, &req).status, 409);
+    }
 
     #[test]
     fn only_a_mac_that_is_not_shared_opens_without_the_service() {

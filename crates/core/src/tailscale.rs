@@ -324,6 +324,7 @@ pub struct WhoIs {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct WhoIsNode {
+    pub addresses: Vec<String>,
     pub name: String,
     #[serde(rename = "ComputedName")]
     pub computed_name: String,
