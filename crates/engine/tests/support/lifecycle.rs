@@ -160,10 +160,14 @@ fn idle_requests_are_prompt_and_each_encoded_frame_updates_mapping_and_is_sent()
                 };
                 info.encoder = "fallback".into();
                 info.hardware = false;
-            } else {
+            } else if calls == 2 {
                 assert!(keyframe);
                 idr_tx.send(()).unwrap();
-                worker_session.stop.store(true, Ordering::Release);
+            } else {
+                while !worker_session.stopping() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                anyhow::bail!("stopped");
             }
             Ok(EncodedVideo {
                 data: vec![calls; 100],
@@ -196,15 +200,7 @@ fn idle_requests_are_prompt_and_each_encoded_frame_updates_mapping_and_is_sent()
         start.elapsed(),
         IDLE_REPEAT
     );
-    worker.join().unwrap();
-    let display = session.input.lock().display;
-    assert_eq!(display.map(32, 32, 64, 64), (-64, 58));
-    assert_eq!(server.status().encoder, "fallback");
-    assert!(!server.status().hardware);
-    // Stop may cancel the final queued IDR, but every transmitted reference is ordered.
-    let sent = session.frames.load(Ordering::Relaxed) as usize;
-    assert!((1..=2).contains(&sent));
-    let mut seen = vec![false; sent];
+    let mut seen = [false; 2];
     let mut buf = [0; 2048];
     while !seen.iter().all(|v| *v) {
         let n = udp.recv(&mut buf).unwrap();
@@ -212,6 +208,13 @@ fn idle_requests_are_prompt_and_each_encoded_frame_updates_mapping_and_is_sent()
             seen[shard.frame as usize] = true;
         }
     }
+    session.stop.store(true, Ordering::Release);
+    worker.join().unwrap();
+    let display = session.input.lock().display;
+    assert_eq!(display.map(32, 32, 64, 64), (-64, 58));
+    assert_eq!(server.status().encoder, "fallback");
+    assert!(!server.status().hardware);
+    assert_eq!(session.frames.load(Ordering::Relaxed), 2);
 }
 
 struct Sound {
