@@ -425,6 +425,9 @@ impl Encoder {
                     Err(e) => return Err(e).context("encoder ProcessOutput"),
                     Ok(()) => {}
                 }
+                if output.dwStatus == MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE.0 as u32 {
+                    return Ok(None);
+                }
                 let sample = sample.context("encoder returned no output sample")?;
                 let buffer = sample.ConvertToContiguousBuffer()?;
                 let (mut data, mut length) = (std::ptr::null_mut(), 0);
