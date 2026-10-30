@@ -283,9 +283,7 @@ pub mod keymap {
             0x26 => *b"UP\0\0",
             0x27 => *b"RGHT",
             0x28 => *b"DOWN",
-            0x29 => *b"I129",
             0x2A => *b"PRSC",
-            0x2B => *b"I142",
             0x2C => *b"PRSC",
             0x2D => *b"INS\0",
             0x2E => *b"DELE",
@@ -295,7 +293,7 @@ pub mod keymap {
             0x5D => *b"MENU",
             0x6A => *b"KPMU",
             0x6B => *b"KPAD",
-            0x6C => *b"KPDL",
+            0x6C => *b"KPCO",
             0x6D => *b"KPSU",
             0x6E => *b"KPDL",
             0x6F => *b"KPDV",
@@ -454,7 +452,8 @@ pub mod keymap {
             assert_eq!(vk_to_xkb_name(0x5B), Some(*b"LWIN"));
             assert_eq!(vk_to_xkb_name(0x87), Some(*b"FK24"));
             for vk in 0..=255 {
-                if vk_to_keysym(vk).is_some() {
+                // Select/Execute have no standard ANSI physical position.
+                if vk_to_keysym(vk).is_some() && !matches!(vk, 0x29 | 0x2B) {
                     assert!(vk_to_xkb_name(vk).is_some(), "missing {vk:#x}");
                 }
             }
