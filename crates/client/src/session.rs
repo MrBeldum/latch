@@ -159,15 +159,22 @@ pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
     });
 }
 
+fn normalize_for_comparison(d: &Discovery) -> Discovery {
+    let mut normalized = d.clone();
+    normalized.refreshed = None;
+    for pc in &mut normalized.pcs {
+        if let Some(host) = &mut pc.host {
+            host.wake_packet_age_secs = None;
+        }
+    }
+    normalized
+}
+
 /// Whether a new scan shows the window anything new. Every scan has a new
 /// time; that alone is no reason to draw the window again.
 fn listing_changed(old: &Discovery, new: &Discovery) -> bool {
     old.refreshed.is_none() != new.refreshed.is_none()
-        || *old
-            != (Discovery {
-                refreshed: old.refreshed,
-                ..new.clone()
-            })
+        || normalize_for_comparison(old) != normalize_for_comparison(new)
 }
 
 /// `tailscale netcheck` now and then, for [`Discovery::self_nat`]. The next
@@ -1516,5 +1523,26 @@ mod tests {
         let settings = StreamSettings::default();
         let (w, h, fps) = request_for_hz(&settings, (1920, 1080), 120, None, 144);
         assert_eq!((w, h, fps), (1920, 1080, 120));
+    }
+
+    #[test]
+    fn wake_packet_age_does_not_trigger_listing_changed_repaint() {
+        let mut d1 = Discovery::default();
+        let pc1 = Pc {
+            name: "Gaming-PC".into(),
+            host: Some(Status {
+                wake_packet_age_secs: Some(3),
+                ..Status::default()
+            }),
+            ..Pc::default()
+        };
+        d1.pcs.push(pc1.clone());
+
+        let mut d2 = Discovery::default();
+        let mut pc2 = pc1;
+        pc2.host.as_mut().unwrap().wake_packet_age_secs = Some(6);
+        d2.pcs.push(pc2);
+
+        assert!(!listing_changed(&d1, &d2));
     }
 }
