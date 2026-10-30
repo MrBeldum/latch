@@ -61,6 +61,14 @@ enum Confirmable {
     Forget,
 }
 
+/// The outcome of an attempt to turn HDR off on the remote PC.
+#[derive(Debug, Clone)]
+struct HdrCompletion {
+    ip: std::net::Ipv4Addr,
+    pc: Pc,
+    result: Result<bool, String>,
+}
+
 /// The window's pages, one per tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -129,6 +137,7 @@ pub struct ClientApp {
     power_sent: Arc<AtomicBool>,
     ended_seen: bool,
     pending_notice: Option<Notice>,
+    pending_hdr: Option<Arc<Mutex<Option<HdrCompletion>>>>,
     updates: Arc<Mutex<update::State>>,
     /// The PC last connected to, for a reconnect at another quality.
     last_pc: Option<Pc>,
@@ -197,6 +206,7 @@ impl ClientApp {
             power_sent: Arc::default(),
             ended_seen: true,
             pending_notice: None,
+            pending_hdr: None,
             updates: Arc::default(),
             last_pc: None,
             reconnect: None,
@@ -354,7 +364,7 @@ impl ClientApp {
 
     /// Turn the PC's HDR desktop off, then start a fresh capture: the old
     /// one keeps producing the black frames it was already producing.
-    fn turn_off_hdr(&mut self, _ctx: &egui::Context, ip: std::net::Ipv4Addr) {
+    fn turn_off_hdr(&mut self, ctx: &egui::Context, ip: std::net::Ipv4Addr) {
         let help = self.video_help.clone();
         if help.lock().as_ref().is_some_and(|h| h.busy) {
             return;
@@ -362,29 +372,33 @@ impl ClientApp {
         if let Some(h) = help.lock().as_mut() {
             h.busy = true;
         }
-        self.notify_later(move || {
-            let told = match crate::display::set_hdr(ip, false) {
+        let Some(pc) = self.last_pc.clone() else {
+            return;
+        };
+        let completion: Arc<Mutex<Option<HdrCompletion>>> = Arc::default();
+        let slot = completion.clone();
+        self.pending_hdr = Some(completion);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = match crate::display::set_hdr(ip, false) {
                 Ok(state) => {
                     if crate::display::hdr_is_on(&serde_json::json!({"advanced_color": state})) {
-                        (Tone::Danger, "The PC kept its HDR desktop on.".to_string())
+                        Ok(false)
                     } else {
-                        (
-                            Tone::Success,
-                            "HDR is off on the PC. Starting a fresh capture…".to_string(),
-                        )
+                        Ok(true)
                     }
                 }
-                Err(e) => (Tone::Danger, format!("Couldn't turn HDR off: {e}")),
+                Err(e) => Err(format!("{e:#}")),
             };
             if let Some(h) = help.lock().as_mut() {
                 h.busy = false;
-                h.hdr_is_on = told.0 != Tone::Success;
+                if let Ok(turned_off) = &result {
+                    h.hdr_is_on = !turned_off;
+                }
             }
-            told
+            *slot.lock() = Some(HdrCompletion { ip, pc, result });
+            ctx.request_repaint();
         });
-        // The picture cannot recover on the capture that is already black.
-        self.reconnect = self.last_pc.clone();
-        self.disconnect();
     }
 
     /// Ask the machine at `ip` to sleep, restart or shut down. A stream from
@@ -614,6 +628,34 @@ impl ClientApp {
         }
     }
 
+    fn poll_hdr(&mut self) {
+        let ready = self.pending_hdr.as_ref().and_then(|h| h.lock().take());
+        if let Some(completion) = ready {
+            self.pending_hdr = None;
+            let (tone, text, succeed) = match completion.result {
+                Ok(true) => (
+                    Tone::Success,
+                    "HDR is off on the PC. Starting a fresh capture…".to_string(),
+                    true,
+                ),
+                Ok(false) => (
+                    Tone::Danger,
+                    "The PC kept its HDR desktop on.".to_string(),
+                    false,
+                ),
+                Err(e) => (Tone::Danger, format!("Couldn't turn HDR off: {e}"), false),
+            };
+            if self.live.lock().is_some() {
+                self.view.toast(tone, text.clone());
+            }
+            self.notice = Some((tone, text, Instant::now()));
+            if succeed && self.is_current_target(completion.ip) {
+                self.reconnect = Some(completion.pc);
+                self.disconnect();
+            }
+        }
+    }
+
     fn tailscale_installed(&self) -> bool {
         self.tailscale_ok.load(Ordering::Relaxed)
     }
@@ -737,6 +779,7 @@ impl eframe::App for ClientApp {
         }
         self.poll_live(ctx);
         self.poll_notice();
+        self.poll_hdr();
 
         let streaming = self.live.lock().is_some();
         if streaming {
@@ -871,7 +914,7 @@ impl eframe::App for ClientApp {
                 None => self.notice = None,
             }
         }
-        if self.pending_notice.is_some() {
+        if self.pending_notice.is_some() || self.pending_hdr.is_some() {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
         self.shortcuts(ctx);
@@ -3851,5 +3894,122 @@ mod live_snapshot {
                 "the host supplied no visible picture: {problem:?}"
             );
         }
+    }
+
+    #[test]
+    fn turn_off_hdr_does_not_queue_reconnect_at_launch() {
+        let mut h = snapshots::build(
+            snapshots::Setup::new(Discovery::default()),
+            egui::vec2(800.0, 600.0),
+            1.0,
+            false,
+        );
+        let pc = Pc {
+            node_id: "test-node".into(),
+            name: "TestPC".into(),
+            ip: Some("127.0.0.1".parse().unwrap()),
+            online: true,
+            ..Default::default()
+        };
+        h.state_mut().last_pc = Some(pc.clone());
+        *h.state_mut().video_help.lock() = Some(crate::display::Help {
+            message: "Black screen".into(),
+            hdr_is_on: true,
+            mode: "HDR".into(),
+            busy: false,
+        });
+
+        let ctx = h.ctx.clone();
+        h.state_mut()
+            .turn_off_hdr(&ctx, "127.0.0.1".parse().unwrap());
+        assert_eq!(
+            h.state().reconnect,
+            None,
+            "reconnect must not be queued at launch"
+        );
+        assert!(
+            h.state().video_help.lock().as_ref().unwrap().busy,
+            "must be marked busy"
+        );
+    }
+
+    #[test]
+    fn poll_hdr_queues_reconnect_only_on_success_and_matching_target() {
+        let mut h = snapshots::build(
+            snapshots::Setup::new(Discovery::default()),
+            egui::vec2(800.0, 600.0),
+            1.0,
+            false,
+        );
+        let pc = Pc {
+            node_id: "test-node".into(),
+            name: "TestPC".into(),
+            ip: Some("127.0.0.1".parse().unwrap()),
+            online: true,
+            ..Default::default()
+        };
+        h.state_mut().last_pc = Some(pc.clone());
+
+        // Fake target as current connecting target
+        h.state_mut().progress.lock().pc = "TestPC".into();
+        h.state_mut().progress.lock().ip = Some("127.0.0.1".parse().unwrap());
+        h.state_mut().progress.lock().step = Step::Streaming;
+
+        let completion = HdrCompletion {
+            ip: "127.0.0.1".parse().unwrap(),
+            pc: pc.clone(),
+            result: Ok(true),
+        };
+        h.state_mut().pending_hdr = Some(Arc::new(Mutex::new(Some(completion))));
+
+        h.state_mut().poll_hdr();
+
+        assert_eq!(h.state().reconnect, Some(pc), "reconnect queued on success");
+        assert!(h.state().notice.is_some());
+        assert_eq!(h.state().notice.as_ref().unwrap().0, Tone::Success);
+    }
+
+    #[test]
+    fn poll_hdr_on_failure_surfaces_error_without_reconnect() {
+        let mut h = snapshots::build(
+            snapshots::Setup::new(Discovery::default()),
+            egui::vec2(800.0, 600.0),
+            1.0,
+            false,
+        );
+        let pc = Pc {
+            node_id: "test-node".into(),
+            name: "TestPC".into(),
+            ip: Some("127.0.0.1".parse().unwrap()),
+            online: true,
+            ..Default::default()
+        };
+        h.state_mut().last_pc = Some(pc.clone());
+        h.state_mut().progress.lock().pc = "TestPC".into();
+        h.state_mut().progress.lock().ip = Some("127.0.0.1".parse().unwrap());
+
+        let completion = HdrCompletion {
+            ip: "127.0.0.1".parse().unwrap(),
+            pc,
+            result: Err("connection refused".into()),
+        };
+        h.state_mut().pending_hdr = Some(Arc::new(Mutex::new(Some(completion))));
+
+        h.state_mut().poll_hdr();
+
+        assert_eq!(
+            h.state().reconnect,
+            None,
+            "reconnect must not be queued on error"
+        );
+        assert!(h.state().notice.is_some());
+        assert_eq!(h.state().notice.as_ref().unwrap().0, Tone::Danger);
+        assert!(h
+            .state()
+            .notice
+            .as_ref()
+            .unwrap()
+            .1
+            .contains("Couldn't turn HDR off: connection refused"));
     }
 }
