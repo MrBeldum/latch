@@ -32,14 +32,24 @@ const SETUP_DIR: &str = r"Latch\Setup";
 /// the user can write to.
 #[cfg(any(windows, test))]
 fn powershell_exe() -> PathBuf {
-    let root = std::env::var("SystemRoot")
-        .ok()
-        .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| r"C:\Windows".into());
-    PathBuf::from(format!(
-        r"{}\System32\WindowsPowerShell\v1.0\powershell.exe",
-        root.trim_end_matches('\\')
-    ))
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+        }
+        let mut buffer = [0u16; 32768];
+        // SAFETY: the buffer has the length passed to Windows.
+        let n = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+        assert!(
+            n > 0 && n < buffer.len(),
+            "Windows system directory unavailable"
+        );
+        PathBuf::from(String::from_utf16_lossy(&buffer[..n]))
+            .join(r"WindowsPowerShell\v1.0\powershell.exe")
+    }
+    #[cfg(not(windows))]
+    PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
 }
 
 /// What the administrator step exits with when it never ran setup.
@@ -82,10 +92,18 @@ fn stage_script(program: &str, sha256: &str) -> String {
     format!(
         r#"$ErrorActionPreference = 'Stop'
 $program = '{program}'
+{protection}
 try {{
+    $root = [Environment]::GetFolderPath('ProgramFiles')
+    Assert-Protected $root
+    $parent = Join-Path $root 'Latch'
+    if (-not (Test-Path -LiteralPath $parent)) {{ New-Item -ItemType Directory -Path $parent | Out-Null }}
+    Assert-Protected $parent
     $dir = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) '{dir}'
-    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    if (-not (Test-Path -LiteralPath $dir)) {{ New-Item -ItemType Directory -Path $dir | Out-Null }}
+    Assert-Protected $dir
     $copy = Join-Path $dir 'latch-host.exe'
+    if (Test-Path -LiteralPath $copy) {{ Assert-Protected $copy }}
     Copy-Item -LiteralPath $program -Destination $copy -Force
 }} catch {{ exit {copy_failed} }}
 if ((Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash -ne '{sha256}') {{
@@ -97,12 +115,14 @@ if ((Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash -ne '{sha256}') {{
 $start = New-Object System.Diagnostics.ProcessStartInfo $copy
 $start.Arguments = '--setup-elevated --program "' + $program + '"'
 $start.UseShellExecute = $false
+$start.WorkingDirectory = $dir
 $p = [System.Diagnostics.Process]::Start($start)
 $p.WaitForExit()
 Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue
 exit $p.ExitCode
 "#,
         program = q(program),
+        protection = include_str!("../../../scripts/setup-protection.ps1"),
         dir = SETUP_DIR,
         sha256 = sha256,
         copy_failed = exit::COPY_FAILED,
@@ -115,13 +135,17 @@ exit $p.ExitCode
 /// fixes when it is approved, rather than in a file the user could edit.
 #[cfg(any(windows, test))]
 fn launch_script(stage: &str) -> String {
+    // Elevated scripts must not resolve tools from a caller's PATH or cwd.
+    let stage = format!(
+        "$env:PATH = [Environment]::SystemDirectory; Set-Location -LiteralPath ([Environment]::SystemDirectory);\n{stage}"
+    );
     // Already elevated (an administrator's SSH session, a window started as
     // administrator): no prompt to show, and none could be shown in
     // session 0.
     format!(
         "if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{ & '{ps}' -NoProfile -NonInteractive -EncodedCommand {encoded}; exit $LASTEXITCODE }}; try {{ $p = Start-Process -FilePath '{ps}' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile -NonInteractive -EncodedCommand {encoded}' -ErrorAction Stop }} catch {{ exit {declined} }}; if ($null -eq $p) {{ exit {declined} }}; exit $p.ExitCode",
         ps = q(&powershell_exe().display().to_string()),
-        encoded = encoded_command(stage),
+        encoded = encoded_command(&stage),
         declined = exit::DECLINED,
     )
 }
@@ -372,12 +396,14 @@ pub fn run_as_admin(program: Option<&Path>) -> Result<()> {
         // Everything below is written beside this copy, so it has to be
         // the one in Program Files and not a file a user put anywhere.
         let dir = exe.parent().context("own folder")?.to_path_buf();
-        let protected = std::env::var_os("ProgramFiles")
-            .map(|pf| PathBuf::from(pf).join(SETUP_DIR))
-            .and_then(|d| d.canonicalize().ok());
+        let checked = powershell(&format!(
+            "{}\n$root = [Environment]::GetFolderPath('ProgramFiles'); Assert-Protected $root; $parent = Join-Path $root 'Latch'; Assert-Protected $parent; $dir = Join-Path $parent 'Setup'; Assert-Protected $dir; $log = Join-Path $dir 'setup.log'; if (Test-Path -LiteralPath $log) {{ Assert-Protected $log }}; Write-Output $dir",
+            include_str!("../../../scripts/setup-protection.ps1")
+        ))?;
+        let protected = PathBuf::from(checked.trim()).canonicalize()?;
         anyhow::ensure!(
-            protected.is_some_and(|p| dir.canonicalize().is_ok_and(|d| same_path(&d, &p))),
-            "--program is only for the copy setup makes in Program Files"
+            dir.canonicalize().is_ok_and(|d| same_path(&d, &protected)),
+            "--program is only for the protected copy setup makes in Program Files"
         );
         anyhow::ensure!(
             plausible_program(&program.display().to_string()) && program.is_file(),
@@ -867,10 +893,7 @@ mod tests {
             .find("IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)")
             .unwrap();
         assert!(direct < launch.find("-Verb RunAs").unwrap());
-        assert!(
-            launch.contains("-EncodedCommand ZQB4AGkAdAAgADAA; exit $LASTEXITCODE"),
-            "{launch}"
-        );
+        assert!(launch.contains("; exit $LASTEXITCODE }"), "{launch}");
     }
 
     #[test]
@@ -941,13 +964,25 @@ mod tests {
             2,
             "elevated or prompted, the same script"
         );
-        let utf16 = stage
+        let secured = format!("$env:PATH = [Environment]::SystemDirectory; Set-Location -LiteralPath ([Environment]::SystemDirectory);\n{stage}");
+        let utf16 = secured
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>();
         assert_eq!(encoded, base64(&utf16));
-        assert_eq!(encoded, encoded_command(&stage));
+        assert_eq!(encoded, encoded_command(&secured));
         assert!(launch.contains("catch { exit 1223 }"));
+    }
+
+    #[test]
+    fn setup_checks_permissions_and_links_before_writing() {
+        let s = stage_script(r"C:\Latch\latch-host.exe", &"ab".repeat(32));
+        assert!(s.contains("Assert-Protected $dir"));
+        assert!(s.contains("Assert-Protected $copy"));
+        assert!(s.contains("ReparsePoint"));
+        assert!(s.contains("GetOwner([Security.Principal.SecurityIdentifier])"));
+        assert!(s.find("Assert-Protected $copy").unwrap() < s.find("Copy-Item").unwrap());
+        assert!(s.contains("$start.WorkingDirectory = $dir"));
     }
 
     #[test]
