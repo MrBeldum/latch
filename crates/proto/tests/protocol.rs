@@ -1007,3 +1007,30 @@ fn recovered_audio_pts_follows_negotiated_five_ms_packets() {
         assert!(found);
     }
 }
+
+#[test]
+fn startup_grace_bounds_silence_and_allows_a_healthy_idr_to_finish() {
+    let accepted = Instant::now();
+    let mut rx = Reassembler::new(42);
+    assert!(!rx.needs_keyframe(accepted, accepted + Duration::from_millis(499)));
+    assert!(rx.needs_keyframe(accepted, accepted + Duration::from_millis(500)));
+    let mut tx = Packetizer::new(42);
+    tx.packetize(
+        &OutFrame {
+            data: &[7; 3000],
+            keyframe: true,
+            host_delay: 0,
+        },
+        |bytes| {
+            if let Datagram::Video { shard, .. } = wire::parse(bytes).unwrap() {
+                rx.push(&shard, accepted + Duration::from_millis(80));
+                assert!(!rx.needs_keyframe(accepted, accepted + Duration::from_millis(80)));
+            }
+        },
+    );
+    assert!(matches!(
+        rx.poll(accepted + Duration::from_millis(90)),
+        Some(Reassembled::Frame(_))
+    ));
+    assert!(!rx.needs_keyframe(accepted, accepted + Duration::from_secs(1)));
+}

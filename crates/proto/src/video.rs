@@ -426,6 +426,14 @@ impl Reassembler {
         self.waiting
     }
 
+    /// Recover even when no shard of the initial keyframe reached us. This
+    /// startup grace exceeds the assembly timeout, so a healthy IDR can finish.
+    pub fn needs_keyframe(&self, accepted: Instant, now: Instant) -> bool {
+        self.waiting
+            || (self.last.is_none()
+                && now.saturating_duration_since(accepted) >= Duration::from_millis(500))
+    }
+
     /// The last frame delivered by `poll`.
     pub fn last_delivered(&self) -> Option<u32> {
         self.last

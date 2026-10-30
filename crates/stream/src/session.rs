@@ -873,10 +873,7 @@ fn receive(
                 }
             }
         }
-        let waiting = reassembler.waiting_for_keyframe()
-            || inner.queue.lock().want_keyframe
-            || (reassembler.last_delivered().is_none()
-                && now - accepted >= Duration::from_millis(500));
+        let waiting = reassembler.needs_keyframe(accepted, now) || inner.queue.lock().want_keyframe;
         if keyframes.due(waiting, now, rtt.srtt()) {
             wire::write_keyframe_request(
                 &mut out,
