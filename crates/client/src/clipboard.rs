@@ -108,6 +108,8 @@ struct Shared {
     /// The PC has copied something (text, an image, files) that the
     /// window has not yet weighed against the Mac's clipboard.
     pc_copied: bool,
+    /// A paste was sent to the PC; expect at most one echo/readback of that text.
+    readback_expected: bool,
     /// The Mac clipboard's change count when the PC last copied something.
     /// While the Mac's count still reads this, the PC's clipboard is the
     /// newer of the two and a paste leaves it alone.
@@ -302,6 +304,7 @@ impl Shared {
     /// now, so the poll does not take the PC reading it back for a copy
     /// made there. Returns what `last` was, for [`Shared::not_sent`].
     fn sending(&mut self, fitted: &Clipboard) -> String {
+        self.readback_expected = true;
         std::mem::replace(&mut self.last, fitted.text.clone())
     }
 
@@ -318,6 +321,7 @@ impl Shared {
     }
 
     fn not_sent(&mut self, fitted: &Clipboard, before: String) {
+        self.readback_expected = false;
         if self.last == fitted.text {
             self.last = before;
         }
@@ -347,10 +351,12 @@ impl Shared {
             return false;
         }
         self.last_seq = Some(c.seq);
-        if !c.text.is_empty() && same_text(&c.text, &self.last) {
+        if !c.text.is_empty() && self.readback_expected && same_text(&c.text, &self.last) {
             // Our own paste, read back.
+            self.readback_expected = false;
             return false;
         }
+        self.readback_expected = false;
         self.pc_copied = true;
         if c.text.is_empty() {
             // An image or files: nothing to bring over, but what the PC
@@ -655,8 +661,13 @@ mod tests {
         // The PC reads back the cut text under a new number.
         assert!(!sh.observe(pc(&fitted.text, 2), &mut primed));
         assert!(sh.incoming.is_none(), "the Mac keeps its whole text");
+        assert!(!sh.pc_copied);
         // Pasting the same long text again sends nothing new.
         assert!(!sh.needs(&Clipboard::fit(&long, 0), None));
+        // A subsequent copy on the PC with a new sequence (even if matching the truncated text)
+        // must be recognized as a copy made on the PC so subsequent pastes do not overwrite it.
+        assert!(sh.observe(pc(&fitted.text, 3), &mut primed));
+        assert!(sh.pc_copied);
     }
 
     #[test]
