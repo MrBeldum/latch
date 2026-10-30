@@ -39,6 +39,8 @@ const PING_EVERY: Duration = Duration::from_millis(500);
 /// keep up: the queue is dropped and the stream restarts at a keyframe,
 /// rather than the picture falling further and further behind.
 const DECODE_QUEUE: usize = 8;
+const DECODE_MAX_AGE: Duration = Duration::from_millis(50);
+const REPORT_EVERY: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -116,6 +118,17 @@ pub struct Stats {
     pub audio: String,
     /// Persistent video diagnosis, even while the transport is connected.
     pub video_problem: Option<String>,
+    pub applied_bitrate_kbps: u32,
+    pub requested_bitrate_kbps: u32,
+    pub pacing_queue_ms: f32,
+    pub send_errors: u64,
+    pub send_retries: u64,
+    pub socket_send_bytes: usize,
+    pub socket_receive_bytes: usize,
+    pub host_socket_send_bytes: usize,
+    pub host_socket_receive_bytes: usize,
+    pub frames_lost: u64,
+    pub window_ms: u32,
 }
 
 #[derive(Default)]
@@ -447,6 +460,15 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         Ok(u) => u,
         Err(e) => return fail("connecting", format!("no UDP socket for the picture: {e}")),
     };
+    match latch_proto::transport::configure_socket(&udp, 1024 * 1024, 4 * 1024 * 1024) {
+        Ok(buffers) => {
+            tracing::info!(send_bytes = buffers.send, receive_bytes = buffers.receive, "viewer UDP buffers (requested 1048576/4194304; Linux may cap at net.core.wmem_max/rmem_max)");
+            let mut stats = inner.stats.lock();
+            stats.socket_send_bytes = buffers.send;
+            stats.socket_receive_bytes = buffers.receive;
+        }
+        Err(e) => return fail("connecting", format!("cannot configure media buffers: {e}")),
+    }
     let udp_port = udp.local_addr().map(|a| a.port()).unwrap_or(0);
     let codecs = offer(settings);
     let request = StreamRequest {
@@ -610,6 +632,7 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
             });
     }
     let accepted = Instant::now();
+    let mut last_report = Instant::now();
     let mut last_keepalive = Instant::now();
     loop {
         if inner.stopping() {
@@ -622,7 +645,7 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
             );
             return Outcome::Stopped;
         }
-        match inbox.recv_timeout(Duration::from_millis(100)) {
+        match inbox.recv_timeout(Duration::from_millis(25)) {
             Ok(Message::End(e)) => {
                 let message = if e.message.is_empty() {
                     "The host ended the stream.".to_string()
@@ -634,6 +657,17 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
                 } else {
                     Outcome::Failed("starting".into(), message)
                 };
+            }
+            Ok(Message::Report(report)) => {
+                inner.heard();
+                let mut stats = inner.stats.lock();
+                stats.applied_bitrate_kbps = report.applied_bitrate_kbps;
+                stats.requested_bitrate_kbps = report.requested_bitrate_kbps;
+                stats.pacing_queue_ms = report.pacing_queue_ms;
+                stats.send_errors = report.send_errors;
+                stats.send_retries = report.send_retries;
+                stats.host_socket_send_bytes = report.socket_send_bytes;
+                stats.host_socket_receive_bytes = report.socket_receive_bytes;
             }
             Ok(Message::Notice(n)) => {
                 inner.heard();
@@ -667,19 +701,26 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
         let now = Instant::now();
         if now - last_keepalive >= KEEPALIVE {
             last_keepalive = now;
+            if control::write_message(tcp, &Message::Keepalive).is_err() && !inner.stopping() {
+                return Outcome::Ended(-1, "The connection to the host broke.".into());
+            }
+        }
+        if now - last_report >= REPORT_EVERY {
+            last_report = now;
             let stats = inner.stats.lock().clone();
-            let sent = control::write_message(tcp, &Message::Keepalive).and_then(|()| {
-                control::write_message(
-                    tcp,
-                    &Message::Report(Report {
-                        fps: stats.fps,
-                        loss_pct: inner.raw_loss_milli.load(Ordering::Relaxed) as f32 / 1000.0,
-                        decode_ms: stats.decode_ms,
-                        rtt_ms: stats.rtt_ms as f32,
-                    }),
-                )
-            });
-            if sent.is_err() && !inner.stopping() {
+            let report = Report {
+                fps: stats.fps,
+                loss_pct: inner.raw_loss_milli.load(Ordering::Relaxed) as f32 / 1000.0,
+                decode_ms: stats.decode_ms,
+                rtt_ms: stats.rtt_ms as f32,
+                received_kbps: (stats.mbps * 1000.0) as u32,
+                frames_lost: stats.frames_lost,
+                unrecovered_loss_pct: Some(stats.loss_pct),
+                queue_ms: stats.queue_ms,
+                window_ms: stats.window_ms,
+                ..Default::default()
+            };
+            if control::write_message(tcp, &Message::Report(report)).is_err() && !inner.stopping() {
                 return Outcome::Ended(-1, "The connection to the host broke.".into());
             }
         }
@@ -716,11 +757,34 @@ fn receive(
     mut player: Option<Player>,
 ) {
     let session = accept.session;
-    let _ = udp.set_read_timeout(Some(Duration::from_millis(5)));
+    // Readiness wakes immediately for datagrams on macOS, Linux and Windows;
+    // socket receive timeouts round up to scheduler ticks on Windows.
+    let Ok(mut poll) = mio::Poll::new() else {
+        return;
+    };
+    if udp.set_nonblocking(true).is_err() {
+        return;
+    }
+    let Ok(clone) = udp.try_clone() else {
+        return;
+    };
+    let mut ready_socket = mio::net::UdpSocket::from_std(clone);
+    if poll
+        .registry()
+        .register(&mut ready_socket, mio::Token(0), mio::Interest::READABLE)
+        .is_err()
+    {
+        return;
+    }
+    let mut events = mio::Events::with_capacity(4);
+    let accepted = Instant::now();
     let mut buf = vec![0u8; latch_proto::MAX_DATAGRAM + 1];
     let mut out = Vec::with_capacity(64);
     let mut reassembler = Reassembler::new(session);
-    let mut audio_rx = AudioReceiver::new(session);
+    let mut audio_rx = accept.audio.as_ref().map_or_else(
+        || AudioReceiver::new(session),
+        |format| AudioReceiver::with_format(session, format.frame_samples, format.rate),
+    );
     let mut keyframes = KeyframeRequests::new();
     let mut rtt = RttEstimator::new();
     let mut media_seen = false;
@@ -770,6 +834,16 @@ fn receive(
                 }
             }
             Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                let now = Instant::now();
+                let deadline = reassembler
+                    .next_deadline()
+                    .unwrap_or(now + Duration::from_millis(20));
+                let wait = deadline
+                    .saturating_duration_since(now)
+                    .min(Duration::from_millis(20));
+                let _ = poll.poll(&mut events, Some(wait));
+            }
             Err(_) => {}
         }
         let now = Instant::now();
@@ -777,7 +851,11 @@ fn receive(
             match event {
                 Reassembled::Frame(frame) => {
                     let mut q = inner.queue.lock();
-                    if q.frames.len() >= DECODE_QUEUE {
+                    if q.frames.len() >= DECODE_QUEUE
+                        || q.frames.front().is_some_and(|(_, at)| {
+                            now.saturating_duration_since(*at) >= DECODE_MAX_AGE
+                        })
+                    {
                         tracing::warn!("the decoder fell behind; restarting at a keyframe");
                         q.frames.clear();
                         q.want_keyframe = true;
@@ -791,8 +869,11 @@ fn receive(
                 }
             }
         }
-        let waiting = reassembler.waiting_for_keyframe() || inner.queue.lock().want_keyframe;
-        if media_seen && keyframes.due(waiting, now, rtt.srtt()) {
+        let waiting = reassembler.waiting_for_keyframe()
+            || inner.queue.lock().want_keyframe
+            || (reassembler.last_delivered().is_none()
+                && now - accepted >= Duration::from_millis(500));
+        if keyframes.due(waiting, now, rtt.srtt()) {
             wire::write_keyframe_request(
                 &mut out,
                 session,
@@ -800,10 +881,11 @@ fn receive(
             );
             let _ = udp.send_to(&out, host);
         }
-        if now - window_start >= Duration::from_secs(1) {
+        if now - window_start >= REPORT_EVERY {
             let stats = reassembler.stats();
             let (loss, recovered, raw_loss) = loss_in_window(&window_base, &stats);
-            let lost_frames = stats.frames_lost > window_base.frames_lost;
+            let lost_count = stats.frames_lost.saturating_sub(window_base.frames_lost);
+            let lost_frames = lost_count > 0;
             window_base = stats;
             inner
                 .raw_loss_milli
@@ -814,6 +896,8 @@ fn receive(
             let frames = decode.frames.max(1) as f32;
             {
                 let mut s = inner.stats.lock();
+                s.window_ms = (secs * 1000.0) as u32;
+                s.frames_lost = lost_count;
                 s.fps = decode.frames as f32 / secs;
                 s.mbps = window_bytes as f32 * 8.0 / secs / 1e6;
                 s.decode_ms = decode.decode_us as f32 / frames / 1000.0;
@@ -941,6 +1025,13 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
             loop {
                 if inner.stopping() {
                     return;
+                }
+                if q.frames
+                    .front()
+                    .is_some_and(|(_, at)| at.elapsed() >= DECODE_MAX_AGE)
+                {
+                    q.frames.clear();
+                    q.want_keyframe = true;
                 }
                 if let Some(next) = q.frames.pop_front() {
                     if q.want_keyframe && !next.0.keyframe {

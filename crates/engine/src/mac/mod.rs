@@ -123,9 +123,7 @@ impl VideoPipeline for Video {
                     drop(state);
                     let first = self.sent.is_none();
                     self.sent = Some(now);
-                    let frame =
-                        self.encoder
-                            .encode(image.0, captured, keyframe || first)?;
+                    let frame = self.encoder.encode(image.0, captured, keyframe || first)?;
                     // A real-time encoder may drop under load. Pace the retry and
                     // preserve a pending IDR request until a picture is emitted.
                     if let Some(frame) = frame {

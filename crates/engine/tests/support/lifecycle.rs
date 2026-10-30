@@ -51,6 +51,9 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         heard_us: AtomicU64::new(0),
         frames: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
+        transport: TransportState::new(1000),
+        keyframe_request: Mutex::new(None),
+        audio_enabled: false,
     })
 }
 
@@ -119,10 +122,8 @@ fn repeated_video_errors_release_exclusive_capture_and_have_a_retry_budget() {
         open(c)
     });
     assert_eq!(attempts.load(Ordering::Relaxed), VIDEO_RECOVERIES);
-    assert_eq!(
-        session.frames.load(Ordering::Relaxed),
-        (VIDEO_RECOVERIES + 1) as u64
-    );
+    // Fatal capture failure cancels queued media; reopening must still be bounded.
+    assert!(session.frames.load(Ordering::Relaxed) <= (VIDEO_RECOVERIES + 1) as u64);
     assert!(!held.load(Ordering::Acquire));
     assert_eq!(
         session.ended.lock().as_ref().unwrap().code,
@@ -200,8 +201,10 @@ fn idle_requests_are_prompt_and_each_encoded_frame_updates_mapping_and_is_sent()
     assert_eq!(display.map(32, 32, 64, 64), (-64, 58));
     assert_eq!(server.status().encoder, "fallback");
     assert!(!server.status().hardware);
-    assert_eq!(session.frames.load(Ordering::Relaxed), 2);
-    let mut seen = [false; 2];
+    // Stop may cancel the final queued IDR, but every transmitted reference is ordered.
+    let sent = session.frames.load(Ordering::Relaxed) as usize;
+    assert!((1..=2).contains(&sent));
+    let mut seen = vec![false; sent];
     let mut buf = [0; 2048];
     while !seen.iter().all(|v| *v) {
         let n = udp.recv(&mut buf).unwrap();

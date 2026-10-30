@@ -46,9 +46,10 @@ mod tests {
                 let work = Duration::from_millis(cost);
                 let mut now = start;
                 for _ in 0..1000 {
+                    let missed = now.saturating_duration_since(cadence.next) >= cadence.interval;
                     let slot = cadence.slot(now);
                     assert!(slot >= now);
-                    if work > cadence.interval && now > start {
+                    if missed {
                         assert!(slot > now, "overload must wait for a future slot");
                     }
                     now = slot + work;

@@ -5,7 +5,7 @@
 //! the TCP control messages ([`control`]), round-trip estimation ([`rtt`])
 //! and a network impairment simulator for tests ([`sim`]).
 //!
-//! Nothing here reads a clock: every function that needs the time takes
+//! Except for socket configuration in `transport`, nothing here does I/O or reads a clock: every function that needs the time takes
 //! `now`, so tests run on simulated time.
 
 pub mod audio;
@@ -14,6 +14,7 @@ pub mod fec;
 pub mod input;
 pub mod rtt;
 pub mod sim;
+pub mod transport;
 pub mod video;
 pub mod wire;
 
