@@ -1,3 +1,6 @@
+$env:PATH = [Environment]::SystemDirectory
+$env:PSModulePath = [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\Modules')
+Set-Location -LiteralPath ([Environment]::SystemDirectory)
 # Run only elevated. Refuse pre-existing paths a non-administrator can
 # redirect or change; changing their ACL would leave existing handles open.
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -17,5 +20,16 @@ function Assert-Protected($path) {
         if ($rule.AccessControlType -eq 'Allow' -and ($rule.FileSystemRights -band $writes) -and $rule.IdentityReference.Value -notin $trusted) {
             throw "Untrusted write access: $path"
         }
+    }
+}
+function Assert-ProtectedTree($path) {
+    $path = [IO.Path]::GetFullPath($path)
+    if ($path.StartsWith('\\')) { throw 'Setup requires a local path' }
+    $root = [IO.Path]::GetPathRoot($path)
+    $walk = $root
+    foreach ($part in $path.Substring($root.Length).Split('\')) {
+        if (-not $part) { continue }
+        $walk = Join-Path $walk $part
+        Assert-Protected $walk
     }
 }

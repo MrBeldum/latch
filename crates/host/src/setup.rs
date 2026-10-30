@@ -143,7 +143,7 @@ fn launch_script(stage: &str) -> String {
     // administrator): no prompt to show, and none could be shown in
     // session 0.
     format!(
-        "if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{ & '{ps}' -NoProfile -NonInteractive -EncodedCommand {encoded}; exit $LASTEXITCODE }}; try {{ $p = Start-Process -FilePath '{ps}' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile -NonInteractive -EncodedCommand {encoded}' -ErrorAction Stop }} catch {{ exit {declined} }}; if ($null -eq $p) {{ exit {declined} }}; exit $p.ExitCode",
+        "$encoded = '{encoded}'; if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{ & '{ps}' -NoProfile -NonInteractive -EncodedCommand $encoded; exit $LASTEXITCODE }}; try {{ $p = Start-Process -FilePath '{ps}' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList ('-NoProfile -NonInteractive -EncodedCommand ' + $encoded) -ErrorAction Stop }} catch {{ exit {declined} }}; if ($null -eq $p) {{ exit {declined} }}; exit $p.ExitCode",
         ps = q(&powershell_exe().display().to_string()),
         encoded = encoded_command(&stage),
         declined = exit::DECLINED,
@@ -220,6 +220,7 @@ try {{ powercfg /deviceenablewake $wakeDevice | Out-Null }} catch {{ Write-Outpu
 $ErrorActionPreference = 'Continue'
 function Step($m) {{ Write-Output "[$(Get-Date -Format HH:mm:ss)] $m" }}
 $setupFailed = $false
+{protection}
 Step "Latch setup started"
 {retire}
 Step "Opening TCP and UDP {port} to the tailnet for Latch"
@@ -254,6 +255,7 @@ if ($setupFailed) {{ Step "Some setup steps failed. See the lines above."; exit 
 Step "Latch setup finished"
 exit 0
 "#,
+        protection = include_str!("../../../scripts/setup-protection.ps1"),
         retire = crate::legacy::retire_windows_ps(),
         port = CONTROL_PORT,
         tailnet = "100.64.0.0/10,fd7a:115c:a1e0::/48",
@@ -664,6 +666,7 @@ fn uninstall_machine_ps() -> String {
 $ErrorActionPreference = 'Continue'
 function Step($m) {{ Write-Output "[$(Get-Date -Format HH:mm:ss)] $m" }}
 $setupFailed = $false
+{protection}
 Step "Latch uninstall started"
 {retire}
 Step "Removing Latch's firewall rules and start task"
@@ -698,7 +701,10 @@ if ($saved) {{
 }} else {{ Write-Output "  nothing recorded; the power settings stay as they are" }}
 Step "Removing setup's folder"
 $latchDir = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Latch'
-Remove-Item -LiteralPath (Join-Path $latchDir 'Setup') -Recurse -Force -ErrorAction SilentlyContinue
+$setupDir = Join-Path $latchDir 'Setup'
+if (Test-Path -LiteralPath $setupDir) {{
+    try {{ Assert-ProtectedTree $setupDir; Remove-Item -LiteralPath $setupDir -Recurse -Force -ErrorAction Stop }} catch {{ Write-Output "  setup folder: $_"; $setupFailed = $true }}
+}}
 foreach ($empty in @($latchDir, 'HKLM:\SOFTWARE\Latch')) {{
     if ((Test-Path -LiteralPath $empty) -and -not (Get-ChildItem -LiteralPath $empty -Force)) {{ Remove-Item -LiteralPath $empty -Force }}
 }}
@@ -706,6 +712,7 @@ if ($setupFailed) {{ Step "Some steps failed. See the lines above."; exit 1 }}
 Step "Latch uninstall finished"
 exit 0
 "#,
+        protection = include_str!("../../../scripts/setup-protection.ps1"),
         retire = crate::legacy::retire_windows_ps(),
         task = START_TASK,
         key = SAVED_KEY,
@@ -924,6 +931,16 @@ mod tests {
     }
 
     #[test]
+    fn elevated_commands_fit_the_windows_command_line() {
+        for script in [
+            stage_script(r"C:\Latch\latch-host.exe", &"ab".repeat(32)),
+            uninstall_machine_ps(),
+        ] {
+            assert!(launch_script(&script).encode_utf16().count() < 32000);
+        }
+    }
+
+    #[test]
     fn setup_during_a_stream_needs_a_second_click() {
         let now = std::time::Instant::now();
         assert!(refuse_during_stream(true, None, now));
@@ -982,12 +999,12 @@ mod tests {
             "the user's file is never elevated: {launch}"
         );
         let encoded = launch
-            .split("-EncodedCommand ")
+            .split("$encoded = '")
             .nth(1)
-            .and_then(|rest| rest.split(['\'', ';']).next())
+            .and_then(|rest| rest.split('\'').next())
             .unwrap();
         assert_eq!(
-            launch.matches(encoded).count(),
+            launch.matches("-EncodedCommand ").count(),
             2,
             "elevated or prompted, the same script"
         );
