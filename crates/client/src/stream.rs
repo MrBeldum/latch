@@ -4059,6 +4059,43 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn review_countdown_dispatches_once_and_back_cancels_in_flight() {
+        let (mut h, _) = recording(View::default(), false);
+        h.state_mut().view.interrupted = Some(Interruption::Reconnecting(ReconnectState {
+            attempt: 1,
+            deadline: Instant::now() - Duration::from_secs(1),
+            in_flight: false,
+        }));
+        h.run_steps(1);
+        assert_eq!(
+            h.state()
+                .actions
+                .iter()
+                .filter(|a| **a == Action::Reconnect)
+                .count(),
+            1
+        );
+        h.state_mut().actions.clear();
+        h.run_steps(1);
+        assert!(!h.state().actions.contains(&Action::Reconnect));
+        h.get_by_label("Reconnect now").simulate_click();
+        h.run_steps(2);
+        assert!(
+            !h.state().actions.contains(&Action::Reconnect),
+            "in-flight retry is disabled"
+        );
+        frame(&mut h, vec![Event::WindowFocused(false)], Modifiers::NONE);
+        assert!(
+            h.state().view.interrupted.is_some(),
+            "focus loss must retain retry overlay"
+        );
+        h.get_by_label("Back to machines").simulate_click();
+        h.run_steps(2);
+        assert!(h.state().actions.contains(&Action::Disconnect));
+        assert!(h.state().view.interrupted.is_none());
+    }
+
+    #[test]
     fn reconnect_state_transitions_countdown_and_attempts() {
         let mut view = View::default();
         let t0 = Instant::now();
