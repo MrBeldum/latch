@@ -3183,8 +3183,10 @@ pub(crate) mod snapshots {
             }),
             ..Pc::default()
         };
-        let mut disc = Discovery::default();
-        disc.pcs = vec![pc1, pc2];
+        let disc = Discovery {
+            pcs: vec![pc1, pc2],
+            ..Default::default()
+        };
         let mut h = build(Setup::new(disc), TYPICAL, 1.0, false);
         h.state_mut().confirm = Some(Confirm {
             node_id: "n2".into(),
