@@ -689,9 +689,11 @@ fn relaunch_command(
     let mut command = std::process::Command::new("/bin/sh");
     // The bundle is an argument, never shell source (paths can contain $, ",
     // backticks and newlines). $0 is a diagnostic command name.
+    // LaunchServices acceptance is not startup: only the new app cleans the
+    // backup. A failed restore keeps the new bundle launchable as well.
     command.args([
         "-c",
-        "sleep 1 && if /usr/bin/open \"$1\"; then :; else rm -rf \"$1\" && mv \"$3\" \"$1\" && rm -rf \"$2\"; fi",
+        "sleep 1 && if /usr/bin/open \"$1\"; then :; else mv \"$1\" \"$2/failed.app\" && if mv \"$3\" \"$1\"; then rm -rf \"$2\"; else mv \"$2/failed.app\" \"$1\"; fi; fi",
         "latch-relaunch",
     ]);
     command.arg(bundle);
@@ -904,7 +906,7 @@ mod tests {
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(
             args[1],
-            "sleep 1 && if /usr/bin/open \"$1\"; then :; else rm -rf \"$1\" && mv \"$3\" \"$1\" && rm -rf \"$2\"; fi"
+            "sleep 1 && if /usr/bin/open \"$1\"; then :; else mv \"$1\" \"$2/failed.app\" && if mv \"$3\" \"$1\"; then rm -rf \"$2\"; else mv \"$2/failed.app\" \"$1\"; fi; fi"
         );
         assert_eq!(args[3], path.as_os_str());
     }
