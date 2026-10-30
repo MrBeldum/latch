@@ -593,7 +593,7 @@ impl Service {
     /// One of this machine's own Tailscale addresses: a connection from it
     /// is a process on this machine, as loopback is.
     fn own_address(&self, ip: IpAddr) -> bool {
-        self.tailscale.lock().as_ref().is_ok_and(|st| {
+        self.tailscale.lock().as_ref().map_or(true, |st| {
             st.self_node
                 .tailscale_ips
                 .iter()
@@ -1757,6 +1757,12 @@ mod tests {
         // Another machine on the account still gets through to the route.
         assert_ne!(svc.handle(other, &update).status, 403);
         assert_eq!(svc.handle(other, &write).status, 400);
+        // A cached admission must not bypass the local-address check when
+        // the next Tailscale status probe fails.
+        *svc.tailscale.lock() = Err("status unavailable".into());
+        for req in [&update, &read, &write] {
+            assert_eq!(svc.handle(own, req).status, 403);
+        }
     }
 
     const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
