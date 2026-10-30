@@ -228,6 +228,7 @@ extern "C" {
 extern "C" {
     pub fn CGPreflightScreenCaptureAccess() -> bool;
     pub fn CGMainDisplayID() -> u32;
+    pub fn CGDisplayBounds(display: u32) -> objc2_core_foundation::CGRect;
     pub static kCGColorBlack: Ref;
     pub fn CGColorGetConstantColor(name: Ref) -> Ref;
 }

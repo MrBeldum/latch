@@ -13,6 +13,9 @@ use capture::Capture;
 use encoder::Encoder;
 use std::time::{Duration, Instant};
 
+/// How often a running capture asks whether its display changed.
+const GEOMETRY_CHECK: Duration = Duration::from_millis(250);
+
 pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
     capture::permission()?;
     let encoder = Encoder::new(config)?;
@@ -25,6 +28,7 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
         cadence: crate::cadence::Cadence::new(config.fps),
         sent: None,
         pending: None,
+        checked: Instant::now(),
     };
     // Some virtual Macs advertise hardware that fails only on the first encode.
     // Resolve that fallback before the server snapshots VideoInfo for status.
@@ -62,6 +66,7 @@ struct Video {
     cadence: crate::cadence::Cadence,
     sent: Option<Instant>,
     pending: Option<EncodedVideo>,
+    checked: Instant,
 }
 impl VideoPipeline for Video {
     fn info(&self) -> VideoInfo {
@@ -87,6 +92,22 @@ impl VideoPipeline for Video {
         }
         let interval = Duration::from_secs_f64(1.0 / f64::from(self.config.fps));
         self.cadence.wait();
+        if self.checked.elapsed() >= GEOMETRY_CHECK {
+            self.checked = Instant::now();
+            // A new capture refits the picture, and info() hands the server
+            // the display's new place for input.
+            if self.capture.moved() {
+                tracing::info!("display changed size or place; restarting screen capture");
+                self.capture = Capture::new(
+                    self.config.width,
+                    self.config.height,
+                    self.config.fps,
+                    false,
+                )?;
+                self.generation = 0;
+                keyframe = true;
+            }
+        }
         let start = Instant::now();
         loop {
             let mut state = self.capture.shared.state.lock();
