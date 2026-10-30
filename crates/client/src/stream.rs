@@ -1463,27 +1463,27 @@ impl View {
                 pressed,
                 modifiers: m,
             } if self.captured || at.over_stream || (!pressed && self.held.any_down()) => {
+                // A click on the picture puts the toolbar away and, when
+                // capture is on, takes the mouse. We complete capture before
+                // synchronizing modifiers and sending the click so grab's
+                // release does not drop the click's modifiers (F09).
+                let recaptured = pressed && at.over_stream && !self.captured && link.connected;
+                if recaptured {
+                    self.bar_shown = false;
+                    if link.cfg.capture_mouse {
+                        self.grab(link.ctx, out);
+                    }
+                }
                 if at.keys_to_pc && !(m.ctrl && m.alt) {
                     self.held.modifiers(out, m, cmd_is_ctrl);
                 }
                 // The click lands where it was made: the pointer goes
                 // there first, before a capture would zero the motion.
-                if self.captured {
+                if self.captured && !recaptured {
                     self.flush_motion(out);
                 } else {
                     self.moved_to = None;
                     self.send_position(link, pos);
-                }
-                // A click on the picture puts the toolbar away and, when
-                // capture is on, takes the mouse. The click itself still
-                // goes to the PC: what was clicked on is what was meant.
-                // Not before the stream connects: the mouse would be held
-                // with no way out but the host key, over the Cancel button.
-                if pressed && at.over_stream && !self.captured && link.connected {
-                    self.bar_shown = false;
-                    if link.cfg.capture_mouse {
-                        self.grab(link.ctx, out);
-                    }
                 }
                 if let Some(b) = input::button(button) {
                     self.held.button(out, b, pressed);
@@ -3047,6 +3047,59 @@ pub(crate) mod tests {
             ]
         );
         assert!(!h.state().view.captured, "free mode");
+    }
+
+    #[test]
+    fn a_click_that_recaptures_the_mouse_preserves_modifiers() {
+        let (mut h, tap) = recording(View::default(), true);
+        h.state_mut().cfg.capture_mouse = true;
+        assert!(!h.state().view.captured);
+
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::NONE
+        };
+        frame(
+            &mut h,
+            vec![Event::PointerButton {
+                pos: ON_PICTURE,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: shift,
+            }],
+            shift,
+        );
+
+        let sent = tap.take();
+        assert!(
+            h.state().view.captured,
+            "mouse must be captured after click"
+        );
+        let shift_down_pos = sent
+            .iter()
+            .position(|s| matches!(s, Sent::Key(k, true, _) if *k == input::VK_SHIFT));
+        let button_down_pos = sent
+            .iter()
+            .position(|s| matches!(s, Sent::Button(BUTTON_LEFT, true)));
+        assert!(
+            shift_down_pos.is_some(),
+            "shift down must be sent: {sent:?}"
+        );
+        assert!(
+            button_down_pos.is_some(),
+            "button down must be sent: {sent:?}"
+        );
+        assert!(
+            shift_down_pos.unwrap() < button_down_pos.unwrap(),
+            "shift down must precede button down: {sent:?}"
+        );
+        let shift_up_between = sent[shift_down_pos.unwrap()..button_down_pos.unwrap()]
+            .iter()
+            .any(|s| matches!(s, Sent::Key(k, false, _) if *k == input::VK_SHIFT));
+        assert!(
+            !shift_up_between,
+            "shift must not be released before button down: {sent:?}"
+        );
     }
 
     #[test]
