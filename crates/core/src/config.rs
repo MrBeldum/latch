@@ -1,6 +1,6 @@
 //! Where each app keeps its few settings: one TOML file in the per-user data
 //! directory (`%LOCALAPPDATA%\Latch` on Windows, `~/Library/Application
-//! Support/com.bardbro.Latch` on macOS, `~/.local/share/latch` on Linux).
+//! Support/io.github.MrBeldum.Latch` on macOS, `~/.local/share/latch` on Linux).
 
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
@@ -33,14 +33,17 @@ pub fn data_dir() -> Result<PathBuf> {
             .map(PathBuf::from)
             .map(|p| p.join(crate::APP_NAME))
     } else {
-        directories::ProjectDirs::from("com", "bardbro", crate::APP_NAME)
+        directories::ProjectDirs::from("io.github", "MrBeldum", crate::APP_NAME)
             .map(|d| d.data_dir().to_path_buf())
     }
     .context("no per-user data directory")?;
     if adopting {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            if let Some(old) = crate::legacy::data_dir() {
+            for old in [crate::legacy::latch_data_dir(), crate::legacy::data_dir()]
+                .into_iter()
+                .flatten()
+            {
                 match adopt(&old, &dir) {
                     Ok(true) => tracing::info!("took over {} as {}", old.display(), dir.display()),
                     Ok(false) => {}

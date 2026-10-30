@@ -4,6 +4,9 @@ pub const WINDOWS_RUN_VALUE: &str = "BroLinkHost";
 pub const MAC_BUNDLE: &str = "BroLink.app";
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const MAC_LAUNCH_AGENT: &str = "dev.brolink.node";
+/// Previous Latch label, used only to retire existing login items.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const MAC_LATCH_LAUNCH_AGENT: &str = "com.bardbro.latch.node";
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub const LINUX_USER_UNIT: &str = "brolink.service";
 

@@ -27,10 +27,13 @@ OLD_AGENT="gui/$(id -u)/dev.brolink.node"
 launchctl bootout "$OLD_AGENT" >/dev/null 2>&1 || true
 rm -f "$HOME/Library/LaunchAgents/dev.brolink.node.plist"
 rm -rf /Applications/BroLink.app
+# Retire the previous Latch login item; the app registers its current one.
+launchctl bootout "gui/$(id -u)/com.bardbro.latch.node" >/dev/null 2>&1 || true
+rm -f "$HOME/Library/LaunchAgents/com.bardbro.latch.node.plist"
 # The background service keeps running the old binary until it restarts:
 # replacing the bundle does not stop it, and launchd restarts it only after
 # a failure. Restart it through launchd so it runs the new one now.
-AGENT="gui/$(id -u)/com.bardbro.latch.node"
+AGENT="gui/$(id -u)/io.github.MrBeldum.Latch.node"
 if launchctl print "$AGENT" >/dev/null 2>&1; then
   launchctl kickstart -k "$AGENT" && echo "restarted the Latch background service"
 fi

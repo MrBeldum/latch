@@ -5,9 +5,6 @@
 
 # Latch
 
-Latch is made by [Bardbro](https://bardbro.com), a personal project for
-cloud gaming.
-
 Your machines, on any of your machines: stream a desktop full screen over
 Tailscale. Mac, Windows, Linux, and a VPS container all run the same Latch
 app. Each one lists the others and can Connect; each one can share its own
