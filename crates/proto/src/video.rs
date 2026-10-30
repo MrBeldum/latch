@@ -220,6 +220,7 @@ pub struct Reassembler {
     waiting: bool,
     last: Option<u32>,
     stats: ReassemblyStats,
+    shard_pool: Vec<Vec<u8>>,
 }
 
 impl Reassembler {
@@ -231,6 +232,7 @@ impl Reassembler {
             waiting: false,
             last: None,
             stats: Default::default(),
+            shard_pool: Vec::new(),
         }
     }
 
@@ -293,7 +295,10 @@ impl Reassembler {
             self.stats.shards_late += 1;
             return;
         }
-        block.shards[idx] = Some(shard.bytes.to_vec());
+        let mut bytes = self.shard_pool.pop().unwrap_or_default();
+        bytes.clear();
+        bytes.extend_from_slice(shard.bytes);
+        block.shards[idx] = Some(bytes);
         self.stats.shards_received += 1;
         if block.shards.iter().filter(|s| s.is_some()).count() >= count {
             let missing = block.shards[..count].iter().filter(|s| s.is_none()).count();
@@ -327,6 +332,13 @@ impl Reassembler {
                 if (self.last.is_none() || self.waiting) && !frame.keyframe {
                     self.waiting = true;
                     self.stats.frames_skipped += 1;
+                    for block in frame.blocks.into_iter().flatten() {
+                        for shard in block.shards.into_iter().flatten() {
+                            if self.shard_pool.len() < 4096 {
+                                self.shard_pool.push(shard);
+                            }
+                        }
+                    }
                     continue;
                 }
                 self.waiting = false;
@@ -334,8 +346,15 @@ impl Reassembler {
                 self.stats.frames_delivered += 1;
                 let mut data = Vec::with_capacity(frame.len);
                 for block in frame.blocks.into_iter().flatten() {
-                    for shard in block.shards.into_iter().take(block.data).flatten() {
-                        data.extend(shard);
+                    for (index, shard) in block.shards.into_iter().enumerate() {
+                        if let Some(shard) = shard {
+                            if index < block.data {
+                                data.extend_from_slice(&shard);
+                            }
+                            if self.shard_pool.len() < 4096 {
+                                self.shard_pool.push(shard);
+                            }
+                        }
                     }
                 }
                 data.truncate(frame.len);
@@ -363,7 +382,15 @@ impl Reassembler {
                 let count = frame.blocks.len();
                 for (i, block) in frame.blocks.into_iter().enumerate() {
                     self.stats.shards_missing += match block {
-                        Some(b) => b.shards[..b.data].iter().filter(|s| s.is_none()).count(),
+                        Some(b) => {
+                            let missing = b.shards[..b.data].iter().filter(|s| s.is_none()).count();
+                            for shard in b.shards.into_iter().flatten() {
+                                if self.shard_pool.len() < 4096 {
+                                    self.shard_pool.push(shard);
+                                }
+                            }
+                            missing
+                        }
                         None => total / count + usize::from(i < total % count),
                     } as u64;
                 }
