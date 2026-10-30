@@ -57,7 +57,14 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $old = Join-Path $env:RUNNER_TEMP "old-engine"
+          # The real retirement guard checks every ancestor. RUNNER_TEMP
+          # lives below the user-writable D:\a on hosted Windows runners.
+          $fixture = Join-Path ([IO.Path]::GetPathRoot($env:SystemRoot)) ('LatchRetireSelftest-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $fixture | Out-Null
+          $acl = New-Object Security.AccessControl.DirectorySecurity
+          $acl.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
+          Set-Acl -LiteralPath $fixture -AclObject $acl
+          $old = Join-Path $fixture 'old-engine'
           $svc = 'LatchRetireSelftest'
           $script = Join-Path $env:RUNNER_TEMP 'retire.ps1'
           $env:LATCH_DUMP_RETIRE_SCRIPT = $script
@@ -76,6 +83,7 @@ jobs:
             if (Test-Path -LiteralPath $old) { throw "old folder remains" }
           }
           if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { throw "old service remains" }
+          Remove-Item -LiteralPath $fixture -Recurse -Force
           exit 0
       # Setup's record of the power settings and --uninstall's
       # administrator part, on this throwaway runner: the rules and the
