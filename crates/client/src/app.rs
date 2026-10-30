@@ -274,7 +274,7 @@ impl ClientApp {
         }
     }
 
-    /// A window with no background threads and the given settings, for
+    /// A window with only the config writer and the given settings, for
     /// rendering screens in tests (this crate's and the host's).
     #[doc(hidden)]
     pub fn headless(
@@ -670,7 +670,14 @@ impl ClientApp {
                 if candidate == size && at.elapsed() >= Duration::from_secs(1) =>
             {
                 let changes = limits.is_none_or(|(capture_size, max_fps)| {
-                    session::request_for(&self.cfg.stream, size, capture_size, max_fps) != asked
+                    #[cfg(not(target_os = "linux"))]
+                    let hz = crate::refresh::hz().unwrap_or(60);
+                    // Do not make a blocking X11 query on the UI thread. A
+                    // reconnect refreshes it on the connection worker.
+                    #[cfg(target_os = "linux")]
+                    let hz = asked.2;
+                    session::request_for_hz(&self.cfg.stream, size, hz, capture_size, max_fps)
+                        != asked
                 });
                 if changes {
                     self.reconnect = self.last_pc.clone();
