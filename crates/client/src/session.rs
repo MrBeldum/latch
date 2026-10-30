@@ -514,12 +514,7 @@ fn timed_port_open(ip: Ipv4Addr, port: u16, timeout: Duration) -> (bool, Option<
 /// A fresh look at the path to `ip` right before connecting: direct or
 /// relayed from Tailscale's own view of the peer, latency from the best of
 /// a few connects.
-fn measure_path(
-    node_id: &str,
-    ip: Ipv4Addr,
-    prior: &Path,
-    stale: impl FnMut() -> bool,
-) -> Path {
+fn measure_path(node_id: &str, ip: Ipv4Addr, prior: &Path, stale: impl FnMut() -> bool) -> Path {
     measure_path_on(node_id, ip, CONTROL_PORT, prior, stale)
 }
 

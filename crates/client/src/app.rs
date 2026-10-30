@@ -167,7 +167,8 @@ impl ClientApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let discovery = Arc::new(Mutex::new(Discovery::default()));
         let stop = session::spawn_discovery(discovery.clone(), cc.egui_ctx.clone());
-        let mut app = Self::with_shared(cc, discovery.clone(), Arc::default(), ClientConfig::load());
+        let mut app =
+            Self::with_shared(cc, discovery.clone(), Arc::default(), ClientConfig::load());
         app.discovery_stop = Some(stop);
         spawn_tailscale_probe(app.tailscale_ok.clone(), cc.egui_ctx.clone());
         update::spawn(
@@ -605,8 +606,8 @@ impl ClientApp {
         // Only reconnect if monitor_size is known, or if currently fullscreen.
         // In windowed mode with unknown monitor_size, screen_rect fluctuations are window resizes.
         let monitor_size_known = ctx.input(|i| i.viewport().monitor_size.is_some());
-        let is_fullscreen = self.cfg.stream.fullscreen
-            || ctx.input(|i| i.viewport().fullscreen == Some(true));
+        let is_fullscreen =
+            self.cfg.stream.fullscreen || ctx.input(|i| i.viewport().fullscreen == Some(true));
         if !monitor_size_known && !is_fullscreen {
             self.display_change = None;
             return;
@@ -900,7 +901,10 @@ impl eframe::App for ClientApp {
                 if let Some(on) = self.fullscreen_after.take() {
                     self.set_fullscreen(ctx, on);
                 }
-                if self.streamed && self.cfg.sleep_prompt && !self.power_sent.load(Ordering::Relaxed) {
+                if self.streamed
+                    && self.cfg.sleep_prompt
+                    && !self.power_sent.load(Ordering::Relaxed)
+                {
                     self.offer_sleep = disc
                         .pcs
                         .iter()
@@ -1086,14 +1090,14 @@ impl ClientApp {
         let Some(q) = self.confirm.clone() else {
             return;
         };
-        let duplicate_name = disc
-            .pcs
-            .iter()
-            .filter(|p| p.name == q.name)
-            .count()
-            > 1;
+        let duplicate_name = disc.pcs.iter().filter(|p| p.name == q.name).count() > 1;
         let display_name = if duplicate_name {
-            if let Some(ip) = disc.pcs.iter().find(|p| p.node_id == q.node_id).and_then(|p| p.ip) {
+            if let Some(ip) = disc
+                .pcs
+                .iter()
+                .find(|p| p.node_id == q.node_id)
+                .and_then(|p| p.ip)
+            {
                 format!("{} ({ip})", q.name)
             } else {
                 q.name.clone()
@@ -1213,8 +1217,9 @@ impl ClientApp {
                             };
                             let clicked = ui
                                 .add_enabled_ui(!prog.active(), |ui| {
-                                    ui::secondary_button(ui, label)
-                                        .on_disabled_hover_text("Another connection is in progress.")
+                                    ui::secondary_button(ui, label).on_disabled_hover_text(
+                                        "Another connection is in progress.",
+                                    )
                                 })
                                 .inner
                                 .clicked();
@@ -1336,63 +1341,69 @@ impl ClientApp {
             name: pc.name.clone(),
             action,
         };
-        ui::icon_menu_id(ui, Icon::More, &format!("More for {}", pc.name), &pc.node_id, |ui| {
-            if wake && ui::menu_item(ui, "Wake").clicked() {
-                let pc = pc.clone();
-                self.notify_later(move || match session::wake_only(&pc) {
-                    Ok(_) => (
-                        Tone::Neutral,
-                        format!(
-                            "Wake packets sent to {}. It can take a minute to come online.",
-                            pc.name
+        ui::icon_menu_id(
+            ui,
+            Icon::More,
+            &format!("More for {}", pc.name),
+            &pc.node_id,
+            |ui| {
+                if wake && ui::menu_item(ui, "Wake").clicked() {
+                    let pc = pc.clone();
+                    self.notify_later(move || match session::wake_only(&pc) {
+                        Ok(_) => (
+                            Tone::Neutral,
+                            format!(
+                                "Wake packets sent to {}. It can take a minute to come online.",
+                                pc.name
+                            ),
                         ),
-                    ),
-                    Err(e) => (Tone::Danger, format!("{}: {e}", pc.name)),
-                });
-            }
-            if test_wake && ui::menu_item(ui, "Test waking it from this network").clicked() {
-                self.test_wake(pc);
-            }
-            if power {
-                if wake || test_wake {
-                    ui::menu_separator(ui);
+                        Err(e) => (Tone::Danger, format!("{}: {e}", pc.name)),
+                    });
                 }
-                // Only where something can wake it again: never a Linux
-                // VPS or a Mac, which would stay asleep.
-                if pc.can_sleep() && ui::menu_item(ui, "Sleep").clicked() {
-                    if let Some(ip) = pc.ip {
-                        self.power(ip, &pc.name, PowerAction::Sleep);
+                if test_wake && ui::menu_item(ui, "Test waking it from this network").clicked() {
+                    self.test_wake(pc);
+                }
+                if power {
+                    if wake || test_wake {
+                        ui::menu_separator(ui);
+                    }
+                    // Only where something can wake it again: never a Linux
+                    // VPS or a Mac, which would stay asleep.
+                    if pc.can_sleep() && ui::menu_item(ui, "Sleep").clicked() {
+                        if let Some(ip) = pc.ip {
+                            self.power(ip, &pc.name, PowerAction::Sleep);
+                        }
+                    }
+                    if ui::menu_item(ui, "Restart…").clicked() {
+                        self.confirm = Some(ask(Confirmable::Power(PowerAction::Restart)));
+                    }
+                    if ui::menu_item(ui, "Shut down…").clicked() {
+                        self.confirm = Some(ask(Confirmable::Power(PowerAction::Shutdown)));
                     }
                 }
-                if ui::menu_item(ui, "Restart…").clicked() {
-                    self.confirm = Some(ask(Confirmable::Power(PowerAction::Restart)));
+                if let Some(ip) = pc.ip {
+                    if wake || test_wake || power {
+                        ui::menu_separator(ui);
+                    }
+                    if ui::menu_item(ui, "Copy Tailscale address").clicked() {
+                        ui.ctx().copy_text(ip.to_string());
+                        self.notice = Some((
+                            Tone::Neutral,
+                            format!("Copied {ip}, {}'s Tailscale address.", pc.name),
+                            Instant::now(),
+                        ));
+                    }
                 }
-                if ui::menu_item(ui, "Shut down…").clicked() {
-                    self.confirm = Some(ask(Confirmable::Power(PowerAction::Shutdown)));
+                if forget {
+                    if wake || test_wake || power || pc.ip.is_some() {
+                        ui::menu_separator(ui);
+                    }
+                    if ui::menu_item(ui, "Forget this machine…").clicked() {
+                        self.confirm = Some(ask(Confirmable::Forget));
+                    }
                 }
-            }
-            if let Some(ip) = pc.ip {
-                if wake || test_wake || power {
-                    ui::menu_separator(ui);
-                }
-                if ui::menu_item(ui, "Copy Tailscale address").clicked() {
-                    ui.ctx().copy_text(ip.to_string());
-                    self.notice = Some((
-                        Tone::Neutral,
-                        format!("Copied {ip}, {}'s Tailscale address.", pc.name),
-                        Instant::now(),
-                    ));
-                }
-            }
-            if forget {
-                if wake || test_wake || power || pc.ip.is_some() {
-                    ui::menu_separator(ui);
-                }
-                if ui::menu_item(ui, "Forget this machine…").clicked() {
-                    self.confirm = Some(ask(Confirmable::Forget));
-                }
-            }
-        });
+            },
+        );
     }
 
     /// What the next stream asks for, and a way to change it.
@@ -3181,7 +3192,9 @@ pub(crate) mod snapshots {
             action: Confirmable::Power(PowerAction::Restart),
         });
         h.run_steps(1);
-        assert!(h.query_by_label_contains("Restart Office (100.64.0.2)?").is_some());
+        assert!(h
+            .query_by_label_contains("Restart Office (100.64.0.2)?")
+            .is_some());
     }
 
     #[test]
@@ -3504,11 +3517,7 @@ pub(crate) mod snapshots {
 
     #[test]
     fn failed_connect_never_offers_sleep() {
-        let mut setup = Setup::new(pcs()).step(
-            "Gaming-PC",
-            Step::Ended { error: None },
-            "",
-        );
+        let mut setup = Setup::new(pcs()).step("Gaming-PC", Step::Ended { error: None }, "");
         setup.prog.node_id = "n1".into();
         setup.cfg.sleep_prompt = true;
         setup.tweak = |app| {
