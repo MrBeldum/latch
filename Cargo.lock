@@ -1994,6 +1994,8 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
+ "x11rb",
 ]
 
 [[package]]
@@ -2015,6 +2017,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "socket2",
  "toml 0.8.23",
  "tracing",
  "webpki-roots",

@@ -494,7 +494,8 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         &body,
         START_TIMEOUT,
         |stream| {
-            *inner.tcp.lock() = stream.try_clone().ok();
+            *inner.tcp.lock() = Some(stream.try_clone()?);
+            Ok(())
         },
         || inner.stopping(),
     ) {
@@ -518,7 +519,6 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     };
     let _ = tcp.set_nodelay(true);
     let _ = tcp.set_read_timeout(Some(START_TIMEOUT));
-    *inner.tcp.lock() = tcp.try_clone().ok();
     if inner.stopping() {
         let _ = tcp.shutdown(Shutdown::Both);
         return;
@@ -1183,7 +1183,17 @@ mod tests {
             std::sync::mpsc::channel().0,
             || {},
         );
-        let (server_sock, _) = listener.accept().unwrap();
+        let (mut server_sock, _) = listener.accept().unwrap();
+        server_sock
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        use std::io::Read;
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            server_sock.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
         let start = Instant::now();
         session.stop();
         while !session.finished() {

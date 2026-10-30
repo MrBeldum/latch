@@ -400,7 +400,7 @@ pub fn upgrade(
     body: &[u8],
     timeout: Duration,
 ) -> Result<std::result::Result<TcpStream, Response>> {
-    upgrade_cancellable(addr, path, protocol, body, timeout, |_| {}, || false)
+    upgrade_cancellable(addr, path, protocol, body, timeout, |_| Ok(()), || false)
 }
 
 /// A cancellable variant of [`upgrade`] that exposes the connected socket before
@@ -411,7 +411,7 @@ pub fn upgrade_cancellable(
     protocol: &str,
     body: &[u8],
     timeout: Duration,
-    on_socket: impl FnOnce(&TcpStream),
+    on_socket: impl FnOnce(&TcpStream) -> Result<()>,
     cancelled: impl Fn() -> bool,
 ) -> Result<std::result::Result<TcpStream, Response>> {
     if cancelled() {
@@ -419,8 +419,54 @@ pub fn upgrade_cancellable(
     }
     validate_target("POST", path)?;
     validate_header("Upgrade", protocol)?;
-    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(io_err)?;
-    on_socket(&stream);
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(addr),
+        socket2::Type::STREAM,
+        None,
+    )?;
+    socket.set_nonblocking(true)?;
+    let connecting = match socket.connect(&addr.into()) {
+        Ok(()) => false,
+        Err(e)
+            if e.kind() == ErrorKind::WouldBlock
+                || e.raw_os_error()
+                    == Some({
+                        #[cfg(unix)]
+                        {
+                            libc::EINPROGRESS
+                        }
+                        #[cfg(windows)]
+                        {
+                            10035
+                        }
+                    }) =>
+        {
+            true
+        }
+        Err(e) => return Err(io_err(e)),
+    };
+    let mut stream: TcpStream = socket.into();
+    on_socket(&stream)?;
+    let deadline = Instant::now() + timeout;
+    if connecting {
+        loop {
+            if cancelled() {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                bail!("cancelled");
+            }
+            if let Some(e) = stream.take_error()? {
+                return Err(io_err(e));
+            }
+            if stream.peer_addr().is_ok() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                bail!("timed out");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    stream.set_nonblocking(false)?;
     if cancelled() {
         let _ = stream.shutdown(std::net::Shutdown::Both);
         bail!("cancelled");

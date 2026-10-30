@@ -21,6 +21,7 @@ rustls-graviola = "0.4.0"
 webpki-roots = "1"
 semver = "1"
 sha2 = "0.10"
+socket2 = "0.6"
 # Decodes and resizes the checked-in logo for the window and file icons.
 image = { version = "0.25", default-features = false, features = ["png"] }
 
