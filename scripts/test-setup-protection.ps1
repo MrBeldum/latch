@@ -12,7 +12,8 @@ try {
     $unsafe = Join-Path $root 'writable'
     New-Item -ItemType Directory -Path $unsafe | Out-Null
     $acl = Get-Acl -LiteralPath $unsafe
-    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule('S-1-5-32-545', 'Modify', 'Allow')))
+    $users = [Security.Principal.SecurityIdentifier]'S-1-5-32-545'
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($users, 'Modify', 'Allow')))
     Set-Acl -LiteralPath $unsafe -AclObject $acl
     function Must-Reject($path) {
         $rejected = $false
