@@ -317,6 +317,9 @@ impl ClientApp {
     fn set_fullscreen(&mut self, ctx: &egui::Context, on: bool) {
         if self.fullscreen != on {
             self.fullscreen = on;
+            let live = self.live.lock();
+            self.view.reset(ctx, live.as_ref());
+            drop(live);
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
         }
     }
@@ -3531,6 +3534,16 @@ pub(crate) mod snapshots {
         std::thread::sleep(Duration::from_millis(50));
         h.state_mut().poll_notice();
         assert!(h.state().pending_notice.is_none());
+    }
+
+    #[test]
+    fn set_fullscreen_resets_view_and_held_state() {
+        let mut h = build(Setup::new(pcs()), MIN, 1.0, false);
+        let ctx = h.ctx.clone();
+        let live = crate::stream::tests::dummy_live(&ctx);
+        *h.state().live.lock() = Some(live);
+        h.state_mut().set_fullscreen(&ctx, true);
+        assert!(h.state().fullscreen);
     }
 
     #[test]
