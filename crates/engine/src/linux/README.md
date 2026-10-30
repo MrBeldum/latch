@@ -5,7 +5,23 @@ requires a 32-bit little-endian BGR visual. x11rb handles `DISPLAY` and
 `XAUTHORITY`; no Xlib is linked. MIT-SHM 1.2 server-allocated segments are
 mapped read-only, with GetImage as the fallback. Damage bounds the pixel
 transfer, and XFixes supplies the premultiplied cursor. RandR and root
-ConfigureNotify events rebuild the image and SHM allocation after a resize.
+ConfigureNotify events rebuild the image and SHM allocation after a resize;
+so does a GetImage that fails because the root shrank after the event poll.
+Rows whose pixels did not change are not copied, and a grab where none did
+(and the cursor stayed) reports no change, so the encoder repeats instead.
+
+Every X round trip fails after 2 s without a byte from the server (RandR:
+10 s), so a stalled X server ends a grab with an error instead of holding the
+session's stop and display restore. Rootless Xwayland (the XWAYLAND
+extension, or RandR outputs named `XWAYLAND*`) is refused with a message to
+log in to an Xorg session; so is a failed connection while
+`WAYLAND_DISPLAY`/`XDG_SESSION_TYPE` say Wayland. A separate Xorg server on
+`DISPLAY` inside a Wayland session still works.
+
+RandR sizes follow the CRTC's rotation: a request is a size on screen, and a
+quarter-turned CRTC gets the mode with swapped sides. Modes that `prepare`
+added to the output are removed again by `restore`, after it has switched
+back; modes the server had before are left alone.
 
 Audio uses Colin Marc's `pulseaudio` 0.3.2 native-protocol client, rather than
 libpulse or a child process. Its normal and build dependency graph contains
@@ -14,6 +30,9 @@ no `cc`, `cmake`, or `nasm-rs`. The default sink's monitor is requested as
 A bounded 64-frame queue absorbs protocol batches without blocking the
 reactor. If the consumer stalls beyond that queue, incoming frames are
 dropped. Reads return false on timeout and leave the destination unchanged.
+The client ignores the server's notice that it killed a recording, so while
+reads time out a latency query is sent at most once a second; the server
+answers it with an error for a killed stream, and the read returns that error.
 
 Text temporarily binds an unused keycode to a Unicode keysym. X11 has no
 acknowledgement that a client has consumed a key event, so each character
