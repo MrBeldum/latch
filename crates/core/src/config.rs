@@ -679,6 +679,10 @@ mod tests {
         let Ok(name) = std::env::var("LATCH_TEST_CONFIG_NAME") else {
             return;
         };
+        if std::env::var_os("LATCH_TEST_EXIT_WITH_LOCK").is_some() {
+            let _lock = lock_config(&name).unwrap();
+            std::process::exit(0); // deliberately skip Drop, as a crashed process would
+        }
         for _ in 0..20 {
             update::<Cfg>(&name, |c| c.n += 1).unwrap();
         }
@@ -700,6 +704,16 @@ mod tests {
         assert!(first.wait().unwrap().success());
         assert!(second.wait().unwrap().success());
         assert_eq!(load::<Cfg>(&name).n, 40);
+        let exited = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "config::tests::config_process_writer"])
+            .env("LATCH_TEST_CONFIG_NAME", &name)
+            .env("LATCH_TEST_EXIT_WITH_LOCK", "1")
+            .status()
+            .unwrap();
+        assert!(exited.success());
+        // A leftover .lock file must not act as a stale ownership marker.
+        update::<Cfg>(&name, |c| c.n += 1).unwrap();
+        assert_eq!(load::<Cfg>(&name).n, 41);
         std::fs::remove_file(data_dir().unwrap().join(name)).unwrap();
     }
 

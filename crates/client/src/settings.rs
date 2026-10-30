@@ -256,5 +256,12 @@ mod tests {
         assert_eq!(harness.state().s.resolution, Resolution::P720);
         assert_eq!(harness.state().s.bitrate_kbps, 15_000);
         assert_eq!(harness.state().s.fps, 30);
+        for label in ["Smooth", "Recommended", "Custom"] {
+            harness.get_by_label(label).click();
+            harness.run();
+        }
+        assert_eq!(harness.state().s.resolution, Resolution::P720);
+        assert_eq!(harness.state().s.bitrate_kbps, 15_000);
+        assert_eq!(harness.state().s.fps, 30);
     }
 }
