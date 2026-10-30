@@ -282,7 +282,7 @@ pub fn yuv420_to_nv12(src: &Yuv420, y: &mut Vec<u8>, uv: &mut Vec<u8>) -> (usize
     let w = src.width as usize;
     let h = src.height as usize;
     let y_stride = w;
-    let uv_stride = w;
+    let uv_stride = w.div_ceil(2) * 2;
 
     y.resize(y_stride * h, 0);
     for row in 0..h {
@@ -378,6 +378,43 @@ mod simd_tests {
                     bgra_to_yuv420_rows_impl::<true>(input, w, h, stride, 0..h, &mut actual);
                     bgra_to_yuv420_rows_impl::<false>(input, w, h, stride, 0..h, &mut scalar);
                     assert_eq!(actual, scalar, "{w}x{h} missing={missing}");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod nv12_tests {
+    use super::*;
+
+    #[test]
+    fn odd_visible_sizes_preserve_the_last_chroma_pair() {
+        for (w, h) in [(19, 13), (1, 1), (2, 2), (17, 16)] {
+            let mut src = Yuv420::new(w, h);
+            for (i, v) in src.y.iter_mut().enumerate() {
+                *v = i as u8;
+            }
+            for (i, v) in src.u.iter_mut().enumerate() {
+                *v = i as u8;
+            }
+            for (i, v) in src.v.iter_mut().enumerate() {
+                *v = !(i as u8);
+            }
+            let (mut y, mut uv) = (vec![], vec![]);
+            let (ys, uvs) = yuv420_to_nv12(&src, &mut y, &mut uv);
+            assert_eq!(ys, w as usize);
+            assert_eq!(uvs, (w as usize).div_ceil(2) * 2);
+            for row in 0..h as usize {
+                assert_eq!(
+                    &y[row * ys..(row + 1) * ys],
+                    &src.y[row * src.y_stride..row * src.y_stride + ys]
+                );
+            }
+            for row in 0..(h as usize).div_ceil(2) {
+                for x in 0..(w as usize).div_ceil(2) {
+                    assert_eq!(uv[row * uvs + x * 2], src.u[row * src.c_stride + x]);
+                    assert_eq!(uv[row * uvs + x * 2 + 1], src.v[row * src.c_stride + x]);
                 }
             }
         }
