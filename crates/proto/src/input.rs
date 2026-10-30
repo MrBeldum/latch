@@ -21,9 +21,9 @@ pub const RESEND: Duration = Duration::from_millis(20);
 /// Backlog threshold retained for callers monitoring input congestion.
 /// Motion only merges with an adjacent, unsent event, regardless of backlog.
 pub const MAX_UNACKED: usize = 1024;
-/// Enough for 65 seconds of uncoalesced 1000 Hz input, beyond the session's
-/// ten-second silence timeout. Never mutate an event already assigned and sent.
-/// The receiver uses the same window so it can retain the whole backlog.
+/// Receiver reorder window. The sender retains input until acknowledged,
+/// including backlogs larger than this window: it sends oldest first, so it
+/// never needs the receiver to buffer the entire backlog at once.
 pub const HARD_MAX_UNACKED: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,9 +244,6 @@ impl InputSender {
     }
 
     fn enqueue(&mut self, event: Event) {
-        if self.queue.len() >= HARD_MAX_UNACKED {
-            return;
-        }
         self.queue.push_back((self.next, event, false));
         self.next = self.next.wrapping_add(1);
         self.changed = true;

@@ -111,20 +111,20 @@ fn input_full_queue_preserves_relative_motion_without_saturation() {
 }
 
 #[test]
-fn input_hard_cap_refuses_only_new_events_without_sequence_gaps() {
+fn input_backlog_never_discards_critical_events_or_creates_sequence_gaps() {
     let mut sender = InputSender::new(1);
     for _ in 0..65_536 + 1 {
         sender.push(Event::ReleaseAll);
     }
-    assert_eq!(sender.unacked(), 65_536);
-    assert_eq!(drain_input(&mut sender, Instant::now()).len(), 65_536);
+    assert_eq!(sender.unacked(), 65_537);
+    assert_eq!(drain_input(&mut sender, Instant::now()).len(), 65_537);
     sender.push(position(1));
     let mut out = Vec::new();
     assert!(sender.poll(Instant::now(), &mut out));
     let Datagram::Input { first, .. } = wire::parse(&out).unwrap() else {
         panic!()
     };
-    assert_eq!(first, 65_536);
+    assert_eq!(first, 65_537);
 }
 
 #[test]
