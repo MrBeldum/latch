@@ -42,17 +42,28 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
         if ui::segmented(ui, &options, &mut profile) {
             match profile {
                 Profile::Recommended => {
+                    if s.quality == Quality::Custom {
+                        s.custom_resolution = Some(s.resolution);
+                        s.custom_fps = Some(s.fps);
+                        s.custom_bitrate_kbps = Some(s.bitrate_kbps);
+                    }
                     s.quality = Quality::Auto;
                     s.resolution = Resolution::Native;
                 }
-                Profile::Preset(p) => s.apply_preset(p),
-                Profile::Custom => {
-                    // Start from what Recommended was asking for, so
-                    // nothing jumps.
-                    if s.quality == Quality::Auto {
-                        s.resolution = Resolution::Native;
-                        s.bitrate_kbps = 50_000;
+                Profile::Preset(p) => {
+                    if s.quality == Quality::Custom && s.preset().is_none() {
+                        s.custom_resolution = Some(s.resolution);
+                        s.custom_fps = Some(s.fps);
+                        s.custom_bitrate_kbps = Some(s.bitrate_kbps);
                     }
+                    s.apply_preset(p);
+                }
+                Profile::Custom => {
+                    // Restore previously dialed custom values if available,
+                    // otherwise start from what Recommended was asking for.
+                    s.resolution = s.custom_resolution.unwrap_or(Resolution::Native);
+                    s.fps = s.custom_fps.unwrap_or(s.fps);
+                    s.bitrate_kbps = s.custom_bitrate_kbps.unwrap_or(50_000);
                     s.quality = Quality::Custom;
                 }
             }
@@ -73,6 +84,7 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
             if resolution != s.resolution {
                 s.resolution = resolution;
                 s.quality = Quality::Custom;
+                s.custom_resolution = Some(resolution);
             }
         },
     );
@@ -82,11 +94,17 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
         "Frame rate",
         Some("Above 60 needs a display there that runs that fast."),
         |ui| {
-            ui::select(ui, "stream-fps", format!("{} fps", s.fps), 120.0, |ui| {
-                for fps in [30, 60, 90, 120, 144, 165, 240] {
-                    ui::select_option(ui, &mut s.fps, fps, format!("{fps} fps"));
+            let mut fps = s.fps;
+            ui::select(ui, "stream-fps", format!("{fps} fps"), 120.0, |ui| {
+                for choice in [30, 60, 90, 120, 144, 165, 240] {
+                    ui::select_option(ui, &mut fps, choice, format!("{choice} fps"));
                 }
             });
+            if fps != s.fps {
+                s.fps = fps;
+                s.quality = Quality::Custom;
+                s.custom_fps = Some(fps);
+            }
         },
     );
     ui::row_separator(ui);
@@ -96,13 +114,14 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
         Some("The encoder aims at this while the picture moves; a still screen uses less."),
         |ui| {
             let mut mbps = if s.quality == Quality::Auto {
-                50
+                s.custom_bitrate_kbps.map_or(50, |k| k / 1000)
             } else {
                 s.bitrate_kbps / 1000
             };
             if ui::slider(ui, &mut mbps, 2..=150, 180.0, "Bitrate").changed() {
                 s.quality = Quality::Custom;
                 s.bitrate_kbps = mbps * 1000;
+                s.custom_bitrate_kbps = Some(s.bitrate_kbps);
             }
             ui::slider_value(ui, &format!("{mbps} Mbps"));
         },
@@ -143,6 +162,7 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui_kittest::kittest::Queryable;
 
     #[test]
     fn the_profile_follows_the_values() {
@@ -152,5 +172,89 @@ mod tests {
         assert_eq!(Profile::of(&s), Profile::Preset(Preset::Smooth));
         s.fps = 144;
         assert_eq!(Profile::of(&s), Profile::Custom);
+    }
+
+    #[test]
+    fn frame_rate_selector_switches_quality_to_custom() {
+        struct State {
+            applied: bool,
+            s: StreamSettings,
+        }
+        let state = State {
+            applied: false,
+            s: StreamSettings::default(),
+        };
+        assert_eq!(state.s.quality, Quality::Auto);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(600.0, 400.0))
+            .build_state(
+                |ctx, state| {
+                    if !state.applied {
+                        latch_ui::apply(ctx);
+                        state.applied = true;
+                        return;
+                    }
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        stream_controls(ui, &mut state.s, (1920, 1080));
+                    });
+                },
+                state,
+            );
+        harness.run();
+        harness
+            .get_all_by_label("Frame rate")
+            .into_iter()
+            .find(|n| n.role() == egui::accesskit::Role::ComboBox)
+            .expect("frame rate combo box")
+            .click();
+        harness.run();
+        harness.get_by_label("120 fps").click();
+        harness.run();
+        assert_eq!(harness.state().s.fps, 120);
+        assert_eq!(harness.state().s.quality, Quality::Custom);
+    }
+
+    #[test]
+    fn custom_settings_preserved_across_preset_switches() {
+        struct State {
+            applied: bool,
+            s: StreamSettings,
+        }
+        let state = State {
+            applied: false,
+            s: StreamSettings {
+                quality: Quality::Custom,
+                resolution: Resolution::P720,
+                fps: 30,
+                bitrate_kbps: 15_000,
+                ..Default::default()
+            },
+        };
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(600.0, 400.0))
+            .build_state(
+                |ctx, state| {
+                    if !state.applied {
+                        latch_ui::apply(ctx);
+                        state.applied = true;
+                        return;
+                    }
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        stream_controls(ui, &mut state.s, (1920, 1080));
+                    });
+                },
+                state,
+            );
+        harness.run();
+        harness.get_by_label("Recommended").click();
+        harness.run();
+        assert_eq!(harness.state().s.quality, Quality::Auto);
+
+        harness.get_by_label("Custom").click();
+        harness.run();
+        assert_eq!(harness.state().s.quality, Quality::Custom);
+        assert_eq!(harness.state().s.resolution, Resolution::P720);
+        assert_eq!(harness.state().s.bitrate_kbps, 15_000);
+        assert_eq!(harness.state().s.fps, 30);
     }
 }

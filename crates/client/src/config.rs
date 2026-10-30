@@ -129,6 +129,12 @@ pub struct StreamSettings {
     pub bitrate_kbps: u32,
     pub codec: Codec,
     pub fullscreen: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_resolution: Option<Resolution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_fps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_bitrate_kbps: Option<u32>,
 }
 
 impl Default for StreamSettings {
@@ -140,6 +146,9 @@ impl Default for StreamSettings {
             bitrate_kbps: 50_000,
             codec: Codec::Auto,
             fullscreen: true,
+            custom_resolution: None,
+            custom_fps: None,
+            custom_bitrate_kbps: None,
         }
     }
 }
