@@ -811,40 +811,44 @@ fn receive(
         if let Some(link) = inner.link.lock().as_mut() {
             link.flush(now);
         }
-        match udp.recv_from(&mut buf) {
-            Ok((n, from)) if from.ip() == host.ip() => {
-                if let Ok(datagram) = wire::parse(&buf[..n]) {
-                    if datagram.session() == session {
-                        inner.heard();
-                        handle(
-                            inner,
-                            &datagram,
-                            &udp,
-                            from,
-                            &mut out,
-                            &mut reassembler,
-                            &mut audio_rx,
-                            &mut rtt,
-                            player.as_mut(),
-                            &mut media_seen,
-                            &mut window_bytes,
-                            n,
-                        );
+        // Drain a bounded batch before timers and feedback bookkeeping.
+        for _ in 0..64 {
+            match ready_socket.recv_from(&mut buf) {
+                Ok((n, from)) if from.ip() == host.ip() => {
+                    if let Ok(datagram) = wire::parse(&buf[..n]) {
+                        if datagram.session() == session {
+                            inner.heard();
+                            handle(
+                                inner,
+                                &datagram,
+                                &udp,
+                                from,
+                                &mut out,
+                                &mut reassembler,
+                                &mut audio_rx,
+                                &mut rtt,
+                                player.as_mut(),
+                                &mut media_seen,
+                                &mut window_bytes,
+                                n,
+                            );
+                        }
                     }
                 }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    let now = Instant::now();
+                    let deadline = reassembler
+                        .next_deadline()
+                        .unwrap_or(now + Duration::from_millis(20));
+                    let wait = deadline
+                        .saturating_duration_since(now)
+                        .min(Duration::from_millis(20));
+                    let _ = poll.poll(&mut events, Some(wait));
+                    break;
+                }
+                Err(_) => {}
             }
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                let now = Instant::now();
-                let deadline = reassembler
-                    .next_deadline()
-                    .unwrap_or(now + Duration::from_millis(20));
-                let wait = deadline
-                    .saturating_duration_since(now)
-                    .min(Duration::from_millis(20));
-                let _ = poll.poll(&mut events, Some(wait));
-            }
-            Err(_) => {}
         }
         let now = Instant::now();
         while let Some(event) = reassembler.poll(now) {

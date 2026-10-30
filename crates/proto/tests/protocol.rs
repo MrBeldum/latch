@@ -981,3 +981,29 @@ fn bottleneck_serializes_bounds_and_removes_queue() {
         vec![vec![1]]
     );
 }
+
+#[test]
+fn recovered_audio_pts_follows_negotiated_five_ms_packets() {
+    let now = Instant::now();
+    for missing in [0, 3] {
+        let mut tx = AudioPacketizer::new(42);
+        let mut rx = AudioReceiver::with_format(42, 240, 48_000);
+        for seq in 0..4 {
+            tx.packetize(100_000 + seq * 5_000, &[seq as u8; 20], |bytes| {
+                if let Datagram::Audio { packet, .. } = wire::parse(bytes).unwrap() {
+                    if packet.parity || packet.seq != missing {
+                        rx.push(&packet, now);
+                    }
+                }
+            });
+        }
+        let mut found = false;
+        while let Some(output) = rx.pop() {
+            if let AudioOut::Frame { seq, pts, .. } = output {
+                assert_eq!(pts, 100_000 + seq * 5_000);
+                found |= seq == missing;
+            }
+        }
+        assert!(found);
+    }
+}

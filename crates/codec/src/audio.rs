@@ -679,3 +679,45 @@ pub fn decode(data: &[u8], pcm: &mut Vec<i16>) -> Result<(), AudioError> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod transport_bounds {
+    #[test]
+    fn full_range_stereo_always_fits_verbatim_bound() {
+        let mut seed = 7u32;
+        for pairs in [1, 240, 480] {
+            for kind in 0..8 {
+                let pcm: Vec<i16> = (0..pairs * 2)
+                    .map(|i| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        match kind {
+                            0 => {
+                                if i % 2 == 0 {
+                                    i16::MIN
+                                } else {
+                                    i16::MAX
+                                }
+                            }
+                            1 => {
+                                if i % 2 == 0 {
+                                    i16::MAX
+                                } else {
+                                    i16::MIN
+                                }
+                            }
+                            _ => seed as i16,
+                        }
+                    })
+                    .collect();
+                let mut encoded = Vec::new();
+                super::encode(&pcm, &mut encoded);
+                assert!(encoded.len() <= 3 + 2 * (1 + pairs * 2));
+                let mut decoded = Vec::new();
+                super::decode(&encoded, &mut decoded).unwrap();
+                assert_eq!(decoded, pcm);
+            }
+        }
+    }
+}
