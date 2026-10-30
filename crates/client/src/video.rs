@@ -48,8 +48,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     var cr: f32;
     if (u.full_range == 1u) {
         yy = y;
-        cb = c.x - 0.5;
-        cr = c.y - 0.5;
+        cb = c.x - 128.0 / 255.0;
+        cr = c.y - 128.0 / 255.0;
     } else {
         yy = (y - 16.0 / 255.0) * (255.0 / 219.0);
         cb = (c.x - 128.0 / 255.0) * (255.0 / 224.0);
@@ -406,5 +406,21 @@ mod tests {
                 "black half: {bottom:?}"
             );
         }
+    }
+
+    #[test]
+    fn full_range_chroma_offset_uses_digital_128_neutral_point() {
+        assert!(
+            !SHADER.contains("cb = c.x - 0.5;"),
+            "shader must not use 0.5 for 8-bit full-range chroma neutral offset"
+        );
+        assert!(
+            SHADER.contains("cb = c.x - 128.0 / 255.0;"),
+            "shader must use 128.0 / 255.0 for 8-bit full-range Cb offset"
+        );
+        assert!(
+            SHADER.contains("cr = c.y - 128.0 / 255.0;"),
+            "shader must use 128.0 / 255.0 for 8-bit full-range Cr offset"
+        );
     }
 }

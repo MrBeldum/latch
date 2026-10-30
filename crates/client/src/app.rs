@@ -70,6 +70,14 @@ enum Confirmable {
     Forget,
 }
 
+/// The outcome of an attempt to turn HDR off on the remote PC.
+#[derive(Debug, Clone)]
+struct HdrCompletion {
+    ip: std::net::Ipv4Addr,
+    pc: Pc,
+    result: Result<bool, String>,
+}
+
 /// The window's pages, one per tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -138,6 +146,7 @@ pub struct ClientApp {
     power_sent: Arc<AtomicBool>,
     ended_seen: bool,
     pending_notice: Option<Notice>,
+    pending_hdr: Option<Arc<Mutex<Option<HdrCompletion>>>>,
     updates: Arc<Mutex<update::State>>,
     /// The PC last connected to, for a reconnect at another quality.
     last_pc: Option<Pc>,
@@ -256,6 +265,7 @@ impl ClientApp {
             power_sent: Arc::default(),
             ended_seen: true,
             pending_notice: None,
+            pending_hdr: None,
             updates: Arc::default(),
             last_pc: None,
             reconnect: None,
@@ -335,6 +345,7 @@ impl ClientApp {
         let Some(target) = Target::from_pc(pc) else {
             return;
         };
+        self.pending_hdr = None;
         self.ended_seen = false;
         self.offer_sleep = None;
         self.streamed = false;
@@ -426,7 +437,7 @@ impl ClientApp {
 
     /// Turn the PC's HDR desktop off, then start a fresh capture: the old
     /// one keeps producing the black frames it was already producing.
-    fn turn_off_hdr(&mut self, _ctx: &egui::Context, ip: std::net::Ipv4Addr) {
+    fn turn_off_hdr(&mut self, ctx: &egui::Context, ip: std::net::Ipv4Addr) {
         let help = self.video_help.clone();
         if help.lock().as_ref().is_some_and(|h| h.busy) {
             return;
@@ -434,29 +445,33 @@ impl ClientApp {
         if let Some(h) = help.lock().as_mut() {
             h.busy = true;
         }
-        self.notify_later(move || {
-            let told = match crate::display::set_hdr(ip, false) {
+        let Some(pc) = self.last_pc.clone() else {
+            return;
+        };
+        let completion: Arc<Mutex<Option<HdrCompletion>>> = Arc::default();
+        let slot = completion.clone();
+        self.pending_hdr = Some(completion);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = match crate::display::set_hdr(ip, false) {
                 Ok(state) => {
                     if crate::display::hdr_is_on(&serde_json::json!({"advanced_color": state})) {
-                        (Tone::Danger, "The PC kept its HDR desktop on.".to_string())
+                        Ok(false)
                     } else {
-                        (
-                            Tone::Success,
-                            "HDR is off on the PC. Starting a fresh capture…".to_string(),
-                        )
+                        Ok(true)
                     }
                 }
-                Err(e) => (Tone::Danger, format!("Couldn't turn HDR off: {e}")),
+                Err(e) => Err(format!("{e:#}")),
             };
             if let Some(h) = help.lock().as_mut() {
                 h.busy = false;
-                h.hdr_is_on = told.0 != Tone::Success;
+                if let Ok(turned_off) = &result {
+                    h.hdr_is_on = !turned_off;
+                }
             }
-            told
+            *slot.lock() = Some(HdrCompletion { ip, pc, result });
+            ctx.request_repaint();
         });
-        // The picture cannot recover on the capture that is already black.
-        self.reconnect = self.last_pc.clone();
-        self.disconnect();
     }
 
     /// Ask the machine at `ip` to sleep, restart or shut down. A stream from
@@ -467,6 +482,11 @@ impl ClientApp {
         let name = name.to_string();
         let ours = self.is_current_target(ip);
         if ours {
+            self.pending_hdr = None;
+            self.reconnect = None;
+            if self.view.interrupted.is_some() {
+                self.view.interrupted = Some(crate::stream::Interruption::HostSleeping);
+            }
             self.power_sent.store(true, Ordering::Relaxed);
             if self.live.lock().is_some() {
                 self.view.toast(
@@ -524,11 +544,12 @@ impl ClientApp {
     }
 
     fn disconnect(&mut self) {
+        self.pending_hdr = None;
+        self.reconnect = None;
+        self.view.interrupted = None;
         let live = self.live.lock();
         let mut p = self.progress.lock();
-        if p.active() {
-            p.cancel = true;
-        }
+        p.cancel = true;
         if let Some(l) = live.as_ref() {
             l.input.release_all();
             l.session.stop();
@@ -549,7 +570,14 @@ impl ClientApp {
                 }
             }
             let mut prog = self.progress.lock();
-            while let Ok(ev) = live.events.try_recv() {
+            while live.generation == prog.generation {
+                let Ok(ev) = live.events.try_recv() else {
+                    break;
+                };
+                if prog.cancel {
+                    live.session.stop();
+                    continue;
+                }
                 match ev {
                     Event::Stage(s) => {
                         if prog.step == Step::Connecting {
@@ -557,19 +585,24 @@ impl ClientApp {
                         }
                     }
                     Event::Connected => {
-                        if prog.cancel || matches!(prog.step, Step::Ended { .. }) {
+                        if prog.cancel
+                            || matches!(prog.step, Step::Ended { .. })
+                            || self.power_sent.load(Ordering::Relaxed)
+                        {
                             live.session.stop();
-                            break;
+                            continue;
                         }
                         prog.step = Step::Streaming;
                         prog.since = Instant::now();
                         self.streamed = true;
+                        let restoring = self.fullscreen_after.is_some();
                         self.fullscreen_after.get_or_insert(self.fullscreen);
                         if self.cfg.stream.fullscreen {
                             fullscreen = Some(true);
-                        } else {
+                        } else if !restoring {
                             fit_window_to(ctx, live.requested.0, live.requested.1);
                         }
+                        self.view.interrupted = None;
                         self.view.stream_started(ctx, live, self.cfg.capture_mouse);
                         if let Some(problem) = host_audio_problem(&self.discovery, &live.node_id) {
                             self.view.toast(
@@ -589,6 +622,9 @@ impl ClientApp {
                             if cancelled { " after a stop" } else { "" }
                         );
                         self.stream_failed = !cancelled;
+                        if !cancelled && live.frames.seq() > 0 && self.view.interrupted.is_none() {
+                            self.view.handle_interruption();
+                        }
                         prog.step = Step::Ended {
                             error: (!cancelled).then(|| stream_failure(&message)),
                         };
@@ -598,6 +634,13 @@ impl ClientApp {
                         let error = code != 0 && code != 1 && !cancelled;
                         if code == 1 && !cancelled {
                             self.notice = Some((Tone::Info, message.clone(), Instant::now()));
+                            self.view.interrupted =
+                                Some(crate::stream::Interruption::TakenOver(message.clone()));
+                        } else if self.power_sent.load(Ordering::Relaxed) {
+                            self.view.interrupted = Some(crate::stream::Interruption::HostSleeping);
+                        } else if error && live.frames.seq() > 0 && self.view.interrupted.is_none()
+                        {
+                            self.view.handle_interruption();
                         }
                         if code != 0 {
                             tracing::warn!(
@@ -620,17 +663,39 @@ impl ClientApp {
                         .toast(Tone::Warning, format!("No sound on this machine: {e}.")),
                 }
             }
+            let is_reconnecting = matches!(
+                self.view.interrupted,
+                Some(crate::stream::Interruption::Reconnecting(ref s)) if s.in_flight
+            );
+            if is_reconnecting
+                && self.reconnect.is_none()
+                && matches!(prog.step, Step::Ended { .. })
+                && !prog.cancel
+            {
+                self.view.handle_interruption();
+            }
+            if self.view.interrupted.is_some() {
+                let interruption = self.view.interrupted.take();
+                self.view.reset(ctx, Some(live));
+                self.view.interrupted = interruption;
+            }
             // A stop we asked for ends without a Terminated event.
             let ended = matches!(prog.step, Step::Ended { .. });
             if live.session.finished() {
-                if !ended {
-                    prog.step = Step::Ended { error: None };
+                if self.view.interrupted.is_some() && !prog.cancel {
+                    // Retain in-stream view to show interruption overlay until user acts
+                } else {
+                    if !ended {
+                        prog.step = Step::Ended { error: None };
+                    }
+                    self.view.reset(ctx, Some(live));
+                    *guard = None;
+                    fullscreen = fullscreen_when_finished(
+                        self.reconnect.is_some(),
+                        &mut self.fullscreen_after,
+                    );
                 }
-                self.view.reset(ctx, Some(live));
-                *guard = None;
-                fullscreen =
-                    fullscreen_when_finished(self.reconnect.is_some(), &mut self.fullscreen_after);
-            } else if ended {
+            } else if ended && self.view.interrupted.is_none() {
                 live.session.stop();
             }
         }
@@ -660,7 +725,10 @@ impl ClientApp {
         }
 
         let size = Self::native_pixels(ctx);
-        if size == self.display_at_connect || self.reconnect.is_some() {
+        if size == self.display_at_connect
+            || self.reconnect.is_some()
+            || self.view.interrupted.is_some()
+        {
             self.display_change = None;
             return;
         }
@@ -679,8 +747,8 @@ impl ClientApp {
                         != asked
                 });
                 if changes {
-                    self.reconnect = self.last_pc.clone();
                     self.disconnect();
+                    self.reconnect = self.last_pc.clone();
                 } else {
                     // Nothing to ask for anew: this display is the one the
                     // stream is for now.
@@ -709,6 +777,34 @@ impl ClientApp {
         }
         if done {
             self.pending_notice = None;
+        }
+    }
+
+    fn poll_hdr(&mut self) {
+        let ready = self.pending_hdr.as_ref().and_then(|h| h.lock().take());
+        if let Some(completion) = ready {
+            self.pending_hdr = None;
+            let (tone, text, succeed) = match completion.result {
+                Ok(true) => (
+                    Tone::Success,
+                    "HDR is off on the PC. Starting a fresh capture…".to_string(),
+                    true,
+                ),
+                Ok(false) => (
+                    Tone::Danger,
+                    "The PC kept its HDR desktop on.".to_string(),
+                    false,
+                ),
+                Err(e) => (Tone::Danger, format!("Couldn't turn HDR off: {e}"), false),
+            };
+            if self.live.lock().is_some() {
+                self.view.toast(tone, text.clone());
+            }
+            self.notice = Some((tone, text, Instant::now()));
+            if succeed && !self.progress.lock().cancel && self.is_current_target(completion.ip) {
+                self.disconnect();
+                self.reconnect = Some(completion.pc);
+            }
         }
     }
 
@@ -748,6 +844,15 @@ impl ClientApp {
             }
         }
     }
+}
+
+fn reconnect_pc(discovery: &Discovery, saved: Pc) -> Pc {
+    discovery
+        .pcs
+        .iter()
+        .find(|p| p.node_id == saved.node_id && p.ip.is_some())
+        .cloned()
+        .unwrap_or(saved)
 }
 
 /// Full screen or not once a stream has finished. A restart, new settings
@@ -846,11 +951,28 @@ impl eframe::App for ClientApp {
         }
         self.poll_live(ctx);
         self.poll_notice();
+        self.poll_hdr();
 
         let streaming = self.live.lock().is_some();
         if streaming {
-            // The stream repaints itself on every decoded frame.
-            ctx.request_repaint_after(Duration::from_millis(250));
+            if self.view.interrupted.is_none() || self.progress.lock().active() {
+                // The stream repaints itself on every decoded frame.
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+
+            if let Some(pc) = self.reconnect.take() {
+                let prog_active = self.progress.lock().active();
+                if prog_active {
+                    self.reconnect = Some(pc);
+                    ctx.request_repaint_after(Duration::from_millis(250));
+                } else {
+                    let disc = self.discovery.lock().clone();
+                    let fresh = reconnect_pc(&disc, pc);
+                    self.connect(ctx, &fresh);
+                    self.commit();
+                }
+            }
+
             let live = self.live.clone();
             let guard = live.lock();
             if let Some(l) = guard.as_ref() {
@@ -902,7 +1024,13 @@ impl eframe::App for ClientApp {
                 drop(guard);
                 for a in actions {
                     match a {
-                        Action::Disconnect => self.disconnect(),
+                        Action::Disconnect => {
+                            self.view.cancel_reconnect();
+                            self.disconnect();
+                        }
+                        Action::Reconnect => {
+                            self.reconnect = self.last_pc.clone();
+                        }
                         Action::Power(action) => self.power(ip, &name, action),
                         Action::Fullscreen(on) => {
                             self.set_fullscreen(ctx, on);
@@ -920,8 +1048,8 @@ impl eframe::App for ClientApp {
                         Action::ApplySettings(settings) => {
                             self.cfg.stream = settings;
                             self.dirty = true;
-                            self.reconnect = self.last_pc.clone();
                             self.disconnect();
+                            self.reconnect = self.last_pc.clone();
                         }
                         Action::TurnOffHdr => self.turn_off_hdr(ctx, ip),
                         Action::InstallHost => {
@@ -946,12 +1074,7 @@ impl eframe::App for ClientApp {
                 ctx.request_repaint_after(Duration::from_millis(250));
             } else {
                 // Fresh details if discovery has them; the saved ones otherwise.
-                let fresh = disc
-                    .pcs
-                    .iter()
-                    .find(|p| p.node_id == pc.node_id)
-                    .cloned()
-                    .unwrap_or(pc);
+                let fresh = reconnect_pc(&disc, pc);
                 self.connect(ctx, &fresh);
                 self.commit();
                 return;
@@ -983,7 +1106,7 @@ impl eframe::App for ClientApp {
                 None => self.notice = None,
             }
         }
-        if self.pending_notice.is_some() {
+        if self.pending_notice.is_some() || self.pending_hdr.is_some() {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
         self.shortcuts(ctx);
@@ -3752,6 +3875,38 @@ pub(crate) mod snapshots {
     }
 
     #[test]
+    fn takeover_displays_in_stream_overlay_without_dropping_live() {
+        let mut h = build(Setup::new(pcs()), MIN, 1.0, false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut live = crate::stream::tests::dummy_live(&h.ctx);
+        live.events = rx;
+        *h.state().live.lock() = Some(live);
+        tx.send(Event::Terminated {
+            code: 1,
+            message: "Another device is watching Gaming-PC.".into(),
+        })
+        .unwrap();
+        let ctx = h.ctx.clone();
+        h.state_mut().poll_live(&ctx);
+
+        assert_eq!(
+            h.state().view.interrupted,
+            Some(crate::stream::Interruption::TakenOver(
+                "Another device is watching Gaming-PC.".into()
+            ))
+        );
+        assert!(h.state().live.lock().is_some());
+
+        h.run_steps(1);
+        assert!(h.query_by_label("Another device took over").is_some());
+        assert!(h
+            .query_by_label("Another device is watching Gaming-PC.")
+            .is_some());
+        assert!(h.query_by_label("Reconnect now").is_some());
+        assert!(h.query_by_label("Back to machines").is_some());
+    }
+
+    #[test]
     #[ignore = "renders changed streaming UI text with a GPU"]
     fn snapshots_client_migration() {
         for (name, setup, size) in [
@@ -4223,5 +4378,270 @@ mod live_snapshot {
                 "the host supplied no visible picture: {problem:?}"
             );
         }
+    }
+
+    #[test]
+    fn review_retry_flow_ignores_old_events_and_counts_worker_failures_once() {
+        let mut h = snapshots::build(
+            snapshots::Setup::new(Discovery::default()),
+            egui::vec2(800.0, 600.0),
+            1.0,
+            false,
+        );
+        let ctx = h.ctx.clone();
+        let mut live = crate::stream::tests::dummy_live(&ctx);
+        let (tx, rx) = std::sync::mpsc::channel();
+        live.events = rx;
+        *h.state().live.lock() = Some(live);
+        h.state().progress.lock().step = Step::Ended {
+            error: Some("lost".into()),
+        };
+        h.state_mut().fullscreen_after = Some(false);
+        h.state_mut().fullscreen = true;
+        for attempt in 1..=3 {
+            h.state_mut().view.interrupted = Some(crate::stream::Interruption::Reconnecting(
+                crate::stream::ReconnectState {
+                    attempt,
+                    deadline: Instant::now(),
+                    in_flight: true,
+                },
+            ));
+            // The action is queued, but the next worker hasn't started yet.
+            h.state_mut().reconnect = Some(Pc::default());
+            h.state_mut().poll_live(&ctx);
+            assert!(
+                matches!(&h.state().view.interrupted, Some(crate::stream::Interruption::Reconnecting(s)) if s.attempt == attempt && s.in_flight)
+            );
+            h.state_mut().reconnect = None;
+            h.state().progress.lock().generation = attempt as u64;
+            h.state().progress.lock().step = Step::Launching;
+            tx.send(Event::Connected).unwrap();
+            h.state_mut().poll_live(&ctx);
+            assert_eq!(
+                h.state().progress.lock().step,
+                Step::Launching,
+                "old Connected cannot finish a new attempt"
+            );
+            h.state().progress.lock().step = Step::Ended {
+                error: Some("worker failed before publishing live".into()),
+            };
+            h.state_mut().poll_live(&ctx);
+            let after = h.state().view.interrupted.clone();
+            h.state_mut().poll_live(&ctx);
+            assert_eq!(h.state().view.interrupted, after, "one failure counts once");
+            if attempt < 3 {
+                assert!(
+                    matches!(after, Some(crate::stream::Interruption::Reconnecting(s)) if s.attempt == attempt + 1 && !s.in_flight)
+                );
+            } else {
+                assert_eq!(after, Some(crate::stream::Interruption::Failed));
+            }
+            assert!(h.state().fullscreen);
+            assert_eq!(h.state().fullscreen_after, Some(false));
+        }
+        h.state_mut().reconnect = Some(Pc::default());
+        h.state_mut().disconnect();
+        assert!(h.state().progress.lock().cancel);
+        assert!(h.state().reconnect.is_none());
+        assert!(h.state().view.interrupted.is_none());
+    }
+
+    #[test]
+    fn review_session_end_events_retry_only_unexpected_loss() {
+        for (cancel, sleeping, code, retry) in [
+            (false, false, 2, true),
+            (true, false, 2, false),
+            (false, true, 2, false),
+            (false, false, 1, false),
+        ] {
+            let mut h = snapshots::build(
+                snapshots::Setup::new(Discovery::default()),
+                egui::vec2(800.0, 600.0),
+                1.0,
+                false,
+            );
+            let ctx = h.ctx.clone();
+            let mut live = crate::stream::tests::dummy_live(&ctx);
+            live.frames.publish(Default::default());
+            let (tx, rx) = std::sync::mpsc::channel();
+            live.events = rx;
+            *h.state().live.lock() = Some(live);
+            h.state().progress.lock().step = Step::Streaming;
+            h.state().progress.lock().cancel = cancel;
+            h.state().power_sent.store(sleeping, Ordering::Relaxed);
+            tx.send(Event::Terminated {
+                code,
+                message: "ended".into(),
+            })
+            .unwrap();
+            h.state_mut().poll_live(&ctx);
+            assert_eq!(
+                matches!(
+                    h.state().view.interrupted,
+                    Some(crate::stream::Interruption::Reconnecting(_))
+                ),
+                retry
+            );
+            if retry {
+                assert!(
+                    matches!(&h.state().view.interrupted, Some(crate::stream::Interruption::Reconnecting(s)) if s.attempt == 1 && !s.in_flight)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn review_reconnect_retains_address_when_discovery_loses_it() {
+        let saved = Pc {
+            node_id: "a".into(),
+            ip: Some("100.64.0.1".parse().unwrap()),
+            ..Default::default()
+        };
+        let mut discovery = Discovery {
+            pcs: vec![Pc {
+                node_id: "a".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(reconnect_pc(&discovery, saved.clone()).ip, saved.ip);
+        discovery.pcs[0].ip = Some("100.64.0.2".parse().unwrap());
+        assert_eq!(reconnect_pc(&discovery, saved).ip, discovery.pcs[0].ip);
+    }
+
+    #[test]
+    fn review_disconnect_invalidates_hdr_completion() {
+        let mut h = snapshots::build(
+            snapshots::Setup::new(Discovery::default()),
+            egui::vec2(800.0, 600.0),
+            1.0,
+            false,
+        );
+        h.state_mut().pending_hdr = Some(Arc::new(Mutex::new(Some(HdrCompletion {
+            ip: "127.0.0.1".parse().unwrap(),
+            pc: Pc::default(),
+            result: Ok(true),
+        }))));
+        h.state_mut().disconnect();
+        assert!(h.state().pending_hdr.is_none());
+        h.state_mut().poll_hdr();
+        assert!(h.state().reconnect.is_none());
+    }
+
+    #[test]
+    fn turn_off_hdr_does_not_queue_reconnect_at_launch() {
+        let mut h = snapshots::build(
+            snapshots::Setup::new(Discovery::default()),
+            egui::vec2(800.0, 600.0),
+            1.0,
+            false,
+        );
+        let pc = Pc {
+            node_id: "test-node".into(),
+            name: "TestPC".into(),
+            ip: Some("127.0.0.1".parse().unwrap()),
+            online: true,
+            ..Default::default()
+        };
+        h.state_mut().last_pc = Some(pc.clone());
+        *h.state_mut().video_help.lock() = Some(crate::display::Help {
+            message: "Black screen".into(),
+            hdr_is_on: true,
+            mode: "HDR".into(),
+            busy: false,
+        });
+
+        let ctx = h.ctx.clone();
+        h.state_mut()
+            .turn_off_hdr(&ctx, "127.0.0.1".parse().unwrap());
+        assert_eq!(
+            h.state().reconnect,
+            None,
+            "reconnect must not be queued at launch"
+        );
+        assert!(
+            h.state().video_help.lock().as_ref().unwrap().busy,
+            "must be marked busy"
+        );
+    }
+
+    #[test]
+    fn poll_hdr_queues_reconnect_only_on_success_and_matching_target() {
+        let mut h = snapshots::build(
+            snapshots::Setup::new(Discovery::default()),
+            egui::vec2(800.0, 600.0),
+            1.0,
+            false,
+        );
+        let pc = Pc {
+            node_id: "test-node".into(),
+            name: "TestPC".into(),
+            ip: Some("127.0.0.1".parse().unwrap()),
+            online: true,
+            ..Default::default()
+        };
+        h.state_mut().last_pc = Some(pc.clone());
+
+        // Fake target as current connecting target
+        h.state_mut().progress.lock().pc = "TestPC".into();
+        h.state_mut().progress.lock().ip = Some("127.0.0.1".parse().unwrap());
+        h.state_mut().progress.lock().step = Step::Streaming;
+
+        let completion = HdrCompletion {
+            ip: "127.0.0.1".parse().unwrap(),
+            pc: pc.clone(),
+            result: Ok(true),
+        };
+        h.state_mut().pending_hdr = Some(Arc::new(Mutex::new(Some(completion))));
+
+        h.state_mut().poll_hdr();
+
+        assert_eq!(h.state().reconnect, Some(pc), "reconnect queued on success");
+        assert!(h.state().notice.is_some());
+        assert_eq!(h.state().notice.as_ref().unwrap().0, Tone::Success);
+    }
+
+    #[test]
+    fn poll_hdr_on_failure_surfaces_error_without_reconnect() {
+        let mut h = snapshots::build(
+            snapshots::Setup::new(Discovery::default()),
+            egui::vec2(800.0, 600.0),
+            1.0,
+            false,
+        );
+        let pc = Pc {
+            node_id: "test-node".into(),
+            name: "TestPC".into(),
+            ip: Some("127.0.0.1".parse().unwrap()),
+            online: true,
+            ..Default::default()
+        };
+        h.state_mut().last_pc = Some(pc.clone());
+        h.state_mut().progress.lock().pc = "TestPC".into();
+        h.state_mut().progress.lock().ip = Some("127.0.0.1".parse().unwrap());
+
+        let completion = HdrCompletion {
+            ip: "127.0.0.1".parse().unwrap(),
+            pc,
+            result: Err("connection refused".into()),
+        };
+        h.state_mut().pending_hdr = Some(Arc::new(Mutex::new(Some(completion))));
+
+        h.state_mut().poll_hdr();
+
+        assert_eq!(
+            h.state().reconnect,
+            None,
+            "reconnect must not be queued on error"
+        );
+        assert!(h.state().notice.is_some());
+        assert_eq!(h.state().notice.as_ref().unwrap().0, Tone::Danger);
+        assert!(h
+            .state()
+            .notice
+            .as_ref()
+            .unwrap()
+            .1
+            .contains("Couldn't turn HDR off: connection refused"));
     }
 }

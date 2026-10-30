@@ -20,7 +20,7 @@ use latch_proto::wire::{self, Datagram};
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -232,6 +232,7 @@ struct Inner {
     connected: AtomicBool,
     stop: AtomicBool,
     finished: AtomicBool,
+    audio_gain: Arc<AtomicU32>,
     done: Mutex<bool>,
     done_cv: Condvar,
 }
@@ -375,6 +376,7 @@ impl Session {
             connected: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             finished: AtomicBool::new(false),
+            audio_gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             done: Mutex::new(false),
             done_cv: Condvar::new(),
         });
@@ -418,6 +420,16 @@ impl Session {
         let mut stats = self.inner.stats.lock().clone();
         stats.video_problem = self.inner.video_health.lock().problem(Instant::now());
         stats
+    }
+
+    pub fn set_volume(&self, gain: f32) {
+        self.inner
+            .audio_gain
+            .store(gain.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.inner.audio_gain.load(Ordering::Relaxed))
     }
 
     pub fn input(&self) -> Input {
@@ -572,7 +584,12 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         }
     }
     let player = accept.audio.as_ref().and_then(|a| {
-        match Player::new(a.rate, a.channels as usize, a.frame_samples as usize) {
+        match Player::with_gain(
+            a.rate,
+            a.channels as usize,
+            a.frame_samples as usize,
+            inner.audio_gain.clone(),
+        ) {
             Ok(p) => Some(p),
             Err(e) => {
                 inner.emit(Event::NoAudio(format!("{e:#}")));
@@ -1138,6 +1155,11 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
                     named = decoder.name();
                     inner.stats.lock().decoder = named;
                 }
+                if picture.width > 0 && picture.height > 0 {
+                    let mut st = inner.stats.lock();
+                    st.width = picture.width;
+                    st.height = picture.height;
+                }
                 let black = picture.is_black();
                 inner.frames.publish(picture);
                 (inner.wake)();
@@ -1333,5 +1355,85 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         drop(server_sock);
+    }
+
+    #[test]
+    fn decoded_picture_updates_session_stats_dimensions() {
+        let (tx, _rx) = mpsc::channel();
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let frames = Arc::new(FrameSlot::default());
+        let inner = Arc::new(Inner {
+            events: tx,
+            wake: Box::new(move || {
+                let _ = wake_tx.send(());
+            }),
+            frames,
+            stats: Mutex::new(Stats {
+                width: 64,
+                height: 64,
+                ..Default::default()
+            }),
+            host_audio_problem: Mutex::new(String::new()),
+            video_health: Mutex::new(VideoHealth::default()),
+            decode: Mutex::new(DecodeWindow::default()),
+            link: Mutex::new(None),
+            queue: Mutex::new(DecodeQueue::default()),
+            queue_cv: Condvar::new(),
+            tcp: Mutex::new(None),
+            epoch: Instant::now(),
+            heard_us: AtomicU64::new(0),
+            raw_loss_milli: AtomicU64::new(0),
+            connected: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            audio_gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            done: Mutex::new(false),
+            done_cv: Condvar::new(),
+        });
+
+        struct FakeDecoder;
+        impl video::Decoder for FakeDecoder {
+            fn decode(
+                &mut self,
+                _annexb: &[u8],
+                _idr: bool,
+                spare: Option<video::Frame>,
+            ) -> anyhow::Result<Option<video::Frame>> {
+                let mut f = spare.unwrap_or_default();
+                f.width = 128;
+                f.height = 64;
+                Ok(Some(f))
+            }
+            fn name(&self) -> &'static str {
+                "fake"
+            }
+        }
+
+        let in_frame = InFrame {
+            frame: 1,
+            data: vec![0, 0, 0, 1],
+            keyframe: true,
+            host_delay: 0,
+            assembly: Duration::ZERO,
+        };
+        inner
+            .queue
+            .lock()
+            .frames
+            .push_back((in_frame, Instant::now()));
+
+        let inner_clone = inner.clone();
+        let handle = std::thread::spawn(move || {
+            decode(&inner_clone, Box::new(FakeDecoder));
+        });
+
+        let decoded = wake_rx.recv_timeout(Duration::from_secs(10));
+        inner.stop.store(true, Ordering::Release);
+        inner.queue_cv.notify_all();
+        handle.join().unwrap();
+
+        decoded.expect("decoder did not publish a frame");
+        assert_eq!(inner.stats.lock().width, 128);
+        assert_eq!(inner.stats.lock().height, 64);
     }
 }

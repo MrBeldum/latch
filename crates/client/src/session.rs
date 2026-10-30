@@ -628,6 +628,7 @@ impl Progress {
 
 /// A running stream and everything the window needs to show and drive it.
 pub struct Live {
+    pub generation: u64,
     pub pc: String,
     pub node_id: String,
     pub ip: Ipv4Addr,
@@ -837,7 +838,11 @@ fn stale(progress: &Mutex<Progress>, generation: u64) -> bool {
 fn run(c: &Connect, generation: u64) -> Result<()> {
     let t = &c.target;
     let report = |step: Step, detail: String| {
-        c.progress.lock().set(step, detail);
+        let mut p = c.progress.lock();
+        if p.generation != generation || p.cancel {
+            return;
+        }
+        p.set(step, detail);
         c.ctx.request_repaint();
     };
 
@@ -990,6 +995,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     }
     let input = session.input();
     *live_guard = Some(Live {
+        generation,
         pc: t.name.clone(),
         node_id: t.node_id.clone(),
         ip: t.ip,
@@ -1011,6 +1017,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     prog_guard.since = Instant::now();
     drop(prog_guard);
     drop(live_guard);
+    c.ctx.request_repaint();
     Ok(())
 }
 

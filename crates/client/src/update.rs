@@ -94,6 +94,7 @@ pub fn spawn(
         };
         return;
     }
+    clean_old_stages();
     std::thread::spawn(move || {
         let mut next = Instant::now() + FIRST_CHECK;
         let mut release: Option<Release> = None;
@@ -192,9 +193,24 @@ pub fn spawn(
                     }
                 };
                 if idle {
-                    match install_self(rel, token.as_deref()) {
-                        Ok(()) => relaunch(),
-                        Err(e) => {
+                    let bundle = bundle_path();
+                    match (bundle, install_self(rel, token.as_deref())) {
+                        (Some(bundle), Ok(staged)) => {
+                            if let Err(e) = relaunch(&bundle, &staged.parked, &staged.stage) {
+                                let mut st = state.lock();
+                                st.ready = None;
+                                st.notice = None;
+                                st.message = format!("Could not install Latch {v}: {e:#}.");
+                                tracing::error!("self-update: {e:#}");
+                                progress.lock().updating = false;
+                                self_failed = Some(SelfFailure::new(rel, &e, Instant::now()));
+                            }
+                        }
+                        (None, Ok(_)) => {
+                            tracing::error!("self-update: not running from an app bundle");
+                            progress.lock().updating = false;
+                        }
+                        (_, Err(e)) => {
                             let mut st = state.lock();
                             st.ready = None;
                             st.notice = None;
@@ -522,23 +538,44 @@ fn verify_app(app: &Path, want: &Version) -> Result<Version> {
     Ok(version)
 }
 
+#[derive(Debug)]
+struct StagedUpdate {
+    stage: std::path::PathBuf,
+    parked: std::path::PathBuf,
+}
+
+fn clean_old_stages() {
+    if let Some(bundle) = bundle_path() {
+        if let Some(parent) = bundle.parent() {
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    if name.to_string_lossy().starts_with(".latch-update-") {
+                        let _ = std::fs::remove_dir_all(entry.path());
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Move the new app over this one. The release's tarball is checked
 /// against GitHub's digest again (and fetched again if the asset changed
 /// since it was prepared), unpacked straight into the staging folder beside
 /// this app and checked there: what was checked is exactly what goes in.
 /// macOS keeps the running executable alive across the rename, so the swap
 /// is safe while we are still up.
-fn install_self(rel: &Release, token: Option<&str>) -> Result<()> {
+fn install_self(rel: &Release, token: Option<&str>) -> Result<StagedUpdate> {
     let bundle = bundle_path().ok_or_else(|| anyhow!("not running from an app bundle"))?;
     let tarball = fetch_asset(rel, MAC_ASSET, token)?;
-    replace_bundle(&bundle, &tarball, |tarball, staged| {
+    let staged = replace_bundle(&bundle, &tarball, |tarball, staged| {
         stage_from(tarball, staged, &rel.version)
     })?;
     let _ = run(
         "/usr/bin/xattr",
         &["-dr", "com.apple.quarantine", &bundle.display().to_string()],
     );
-    Ok(())
+    Ok(staged)
 }
 
 /// Unpack the app from `tarball` as `staged` (`Latch.app` in a fresh
@@ -559,7 +596,7 @@ fn replace_bundle(
     bundle: &std::path::Path,
     new: &std::path::Path,
     copy: impl FnOnce(&std::path::Path, &std::path::Path) -> Result<()>,
-) -> Result<()> {
+) -> Result<StagedUpdate> {
     let parent = bundle
         .parent()
         .ok_or_else(|| anyhow!("app has no parent"))?;
@@ -581,33 +618,87 @@ fn replace_bundle(
         }
         Ok(())
     })();
-    // If rollback failed, keep the previous app so it can be recovered.
-    if outcome.is_ok() || !parked.exists() {
-        let _ = std::fs::remove_dir_all(&stage);
+    if outcome.is_err() {
+        if !parked.exists() {
+            let _ = std::fs::remove_dir_all(&stage);
+        }
+        outcome?;
     }
-    outcome
+    // Note: on success, previous.app is intentionally kept in `stage` until
+    // the new process successfully launches, rather than deleting it immediately.
+    Ok(StagedUpdate { stage, parked })
+}
+
+fn rollback(bundle: &std::path::Path, parked: &std::path::Path) -> Result<()> {
+    let failed = parked.with_file_name("failed.app");
+    if bundle.exists() {
+        std::fs::rename(bundle, &failed).context("park failed new bundle")?;
+    }
+    if let Err(e) = std::fs::rename(parked, bundle) {
+        if failed.exists() {
+            std::fs::rename(&failed, bundle).context("restore new bundle after rollback failed")?;
+        }
+        return Err(e).context("restore previous bundle");
+    }
+    let _ = std::fs::remove_dir_all(failed);
+    Ok(())
+}
+
+fn perform_relaunch(
+    bundle: &std::path::Path,
+    parked: &std::path::Path,
+    _stage: &std::path::Path,
+    mut command: std::process::Command,
+) -> Result<()> {
+    match command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            rollback(bundle, parked).context("relaunch failed and rollback failed")?;
+            Err(anyhow!("spawn relaunch command: {e}"))
+        }
+    }
 }
 
 /// Start the new copy and leave. `open` goes through LaunchServices, so the
 /// new instance gets a proper app launch rather than inheriting this one.
-fn relaunch() {
-    if let Some(bundle) = bundle_path() {
-        let _ = relaunch_command(&bundle)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
+fn relaunch(
+    bundle: &std::path::Path,
+    parked: &std::path::Path,
+    stage: &std::path::Path,
+) -> Result<()> {
+    perform_relaunch(
+        bundle,
+        parked,
+        stage,
+        relaunch_command(bundle, stage, parked),
+    )?;
     tracing::info!("relaunching into the new version");
     std::process::exit(0);
 }
 
-fn relaunch_command(bundle: &std::path::Path) -> std::process::Command {
+fn relaunch_command(
+    bundle: &std::path::Path,
+    stage: &std::path::Path,
+    parked: &std::path::Path,
+) -> std::process::Command {
     let mut command = std::process::Command::new("/bin/sh");
     // The bundle is an argument, never shell source (paths can contain $, ",
     // backticks and newlines). $0 is a diagnostic command name.
-    command.args(["-c", "sleep 1; exec /usr/bin/open \"$1\"", "latch-relaunch"]);
+    // LaunchServices acceptance is not startup: only the new app cleans the
+    // backup. A failed restore keeps the new bundle launchable as well.
+    command.args([
+        "-c",
+        "sleep 1 && if /usr/bin/open \"$1\"; then :; else mv \"$1\" \"$2/failed.app\" && if mv \"$3\" \"$1\"; then rm -rf \"$2\"; else mv \"$2/failed.app\" \"$1\"; fi; fi",
+        "latch-relaunch",
+    ]);
     command.arg(bundle);
+    command.arg(stage);
+    command.arg(parked);
     command
 }
 
@@ -807,9 +898,16 @@ mod tests {
     #[test]
     fn relaunch_keeps_shell_metacharacters_in_the_path_literal() {
         let path = std::path::Path::new("/Applications/$(touch nope) \"quoted\" `name`.app");
-        let command = relaunch_command(path);
+        let command = relaunch_command(
+            path,
+            std::path::Path::new("/stage"),
+            std::path::Path::new("/parked"),
+        );
         let args: Vec<_> = command.get_args().collect();
-        assert_eq!(args[1], "sleep 1; exec /usr/bin/open \"$1\"");
+        assert_eq!(
+            args[1],
+            "sleep 1 && if /usr/bin/open \"$1\"; then :; else mv \"$1\" \"$2/failed.app\" && if mv \"$3\" \"$1\"; then rm -rf \"$2\"; else mv \"$2/failed.app\" \"$1\"; fi; fi"
+        );
         assert_eq!(args[3], path.as_os_str());
     }
 
@@ -835,13 +933,13 @@ mod tests {
     }
 
     #[test]
-    fn a_staged_update_replaces_the_app_and_removes_the_backup() {
+    fn a_staged_update_replaces_the_app_and_keeps_the_backup() {
         let dir = std::env::temp_dir().join(format!("latch-swap-{:016x}", rand::random::<u64>()));
         std::fs::create_dir(&dir).unwrap();
         let bundle = dir.join("Latch.app");
         std::fs::create_dir(&bundle).unwrap();
         std::fs::write(bundle.join("version"), "original").unwrap();
-        replace_bundle(&bundle, &dir.join("download"), |_, staged| {
+        let staged = replace_bundle(&bundle, &dir.join("download"), |_, staged| {
             std::fs::create_dir(staged)?;
             std::fs::write(staged.join("version"), "updated")?;
             Ok(())
@@ -851,7 +949,70 @@ mod tests {
             std::fs::read_to_string(bundle.join("version")).unwrap(),
             "updated"
         );
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        assert!(staged.parked.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn replace_bundle_preserves_previous_app_until_relaunch() {
+        let dir = std::env::temp_dir().join(format!("latch-swap-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir(&dir).unwrap();
+        let bundle = dir.join("Latch.app");
+        std::fs::create_dir(&bundle).unwrap();
+        std::fs::write(bundle.join("version"), "original").unwrap();
+        let staged = replace_bundle(&bundle, &dir.join("download"), |_, staged| {
+            std::fs::create_dir(staged)?;
+            std::fs::write(staged.join("version"), "updated")?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            staged.parked.exists(),
+            "previous.app must still exist in staging dir after replace_bundle returns Ok"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn review_failed_rollback_preserves_the_installed_bundle() {
+        let dir =
+            std::env::temp_dir().join(format!("latch-rollback-{:016x}", rand::random::<u64>()));
+        let bundle = dir.join("Latch.app");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("version"), "new").unwrap();
+        assert!(rollback(&bundle, &dir.join("missing.app")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(bundle.join("version")).unwrap(),
+            "new"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_relaunch_spawn_rolls_back_to_previous_app() {
+        let dir = std::env::temp_dir().join(format!("latch-swap-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir(&dir).unwrap();
+        let bundle = dir.join("Latch.app");
+        std::fs::create_dir(&bundle).unwrap();
+        std::fs::write(bundle.join("version"), "original").unwrap();
+        let staged = replace_bundle(&bundle, &dir.join("download"), |_, staged| {
+            std::fs::create_dir(staged)?;
+            std::fs::write(staged.join("version"), "updated")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(bundle.join("version")).unwrap(),
+            "updated"
+        );
+        let bad_cmd = std::process::Command::new("/path/that/does/not/exist");
+        let res = perform_relaunch(&bundle, &staged.parked, &staged.stage, bad_cmd);
+        assert!(res.is_err(), "must fail when spawn fails");
+        assert_eq!(
+            std::fs::read_to_string(bundle.join("version")).unwrap(),
+            "original",
+            "previous bundle must be restored on failed relaunch spawn"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -957,12 +1118,12 @@ mod tests {
         assert_eq!(marker(&bundle), "running");
         assert_eq!(std::fs::read_dir(&apps).unwrap().count(), 1);
         // The right one goes in, and only the app comes out of the archive.
-        replace_bundle(&bundle, &tarball, |t, staged| {
+        let staged = replace_bundle(&bundle, &tarball, |t, staged| {
             stage_from(t, staged, &Version::new(9, 9, 9))
         })
         .unwrap();
         assert_eq!(marker(&bundle), "fresh");
-        assert_eq!(std::fs::read_dir(&apps).unwrap().count(), 1);
+        assert!(staged.parked.exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
