@@ -4,6 +4,16 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## Unreleased
+
+- Restore start-to-start host frame cadence on software, macOS and Windows.
+- Pace video on a bounded sender queue, size UDP buffers explicitly, and adapt
+  bitrate within the requested ceiling using loss, RTT and sender queue age.
+- Recover a completely lost startup keyframe, batch readiness-driven receives,
+  reuse video shard buffers, and bound decode backlog by time.
+- Add compatible 250 ms feedback and transport telemetry; correct recovered
+  audio timestamps and guarantee Rice packets fit the existing wire format.
+
 ## 5.0.1 (2026-10-29)
 
 - Remove unrelated maker branding and retired-domain links from the app and

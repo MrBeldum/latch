@@ -602,7 +602,7 @@ pub fn encode(pcm: &[i16], out: &mut Vec<u8>) {
         out.extend_from_slice(&(n as u16).to_le_bytes());
         for channel in 0..2 {
             out.push(SUBFRAME_VERBATIM << 5);
-            for pair in pcm.chunks_exact(2) {
+            for pair in pcm.as_chunks::<2>().0 {
                 out.extend_from_slice(&pair[channel].to_le_bytes());
             }
         }

@@ -123,7 +123,7 @@ impl AudioReceiver {
         if packet.parity && !packet.seq.is_multiple_of(GROUP) {
             return;
         }
-        let mut next = *self.next.get_or_insert(packet.seq);
+        let mut next = *self.next.get_or_insert(packet.seq - packet.seq % GROUP);
         if crate::video::before(packet.seq, next.wrapping_sub(GROUP - 1)) {
             return;
         }

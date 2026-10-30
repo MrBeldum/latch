@@ -140,3 +140,38 @@ What shows the engine is right, other than its authors:
 * CPU, memory and energy of host and viewer, measured against Latch 4 at
   the same size, frame rate and bitrate;
 * `scripts/audit-native.sh`: no C, C++ or assembler in the build graph.
+
+## Cadence and transport budgets
+
+All host pipelines use the same start-to-start deadline scheduler. Work time
+is inside the interval; a deadline missed by a whole interval advances to a
+future slot, without catch-up trains. Idle repeats remain bounded at 100 ms.
+Encoding feeds a two-frame bounded channel to a dedicated video sender;
+backpressure preserves encoded references. Cancellation may discard queued
+media. Audio, input acknowledgements and pings bypass the video queue.
+
+Video uses a wire-byte token bucket at 2.5 times the current wire budget,
+with a sixteen-datagram burst. The encoder allowance subtracts audio and
+FEC/header overhead from that budget. A session controller cuts by 20% after
+two pressure reports, at most once per 500 ms, when unrecovered loss exceeds
+3%, a frame is lost, RTT rises above its session minimum by max(12 ms, 25%),
+or sender age exceeds 50 ms. After two clean seconds it adds 5% of the
+requested ceiling per second, capped at that ceiling. The wire floor is
+max(1 Mbps, ceiling/10). Recovered random loss alone does not reduce rate;
+legacy viewers' raw loss is tolerated through 3%. Parity is capped at 30%.
+Rate setters run between frames when the target changes by at least 5%.
+
+Host UDP requests 2 MiB send/1 MiB receive; viewer requests 1 MiB send/4 MiB
+receive. Readback is logged once per session, including Linux sysctl caps;
+macOS requests fall back by halves if the kernel refuses a large buffer.
+Status and viewer stats expose requested/applied bitrate, sender queue age,
+send errors/retries and effective socket buffers. Bytes count successful
+media sends only. ENOBUFS uses the platform constant (10055 on Windows).
+
+Viewer receive uses mio readiness and bounded 64-datagram batches. Video
+shard storage is reused with a 4096-buffer pool cap. Decode queues are
+bounded by eight frames and 50 ms of age; exceeding either restarts at an
+IDR rather than decoding an increasing backlog. A missing initial IDR
+triggers recovery on the first complete P-frame, or after 500 ms without
+a delivered keyframe. Requests retry at max(100 ms, RTT); host duplicate
+requests with the same last-delivered frame are throttled for 250 ms.
