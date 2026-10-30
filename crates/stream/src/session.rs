@@ -827,7 +827,6 @@ fn receive(
                                 &mut reassembler,
                                 &mut audio_rx,
                                 &mut rtt,
-                                player.as_mut(),
                                 &mut media_seen,
                                 &mut window_bytes,
                                 n,
@@ -840,6 +839,9 @@ fn receive(
                     let now = Instant::now();
                     let deadline = reassembler
                         .next_deadline()
+                        .into_iter()
+                        .chain(audio_rx.next_deadline())
+                        .min()
                         .unwrap_or(now + Duration::from_millis(20));
                     let wait = deadline
                         .saturating_duration_since(now)
@@ -851,6 +853,16 @@ fn receive(
             }
         }
         let now = Instant::now();
+        // Also when no audio arrived: a lost packet at the end of a sound
+        // must not hold the rest of it until the next sound.
+        while let Some(out) = audio_rx.pop(now) {
+            if let Some(player) = player.as_mut() {
+                match out {
+                    AudioOut::Frame { payload, .. } => player.push(&payload),
+                    AudioOut::Missing { .. } => player.push(&[]),
+                }
+            }
+        }
         while let Some(event) = reassembler.poll(now) {
             match event {
                 Reassembled::Frame(frame) => {
@@ -964,7 +976,6 @@ fn handle(
     reassembler: &mut Reassembler,
     audio_rx: &mut AudioReceiver,
     rtt: &mut RttEstimator,
-    player: Option<&mut Player>,
     media_seen: &mut bool,
     window_bytes: &mut u64,
     len: usize,
@@ -985,19 +996,7 @@ fn handle(
             }
             reassembler.push(shard, now);
         }
-        Datagram::Audio { packet, .. } => {
-            audio_rx.push(packet, now);
-            if let Some(player) = player {
-                while let Some(out) = audio_rx.pop() {
-                    match out {
-                        AudioOut::Frame { payload, .. } => player.push(&payload),
-                        AudioOut::Missing { .. } => player.push(&[]),
-                    }
-                }
-            } else {
-                while audio_rx.pop().is_some() {}
-            }
-        }
+        Datagram::Audio { packet, .. } => audio_rx.push(packet, now),
         Datagram::InputAck { next, .. } => {
             if let Some(link) = inner.link.lock().as_mut() {
                 link.sender.ack(*next);

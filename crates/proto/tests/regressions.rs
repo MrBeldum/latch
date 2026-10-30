@@ -1,5 +1,5 @@
 use latch_proto::{
-    audio::{AudioOut, AudioPacketizer, AudioReceiver},
+    audio::{AudioOut, AudioPacketizer, AudioReceiver, AUDIO_HOLD},
     input::{Event, InputReceiver, InputSender, MAX_UNACKED, RESEND},
     sim::{Impairment, Link},
     video::{KeyframeRequests, OutFrame, Packetizer, Reassembled, Reassembler, FRAME_TIMEOUT},
@@ -264,7 +264,7 @@ fn audio_recovers_after_long_blackout_with_data_or_parity_first() {
                     panic!()
                 };
                 receiver.push(&packet, now);
-                while let Some(out) = receiver.pop() {
+                while let Some(out) = receiver.pop(now) {
                     if let AudioOut::Frame { seq, payload, .. } = out {
                         assert_eq!(payload, [seq as u8]);
                         delivered.push(seq);
@@ -302,7 +302,7 @@ fn audio_resynchronizes_across_sequence_wrap() {
             receiver.push(&packet, now);
         }
         let mut output = None;
-        while let Some(out) = receiver.pop() {
+        while let Some(out) = receiver.pop(now) {
             output = Some(out);
         }
         if seq == 5 {
@@ -470,4 +470,60 @@ fn another_frames_timeout_leaves_an_assembling_frame_alone() {
     // Frame 2 never came; frame 3's timeout now decides both.
     assert_eq!(receiver.poll(late), Some(Reassembled::Lost { frame: 2 }));
     assert_eq!(receiver.poll(late), Some(Reassembled::Lost { frame: 3 }));
+}
+
+/// One group of four audio packets with payloads `[0]`..`[3]`, then its
+/// parity: the datagrams in the order the host sends them.
+fn audio_group() -> Vec<Vec<u8>> {
+    let mut packetizer = AudioPacketizer::new(1);
+    let mut out = Vec::new();
+    for seq in 0..4u32 {
+        packetizer.packetize(seq * 5000, &[seq as u8], |dg| out.push(dg.to_vec()));
+    }
+    out
+}
+
+/// Pushes each datagram and pops until nothing is ready, as the viewer
+/// does; returns the payloads played and the packets given up on.
+fn deliver_audio(
+    receiver: &mut AudioReceiver,
+    order: &[&[u8]],
+    now: Instant,
+) -> (Vec<Vec<u8>>, Vec<u32>) {
+    let (mut played, mut missing) = (Vec::new(), Vec::new());
+    for dg in order {
+        let Datagram::Audio { packet, .. } = wire::parse(dg).unwrap() else {
+            panic!()
+        };
+        receiver.push(&packet, now);
+        while let Some(out) = receiver.pop(now) {
+            match out {
+                AudioOut::Frame { payload, .. } => played.push(payload),
+                AudioOut::Missing { seq } => missing.push(seq),
+            }
+        }
+    }
+    (played, missing)
+}
+
+#[test]
+fn audio_after_a_lost_packet_is_released_when_the_host_goes_quiet() {
+    let g = audio_group();
+    let start = Instant::now();
+    let mut receiver = AudioReceiver::new(1);
+    // Packet 2 and the parity are lost, then the desktop falls silent.
+    let order = [&g[0][..], &g[1], &g[3]];
+    let (played, missing) = deliver_audio(&mut receiver, &order, start);
+    assert_eq!((played, missing), (vec![vec![0], vec![1]], vec![]));
+    assert_eq!(receiver.next_deadline(), Some(start + AUDIO_HOLD));
+    let later = start + AUDIO_HOLD;
+    assert_eq!(receiver.pop(later), Some(AudioOut::Missing { seq: 2 }));
+    assert!(matches!(
+        receiver.pop(later),
+        Some(AudioOut::Frame { seq: 3, .. })
+    ));
+    assert_eq!(receiver.pop(later), None);
+    // Nothing is held now, so silence produces no concealment.
+    assert_eq!(receiver.next_deadline(), None);
+    assert_eq!(receiver.pop(later + Duration::from_secs(1)), None);
 }

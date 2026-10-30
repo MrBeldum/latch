@@ -539,7 +539,7 @@ fn test_4_audio_5_pct_loss() {
         for dg in link.receive(now) {
             if let Ok(Datagram::Audio { packet, .. }) = wire::parse(&dg) {
                 receiver.push(&packet, now);
-                while let Some(out) = receiver.pop() {
+                while let Some(out) = receiver.pop(now) {
                     outputs.push(out);
                 }
             }
@@ -552,7 +552,7 @@ fn test_4_audio_5_pct_loss() {
         for dg in link.receive(now) {
             if let Ok(Datagram::Audio { packet, .. }) = wire::parse(&dg) {
                 receiver.push(&packet, now);
-                while let Some(out) = receiver.pop() {
+                while let Some(out) = receiver.pop(now) {
                     outputs.push(out);
                 }
             }
@@ -560,7 +560,7 @@ fn test_4_audio_5_pct_loss() {
     }
 
     // Pop all outputs from receiver
-    while let Some(out) = receiver.pop() {
+    while let Some(out) = receiver.pop(now) {
         outputs.push(out);
     }
 
@@ -998,7 +998,7 @@ fn recovered_audio_pts_follows_negotiated_five_ms_packets() {
             });
         }
         let mut found = false;
-        while let Some(output) = rx.pop() {
+        while let Some(output) = rx.pop(now) {
             if let AudioOut::Frame { seq, pts, .. } = output {
                 assert_eq!(pts, 100_000 + seq * 5_000);
                 found |= seq == missing;
