@@ -458,9 +458,19 @@ fn poll_loop(ip: Ipv4Addr, shared: Arc<Mutex<Shared>>, stop: Arc<AtomicBool>, ct
                     tracing::warn!("clipboard from PC: {e}");
                 }
                 // Back off while the host is unreachable.
-                std::thread::sleep(POLL * failures.min(10));
+                sleep_interruptible(POLL * failures.min(10), &stop);
             }
         }
+    }
+}
+
+fn sleep_interruptible(duration: Duration, stop: &AtomicBool) {
+    let step = Duration::from_millis(100);
+    let mut elapsed = Duration::ZERO;
+    while elapsed < duration && !stop.load(Ordering::Relaxed) {
+        let chunk = step.min(duration - elapsed);
+        std::thread::sleep(chunk);
+        elapsed += chunk;
     }
 }
 
@@ -658,5 +668,23 @@ mod tests {
         assert!(sh.note.as_ref().unwrap().0.contains("paste again"));
         sh.sent(&Clipboard::fit("x", 0), 4);
         assert_eq!(sh.note.as_ref().unwrap().0, "Clipboard sent to the PC");
+    }
+
+    #[test]
+    fn poll_backoff_sleep_wakes_promptly_on_stop() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+        let start = Instant::now();
+        let handle = std::thread::spawn(move || {
+            sleep_interruptible(Duration::from_secs(5), &stop_clone);
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        stop.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "backoff sleep must wake promptly on stop, took {:?}",
+            start.elapsed()
+        );
     }
 }
