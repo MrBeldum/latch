@@ -791,8 +791,8 @@ fn receive(server: Weak<Server>) {
                 let now = Instant::now();
                 let mut previous = session.keyframe_request.lock();
                 if previous.is_none_or(|(n, at)| {
-                    (n != last && latch_proto::video::before(n, last))
-                        || now - at >= Duration::from_millis(250)
+                    latch_proto::video::before(n, last)
+                        || (n == last && now - at >= Duration::from_millis(250))
                 }) {
                     *previous = Some((last, now));
                     session.keyframe.store(true, Ordering::Release);
