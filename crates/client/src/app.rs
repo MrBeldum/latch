@@ -3466,12 +3466,12 @@ pub(crate) mod snapshots {
         assert!(h.state().live.lock().is_some());
 
         h.run_steps(1);
-        assert!(h.query_by_label("Stream Taken Over").is_some());
+        assert!(h.query_by_label("Another device took over").is_some());
         assert!(h
             .query_by_label("Another device is watching Gaming-PC.")
             .is_some());
-        assert!(h.query_by_label("Reconnect Now").is_some());
-        assert!(h.query_by_label("Return to Machines").is_some());
+        assert!(h.query_by_label("Reconnect now").is_some());
+        assert!(h.query_by_label("Back to machines").is_some());
     }
 
     #[test]

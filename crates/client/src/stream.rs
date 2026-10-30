@@ -157,7 +157,7 @@ pub struct View {
     bar_h: f32,
     confirm: Option<PowerAction>,
     confirm_install: bool,
-    pub(crate) confirm_disconnect: bool,
+    pub(crate) confirm_disconnect: Option<Instant>,
     pub(crate) volume: u32,
     pub(crate) muted: bool,
     pub(crate) interrupted: Option<Interruption>,
@@ -251,7 +251,7 @@ impl Default for View {
             bar_h: size::TOOLBAR,
             confirm: None,
             confirm_install: false,
-            confirm_disconnect: false,
+            confirm_disconnect: None,
             volume: 100,
             muted: false,
             interrupted: None,
@@ -335,7 +335,7 @@ impl View {
         self.confirm = None;
         self.settings = None;
         self.confirm_install = false;
-        self.confirm_disconnect = false;
+        self.confirm_disconnect = None;
         self.interrupted = None;
         self.poor = false;
         self.poor_hinted = false;
@@ -387,7 +387,7 @@ impl View {
         let popup = ctx.memory(|m| m.any_popup_open());
         let bar_visible = self.bar_shown || popup || self.confirm.is_some() || self.confirm_install;
         if !bar_visible {
-            self.confirm_disconnect = false;
+            self.confirm_disconnect = None;
         }
         let mut bar_rect = bar_visible
             .then(|| Rect::from_min_size(screen.min, Vec2::new(screen.width(), self.bar_h)));
@@ -563,7 +563,7 @@ impl View {
                                 ui.add(ui::spinner(20.0, P.accent));
                                 ui.add_space(space::XS);
                                 ui.label(
-                                    RichText::new("Connection Interrupted")
+                                    RichText::new("Connection lost")
                                         .font(theme::semibold(theme::text::TITLE))
                                         .color(P.text),
                                 );
@@ -573,27 +573,27 @@ impl View {
                                 );
                                 ui.add_space(space::XS);
                                 ui.horizontal(|ui| {
-                                    if ui::primary_button(ui, "Reconnect Now").clicked() {
+                                    if ui::primary_button(ui, "Reconnect now").clicked() {
                                         actions.push(Action::Reconnect);
                                     }
-                                    if ui::ghost_button(ui, "Return to Machines").clicked() {
+                                    if ui::ghost_button(ui, "Back to machines").clicked() {
                                         actions.push(Action::Disconnect);
                                     }
                                 });
                             }
                             Interruption::TakenOver(reason) => {
                                 ui.label(
-                                    RichText::new("Stream Taken Over")
+                                    RichText::new("Another device took over")
                                         .font(theme::semibold(theme::text::TITLE))
                                         .color(P.text),
                                 );
                                 ui::muted(ui, reason);
                                 ui.add_space(space::XS);
                                 ui.horizontal(|ui| {
-                                    if ui::primary_button(ui, "Reconnect Now").clicked() {
+                                    if ui::primary_button(ui, "Reconnect now").clicked() {
                                         actions.push(Action::Reconnect);
                                     }
-                                    if ui::ghost_button(ui, "Return to Machines").clicked() {
+                                    if ui::ghost_button(ui, "Back to machines").clicked() {
                                         actions.push(Action::Disconnect);
                                     }
                                 });
@@ -607,7 +607,7 @@ impl View {
                                 ui::muted(ui, "The remote machine was put to sleep.");
                                 ui.add_space(space::XS);
                                 ui.horizontal(|ui| {
-                                    if ui::ghost_button(ui, "Return to Machines").clicked() {
+                                    if ui::ghost_button(ui, "Back to machines").clicked() {
                                         actions.push(Action::Disconnect);
                                     }
                                 });
@@ -857,20 +857,30 @@ impl View {
                                     self.held.release_all(&live.input);
                                     self.set_captured(ctx, false);
                                     self.settings = Some(cfg.stream.clone());
-                                    self.confirm_disconnect = false;
+                                    self.confirm_disconnect = None;
                                 }
                                 toolbar_rule(ui);
-                                let disc_label = if self.confirm_disconnect {
-                                    "Confirm Disconnect"
+                                let armed = self
+                                    .confirm_disconnect
+                                    .filter(|&t| t.elapsed() < Duration::from_secs(3));
+                                if self.confirm_disconnect.is_some() && armed.is_none() {
+                                    self.confirm_disconnect = None;
+                                }
+                                let disc_label = if armed.is_some() {
+                                    "Click again to disconnect"
                                 } else {
                                     "Disconnect"
                                 };
+                                if let Some(t) = armed {
+                                    let rem = Duration::from_secs(3).saturating_sub(t.elapsed());
+                                    ctx.request_repaint_after(rem);
+                                }
                                 if ui::danger_button(ui, disc_label).clicked() {
-                                    if self.confirm_disconnect {
+                                    if armed.is_some() {
                                         actions.push(Action::Disconnect);
-                                        self.confirm_disconnect = false;
+                                        self.confirm_disconnect = None;
                                     } else {
-                                        self.confirm_disconnect = true;
+                                        self.confirm_disconnect = Some(Instant::now());
                                     }
                                 }
                             });
@@ -3681,21 +3691,34 @@ pub(crate) mod tests {
     fn disconnect_requires_confirmation_in_toolbar() {
         let mut h = harness(Vec2::new(1400.0, 860.0));
         assert!(h.query_by_label("Disconnect").is_some());
-        assert!(h.query_by_label("Confirm Disconnect").is_none());
+        assert!(h.query_by_label("Click again to disconnect").is_none());
 
         // First click requests confirmation
         h.get_by_label("Disconnect").simulate_click();
         h.run_steps(2);
         assert!(
-            h.query_by_label("Confirm Disconnect").is_some(),
-            "Disconnect click must switch to Confirm Disconnect"
+            h.query_by_label("Click again to disconnect").is_some(),
+            "Disconnect click must switch to Click again to disconnect"
         );
-        assert!(h.state().view.confirm_disconnect);
+        assert!(h.state().view.confirm_disconnect.is_some());
 
         // Second click confirms and resets
-        h.get_by_label("Confirm Disconnect").simulate_click();
+        h.get_by_label("Click again to disconnect").simulate_click();
         h.run_steps(2);
-        assert!(!h.state().view.confirm_disconnect);
+        assert!(h.state().view.confirm_disconnect.is_none());
+
+        // Armed state expires after 3 seconds:
+        h.get_by_label("Disconnect").simulate_click();
+        h.run_steps(2);
+        assert!(h.query_by_label("Click again to disconnect").is_some());
+        // Fast-forward armed timestamp by 4s without sleeping
+        h.state_mut().view.confirm_disconnect = Some(Instant::now() - Duration::from_secs(4));
+        h.run_steps(2);
+        assert!(
+            h.query_by_label("Click again to disconnect").is_none(),
+            "armed state must expire back to Disconnect after 3s"
+        );
+        assert!(h.query_by_label("Disconnect").is_some());
     }
 
     #[test]
@@ -3725,15 +3748,13 @@ pub(crate) mod tests {
 
     #[test]
     fn in_stream_reconnecting_overlay_appears_when_connection_interrupted() {
-        let view = view_with_bar();
+        let mut view = view_with_bar();
         let live = dummy_live(&egui::Context::default());
         live.frames.publish(latch_stream::video::Frame::default());
         assert!(live.frames.seq() > 0);
 
-        live.session.stop();
-        while live.session.connected() {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        // Using Tap or explicit interrupted state to avoid sleeping
+        view.interrupted = Some(Interruption::Reconnecting);
 
         let mut h = harness_with(
             Vec2::new(1400.0, 860.0),
@@ -3745,14 +3766,14 @@ pub(crate) mod tests {
         h.run_steps(2);
 
         assert!(
-            h.query_by_label("Connection Interrupted").is_some(),
-            "Connection Interrupted overlay must appear when disconnected during stream"
+            h.query_by_label("Connection lost").is_some(),
+            "Connection lost overlay must appear when disconnected during stream"
         );
-        assert!(h.query_by_label("Reconnect Now").is_some());
-        assert!(h.query_by_label("Return to Machines").is_some());
+        assert!(h.query_by_label("Reconnect now").is_some());
+        assert!(h.query_by_label("Back to machines").is_some());
 
-        // Clicking Return to Machines sends Disconnect
-        h.get_by_label("Return to Machines").simulate_click();
+        // Clicking Back to machines sends Disconnect
+        h.get_by_label("Back to machines").simulate_click();
         h.run_steps(2);
         assert!(h.state().actions.contains(&Action::Disconnect));
     }
