@@ -7,6 +7,7 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use std::{
+    cell::RefCell,
     mem::ManuallyDrop,
     time::{Duration, Instant},
 };
@@ -26,6 +27,7 @@ use windows::{
 pub(super) struct Gpu {
     pub device: ID3D11Device,
     pub context: ID3D11DeviceContext,
+    staging: RefCell<Option<ID3D11Texture2D>>,
 }
 impl Gpu {
     pub fn new(adapter: &IDXGIAdapter1) -> Result<Self> {
@@ -48,6 +50,7 @@ impl Gpu {
         let gpu = Self {
             device: device.context("D3D11 returned no device")?,
             context: context.context("D3D11 returned no context")?,
+            staging: RefCell::new(None),
         };
         // SAFETY: MF may call the immediate context from driver threads.
         unsafe {
@@ -101,21 +104,33 @@ impl Gpu {
         unsafe {
             texture.GetDesc(&mut desc);
         }
-        let staging = self.texture(desc.Width, desc.Height, desc.Format, 0, true)?;
+        let mut cached = self.staging.borrow_mut();
+        let matches = cached.as_ref().is_some_and(|texture| {
+            let mut old = D3D11_TEXTURE2D_DESC::default();
+            // SAFETY: Cached texture owns its descriptor.
+            unsafe {
+                texture.GetDesc(&mut old);
+            }
+            (old.Width, old.Height, old.Format) == (desc.Width, desc.Height, desc.Format)
+        });
+        if !matches {
+            *cached = Some(self.texture(desc.Width, desc.Height, desc.Format, 0, true)?);
+        }
+        let staging = cached.as_ref().context("missing staging texture")?;
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         // SAFETY: CopyResource is ordered before Map. Map is paired with Unmap;
         // the row pitch describes all accessible bytes copied below.
         unsafe {
-            self.context.CopyResource(&staging, texture);
+            self.context.CopyResource(staging, texture);
             self.context
-                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
                 .context("map staging texture")?;
             let bytes = std::slice::from_raw_parts(
                 mapped.pData.cast::<u8>(),
                 mapped.RowPitch as usize * rows,
             )
             .to_vec();
-            self.context.Unmap(&staging, 0);
+            self.context.Unmap(staging, 0);
             Ok((bytes, mapped.RowPitch as usize))
         }
     }
@@ -129,7 +144,7 @@ struct CursorRenderer {
 const SHADER: &str = r#"
 Texture2D<float4> desktop : register(t0);
 Texture2D<uint> shape : register(t1);
-cbuffer C : register(b0) { int2 origin; uint2 size; uint kind; uint rotation; uint2 rawsize; };
+cbuffer C : register(b0) { int2 origin; uint2 size; uint kind; uint rotation; uint2 rawsize; uint hdr; float white; uint2 padding; };
 float4 vs(uint id : SV_VertexID) : SV_Position {
     return float4(id == 2 ? 3 : -1, id == 1 ? 3 : -1, 0, 1);
 }
@@ -139,6 +154,14 @@ float4 ps(float4 p : SV_Position) : SV_Target {
     if(rotation == 3) src = int2(rawsize.x - 1 - pos.x, rawsize.y - 1 - pos.y);
     if(rotation == 4) src = int2(rawsize.x - 1 - pos.y, pos.x);
     float4 bg = desktop.Load(int3(src,0));
+    if(hdr != 0) {
+        // scRGB is linear, with SDR white given by the display's white level.
+        // Clip highlights to SDR and apply the sRGB transfer before cursor blending.
+        float3 linear = saturate(bg.rgb / white);
+        bg.rgb = float3(linear.r <= 0.0031308 ? 12.92*linear.r : 1.055*pow(linear.r,1.0/2.4)-0.055,
+                        linear.g <= 0.0031308 ? 12.92*linear.g : 1.055*pow(linear.g,1.0/2.4)-0.055,
+                        linear.b <= 0.0031308 ? 12.92*linear.b : 1.055*pow(linear.b,1.0/2.4)-0.055);
+    }
     int2 c = pos - origin;
     if(kind == 0 || any(c < 0) || any(c >= int2(size))) return bg;
     uint v = shape.Load(int3(c,0));
@@ -209,7 +232,7 @@ impl CursorRenderer {
             gpu.device
                 .CreateBuffer(
                     &D3D11_BUFFER_DESC {
-                        ByteWidth: 32,
+                        ByteWidth: 48,
                         Usage: D3D11_USAGE_DEFAULT,
                         BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
                         ..Default::default()
@@ -300,14 +323,15 @@ impl CursorRenderer {
         target: &ID3D11Texture2D,
         cursor: &DXGI_OUTDUPL_POINTER_POSITION,
         shape: &DXGI_OUTDUPL_POINTER_SHAPE_INFO,
-        rotation: DXGI_MODE_ROTATION,
+        color: (DXGI_MODE_ROTATION, f32),
     ) -> Result<()> {
+        let (rotation, white) = color;
         let (mut srv, mut rtv) = (None, None);
         let (mut raw, mut dst) = (
             D3D11_TEXTURE2D_DESC::default(),
             D3D11_TEXTURE2D_DESC::default(),
         );
-        // SAFETY: Views reference owned textures and constants contain exactly 32 bytes.
+        // SAFETY: Views reference owned textures and constants contain exactly 48 bytes.
         unsafe {
             source.GetDesc(&mut raw);
             target.GetDesc(&mut dst);
@@ -317,7 +341,7 @@ impl CursorRenderer {
             gpu.device
                 .CreateRenderTargetView(target, None, Some(&mut rtv))
                 .context("cursor render target")?;
-            let constants: [u32; 8] = [
+            let constants: [u32; 12] = [
                 cursor.Position.x as u32,
                 cursor.Position.y as u32,
                 shape.Width,
@@ -334,6 +358,10 @@ impl CursorRenderer {
                 rotation.0 as u32,
                 raw.Width,
                 raw.Height,
+                u32::from(raw.Format == DXGI_FORMAT_R16G16B16A16_FLOAT),
+                white.to_bits(),
+                0,
+                0,
             ];
             gpu.context.UpdateSubresource(
                 &self.constants,
@@ -378,6 +406,7 @@ pub(super) struct Capture {
     pub display: DisplayRect,
     pub has_frame: bool,
     cpu_seeded: bool,
+    white: f32,
     retry: ReopenBackoff,
 }
 struct ReopenBackoff {
@@ -421,7 +450,17 @@ fn duplicate(output: &display::Output, gpu: &Gpu) -> Result<IDXGIOutputDuplicati
         output
             .output
             .cast::<IDXGIOutput5>()
-            .and_then(|o| o.DuplicateOutput1(&gpu.device, 0, &[DXGI_FORMAT_B8G8R8A8_UNORM]))
+            .and_then(|o| {
+                o.DuplicateOutput1(
+                    &gpu.device,
+                    0,
+                    &[
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_FORMAT_R16G16B16A16_FLOAT,
+                        DXGI_FORMAT_R8G8B8A8_UNORM,
+                    ],
+                )
+            })
             .or_else(|_| {
                 output
                     .output
@@ -447,7 +486,7 @@ impl Capture {
         let source = gpu.texture(
             desc.ModeDesc.Width,
             desc.ModeDesc.Height,
-            DXGI_FORMAT_B8G8R8A8_UNORM,
+            desc.ModeDesc.Format,
             D3D11_BIND_SHADER_RESOURCE.0 as u32,
             false,
         )?;
@@ -471,6 +510,7 @@ impl Capture {
             display,
             has_frame: false,
             cpu_seeded: false,
+            white: display::sdr_white_level(&output.desc.DeviceName),
             retry: ReopenBackoff::new(),
         })
     }
@@ -500,7 +540,7 @@ impl Capture {
         let source = self.gpu.texture(
             desc.ModeDesc.Width,
             desc.ModeDesc.Height,
-            DXGI_FORMAT_B8G8R8A8_UNORM,
+            desc.ModeDesc.Format,
             D3D11_BIND_SHADER_RESOURCE.0 as u32,
             false,
         )?;
@@ -512,6 +552,7 @@ impl Capture {
             D3D11_BIND_RENDER_TARGET.0 as u32,
             false,
         )?;
+        self.white = display::sdr_white_level(&output.desc.DeviceName);
         self.source = source;
         self.frame = frame;
         self.display = display;
@@ -554,9 +595,11 @@ impl Capture {
             Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
             Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
                 // Release the old interface before DuplicateOutput: a process can
-                // own only one duplication per output. Retain the last safe copy
-                // while a secure desktop temporarily prevents reopening.
+                // own only one duplication per output. Mark the copy unavailable
+                // so repeated reopen failures cannot stream a stale desktop forever.
                 self.duplication = None;
+                self.has_frame = false;
+                self.cpu_seeded = false;
                 self.retry.defer(Instant::now());
                 return Ok(false);
             }
@@ -575,11 +618,13 @@ impl Capture {
                 texture.GetDesc(&mut desc);
                 self.source.GetDesc(&mut source);
             }
-            if (desc.Width, desc.Height) != (source.Width, source.Height) {
+            if (desc.Width, desc.Height, desc.Format)
+                != (source.Width, source.Height, source.Format)
+            {
                 self.source = self.gpu.texture(
                     desc.Width,
                     desc.Height,
-                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    desc.Format,
                     D3D11_BIND_SHADER_RESOURCE.0 as u32,
                     false,
                 )?;
@@ -594,7 +639,7 @@ impl Capture {
                 self.display.width = width;
                 self.display.height = height;
             }
-            // SAFETY: these textures have identical dimensions and BGRA format.
+            // SAFETY: these textures have identical dimensions and format.
             unsafe {
                 self.gpu.context.CopyResource(&self.source, &texture);
             }
@@ -631,6 +676,10 @@ impl Capture {
         .context("release desktop frame");
         copied?;
         released?;
+        anyhow::ensure!(
+            !info.ProtectedContentMaskedOut.as_bool(),
+            "Windows masked protected display content"
+        );
         if let Some(bytes) = shape_bytes {
             self.renderer.shape(&self.gpu, &self.shape, &bytes)?;
         }
@@ -640,7 +689,7 @@ impl Capture {
             &self.frame,
             &self.pointer,
             &self.shape,
-            self.rotation,
+            (self.rotation, self.white),
         )?;
         self.has_frame = true;
         Ok(true)
@@ -914,6 +963,50 @@ mod tests {
     fn cursor_shaders_compile_without_a_gpu() -> anyhow::Result<()> {
         super::compile_shader(windows::core::s!("vs"), windows::core::s!("vs_4_0"))?;
         super::compile_shader(windows::core::s!("ps"), windows::core::s!("ps_4_0"))?;
+        Ok(())
+    }
+    #[test]
+    fn fp16_sc_rgb_white_becomes_sdr_white() -> anyhow::Result<()> {
+        use super::*;
+        let _runtime = super::super::runtime::Runtime::new(false)?;
+        let output = match display::select() {
+            Ok(output) => output,
+            Err(e) if super::super::unavailable(&e, "DXGI output") => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let gpu = Gpu::new(&output.adapter)?;
+        let source = gpu.texture(
+            2,
+            1,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            false,
+        )?;
+        let target = gpu.texture(
+            2,
+            1,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            D3D11_BIND_RENDER_TARGET.0 as u32,
+            false,
+        )?;
+        // Half-float scRGB pixels: SDR white at 160 nits, then black.
+        let pixels: [u16; 8] = [0x4000, 0x4000, 0x4000, 0x3c00, 0, 0, 0, 0x3c00];
+        // SAFETY: Upload covers the complete two-pixel texture.
+        unsafe {
+            gpu.context
+                .UpdateSubresource(&source, 0, None, pixels.as_ptr().cast(), 16, 0);
+        }
+        CursorRenderer::new(&gpu)?.draw(
+            &gpu,
+            &source,
+            &target,
+            &Default::default(),
+            &Default::default(),
+            (DXGI_MODE_ROTATION_IDENTITY, 2.0),
+        )?;
+        let (pixels, _) = gpu.read(&target, 1)?;
+        assert_eq!(&pixels[..4], &[255, 255, 255, 255]);
+        assert_eq!(&pixels[4..8], &[0, 0, 0, 255]);
         Ok(())
     }
     #[test]
