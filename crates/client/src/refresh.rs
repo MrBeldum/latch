@@ -132,6 +132,116 @@ mod tests {
     }
 
     #[test]
+    fn child_reads_the_active_randr_mode() {
+        use std::io::{Read, Write};
+        use x11rb::protocol::{randr, xproto};
+        use x11rb::x11_utils::Serialize;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(port >= 6000);
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut setup_request = [0; 12];
+            socket.read_exact(&mut setup_request).unwrap();
+            let mut setup = xproto::Setup {
+                status: 1,
+                protocol_major_version: 11,
+                resource_id_mask: 0xffff,
+                roots: vec![xproto::Screen {
+                    root: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            setup.length = ((setup.serialize().len() - 8) / 4) as u16;
+            socket.write_all(&setup.serialize()).unwrap();
+            let mut sequence = 0;
+            loop {
+                let mut header = [0; 4];
+                if socket.read_exact(&mut header).is_err() {
+                    break;
+                }
+                let len = usize::from(u16::from_ne_bytes([header[2], header[3]])) * 4;
+                let mut body = vec![0; len - 4];
+                socket.read_exact(&mut body).unwrap();
+                sequence += 1;
+                let mut reply = match (header[0], header[1]) {
+                    (98, _) => xproto::QueryExtensionReply {
+                        sequence,
+                        present: true,
+                        major_opcode: 140,
+                        ..Default::default()
+                    }
+                    .serialize()
+                    .to_vec(),
+                    (140, 25) => {
+                        let mut resources = randr::GetScreenResourcesCurrentReply {
+                            sequence,
+                            crtcs: vec![2],
+                            modes: vec![
+                                randr::ModeInfo {
+                                    id: 3,
+                                    dot_clock: 148_500_000,
+                                    htotal: 2200,
+                                    vtotal: 1125,
+                                    ..Default::default()
+                                },
+                                randr::ModeInfo {
+                                    id: 4,
+                                    dot_clock: 594_000_000,
+                                    htotal: 2200,
+                                    vtotal: 1125,
+                                    ..Default::default()
+                                },
+                            ],
+                            ..Default::default()
+                        };
+                        resources.length = ((resources.serialize().len() - 32) / 4) as u32;
+                        resources.serialize()
+                    }
+                    (38, _) => xproto::QueryPointerReply {
+                        sequence,
+                        root: 1,
+                        root_x: 100,
+                        root_y: 100,
+                        ..Default::default()
+                    }
+                    .serialize()
+                    .to_vec(),
+                    (140, 20) => randr::GetCrtcInfoReply {
+                        sequence,
+                        mode: 3,
+                        width: 1920,
+                        height: 1080,
+                        ..Default::default()
+                    }
+                    .serialize(),
+                    other => panic!("unexpected X11 request {other:?}"),
+                };
+                reply.resize(reply.len().max(32), 0);
+                if socket.write_all(&reply).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "refresh::tests::x11_query_helper", "--nocapture"])
+            .env("LATCH_TEST_X11_HELPER", "1")
+            .env_remove("WAYLAND_DISPLAY")
+            .env("DISPLAY", format!("127.0.0.1:{}", port - 6000))
+            .env("XAUTHORITY", "/dev/null");
+        assert_eq!(
+            query_child(command, std::time::Duration::from_secs(10)),
+            Some(60)
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
     fn silent_x11_and_blocked_auth_queries_are_killed_and_reaped() {
         use std::io::Read;
         use std::net::TcpListener;
