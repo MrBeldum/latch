@@ -22,6 +22,7 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
         encoder,
         config: config.clone(),
         generation: 0,
+        cadence: crate::cadence::Cadence::new(config.fps),
         sent: None,
         pending: None,
     };
@@ -58,6 +59,7 @@ struct Video {
     encoder: Encoder,
     config: VideoConfig,
     generation: u64,
+    cadence: crate::cadence::Cadence,
     sent: Option<Instant>,
     pending: Option<EncodedVideo>,
 }
@@ -84,6 +86,7 @@ impl VideoPipeline for Video {
             return Ok(frame);
         }
         let interval = Duration::from_secs_f64(1.0 / f64::from(self.config.fps));
+        self.cadence.wait();
         let start = Instant::now();
         loop {
             let mut state = self.capture.shared.state.lock();
@@ -106,7 +109,7 @@ impl VideoPipeline for Video {
                 .sent
                 .map_or(Duration::MAX, |sent| now.saturating_duration_since(sent));
             let due = if keyframe || changed {
-                interval
+                Duration::ZERO
             } else {
                 idle.max(interval)
             };
@@ -118,15 +121,17 @@ impl VideoPipeline for Video {
                     let captured = if changed { picture.captured } else { now };
                     self.generation = state.generation;
                     drop(state);
+                    let first = self.sent.is_none();
+                    self.sent = Some(now);
                     let frame =
                         self.encoder
-                            .encode(image.0, captured, keyframe || self.sent.is_none())?;
+                            .encode(image.0, captured, keyframe || first)?;
                     // A real-time encoder may drop under load. Pace the retry and
                     // preserve a pending IDR request until a picture is emitted.
-                    self.sent = Some(Instant::now());
                     if let Some(frame) = frame {
                         return Ok(frame);
                     }
+                    self.cadence.wait();
                     keyframe = true;
                     continue;
                 }
