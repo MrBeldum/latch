@@ -12,8 +12,144 @@ pub struct Plan<'a> {
     pub adapter_description: &'a str,
 }
 
+/// The setup transcript. On Windows the elevated step writes it beside
+/// the copy of Latch it runs from, in `%ProgramFiles%\Latch\Setup`:
+/// never under a folder the signed-in user (or whoever started the
+/// elevated step) can redirect.
 pub fn log_path() -> Option<PathBuf> {
+    if cfg!(windows) {
+        let pf = std::env::var_os("ProgramFiles").filter(|d| !d.is_empty())?;
+        return Some(PathBuf::from(pf).join(SETUP_DIR).join("setup.log"));
+    }
     data_dir().ok().map(|d| d.join("setup.log"))
+}
+
+/// Under `%ProgramFiles%`, which only administrators can change.
+const SETUP_DIR: &str = r"Latch\Setup";
+
+/// Windows' own PowerShell, by full path. A bare `powershell` is looked
+/// for in the running executable's folder first, which for Latch is one
+/// the user can write to.
+#[cfg(any(windows, test))]
+fn powershell_exe() -> PathBuf {
+    let root = std::env::var("SystemRoot")
+        .ok()
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| r"C:\Windows".into());
+    PathBuf::from(format!(
+        r"{}\System32\WindowsPowerShell\v1.0\powershell.exe",
+        root.trim_end_matches('\\')
+    ))
+}
+
+/// What the administrator step exits with when it never ran setup.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod exit {
+    /// Windows' "the operation was cancelled by the user": the UAC prompt
+    /// was declined, or could not be shown.
+    pub const DECLINED: i32 = 1223;
+    /// Latch could not be copied into `%ProgramFiles%\Latch\Setup`.
+    pub const COPY_FAILED: i32 = 3;
+    /// The copy is not the file this window was started from.
+    pub const CHANGED: i32 = 4;
+}
+
+/// What the window says when the administrator prompt was turned down.
+pub const ADMIN_DECLINED: &str = "Setup needs an administrator's approval, and Windows' prompt was declined. Try again and choose Yes.";
+
+/// Why the administrator step failed, from its exit code.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn elevation_error(code: Option<i32>) -> String {
+    match code {
+        Some(exit::DECLINED) => ADMIN_DECLINED.into(),
+        Some(exit::COPY_FAILED) => {
+            "setup could not copy Latch into Program Files to run it as administrator".into()
+        }
+        Some(exit::CHANGED) => "latch-host.exe changed on disk while Windows asked for approval, so setup did not run it. Open Latch again and retry.".into(),
+        _ => "setup stopped part way; the setup log shows the last step reached".into(),
+    }
+}
+
+/// The elevated first step, run by Windows' own PowerShell after the UAC
+/// prompt. It copies `program` into `%ProgramFiles%\Latch\Setup`, checks
+/// the copy is the file the window hashed (`sha256`), and runs the copy as
+/// `--setup-elevated`. The elevated Latch therefore loads, runs and writes
+/// nothing in a folder a user can change: the install folder under
+/// `%LOCALAPPDATA%` is the user's, and an unzipped copy may sit in one
+/// every user can write to. `program` is only named in the firewall rules.
+#[cfg(any(windows, test))]
+fn stage_script(program: &str, sha256: &str) -> String {
+    format!(
+        r#"$ErrorActionPreference = 'Stop'
+$program = '{program}'
+try {{
+    $dir = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) '{dir}'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $copy = Join-Path $dir 'latch-host.exe'
+    Copy-Item -LiteralPath $program -Destination $copy -Force
+}} catch {{ exit {copy_failed} }}
+if ((Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash -ne '{sha256}') {{
+    Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue
+    exit {changed}
+}}
+# Started directly rather than through the shell, which would ask again
+# about a downloaded file this window already runs.
+$start = New-Object System.Diagnostics.ProcessStartInfo $copy
+$start.Arguments = '--setup-elevated --program "' + $program + '"'
+$start.UseShellExecute = $false
+$p = [System.Diagnostics.Process]::Start($start)
+$p.WaitForExit()
+Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue
+exit $p.ExitCode
+"#,
+        program = q(program),
+        dir = SETUP_DIR,
+        sha256 = sha256,
+        copy_failed = exit::COPY_FAILED,
+        changed = exit::CHANGED,
+    )
+}
+
+/// The unelevated launcher: Windows' PowerShell, elevated through UAC, runs
+/// [`stage_script`]. The script travels on the command line, which UAC
+/// fixes when it is approved, rather than in a file the user could edit.
+#[cfg(any(windows, test))]
+fn launch_script(stage: &str) -> String {
+    format!(
+        "try {{ $p = Start-Process -FilePath '{ps}' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile -NonInteractive -EncodedCommand {encoded}' -ErrorAction Stop }} catch {{ exit {declined} }}; if ($null -eq $p) {{ exit {declined} }}; exit $p.ExitCode",
+        ps = q(&powershell_exe().display().to_string()),
+        encoded = encoded_command(stage),
+        declined = exit::DECLINED,
+    )
+}
+
+/// A script as `-EncodedCommand` takes it: base64 of its UTF-16LE text,
+/// which no quoting on the way there can change.
+#[cfg(any(windows, test))]
+fn encoded_command(script: &str) -> String {
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    base64(&utf16)
+}
+
+/// Standard base64 with padding, for `-EncodedCommand`.
+#[cfg(any(windows, test))]
+fn base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() {
+                TABLE[(n >> (18 - 6 * i) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
 }
 
 pub fn script(p: &Plan<'_>) -> String {
@@ -120,30 +256,17 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
             }
             *warned = None;
         }
-        let exe = q(&p.exe.display().to_string());
-        let log = log_path().unwrap_or_else(|| std::env::temp_dir().join("latch-setup.log"));
-        // UAC may run the helper as another administrator, whose profile
-        // holds no host.toml: pass this user's folder so setup.log stays
-        // with the account that shares the machine.
-        let args = elevated_args(
-            std::env::var_os("LOCALAPPDATA")
-                .filter(|dir| !dir.is_empty())
-                .map(|dir| dir.to_string_lossy().into_owned())
-                .as_deref(),
+        // Pinned now: the elevated step runs only a copy of these bytes.
+        let sha256 = latch_core::update::sha256_hex(
+            &std::fs::read(p.exe).with_context(|| format!("read {}", p.exe.display()))?,
         );
-        let launch = format!(
-            "$p = Start-Process -FilePath '{exe}' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @({args}); if ($null -eq $p) {{ exit 1 }}; exit $p.ExitCode"
-        );
-        let status = std::process::Command::new("powershell")
+        let launch = launch_script(&stage_script(&p.exe.display().to_string(), &sha256));
+        let status = std::process::Command::new(powershell_exe())
             .args(["-NoProfile", "-NonInteractive", "-Command", &launch])
             .creation_flags(0x0800_0000)
             .status()
             .context("launch elevated Latch Host")?;
-        anyhow::ensure!(
-            status.success(),
-            "the administrator prompt was declined or setup failed (see {})",
-            log.display()
-        );
+        anyhow::ensure!(status.success(), elevation_error(status.code()));
         Ok(())
     }
 }
@@ -168,7 +291,7 @@ fn refuse_during_stream(
 #[cfg(windows)]
 pub(crate) fn powershell(script: &str) -> Result<String> {
     use std::os::windows::process::CommandExt;
-    let out = std::process::Command::new("powershell")
+    let out = std::process::Command::new(powershell_exe())
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .creation_flags(0x0800_0000)
         .output()
@@ -182,22 +305,6 @@ pub(crate) fn powershell(script: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// The `-ArgumentList` array for the elevated `--setup-elevated` run.
-/// Start-Process joins the elements with spaces and quotes none of them,
-/// so a folder with a space in it ("C:\Users\Ada Lovelace\...") has to
-/// carry its own double quotes or it arrives as two arguments. A trailing
-/// backslash would escape the closing quote, and a folder never needs one.
-#[cfg(any(windows, test))]
-fn elevated_args(local_app_data: Option<&str>) -> String {
-    match local_app_data {
-        Some(dir) => format!(
-            "'--setup-elevated', '--local-app-data', '\"{}\"'",
-            q(dir.trim_end_matches('\\'))
-        ),
-        None => "'--setup-elevated'".into(),
-    }
-}
-
 // Only the Windows setup path is compiled in a release build; tests use it everywhere.
 #[cfg_attr(not(windows), allow(dead_code))]
 /// A PowerShell single-quoted literal: only `'` needs escaping, nothing is
@@ -206,39 +313,61 @@ fn q(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-/// Generate and run the setup script. Called from `--setup-elevated` after
-pub fn run_as_admin() -> Result<()> {
+/// Generate and run the setup script. Called from `--setup-elevated`,
+/// already elevated: with `program`, by the copy [`stage_script`] made in
+/// `%ProgramFiles%\Latch\Setup`; without, by an administrator's own
+/// session (SSH), which stages this file the same way first.
+pub fn run_as_admin(program: Option<&Path>) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         let exe = std::env::current_exe().context("own path")?;
+        let Some(program) = program else {
+            let sha256 = latch_core::update::sha256_hex(&std::fs::read(&exe)?);
+            let stage = stage_script(&exe.display().to_string(), &sha256);
+            let status = std::process::Command::new(powershell_exe())
+                .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
+                .arg(encoded_command(&stage))
+                .creation_flags(0x0800_0000)
+                .status()
+                .context("run the setup copy")?;
+            anyhow::ensure!(status.success(), elevation_error(status.code()));
+            return Ok(());
+        };
+        // Everything below is written beside this copy, so it has to be
+        // the one in Program Files and not a file a user put anywhere.
+        let dir = exe.parent().context("own folder")?.to_path_buf();
+        let protected = std::env::var_os("ProgramFiles")
+            .map(|pf| PathBuf::from(pf).join(SETUP_DIR))
+            .and_then(|d| d.canonicalize().ok());
+        anyhow::ensure!(
+            protected.is_some_and(|p| dir.canonicalize().is_ok_and(|d| same_path(&d, &p))),
+            "--program is only for the copy setup makes in Program Files"
+        );
+        anyhow::ensure!(
+            plausible_program(&program.display().to_string()) && program.is_file(),
+            "{} is not an installed latch-host.exe",
+            program.display()
+        );
         let wake = crate::wake::probe();
         let plan = Plan {
-            exe: &exe,
+            exe: program,
             adapter: &wake.adapter,
             adapter_description: &wake.description,
         };
-        let tmp_dir = std::env::var_os("SystemRoot")
-            .map(|root| PathBuf::from(root).join("Temp"))
-            .filter(|dir| dir.is_dir())
-            .unwrap_or_else(std::env::temp_dir);
         // PowerShell 5.1 reads a BOM-less file as the system ANSI code page, so
         // a Korean/Japanese username or adapter name ("이더넷") would be mangled
         // and the firewall rule would point at a path that does not exist.
         // We write to a file rather than piping to stdin or -EncodedCommand to preserve
         // reliable UTF-8 BOM detection and avoid Windows command-line length limits.
-        //
-        // Standard users can create files in %SystemRoot%\Temp. Using create_new(true)
-        // with an unpredictable 128-bit random nonce ensures we never open or overwrite an
-        // attacker-precreated file (which would preserve the attacker's ownership and DACL,
-        // allowing a TOCTOU overwrite before PowerShell reads it). When the elevated process
-        // creates a new file here, it inherits administrator-only write permissions.
+        // The folder is administrators' only; create_new with a random name
+        // still never opens a file that is already there.
         use std::io::Write;
         let mut bytes = b"\xEF\xBB\xBF".to_vec();
         bytes.extend(script(&plan).as_bytes());
         let mut tmp = None;
         for _ in 0..5 {
-            let candidate = tmp_dir.join(format!(
+            let candidate = dir.join(format!(
                 "latch-setup-{}-{:032x}.ps1",
                 std::process::id(),
                 rand::random::<u128>()
@@ -254,14 +383,14 @@ pub fn run_as_admin() -> Result<()> {
                     break;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(e).context("create setup script in %SystemRoot%\\Temp"),
+                Err(e) => return Err(e).context("create the setup script"),
             }
         }
         let tmp = tmp.context("could not allocate unique setup script path")?;
-        let log = log_path().unwrap_or_else(|| std::env::temp_dir().join("latch-setup.log"));
+        let log = dir.join("setup.log");
         let out = std::fs::File::create(&log)?;
         let err = out.try_clone()?;
-        let status = std::process::Command::new("powershell")
+        let status = std::process::Command::new(powershell_exe())
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -280,7 +409,32 @@ pub fn run_as_admin() -> Result<()> {
         Ok(())
     }
     #[cfg(not(windows))]
-    anyhow::bail!("setup runs on Windows only")
+    {
+        let _ = program;
+        anyhow::bail!("setup runs on Windows only")
+    }
+}
+
+/// Whether two canonical paths name the same folder: Windows compares
+/// names without regard to case.
+#[cfg(windows)]
+fn same_path(a: &Path, b: &Path) -> bool {
+    a.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
+}
+
+/// What the staging step may pass as `--program`: a full local path to an
+/// `.exe`. It is only ever named in firewall rules, never run or written.
+#[cfg(any(windows, test))]
+fn plausible_program(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() > 7
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && b[2] == b'\\'
+        && path.to_ascii_lowercase().ends_with(".exe")
+        && !path.contains(['"', '\n', '\r'])
 }
 
 /// Register or remove `latch-host.exe --background` under the current
@@ -402,12 +556,108 @@ mod tests {
     }
 
     #[test]
-    fn elevated_arguments_and_the_run_key_quote_paths() {
-        assert_eq!(
-            elevated_args(Some("C:\\Users\\Ada Lovelace\\")),
-            "'--setup-elevated', '--local-app-data', '\"C:\\Users\\Ada Lovelace\"'"
-        );
+    fn the_run_key_quotes_the_path() {
         assert!(run_value(Path::new("C:/a b/latch-host.exe")).starts_with('\"'));
+    }
+
+    /// The UAC prompt runs Windows' own PowerShell, which copies Latch into
+    /// Program Files, checks the copy is the pinned file and runs the copy:
+    /// nothing elevated loads or runs from the user's folder, and no folder
+    /// the caller names is written to (IN-01, IN-02).
+    #[test]
+    fn the_elevated_step_runs_a_checked_copy_from_program_files() {
+        let program = r"C:\Users\O'Brien $x\AppData\Local\Latch\latch-host.exe";
+        let stage = stage_script(program, &"ab".repeat(32));
+        assert!(
+            stage.contains(r"$program = 'C:\Users\O''Brien $x\AppData\Local\Latch\latch-host.exe'"),
+            "{stage}"
+        );
+        assert!(stage.contains(r"[Environment]::GetFolderPath('ProgramFiles')) 'Latch\Setup'"));
+        let copy = stage
+            .find("Copy-Item -LiteralPath $program -Destination $copy")
+            .unwrap();
+        let check = stage
+            .find("Get-FileHash -LiteralPath $copy -Algorithm SHA256")
+            .unwrap();
+        let run = stage.find("ProcessStartInfo $copy").unwrap();
+        assert!(
+            copy < check && check < run,
+            "copy, then check, then run the copy"
+        );
+        assert!(stage.contains(&format!("-ne '{}'", "ab".repeat(32))));
+        assert!(stage.contains("'--setup-elevated --program \"' + $program + '\"'"));
+        assert!(!stage.contains("--local-app-data"));
+        assert!(!stage.contains("ProcessStartInfo $program"));
+
+        let launch = launch_script(&stage);
+        assert!(
+            launch.contains(
+                r"-FilePath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -Verb RunAs"
+            ) || std::env::var_os("SystemRoot").is_some(),
+            "{launch}"
+        );
+        assert!(
+            !launch.contains("latch-host.exe"),
+            "the user's file is never elevated: {launch}"
+        );
+        let encoded = launch
+            .split("-EncodedCommand ")
+            .nth(1)
+            .and_then(|rest| rest.split('\'').next())
+            .unwrap();
+        let utf16 = stage
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(encoded, base64(&utf16));
+        assert_eq!(encoded, encoded_command(&stage));
+        assert!(launch.contains("catch { exit 1223 }"));
+    }
+
+    #[test]
+    fn base64_matches_the_rfc_vectors() {
+        for (plain, coded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(plain.as_bytes()), coded);
+        }
+        assert_eq!(base64(&[0xFF, 0xFE, 0xFD]), "//79");
+    }
+
+    /// A declined prompt says so plainly and points at no log: nothing ran,
+    /// and the log on disk is an older run's (IN-09).
+    #[test]
+    fn a_declined_prompt_is_not_reported_as_a_failed_setup() {
+        let declined = elevation_error(Some(1223));
+        assert_eq!(declined, ADMIN_DECLINED);
+        assert!(!declined.contains("setup.log") && !declined.contains("AppData"));
+        assert!(elevation_error(Some(4)).contains("changed"));
+        assert!(elevation_error(Some(1)).contains("setup log"));
+        assert!(elevation_error(None).contains("setup log"));
+    }
+
+    #[test]
+    fn only_a_full_path_to_an_exe_is_named_in_the_firewall_rules() {
+        assert!(plausible_program(
+            r"C:\Users\Ada Lovelace\AppData\Local\Latch\latch-host.exe"
+        ));
+        assert!(plausible_program(r"D:\Latch\LATCH-HOST.EXE"));
+        for bad in [
+            "latch-host.exe",
+            r"..\latch-host.exe",
+            r"\\server\share\latch-host.exe",
+            r"C:\Latch\latch-host.exe\",
+            r"C:\Latch\setup.ps1",
+            "C:\\Latch\\a\"b.exe",
+        ] {
+            assert!(!plausible_program(bad), "{bad}");
+        }
     }
 
     #[test]
@@ -449,5 +699,11 @@ mod tests {
             }),
         )
         .unwrap();
+        // The elevated staging step and the one-line launcher around it.
+        if let Ok(out) = std::env::var("LATCH_DUMP_STAGE_SCRIPT") {
+            let stage = stage_script(&exe, &"0".repeat(64));
+            std::fs::write(format!("{out}.launch.ps1"), launch_script(&stage)).unwrap();
+            std::fs::write(out, stage).unwrap();
+        }
     }
 }

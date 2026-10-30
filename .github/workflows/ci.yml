@@ -36,9 +36,11 @@ jobs:
           $env:LATCH_DUMP_ADAPTER_DESC = "Realtek PCIe GbE (`"x`")"
           $out = Join-Path $env:RUNNER_TEMP "setup.ps1"
           $env:LATCH_DUMP_SETUP_SCRIPT = $out
+          $stage = Join-Path $env:RUNNER_TEMP "stage.ps1"
+          $env:LATCH_DUMP_STAGE_SCRIPT = $stage
           cargo test -q --locked -p latch-host --lib the_generated_script_can_be_dumped_for_a_syntax_check
           if ($LASTEXITCODE -ne 0) { throw "dumping the setup script failed" }
-          $files = @('scripts\install-host.ps1', $out)
+          $files = @('scripts\install-host.ps1', $out, $stage, "$stage.launch.ps1")
           foreach ($f in $files) {
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errors) | Out-Null
