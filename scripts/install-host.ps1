@@ -56,6 +56,12 @@ if ((Test-Path $OldDir) -and -not (Test-Path (Join-Path $DestDir "host.toml"))) 
 New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
 Copy-Item $Exe $DestExe -Force
 Write-Host "Installed: $DestExe"
+# Latch 4 kept its engine's archive (about 25 MB) and the scripts that
+# started the engine in this folder. Latch 5 has no separate engine; the
+# engine itself was in Program Files, which setup's retire step removes.
+foreach ($old in 'Sunshine-Windows-AMD64-lite.zip', 'take-over-engine.ps1', 'take-over-engine.vbs', 'take-over-engine.cmd') {
+    Remove-Item -LiteralPath (Join-Path $DestDir $old) -Force -ErrorAction SilentlyContinue
+}
 $Wsh = New-Object -ComObject WScript.Shell
 $Desktop = [Environment]::GetFolderPath("Desktop")
 $StartMenu = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs"
