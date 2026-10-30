@@ -3,16 +3,16 @@
 //! each mapping before restoring it. Grabbing the server would prevent
 //! their MappingNotify handlers from fetching the temporary keysym.
 
+use super::X11;
 use crate::input::{DisplayRect, Event, Held, InputSink};
 use anyhow::{ensure, Context};
 use std::collections::BTreeMap;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::protocol::{xkb, xproto, xtest, Event as XEvent};
-use x11rb::rust_connection::RustConnection;
 
 pub(super) struct X11Input {
-    conn: RustConnection,
+    conn: X11,
     root: u32,
     mapping: xproto::GetKeyboardMappingReply,
     min_keycode: u8,
@@ -23,7 +23,8 @@ pub(super) struct X11Input {
 }
 impl X11Input {
     pub(super) fn new() -> anyhow::Result<Self> {
-        let (conn, screen) = x11rb::connect(None).context("connect to X11 for XTest")?;
+        let (conn, screen) =
+            super::connect(super::X11_SILENCE).context("connect to X11 for XTest")?;
         xtest::get_version(&conn, 2, 2)?.reply()?;
         ensure!(
             xkb::use_extension(&conn, 1, 0)?.reply()?.supported,
@@ -312,5 +313,78 @@ mod tests {
         assert_eq!(button_code(4).unwrap(), 8);
         assert_eq!(button_code(5).unwrap(), 9);
         assert!(button_code(6).is_err());
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+    use x11rb::rust_connection::{DefaultStream, RustConnection};
+    use x11rb::x11_utils::Serialize;
+
+    #[test]
+    fn silent_xtest_fails_instead_of_holding_the_session_input_lock() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut request = [0; 12];
+            server.read_exact(&mut request).unwrap();
+            let mut setup = xproto::Setup {
+                status: 1,
+                protocol_major_version: 11,
+                resource_id_mask: 0xffff,
+                roots: vec![xproto::Screen::default()],
+                ..Default::default()
+            };
+            setup.length = ((setup.serialize().len() - 8) / 4) as u16;
+            server.write_all(&setup.serialize()).unwrap();
+            let mut sequence = 0;
+            loop {
+                let mut header = [0; 4];
+                if server.read_exact(&mut header).is_err() {
+                    break;
+                }
+                let len = usize::from(u16::from_ne_bytes([header[2], header[3]])) * 4;
+                server.read_exact(&mut vec![0; len - 4]).unwrap();
+                sequence += 1;
+                if header[0] == 98 {
+                    let mut reply = xproto::QueryExtensionReply {
+                        sequence,
+                        present: true,
+                        major_opcode: 140,
+                        ..Default::default()
+                    }
+                    .serialize()
+                    .to_vec();
+                    reply.resize(32, 0);
+                    server.write_all(&reply).unwrap();
+                }
+                // Leave XTest and its synchronization request unanswered.
+            }
+        });
+        let (stream, _) = DefaultStream::from_unix_stream(client).unwrap();
+        let conn = RustConnection::connect_to_stream(
+            super::super::Bounded {
+                stream,
+                silence: Duration::from_millis(100),
+            },
+            0,
+        )
+        .unwrap();
+        let input = X11Input {
+            conn,
+            root: 0,
+            mapping: Default::default(),
+            min_keycode: 8,
+            key_names: Default::default(),
+            held: Default::default(),
+            pressed: Default::default(),
+            scroll: [0; 2],
+        };
+        assert!(input.fake(xproto::KEY_PRESS_EVENT, 8, 0, 0).is_err());
+        drop(input);
+        worker.join().unwrap();
     }
 }
