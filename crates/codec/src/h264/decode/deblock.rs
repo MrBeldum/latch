@@ -16,7 +16,7 @@ use super::tables::{block_index, ALPHA_TABLE, BETA_TABLE, TC0_TABLE};
 /// Boundary strengths for one MB: vertical edges at luma x = {0,4,8,12}
 /// and horizontal at y = {0,4,8,12}; each entry is the strength of the
 /// 4-sample set `k`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BsMap {
     v: [[u8; 4]; 4],
     h: [[u8; 4]; 4],
@@ -25,6 +25,26 @@ struct BsMap {
 /// Boundary strengths follow 8.7.2.1 on the luma 4x4 grid. Slice
 /// boundaries affect availability only when the controlling slice uses idc 2.
 fn compute_bs(cur: &MbState, mb_a: Option<&MbState>, mb_b: Option<&MbState>) -> BsMap {
+    if cur.mb_type.is_intra() && cur.disable_deblock_idc != 1 {
+        let mut result = BsMap {
+            v: [[3; 4]; 4],
+            h: [[3; 4]; 4],
+        };
+        for (edges, neighbour) in [(&mut result.v, mb_a), (&mut result.h, mb_b)] {
+            edges[0] = if neighbour
+                .is_some_and(|p| cur.disable_deblock_idc != 2 || p.slice_id == cur.slice_id)
+            {
+                [4; 4]
+            } else {
+                [0; 4]
+            };
+        }
+        return result;
+    }
+    compute_bs_general(cur, mb_a, mb_b)
+}
+
+fn compute_bs_general(cur: &MbState, mb_a: Option<&MbState>, mb_b: Option<&MbState>) -> BsMap {
     let mut result = BsMap {
         v: [[0; 4]; 4],
         h: [[0; 4]; 4],
@@ -366,5 +386,39 @@ fn thresholds(bs: [u8; 4], p: u8, q: u8, off_a: i32, off_b: i32) -> crate::h264:
                 TC0_TABLE[a][b as usize - 1]
             }
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::mb::MbType;
+    use super::*;
+
+    #[test]
+    fn intra_strength_shortcut_preserves_picture_and_slice_boundaries() {
+        let mut cur = MbState::new();
+        let mut neighbour = MbState::new();
+        for kind in [
+            MbType::I4x4,
+            MbType::IPcm,
+            MbType::I16x16 {
+                pred: 2,
+                cbp_chroma: 2,
+                cbp_luma: 15,
+            },
+        ] {
+            cur.mb_type = kind;
+            for idc in 0..=2 {
+                cur.disable_deblock_idc = idc;
+                for slice_id in [0, 1] {
+                    neighbour.slice_id = slice_id;
+                    for a in [None, Some(&neighbour)] {
+                        for b in [None, Some(&neighbour)] {
+                            assert_eq!(compute_bs(&cur, a, b), compute_bs_general(&cur, a, b));
+                        }
+                    }
+                }
+            }
+        }
     }
 }
