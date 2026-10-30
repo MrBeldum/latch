@@ -222,6 +222,7 @@ pub struct View {
     pub(crate) confirm_disconnect: Option<Instant>,
     pub(crate) volume: u32,
     pub(crate) muted: bool,
+    composing: bool,
     pub(crate) interrupted: Option<Interruption>,
     poor: bool,
     poor_hinted: bool,
@@ -316,6 +317,7 @@ impl Default for View {
             confirm_disconnect: None,
             volume: 100,
             muted: false,
+            composing: false,
             interrupted: None,
             poor: false,
             poor_hinted: false,
@@ -387,6 +389,7 @@ impl View {
         self.moved_to = None;
         self.pasted_since_v_up = false;
         self.cmd_since_v_up = false;
+        self.composing = false;
         if let Some(out) = out {
             self.held.release_all(out);
         }
@@ -1706,7 +1709,27 @@ impl View {
             })
             .collect();
         for ev in events {
-            if matches!(&ev, Event::Text(t) if physical_text || commits.contains(t)) {
+            match &ev {
+                Event::Ime(egui::ImeEvent::Enabled | egui::ImeEvent::Preedit(_)) => {
+                    self.composing = true
+                }
+                Event::Ime(egui::ImeEvent::Disabled | egui::ImeEvent::Commit(_)) => {
+                    self.composing = false
+                }
+                Event::Key {
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if (self.composing || !commits.is_empty())
+                    && !modifiers.ctrl
+                    && !modifiers.command =>
+                {
+                    continue
+                }
+                _ => {}
+            }
+            if matches!(&ev, Event::Text(t) if self.composing || physical_text || commits.contains(t))
+            {
                 continue;
             }
             match ev {
@@ -3807,6 +3830,41 @@ pub(crate) mod tests {
                 Event::Ime(egui::ImeEvent::Commit("世界".into())),
                 Event::Text("世界".into()),
             ],
+            Modifiers::NONE,
+        );
+        assert_eq!(
+            tap.take()
+                .iter()
+                .filter(|s| matches!(s, Sent::Text(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn review_composition_keys_stay_local_until_commit() {
+        let (mut h, tap) = recording(View::default(), true);
+        frame(
+            &mut h,
+            vec![Event::Ime(egui::ImeEvent::Preedit("n".into()))],
+            Modifiers::NONE,
+        );
+        frame(
+            &mut h,
+            vec![
+                key(Key::N, true, Modifiers::NONE),
+                Event::Text("n".into()),
+                key(Key::N, false, Modifiers::NONE),
+            ],
+            Modifiers::NONE,
+        );
+        assert!(!tap
+            .take()
+            .iter()
+            .any(|s| matches!(s, Sent::Key(_, true, _) | Sent::Text(_))));
+        frame(
+            &mut h,
+            vec![Event::Ime(egui::ImeEvent::Commit("你".into()))],
             Modifiers::NONE,
         );
         assert_eq!(
