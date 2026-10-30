@@ -36,15 +36,22 @@ jobs:
           $env:LATCH_DUMP_ADAPTER_DESC = "Realtek PCIe GbE (`"x`")"
           $out = Join-Path $env:RUNNER_TEMP "setup.ps1"
           $env:LATCH_DUMP_SETUP_SCRIPT = $out
+          $stage = Join-Path $env:RUNNER_TEMP "stage.ps1"
+          $env:LATCH_DUMP_STAGE_SCRIPT = $stage
+          $uninstall = Join-Path $env:RUNNER_TEMP "uninstall.ps1"
+          $env:LATCH_DUMP_UNINSTALL_SCRIPT = $uninstall
           cargo test -q --locked -p latch-host --lib the_generated_script_can_be_dumped_for_a_syntax_check
           if ($LASTEXITCODE -ne 0) { throw "dumping the setup script failed" }
-          $files = @('scripts\install-host.ps1', $out)
+          $files = @('scripts\install-host.ps1', 'scripts\setup-protection.ps1', 'scripts\test-setup-protection.ps1', $out, $stage, "$stage.launch.ps1", $uninstall, "$uninstall.user.ps1")
           foreach ($f in $files) {
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errors) | Out-Null
             if ($errors.Count -gt 0) { $errors | Format-List | Out-String | Write-Host; throw "$f does not parse" }
             Write-Host "parses: $f"
           }
+      - name: setup rejects writable paths and reparse points
+        shell: powershell
+        run: scripts/test-setup-protection.ps1
       # Exercise cleanup on an isolated folder and a dummy service, twice.
       - name: retire the previous streaming service
         shell: powershell
@@ -62,12 +69,50 @@ jobs:
           Set-Content -LiteralPath (Join-Path $old 'old-state.json') -Value '{}'
           sc.exe create $svc binPath= "$env:WINDIR\System32\cmd.exe" start= demand | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "dummy service creation failed" }
+          if ((Get-Service -Name $svc).Status -ne 'Stopped') { throw "dummy service must start stopped" }
           foreach ($attempt in 1..2) {
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script
             if ($LASTEXITCODE -ne 0) { throw "retirement failed" }
             if (Test-Path -LiteralPath $old) { throw "old folder remains" }
           }
           if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { throw "old service remains" }
+          exit 0
+      # Setup's record of the power settings and --uninstall's
+      # administrator part, on this throwaway runner: the rules and the
+      # record go, the power settings come back, and a second run finds
+      # nothing left to do. No adapter is named, so no network card is
+      # touched.
+      - name: uninstall reverses setup
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Join-Path $env:RUNNER_TEMP 'run-setup.ps1'
+          $uninstall = Join-Path $env:RUNNER_TEMP 'run-uninstall.ps1'
+          $env:LATCH_DUMP_SETUP_SCRIPT = $setup
+          $env:LATCH_DUMP_UNINSTALL_SCRIPT = $uninstall
+          cargo test -q --locked -p latch-host --lib the_generated_script_can_be_dumped_for_a_syntax_check
+          if ($LASTEXITCODE -ne 0) { throw "dumping the scripts failed" }
+          function AcIndex($setting) {
+            $hex = [regex]::Matches((powercfg /query SCHEME_CURRENT SUB_SLEEP $setting | Out-String), '0x[0-9a-fA-F]{8}')
+            [Convert]::ToUInt32($hex[$hex.Count - 2].Value, 16)
+          }
+          powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP STANDBYIDLE 1234
+          powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP HIBERNATEIDLE 4321
+          powercfg /setactive SCHEME_CURRENT
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $setup | Out-Host
+          if (-not (Test-Path 'HKLM:\SOFTWARE\Latch\Setup')) { throw "setup recorded nothing" }
+          if ((AcIndex STANDBYIDLE) -ne 0) { throw "setup left the sleep timeout" }
+          if (-not (netsh advfirewall firewall show rule name="Latch Host" | Select-String 'fd7a:115c:a1e0')) { throw "the rule lacks Tailscale's IPv6 range" }
+          foreach ($attempt in 1..2) {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $uninstall | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "uninstall failed (run $attempt)" }
+          }
+          if ((AcIndex STANDBYIDLE) -ne 1234 -or (AcIndex HIBERNATEIDLE) -ne 4321) { throw "the power settings were not put back" }
+          if (Test-Path 'HKLM:\SOFTWARE\Latch\Setup') { throw "the record remains" }
+          foreach ($rule in 'Latch Host', 'Latch Media', 'Latch wake') {
+            netsh advfirewall firewall show rule name="$rule" | Out-Null
+            if ($LASTEXITCODE -eq 0) { throw "$rule remains" }
+          }
           exit 0
       - name: release build
         run: cargo build --locked --workspace --release
@@ -137,6 +182,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: node kit selftest
         run: bash deploy/node/selftest.sh
+  native-display-selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y xauth
+      - run: bash deploy/native/selftest.sh
   relay-selftest:
     runs-on: ubuntu-latest
     steps:

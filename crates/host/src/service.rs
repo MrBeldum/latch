@@ -590,6 +590,19 @@ impl Service {
         })
     }
 
+    /// One of this machine's own Tailscale addresses: a connection from it
+    /// is a process on this machine, as loopback is.
+    fn own_address(&self, ip: IpAddr) -> bool {
+        self.tailscale.lock().as_ref().map_or(true, |st| {
+            st.self_node.tailscale_ips.is_empty()
+                || st
+                    .self_node
+                    .tailscale_ips
+                    .iter()
+                    .any(|a| a.parse::<IpAddr>() == Ok(ip))
+        })
+    }
+
     /// Loopback may connect (see [`Service::caller`] for what it may do);
     /// a tailnet peer must pass [`Owner::admits`]. A `whois` answer is
     /// remembered for [`AUTH_TTL`], a refusal included; a failed `whois` is
@@ -694,6 +707,18 @@ impl Service {
         }
         // The service log and /v1/quit are for this machine's own window.
         let local = caller == Caller::Local;
+        // Loopback, or this machine's own tailnet address, is any process
+        // here, signed in as any OS user. An executable pushed from there
+        // would run as the account that owns this service, and the
+        // clipboard is that account's: both are for the other machines.
+        if (req.path == UPDATE_PATH || req.path == CLIPBOARD_PATH)
+            && (local || self.own_address(peer.ip()))
+        {
+            return Response::json(
+                403,
+                &Ack::err("updates and the clipboard are for the other machines on this Tailscale account"),
+            );
+        }
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/v1/status") => Response::json(200, &self.status(local)),
             ("GET", "/v1/display") => Response::json(200, &self.display()),
@@ -1630,6 +1655,9 @@ mod tests {
     #[test]
     fn stream_and_power_validate_their_bodies() {
         let svc = Service::new();
+        let mut st = tailscale::Status::default();
+        st.self_node.tailscale_ips = vec!["100.64.0.99".into()];
+        *svc.tailscale.lock() = Ok(st);
         let local: SocketAddr = "127.0.0.1:5".parse().unwrap();
         let peer_addr: SocketAddr = "100.64.0.5:5".parse().unwrap();
         svc.auth
@@ -1664,10 +1692,10 @@ mod tests {
         );
         assert_eq!(svc.handle(local, &post("/v1/nope", "")).status, 404);
         // An update without its headers is refused before anything is written.
-        let r = svc.handle(local, &post(UPDATE_PATH, "MZ"));
+        let r = svc.handle(peer_addr, &post(UPDATE_PATH, "MZ"));
         assert_eq!(r.status, 400, "{}", r.body);
         let r = svc.handle(
-            local,
+            peer_addr,
             &Request {
                 method: "POST".into(),
                 path: UPDATE_PATH.into(),
@@ -1685,6 +1713,61 @@ mod tests {
             "{}",
             r.body
         );
+    }
+
+    #[test]
+    fn another_account_on_this_machine_cannot_push_an_update_or_read_the_clipboard() {
+        // Loopback, and this machine's own tailnet address, can be any OS
+        // user signed in here: an executable pushed from there would run as
+        // the account that owns this service.
+        let svc = Service::new();
+        let mut st = tailscale::Status::default();
+        st.self_node.tailscale_ips = vec!["100.64.0.5".into(), "fd7a:115c:a1e0::5".into()];
+        *svc.tailscale.lock() = Ok(st);
+        let own: SocketAddr = "100.64.0.5:5".parse().unwrap();
+        let other: SocketAddr = "100.64.0.6:5".parse().unwrap();
+        for ip in [own.ip(), other.ip()] {
+            svc.auth.lock().insert(ip, (Instant::now(), true));
+        }
+        let update = Request {
+            method: "POST".into(),
+            path: UPDATE_PATH.into(),
+            headers: vec![
+                ("x-latch-version".into(), "99.0.0".into()),
+                ("content-type".into(), "application/octet-stream".into()),
+            ],
+            body: b"MZ".to_vec(),
+        };
+        let read = Request {
+            method: "GET".into(),
+            path: CLIPBOARD_PATH.into(),
+            ..Default::default()
+        };
+        let write = Request {
+            method: "POST".into(),
+            path: CLIPBOARD_PATH.into(),
+            headers: json_header(),
+            body: b"not json".to_vec(),
+        };
+        for from in [
+            "127.0.0.1:5".parse().unwrap(),
+            "[::1]:5".parse().unwrap(),
+            own,
+        ] {
+            for req in [&update, &read, &write] {
+                let r = svc.handle(from, req);
+                assert_eq!(r.status, 403, "{} {} from {from}", req.method, req.path);
+            }
+        }
+        // Another machine on the account still gets through to the route.
+        assert_ne!(svc.handle(other, &update).status, 403);
+        assert_eq!(svc.handle(other, &write).status, 400);
+        // A cached admission must not bypass the local-address check when
+        // the next Tailscale status probe fails.
+        *svc.tailscale.lock() = Err("status unavailable".into());
+        for req in [&update, &read, &write] {
+            assert_eq!(svc.handle(own, req).status, 403);
+        }
     }
 
     const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -1805,9 +1888,13 @@ mod tests {
         // The clipboard routes exist and answer JSON, whatever the platform
         // says about the clipboard itself.
         let svc = Service::new();
-        let local: SocketAddr = "127.0.0.1:5".parse().unwrap();
+        let mut st = tailscale::Status::default();
+        st.self_node.tailscale_ips = vec!["100.64.0.99".into()];
+        *svc.tailscale.lock() = Ok(st);
+        let peer: SocketAddr = "100.64.0.5:5".parse().unwrap();
+        svc.auth.lock().insert(peer.ip(), (Instant::now(), true));
         let r = svc.handle(
-            local,
+            peer,
             &Request {
                 method: "POST".into(),
                 path: CLIPBOARD_PATH.into(),
@@ -1817,7 +1904,7 @@ mod tests {
         );
         assert_eq!(r.status, 400, "{}", r.body);
         let r = svc.handle(
-            local,
+            peer,
             &Request {
                 method: "GET".into(),
                 path: CLIPBOARD_PATH.into(),

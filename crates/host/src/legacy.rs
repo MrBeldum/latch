@@ -86,6 +86,7 @@ if ($sunshine) {{
 }}
 foreach ($dir in @({dirs})) {{
     if (Test-Path -LiteralPath $dir) {{
+        try {{ Assert-ProtectedTree $dir }} catch {{ Write-Output "  unprotected legacy folder: $_"; $setupFailed = $true; continue }}
         Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {{ $_.ExecutablePath -like ($dir + '\*') }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
         try {{ Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop }} catch {{ Write-Output "  remove $dir : $_"; $setupFailed = $true }}
     }}
@@ -151,8 +152,9 @@ mod tests {
             &["LatchRetireSelftestTask"],
             &["Latch Retire Selftest"],
         );
+        let protection = include_str!("../../../scripts/setup-protection.ps1");
         let script = format!(
-            "$ErrorActionPreference = 'Continue'\nfunction Step($m) {{ Write-Output $m }}\n$setupFailed = $false\n{retire}if ($setupFailed) {{ exit 1 }}\nexit 0\n"
+            "$ErrorActionPreference = 'Continue'\nfunction Step($m) {{ Write-Output $m }}\n$setupFailed = $false\n{protection}\n{retire}if ($setupFailed) {{ exit 1 }}\nexit 0\n"
         );
         std::fs::write(out, script).expect("write the script");
     }
