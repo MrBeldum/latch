@@ -59,3 +59,5 @@ dispatch2 = "0.3"
 # The loopback test runs a real viewer against this engine.
 latch-stream.workspace = true
 latch-core.workspace = true
+[target.'cfg(windows)'.dev-dependencies]
+socket2 = "0.6"

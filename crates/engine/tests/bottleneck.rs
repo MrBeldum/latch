@@ -149,9 +149,11 @@ fn noise_stream_adapts_through_ten_megabit_bottleneck_and_recovers() {
             address: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port,
         },
+        // Small enough that a CI runner's few cores encode noise at full
+        // rate, so the 10 Mbps link, not the encoder, is the limit.
         Settings {
-            width: 1920,
-            height: 1080,
+            width: 640,
+            height: 360,
             fps: 60,
             bitrate_kbps: 50_000,
             hevc: false,

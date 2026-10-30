@@ -95,6 +95,14 @@ fn a_viewer_that_does_not_read_cannot_block_the_control_writer() {
     let server = Server::bind(0, Options::default()).unwrap();
     let session = session("127.0.0.1:9".parse().unwrap());
     let (mut host, _client) = sockets();
+    // Windows grows a loopback send backlog on demand, so without a fixed
+    // send buffer the prefill below never fills it and the Accept never
+    // blocks. Setting SO_SNDBUF turns that autotuning off.
+    #[cfg(windows)]
+    {
+        let _ = socket2::SockRef::from(&host).set_send_buffer_size(8192);
+        let _ = socket2::SockRef::from(&_client).set_recv_buffer_size(8192);
+    }
     host.set_nonblocking(true).unwrap();
     let until = Instant::now() + Duration::from_millis(200);
     while Instant::now() < until {
