@@ -2046,6 +2046,7 @@ dependencies = [
  "socket2",
  "tracing",
  "windows 0.58.0",
+ "windows-core 0.58.0",
  "x11rb",
 ]
 

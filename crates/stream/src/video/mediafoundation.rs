@@ -1,7 +1,7 @@
 //! Standalone H.264 decoding. COM and MF stay on a dedicated MTA so callers
 //! can create and move the decoder from a UI thread with any apartment.
 use anyhow::{bail, ensure, Context, Result};
-use std::{collections::VecDeque, mem::ManuallyDrop, sync::mpsc, thread};
+use std::{cell::RefCell, collections::VecDeque, mem::ManuallyDrop, sync::mpsc, thread};
 use windows::{
     core::Interface,
     Win32::{
@@ -121,6 +121,7 @@ struct Gpu {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     _manager: IMFDXGIDeviceManager,
+    staging: RefCell<Option<ID3D11Texture2D>>,
 }
 impl Gpu {
     fn new(transform: &IMFTransform) -> Result<Self> {
@@ -163,6 +164,7 @@ impl Gpu {
                 device,
                 context,
                 _manager: manager,
+                staging: RefCell::new(None),
             })
         }
     }
@@ -191,23 +193,32 @@ impl Gpu {
             desc.BindFlags = 0;
             desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
             desc.MiscFlags = 0;
-            let mut staging = None;
-            self.device
-                .CreateTexture2D(&desc, None, Some(&mut staging))
-                .context("allocate DXVA staging texture")?;
-            let staging = staging.context("missing decoder staging texture")?;
+            let mut cached = self.staging.borrow_mut();
+            let matches = cached.as_ref().is_some_and(|texture| {
+                let mut old = D3D11_TEXTURE2D_DESC::default();
+                texture.GetDesc(&mut old);
+                (old.Width, old.Height, old.Format) == (desc.Width, desc.Height, desc.Format)
+            });
+            if !matches {
+                let mut staging = None;
+                self.device
+                    .CreateTexture2D(&desc, None, Some(&mut staging))
+                    .context("allocate DXVA staging texture")?;
+                *cached = staging;
+            }
+            let staging = cached.as_ref().context("missing decoder staging texture")?;
             self.context
-                .CopySubresourceRegion(&staging, 0, 0, 0, 0, &texture, subresource, None);
+                .CopySubresourceRegion(staging, 0, 0, 0, 0, &texture, subresource, None);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             self.context
-                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
                 .context("map DXVA output")?;
             let bytes = std::slice::from_raw_parts(
                 mapped.pData.cast::<u8>(),
                 mapped.RowPitch as usize * desc.Height as usize * 3 / 2,
             );
             let result = layout.copy(bytes, mapped.RowPitch as usize, desc.Height as usize);
-            self.context.Unmap(&staging, 0);
+            self.context.Unmap(staging, 0);
             result
         }
     }
