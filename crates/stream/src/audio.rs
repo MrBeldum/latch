@@ -3,8 +3,9 @@
 //! pulls from a ring buffer on its own thread, resampled to whatever rate
 //! the output device runs at and spread over its channels. If the buffer
 //! grows past [`MAX_QUEUED_MS`] the oldest audio is dropped: latency matters
-//! more than never skipping. What the output side found is kept, so "no
-//! sound" comes with its reason.
+//! more than never skipping. Below that, playback speed is trimmed a hair to
+//! hold the preroll's worth queued as the two machines' clocks drift. What
+//! the output side found is kept, so "no sound" comes with its reason.
 
 use anyhow::{bail, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -19,6 +20,11 @@ use std::sync::Arc;
 const MAX_QUEUED_MS: usize = 120;
 const KEEP_MS: usize = 50;
 const MAX_CHANNELS: usize = 8;
+/// Most playback is sped up or slowed down to hold the preroll's worth
+/// queued while the host's and this device's clocks drift apart: 0.2 %, a
+/// pitch change too small to hear and ten times the drift of two ordinary
+/// sound clocks.
+const MAX_TRIM: f64 = 0.002;
 
 /// The output device, as the output thread found it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,6 +353,9 @@ struct Mixer {
     out_channels: usize,
     /// Source frames per output frame: 48000 / 44100 ≈ 1.088.
     step: f64,
+    out_rate: f64,
+    /// Queued samples, smoothed over about a second.
+    level: f64,
     /// How far from `prev` towards `next` the output is; a whole frame or
     /// more means it is time to pull.
     pos: f64,
@@ -376,6 +385,8 @@ impl Mixer {
             src_channels: src_channels.clamp(1, MAX_CHANNELS),
             out_channels: out_channels.max(1),
             step: src_rate.max(1) as f64 / out_rate.max(1) as f64,
+            out_rate: out_rate.max(1) as f64,
+            level: 0.0,
             pos: 1.0,
             prev: [0.0; MAX_CHANNELS],
             next: [0.0; MAX_CHANNELS],
@@ -394,7 +405,25 @@ impl Mixer {
                 return;
             }
             self.started = true;
+            if self.preroll > 0 {
+                // Out of silence, start from the newest preroll's worth: a
+                // backlog a stall left behind would stay as added delay.
+                let excess = (q.len() - self.preroll) / self.src_channels * self.src_channels;
+                q.drain(..excess);
+            }
+            self.level = q.len() as f64;
         }
+        // Steer towards keeping the preroll queued, so clock drift neither
+        // grows the delay until the overrun cut nor drains it into a gap.
+        // Packets arrive in bursts: steer by the average over a second.
+        let step = if self.preroll == 0 {
+            self.step
+        } else {
+            let frames = (out.len() / self.out_channels) as f64;
+            self.level += (q.len() as f64 - self.level) * (frames / self.out_rate).min(1.0);
+            let error = self.level / self.preroll as f64 - 1.0;
+            self.step * (1.0 + (2.0 * MAX_TRIM * error).clamp(-MAX_TRIM, MAX_TRIM))
+        };
         let mut frames = 0u64;
         for frame in out.chunks_mut(self.out_channels) {
             while self.pos >= 1.0 {
@@ -424,7 +453,7 @@ impl Mixer {
                     0.0
                 };
             }
-            self.pos += self.step;
+            self.pos += step;
             frames += 1;
         }
         self.pulled.fetch_add(frames, Ordering::Relaxed);
@@ -593,6 +622,89 @@ mod tests {
         let mut out = vec![9.0f32; 6 * 10];
         m.fill(&mut out);
         assert_eq!(&out[6 * 9..], &[0.25, -0.25, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// Plays a constant 0.5 for `secs` from a host whose clock runs `ppm`
+    /// fast, sending 10 ms of stereo every 10 ms of its time with up to
+    /// 10 ms of random delay, into a 48 kHz stereo device that pulls 512
+    /// frames per callback, with the player's preroll and overrun cut.
+    /// Returns the samples that were not 0.5 after sound began (gaps), the
+    /// overrun cuts, and the mean queued audio in ms over the last minute.
+    fn long_session(ppm: f64, secs: u64) -> (u64, u64, f64) {
+        const CALLBACK: usize = 512;
+        let per_ms = 48 * 2;
+        let queue: Arc<Mutex<VecDeque<f32>>> = Arc::default();
+        let preroll = per_ms * 40;
+        let mut m = Mixer::new(48_000, 2, 48_000, 2, queue.clone(), Arc::default(), preroll);
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        let mut random = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let send_every = 0.010 / (1.0 + ppm * 1e-6);
+        let (mut sent, mut arrival, mut next_callback) = (0.0f64, 0.0f64, 0.0f64);
+        let mut out = vec![0.0f32; CALLBACK * 2];
+        let (mut gaps, mut cuts, mut sounding) = (0u64, 0u64, false);
+        let (mut depth_sum, mut depth_n) = (0.0f64, 0u64);
+        let end = secs as f64;
+        while next_callback < end {
+            // In order, as the receiver hands packets to the player.
+            arrival = arrival.max(sent + 0.005 + 0.010 * random());
+            if arrival <= next_callback {
+                let mut q = queue.lock();
+                q.extend(std::iter::repeat_n(0.5f32, 480 * 2));
+                if q.len() > per_ms * MAX_QUEUED_MS {
+                    let drop = q.len() - per_ms * KEEP_MS;
+                    q.drain(..drop);
+                    cuts += 1;
+                }
+                sent += send_every;
+                continue;
+            }
+            let before = queue.lock().len();
+            m.fill(&mut out);
+            let after = queue.lock().len();
+            for &s in &out {
+                if s == 0.5 {
+                    sounding = true;
+                } else if sounding {
+                    gaps += 1;
+                }
+            }
+            if next_callback >= end - 60.0 {
+                depth_sum += (before + after) as f64 / 2.0 / per_ms as f64;
+                depth_n += 1;
+            }
+            next_callback += CALLBACK as f64 / 48_000.0;
+        }
+        (gaps, cuts, depth_sum / depth_n.max(1) as f64)
+    }
+
+    #[test]
+    fn audio_latency_stays_bounded_over_a_long_session_with_clock_drift() {
+        for ppm in [-300.0, 0.0, 300.0] {
+            let (gaps, cuts, ms) = long_session(ppm, 30 * 60);
+            eprintln!("{ppm:+} ppm: {gaps} gap samples, {cuts} cuts, {ms:.1} ms queued");
+            assert_eq!((gaps, cuts), (0, 0), "{ppm:+} ppm");
+            assert!(
+                (25.0..=45.0).contains(&ms),
+                "{ppm:+} ppm: {ms:.1} ms queued"
+            );
+        }
+    }
+
+    #[test]
+    fn after_a_stall_the_mixer_restarts_at_its_preroll_not_the_backlog() {
+        // Ten stereo frames numbered 0..9 piled up; the preroll is four.
+        let queue: Arc<Mutex<VecDeque<f32>>> = Arc::default();
+        queue.lock().extend((0..10).flat_map(|i| [i as f32; 2]));
+        let mut m = Mixer::new(48_000, 2, 48_000, 2, queue.clone(), Arc::default(), 8);
+        let mut out = vec![9.0f32; 8];
+        m.fill(&mut out);
+        // Frames 0..5 are skipped rather than kept as added delay.
+        assert_eq!(out, [0.0, 0.0, 6.0, 6.0, 7.0, 7.0, 8.0, 8.0]);
     }
 
     #[test]
