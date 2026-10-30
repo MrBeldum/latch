@@ -284,6 +284,7 @@ impl ClientApp {
         let Some(target) = Target::from_pc(pc) else {
             return;
         };
+        self.pending_hdr = None;
         self.ended_seen = false;
         self.offer_sleep = None;
         self.streamed = false;
@@ -409,6 +410,11 @@ impl ClientApp {
         let name = name.to_string();
         let ours = self.is_current_target(ip);
         if ours {
+            self.pending_hdr = None;
+            self.reconnect = None;
+            if self.view.interrupted.is_some() {
+                self.view.interrupted = Some(crate::stream::Interruption::HostSleeping);
+            }
             self.power_sent.store(true, Ordering::Relaxed);
             if self.live.lock().is_some() {
                 self.view.toast(
@@ -466,10 +472,10 @@ impl ClientApp {
     }
 
     fn disconnect(&mut self) {
+        self.pending_hdr = None;
+        self.reconnect = None;
         let mut p = self.progress.lock();
-        if p.active() {
-            p.cancel = true;
-        }
+        p.cancel = true;
         drop(p);
         self.view.interrupted = None;
         if let Some(l) = self.live.lock().as_ref() {
@@ -492,7 +498,14 @@ impl ClientApp {
                 }
             }
             let mut prog = self.progress.lock();
-            while let Ok(ev) = live.events.try_recv() {
+            while live.generation == prog.generation {
+                let Ok(ev) = live.events.try_recv() else {
+                    break;
+                };
+                if prog.cancel {
+                    live.session.stop();
+                    continue;
+                }
                 match ev {
                     Event::Stage(s) => {
                         if prog.step == Step::Connecting {
@@ -500,13 +513,18 @@ impl ClientApp {
                         }
                     }
                     Event::Connected => {
+                        if self.power_sent.load(Ordering::Relaxed) {
+                            live.session.stop();
+                            continue;
+                        }
                         prog.step = Step::Streaming;
                         prog.since = Instant::now();
                         self.streamed = true;
+                        let restoring = self.fullscreen_after.is_some();
                         self.fullscreen_after.get_or_insert(self.fullscreen);
                         if self.cfg.stream.fullscreen {
                             fullscreen = Some(true);
-                        } else {
+                        } else if !restoring {
                             fit_window_to(ctx, live.requested.0, live.requested.1);
                         }
                         self.view.interrupted = None;
@@ -529,7 +547,7 @@ impl ClientApp {
                             if cancelled { " after a stop" } else { "" }
                         );
                         self.stream_failed = !cancelled;
-                        if !cancelled && live.frames.seq() > 0 {
+                        if !cancelled && live.frames.seq() > 0 && self.view.interrupted.is_none() {
                             self.view.handle_interruption();
                         }
                         prog.step = Step::Ended {
@@ -545,7 +563,8 @@ impl ClientApp {
                                 Some(crate::stream::Interruption::TakenOver(message.clone()));
                         } else if self.power_sent.load(Ordering::Relaxed) {
                             self.view.interrupted = Some(crate::stream::Interruption::HostSleeping);
-                        } else if error && live.frames.seq() > 0 {
+                        } else if error && live.frames.seq() > 0 && self.view.interrupted.is_none()
+                        {
                             self.view.handle_interruption();
                         }
                         if code != 0 {
@@ -573,8 +592,17 @@ impl ClientApp {
                 self.view.interrupted,
                 Some(crate::stream::Interruption::Reconnecting(ref s)) if s.in_flight
             );
-            if is_reconnecting && matches!(prog.step, Step::Ended { .. }) && !prog.cancel {
+            if is_reconnecting
+                && self.reconnect.is_none()
+                && matches!(prog.step, Step::Ended { .. })
+                && !prog.cancel
+            {
                 self.view.handle_interruption();
+            }
+            if self.view.interrupted.is_some() {
+                let interruption = self.view.interrupted.take();
+                self.view.reset(ctx, Some(live));
+                self.view.interrupted = interruption;
             }
             // A stop we asked for ends without a Terminated event.
             let ended = matches!(prog.step, Step::Ended { .. });
@@ -613,7 +641,10 @@ impl ClientApp {
         (asked, limits): ((u32, u32, u32), Option<HostLimits>),
     ) {
         let size = Self::native_pixels(ctx);
-        if size == self.display_at_connect || self.reconnect.is_some() {
+        if size == self.display_at_connect
+            || self.reconnect.is_some()
+            || self.view.interrupted.is_some()
+        {
             self.display_change = None;
             return;
         }
@@ -625,8 +656,8 @@ impl ClientApp {
                     session::request_for(&self.cfg.stream, size, capture_size, max_fps) != asked
                 });
                 if changes {
-                    self.reconnect = self.last_pc.clone();
                     self.disconnect();
+                    self.reconnect = self.last_pc.clone();
                 } else {
                     // Nothing to ask for anew: this display is the one the
                     // stream is for now.
@@ -673,9 +704,9 @@ impl ClientApp {
                 self.view.toast(tone, text.clone());
             }
             self.notice = Some((tone, text, Instant::now()));
-            if succeed && self.is_current_target(completion.ip) {
-                self.reconnect = Some(completion.pc);
+            if succeed && !self.progress.lock().cancel && self.is_current_target(completion.ip) {
                 self.disconnect();
+                self.reconnect = Some(completion.pc);
             }
         }
     }
@@ -807,7 +838,7 @@ impl eframe::App for ClientApp {
 
         let streaming = self.live.lock().is_some();
         if streaming {
-            if self.view.interrupted.is_none() {
+            if self.view.interrupted.is_none() || self.progress.lock().active() {
                 // The stream repaints itself on every decoded frame.
                 ctx.request_repaint_after(Duration::from_millis(250));
             }
@@ -905,8 +936,8 @@ impl eframe::App for ClientApp {
                         Action::ApplySettings(settings) => {
                             self.cfg.stream = settings;
                             self.dirty = true;
-                            self.reconnect = self.last_pc.clone();
                             self.disconnect();
+                            self.reconnect = self.last_pc.clone();
                         }
                         Action::TurnOffHdr => self.turn_off_hdr(ctx, ip),
                         Action::InstallHost => {
@@ -3977,6 +4008,135 @@ mod live_snapshot {
                 "the host supplied no visible picture: {problem:?}"
             );
         }
+    }
+
+    #[test]
+    fn review_retry_flow_ignores_old_events_and_counts_worker_failures_once() {
+        let mut h = snapshots::build(
+            snapshots::Setup::new(Discovery::default()),
+            egui::vec2(800.0, 600.0),
+            1.0,
+            false,
+        );
+        let ctx = h.ctx.clone();
+        let mut live = crate::stream::tests::dummy_live(&ctx);
+        let (tx, rx) = std::sync::mpsc::channel();
+        live.events = rx;
+        *h.state().live.lock() = Some(live);
+        h.state().progress.lock().step = Step::Ended {
+            error: Some("lost".into()),
+        };
+        h.state_mut().fullscreen_after = Some(false);
+        h.state_mut().fullscreen = true;
+        for attempt in 1..=3 {
+            h.state_mut().view.interrupted = Some(crate::stream::Interruption::Reconnecting(
+                crate::stream::ReconnectState {
+                    attempt,
+                    deadline: Instant::now(),
+                    in_flight: true,
+                },
+            ));
+            // The action is queued, but the next worker hasn't started yet.
+            h.state_mut().reconnect = Some(Pc::default());
+            h.state_mut().poll_live(&ctx);
+            assert!(
+                matches!(&h.state().view.interrupted, Some(crate::stream::Interruption::Reconnecting(s)) if s.attempt == attempt && s.in_flight)
+            );
+            h.state_mut().reconnect = None;
+            h.state().progress.lock().generation = attempt as u64;
+            h.state().progress.lock().step = Step::Launching;
+            tx.send(Event::Connected).unwrap();
+            h.state_mut().poll_live(&ctx);
+            assert_eq!(
+                h.state().progress.lock().step,
+                Step::Launching,
+                "old Connected cannot finish a new attempt"
+            );
+            h.state().progress.lock().step = Step::Ended {
+                error: Some("worker failed before publishing live".into()),
+            };
+            h.state_mut().poll_live(&ctx);
+            let after = h.state().view.interrupted.clone();
+            h.state_mut().poll_live(&ctx);
+            assert_eq!(h.state().view.interrupted, after, "one failure counts once");
+            if attempt < 3 {
+                assert!(
+                    matches!(after, Some(crate::stream::Interruption::Reconnecting(s)) if s.attempt == attempt + 1 && !s.in_flight)
+                );
+            } else {
+                assert_eq!(after, Some(crate::stream::Interruption::Failed));
+            }
+            assert!(h.state().fullscreen);
+            assert_eq!(h.state().fullscreen_after, Some(false));
+        }
+        h.state_mut().reconnect = Some(Pc::default());
+        h.state_mut().disconnect();
+        assert!(h.state().progress.lock().cancel);
+        assert!(h.state().reconnect.is_none());
+        assert!(h.state().view.interrupted.is_none());
+    }
+
+    #[test]
+    fn review_session_end_events_retry_only_unexpected_loss() {
+        for (cancel, sleeping, code, retry) in [
+            (false, false, 2, true),
+            (true, false, 2, false),
+            (false, true, 2, false),
+            (false, false, 1, false),
+        ] {
+            let mut h = snapshots::build(
+                snapshots::Setup::new(Discovery::default()),
+                egui::vec2(800.0, 600.0),
+                1.0,
+                false,
+            );
+            let ctx = h.ctx.clone();
+            let mut live = crate::stream::tests::dummy_live(&ctx);
+            live.frames.publish(Default::default());
+            let (tx, rx) = std::sync::mpsc::channel();
+            live.events = rx;
+            *h.state().live.lock() = Some(live);
+            h.state().progress.lock().step = Step::Streaming;
+            h.state().progress.lock().cancel = cancel;
+            h.state().power_sent.store(sleeping, Ordering::Relaxed);
+            tx.send(Event::Terminated {
+                code,
+                message: "ended".into(),
+            })
+            .unwrap();
+            h.state_mut().poll_live(&ctx);
+            assert_eq!(
+                matches!(
+                    h.state().view.interrupted,
+                    Some(crate::stream::Interruption::Reconnecting(_))
+                ),
+                retry
+            );
+            if retry {
+                assert!(
+                    matches!(&h.state().view.interrupted, Some(crate::stream::Interruption::Reconnecting(s)) if s.attempt == 1 && !s.in_flight)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn review_disconnect_invalidates_hdr_completion() {
+        let mut h = snapshots::build(
+            snapshots::Setup::new(Discovery::default()),
+            egui::vec2(800.0, 600.0),
+            1.0,
+            false,
+        );
+        h.state_mut().pending_hdr = Some(Arc::new(Mutex::new(Some(HdrCompletion {
+            ip: "127.0.0.1".parse().unwrap(),
+            pc: Pc::default(),
+            result: Ok(true),
+        }))));
+        h.state_mut().disconnect();
+        assert!(h.state().pending_hdr.is_none());
+        h.state_mut().poll_hdr();
+        assert!(h.state().reconnect.is_none());
     }
 
     #[test]

@@ -480,18 +480,6 @@ impl View {
         let mut bar_rect = bar_visible
             .then(|| Rect::from_min_size(screen.min, Vec2::new(screen.width(), self.bar_h)));
         let waiting = live.frames.seq() == 0;
-        #[cfg(test)]
-        let connected = self
-            .tap
-            .as_ref()
-            .map(|t| t.connected.get())
-            .unwrap_or_else(|| live.session.connected());
-        #[cfg(not(test))]
-        let connected = live.session.connected();
-
-        if !connected && !waiting && self.interrupted.is_none() {
-            self.handle_interruption();
-        }
         let interruption = self.interrupted.clone();
 
         egui::CentralPanel::default()
@@ -687,7 +675,13 @@ impl View {
                                 }
                                 ui.add_space(space::XS);
                                 ui.horizontal(|ui| {
-                                    if ui::primary_button(ui, "Reconnect now").clicked() {
+                                    if ui
+                                        .add_enabled_ui(!state.in_flight, |ui| {
+                                            ui::primary_button(ui, "Reconnect now")
+                                        })
+                                        .inner
+                                        .clicked()
+                                    {
                                         if let Some(Interruption::Reconnecting(ref mut s)) =
                                             self.interrupted
                                         {
@@ -1570,6 +1564,12 @@ impl View {
         out: &S,
         connected: bool,
     ) {
+        if self.interrupted.is_some() {
+            self.held.release_all(out);
+            self.set_captured(ctx, false);
+            crate::macos::stream_owns_keys(false);
+            return;
+        }
         let (events, modifiers, pointer, focused) = ctx.input(|i| {
             (
                 i.events.clone(),
@@ -1579,7 +1579,10 @@ impl View {
             )
         });
         let popup = ctx.memory(|m| m.any_popup_open());
-        let overlay = self.confirm.is_some() || self.confirm_install || self.settings.is_some();
+        let overlay = self.confirm.is_some()
+            || self.confirm_install
+            || self.settings.is_some()
+            || self.interrupted.is_some();
         let over_bar = pointer.is_some_and(|p| bar.is_some_and(|b| b.contains(p)));
         let over_overlay = pointer.is_some_and(|p| {
             ctx.layer_id_at(p)
@@ -2330,6 +2333,7 @@ pub(crate) mod tests {
         let ip: std::net::Ipv4Addr = "100.64.0.10".parse().unwrap();
         let input = session.input();
         Live {
+            generation: 0,
             pc: "Gaming-PC".into(),
             node_id: "n1".into(),
             ip,

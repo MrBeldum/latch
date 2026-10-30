@@ -551,6 +551,7 @@ impl Progress {
 
 /// A running stream and everything the window needs to show and drive it.
 pub struct Live {
+    pub generation: u64,
     pub pc: String,
     pub node_id: String,
     pub ip: Ipv4Addr,
@@ -748,7 +749,11 @@ fn stale(progress: &Mutex<Progress>, generation: u64) -> bool {
 fn run(c: &Connect, generation: u64) -> Result<()> {
     let t = &c.target;
     let report = |step: Step, detail: String| {
-        c.progress.lock().set(step, detail);
+        let mut p = c.progress.lock();
+        if p.generation != generation || p.cancel {
+            return;
+        }
+        p.set(step, detail);
         c.ctx.request_repaint();
     };
 
@@ -891,7 +896,14 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         bail!("cancelled");
     }
     let input = session.input();
-    *c.live.lock() = Some(Live {
+    let mut live = c.live.lock();
+    let mut progress = c.progress.lock();
+    if progress.cancel || progress.generation != generation {
+        session.stop();
+        bail!("cancelled");
+    }
+    *live = Some(Live {
+        generation,
         pc: t.name.clone(),
         node_id: t.node_id.clone(),
         ip: t.ip,
@@ -908,7 +920,8 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         clipboard: clipboard::Sync::spawn(t.ip, c.ctx.clone()),
         shortcuts: clipboard::Shortcuts::for_os(if host.os.is_empty() { &t.os } else { &host.os }),
     });
-    report(Step::Connecting, "Connecting…".into());
+    progress.set(Step::Connecting, "Connecting…");
+    c.ctx.request_repaint();
     Ok(())
 }
 
