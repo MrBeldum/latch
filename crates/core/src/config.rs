@@ -295,6 +295,98 @@ fn put(root: &mut toml::Table, path: &[String], value: toml::Value) {
     table.insert(last.clone(), value);
 }
 
+/// An OS-level advisory file lock held while updating or saving a config file.
+pub struct ConfigLock {
+    #[cfg(unix)]
+    file: std::fs::File,
+    #[cfg(windows)]
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        use std::os::windows::io::AsRawHandle;
+        let handle = self.file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        let mut overlapped =
+            std::mem::MaybeUninit::<windows_sys::Win32::System::IO::OVERLAPPED>::zeroed();
+        unsafe {
+            windows_sys::Win32::Storage::FileSystem::UnlockFileEx(
+                handle,
+                0,
+                !0,
+                !0,
+                overlapped.as_mut_ptr(),
+            );
+        }
+    }
+}
+
+pub fn lock_config(name: &str) -> Result<ConfigLock> {
+    let dir = data_dir()?;
+    let lock_path = dir.join(format!("{name}.lock"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("open lock file {}", lock_path.display()))?;
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("flock lock file {}", lock_path.display()));
+        }
+        Ok(ConfigLock { file })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("open lock file {}", lock_path.display()))?;
+        let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        let mut overlapped =
+            std::mem::MaybeUninit::<windows_sys::Win32::System::IO::OVERLAPPED>::zeroed();
+        let ret = unsafe {
+            windows_sys::Win32::Storage::FileSystem::LockFileEx(
+                handle,
+                windows_sys::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK,
+                0,
+                !0,
+                !0,
+                overlapped.as_mut_ptr(),
+            )
+        };
+        if ret == 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("LockFileEx {}", lock_path.display()));
+        }
+        Ok(ConfigLock { file })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(ConfigLock {})
+    }
+}
+
 /// Apply a read-modify-write transaction without allowing another in-process
 /// settings or discovery writer to replace the snapshot underneath it.
 /// A file that exists but cannot be read is left alone: the edit fails
@@ -304,6 +396,7 @@ pub fn update<T: Serialize + DeserializeOwned + Default + PartialEq>(
     edit: impl FnOnce(&mut T),
 ) -> Result<()> {
     let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _file_guard = lock_config(name)?;
     let mut value: T = read_unlocked(name)?;
     let before = toml::to_string(&value)?;
     edit(&mut value);
@@ -315,6 +408,7 @@ pub fn update<T: Serialize + DeserializeOwned + Default + PartialEq>(
 
 pub fn save<T: Serialize>(name: &str, value: &T) -> Result<()> {
     let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _file_guard = lock_config(name)?;
     save_unlocked(name, value)
 }
 
@@ -575,6 +669,27 @@ mod tests {
             );
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn file_lock_coordinates_exclusive_access() {
+        use std::time::Duration;
+        let name = format!("flock-test-{}.toml", std::process::id());
+        let lock1 = lock_config(&name).expect("acquire lock1");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let name_clone = name.clone();
+        let t = std::thread::spawn(move || {
+            let _lock2 = lock_config(&name_clone).expect("acquire lock2");
+            tx.send(true).unwrap();
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
+        drop(lock1);
+        assert_eq!(rx.recv_timeout(Duration::from_millis(500)), Ok(true));
+        t.join().unwrap();
+        let _ = std::fs::remove_file(data_dir().unwrap().join(format!("{name}.lock")));
     }
 
     /// `.cargo/config.toml` points `cargo test` at `target/latch-data`.

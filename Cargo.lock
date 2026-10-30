@@ -2008,6 +2008,7 @@ dependencies = [
  "directories",
  "if-addrs",
  "image",
+ "libc",
  "rustls",
  "rustls-graviola",
  "semver",
@@ -2017,6 +2018,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "webpki-roots",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
