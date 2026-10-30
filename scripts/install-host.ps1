@@ -2,7 +2,7 @@
 # %LOCALAPPDATA%\Latch, add Start Menu and Desktop shortcuts and an entry
 # in Settings > Apps, and open it. The app itself runs the one
 # administrator step (firewall, Wake-on-LAN, virtual-display modes) when you
-# click "Set up this PC". Uninstalling (from
+# click "Set up as administrator" on its Sharing tab. Uninstalling (from
 # Settings > Apps, or `latch-host.exe --uninstall`) undoes both.
 #
 # -NoStart leaves the window closed. The background service this stops to
@@ -97,7 +97,7 @@ if (Test-Path $OldDir) {
 }
 
 Write-Host "Shortcut: Desktop\Latch Host.lnk"
-Write-Host "Open Latch Host and click 'Set up this PC' once."
+Write-Host "Open Latch and click 'Set up as administrator' on the Sharing tab once."
 Write-Host "If you already ran setup from the unzipped copy, run it once more from this install so the firewall allows $DestExe."
 if ((Get-Process -Id $PID).SessionId -eq 0) {
     # The task runs as this user, unelevated like the Run key, in the session
