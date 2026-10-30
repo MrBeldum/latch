@@ -154,6 +154,15 @@ impl InputSink for Injector {
         for event in self.held.drain() {
             if let Err(e) = construct(&event, DisplayRect::default()).and_then(|v| post(&v)) {
                 tracing::warn!("release input: {e:#}");
+                match event {
+                    Event::Key { vk, .. } => {
+                        self.held.keys.insert(vk);
+                    }
+                    Event::MouseButton { button, .. } => {
+                        self.held.buttons.insert(button);
+                    }
+                    _ => {}
+                }
             }
         }
     }

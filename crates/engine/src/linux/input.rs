@@ -248,15 +248,22 @@ impl InputSink for X11Input {
         Ok(())
     }
     fn release_all(&mut self) {
-        for (_, code) in std::mem::take(&mut self.pressed) {
-            let _ = self.fake(xproto::KEY_RELEASE_EVENT, code, 0, 0);
+        for (vk, code) in std::mem::take(&mut self.pressed) {
+            if let Err(e) = self.fake(xproto::KEY_RELEASE_EVENT, code, 0, 0) {
+                tracing::warn!("release key: {e:#}");
+                self.pressed.insert(vk, code);
+            } else {
+                self.held.keys.remove(&vk);
+            }
         }
         for button in std::mem::take(&mut self.held.buttons) {
             if let Ok(code) = button_code(button) {
-                let _ = self.button(code, false);
+                if let Err(e) = self.button(code, false) {
+                    tracing::warn!("release button: {e:#}");
+                    self.held.buttons.insert(button);
+                }
             }
         }
-        self.held.keys.clear();
         self.scroll = [0; 2];
         let _ = self.conn.flush();
     }
