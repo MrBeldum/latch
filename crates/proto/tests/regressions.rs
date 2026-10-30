@@ -420,3 +420,54 @@ fn video_initial_keyframe_requests_start_only_after_loss() {
         }
     }
 }
+
+#[test]
+fn another_frames_timeout_leaves_an_assembling_frame_alone() {
+    let start = Instant::now();
+    let mut link = Link::new(Impairment::NONE, 1);
+    let mut sender = Packetizer::new(1);
+    let mut receiver = Reassembler::new(1);
+    let mut frame = |data: &[u8], keyframe| {
+        let mut shards = Vec::new();
+        sender.packetize(
+            &OutFrame {
+                data,
+                keyframe,
+                host_delay: 0,
+            },
+            |dg| shards.push(dg.to_vec()),
+        );
+        shards
+    };
+    for dg in frame(&[1; 2400], true) {
+        link.send(start, &dg);
+    }
+    receive_video(&mut link, &mut receiver, start);
+    assert!(matches!(receiver.poll(start), Some(Reassembled::Frame(_))));
+    let one = frame(&[2; 3000], false);
+    let _two = frame(&[3; 3000], false);
+    let three = frame(&[4; 3000], false);
+    // Frame 3 starts at 0 and loses the rest; frame 1 starts 90 ms later.
+    link.send(start, &three[0]);
+    receive_video(&mut link, &mut receiver, start);
+    let at = start + Duration::from_millis(90);
+    link.send(at, &one[0]);
+    receive_video(&mut link, &mut receiver, at);
+    // Frame 3's timeout is not frame 1's: frame 1 has had 10 ms.
+    let other = start + FRAME_TIMEOUT;
+    assert_eq!(receiver.poll(other), None);
+    assert_eq!(receiver.next_deadline(), Some(at + FRAME_TIMEOUT));
+    // The rest of frame 1 arrives and it is delivered, not dropped as late.
+    let late = other + Duration::from_millis(5);
+    for dg in &one[1..] {
+        link.send(late, dg);
+    }
+    receive_video(&mut link, &mut receiver, late);
+    assert!(matches!(
+        receiver.poll(late),
+        Some(Reassembled::Frame(f)) if f.frame == 1 && f.data == [2; 3000]
+    ));
+    // Frame 2 never came; frame 3's timeout now decides both.
+    assert_eq!(receiver.poll(late), Some(Reassembled::Lost { frame: 2 }));
+    assert_eq!(receiver.poll(late), Some(Reassembled::Lost { frame: 3 }));
+}
