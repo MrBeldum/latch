@@ -257,7 +257,11 @@ impl Server {
             }
         }
         match input::open() {
-            Ok(sink) => prepared.input = Some(sink),
+            Ok(mut sink) => {
+                let info = prepared.info.as_ref().expect("prepared has video info");
+                sink.set_stream_size(info.width, info.height);
+                prepared.input = Some(sink);
+            }
             Err(e) => prepared.input_problem = Some(format!("{e:#}")),
         }
         Ok(prepared)
@@ -920,8 +924,12 @@ fn encode_video(
         };
         let next_info = pipeline.info();
         if next_info != info {
-            if next_info.display != info.display {
-                session.input.lock().display = next_info.display;
+            {
+                let mut input = session.input.lock();
+                input.display = next_info.display;
+                if let Some(sink) = &mut input.sink {
+                    sink.set_stream_size(next_info.width, next_info.height);
+                }
             }
             if next_info.encoder != info.encoder || next_info.hardware != info.hardware {
                 let mut status = server.status.lock();

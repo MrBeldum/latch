@@ -47,6 +47,9 @@ impl DisplayRect {
 }
 
 pub trait InputSink: Send {
+    /// Stream dimensions for platforms whose cursor uses logical display points.
+    fn set_stream_size(&mut self, _width: u32, _height: u32) {}
+
     /// Applies one event. `display` is where absolute positions land.
     fn apply(&mut self, event: &Event, display: DisplayRect) -> anyhow::Result<()>;
 
