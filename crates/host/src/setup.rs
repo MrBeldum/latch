@@ -213,6 +213,8 @@ netsh advfirewall firewall delete rule name="Latch wake" | Out-Null
 netsh advfirewall firewall add rule name="Latch wake" dir=in action=allow protocol=UDP localport=9 program='{exe}' | Out-Null
 if ($LASTEXITCODE -ne 0) {{ $setupFailed = $true }}
 {virtual_display}
+Step "Recording the power settings this PC had before Latch"
+{record}
 Step "Turning Fast Startup off so a shut-down PC can wake"
 try {{ Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -Value 0 -Type DWord -ErrorAction Stop }} catch {{ Write-Output "  Fast Startup: $_"; $setupFailed = $true }}
 Step "Keeping this PC awake when plugged in so Tailscale stays reachable"
@@ -229,7 +231,35 @@ exit 0
         port = CONTROL_PORT,
         tailnet = "100.64.0.0/10,fd7a:115c:a1e0::/48",
         exe = q(&p.exe.display().to_string()),
-        virtual_display = crate::virtual_display::setup_ps()
+        virtual_display = crate::virtual_display::setup_ps(),
+        record = record_power_ps(),
+    )
+}
+
+/// Where setup keeps what it changed, for `--uninstall` to put back.
+/// Administrators' only, like everything setup writes.
+const SAVED_KEY: &str = r"HKLM:\SOFTWARE\Latch\Setup";
+
+/// The AC sleep and hibernate timeouts and Fast Startup as they were before
+/// Latch's first setup, under [`SAVED_KEY`]. A later setup records nothing:
+/// by then the values are its own. powercfg's labels are translated, so the
+/// AC value is read as the second-to-last hex number it prints (the DC
+/// value is the last).
+fn record_power_ps() -> String {
+    format!(
+        r#"$latchSaved = '{key}'
+if (-not (Test-Path -LiteralPath $latchSaved)) {{
+    New-Item -Path $latchSaved -Force | Out-Null
+    $hb = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -ErrorAction SilentlyContinue).HiberbootEnabled
+    if ($null -ne $hb) {{ New-ItemProperty -LiteralPath $latchSaved -Name HiberbootEnabled -Value "$hb" -PropertyType String -Force | Out-Null }}
+    foreach ($s in @(@('StandbyTimeoutAC', 'STANDBYIDLE'), @('HibernateTimeoutAC', 'HIBERNATEIDLE'))) {{
+        $hex = [regex]::Matches((powercfg /query SCHEME_CURRENT SUB_SLEEP $s[1] | Out-String), '0x[0-9a-fA-F]{{8}}')
+        if ($hex.Count -ge 2) {{
+            New-ItemProperty -LiteralPath $latchSaved -Name $s[0] -Value ([string][Convert]::ToUInt32($hex[$hex.Count - 2].Value, 16)) -PropertyType String -Force | Out-Null
+        }}
+    }}
+}} else {{ Write-Output "  kept from an earlier setup" }}"#,
+        key = SAVED_KEY
     )
 }
 
@@ -547,6 +577,38 @@ mod tests {
         assert!(s.contains("vdd_settings.xml"));
         assert!(!s.contains("Invoke-WebRequest"));
         assert!(!s.contains("--creds"));
+    }
+
+    /// The power settings setup changes are recorded first, once, so that
+    /// `--uninstall` can put them back (IN-11).
+    #[test]
+    fn setup_records_the_power_settings_before_changing_them() {
+        let s = script(&Plan {
+            exe: Path::new("C:\\Latch\\latch-host.exe"),
+            adapter: "",
+            adapter_description: "",
+        });
+        let record = s
+            .find(r"$latchSaved = 'HKLM:\SOFTWARE\Latch\Setup'")
+            .unwrap();
+        let only_once = s
+            .find("if (-not (Test-Path -LiteralPath $latchSaved))")
+            .unwrap();
+        for change in [
+            "-Name HiberbootEnabled -Value 0",
+            "standby-timeout-ac 0",
+            "hibernate-timeout-ac 0",
+        ] {
+            assert!(record < s.find(change).unwrap(), "{change}");
+        }
+        assert!(record < only_once);
+        for name in ["HiberbootEnabled", "StandbyTimeoutAC", "HibernateTimeoutAC"] {
+            assert!(
+                s.contains(&format!("-Name {name}")) || s.contains(&format!("'{name}'")),
+                "{name}"
+            );
+        }
+        assert!(s.contains("powercfg /query SCHEME_CURRENT SUB_SLEEP $s[1]"));
     }
 
     #[test]
