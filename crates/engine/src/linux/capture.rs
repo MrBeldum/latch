@@ -184,6 +184,18 @@ impl X11Capture {
         self.first = true;
     }
 
+    /// Re-reads the root's size. True, with a fresh image to come, when it changed.
+    fn resize(&mut self) -> anyhow::Result<bool> {
+        let geometry = self.conn.get_geometry(self.root)?.reply()?;
+        if (self.width, self.height) == (geometry.width, geometry.height) {
+            return Ok(false);
+        }
+        self.width = geometry.width;
+        self.height = geometry.height;
+        self.allocate();
+        Ok(true)
+    }
+
     fn pixels(&mut self, area: xproto::Rectangle) -> anyhow::Result<()> {
         let stride = area.width as usize * 4;
         let len = stride * area.height as usize;
@@ -286,12 +298,7 @@ impl CpuCapture for X11Capture {
                 }
             }
             if resized {
-                let geometry = self.conn.get_geometry(self.root)?.reply()?;
-                if (self.width, self.height) != (geometry.width, geometry.height) {
-                    self.width = geometry.width;
-                    self.height = geometry.height;
-                    self.allocate();
-                }
+                self.resize()?;
             }
             if self.first || self.damage.is_none() {
                 dirty = Some(xproto::Rectangle {
@@ -315,7 +322,14 @@ impl CpuCapture for X11Capture {
                 if let Some(id) = self.damage {
                     damage::subtract(&self.conn, id, x11rb::NONE, x11rb::NONE)?.check()?;
                 }
-                self.pixels(area)?;
+                if let Err(error) = self.pixels(area) {
+                    // The root can shrink between the event poll and GetImage
+                    // (BadMatch). That is a new size to capture, not a failure.
+                    if self.resize()? {
+                        continue;
+                    }
+                    return Err(error);
+                }
             }
             self.cursor = cursor;
             if dirty.is_some() || cursor_changed || self.first {
@@ -544,5 +558,51 @@ mod tests {
             .expect("the grab is still waiting for a silent X server")
             .unwrap_err();
         assert!(error.contains("did not answer"), "{error}");
+    }
+
+    #[test]
+    fn a_resize_just_before_get_image_is_a_new_size_not_a_failure() {
+        let mut shrunk = false;
+        let conn = fake_x(
+            Duration::from_secs(10),
+            move |opcode, sequence| match opcode {
+                xproto::GET_IMAGE_REQUEST if !shrunk => {
+                    // The root became 2x2 after the event poll: BadMatch.
+                    shrunk = true;
+                    let mut error = vec![0; 32];
+                    error[1] = xproto::MATCH_ERROR;
+                    error[2..4].copy_from_slice(&sequence.to_ne_bytes());
+                    error[10] = xproto::GET_IMAGE_REQUEST;
+                    error
+                }
+                xproto::GET_IMAGE_REQUEST => reply(
+                    &xproto::GetImageReply {
+                        depth: 24,
+                        sequence,
+                        visual: 0,
+                        data: vec![7; 16],
+                    }
+                    .serialize(),
+                ),
+                xproto::GET_GEOMETRY_REQUEST => reply(
+                    &xproto::GetGeometryReply {
+                        depth: 24,
+                        sequence,
+                        root: 1,
+                        width: 2,
+                        height: 2,
+                        ..Default::default()
+                    }
+                    .serialize(),
+                ),
+                _ => absent(sequence),
+            },
+        );
+        let mut capture = fake_capture(conn, 4, 4);
+        let mut frame = Bgra::default();
+        assert!(capture.grab(&mut frame, Duration::ZERO).unwrap());
+        assert_eq!((frame.width, frame.height, frame.stride), (2, 2, 8));
+        assert_eq!(frame.data, [7; 16]);
+        assert_eq!(capture.size(), (2, 2));
     }
 }
