@@ -1994,7 +1994,8 @@ pub fn list_row(
                             .color(P.text),
                     )
                     .truncate(),
-                );
+                )
+                .on_hover_text(title);
                 ui.add(
                     Label::new(
                         RichText::new(detail)
@@ -2558,5 +2559,22 @@ mod tests {
                 assert_ne!(a, b);
             }
         }
+    }
+
+    #[test]
+    fn list_row_renders_with_title_and_detail_tooltips() {
+        let ctx = egui::Context::default();
+        crate::apply(&ctx);
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                list_row(
+                    ui,
+                    Some(Tone::Success),
+                    "Office-HighPerformance-Workstation-2026",
+                    "Windows 11 · Online",
+                    |_| {},
+                );
+            });
+        });
     }
 }
