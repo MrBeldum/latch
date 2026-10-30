@@ -143,6 +143,7 @@ pub struct ClientApp {
     /// its way. Asked for once per stream, by the thread that answers.
     video_help: Arc<Mutex<Option<crate::display::Help>>>,
     asked_about_video: bool,
+    save_tx: std::sync::mpsc::Sender<ClientConfig>,
     /// An install of Latch Host through the stream, while it runs and a
     /// little after.
     handover: Option<Handover>,
@@ -179,6 +180,17 @@ impl ClientApp {
         if let Some(rs) = &cc.wgpu_render_state {
             crate::video::install(rs);
         }
+        let (save_tx, rx) = std::sync::mpsc::channel::<ClientConfig>();
+        std::thread::spawn(move || {
+            while let Ok(mut cfg) = rx.recv() {
+                while let Ok(newer) = rx.try_recv() {
+                    cfg = newer;
+                }
+                if let Err(e) = cfg.save() {
+                    tracing::warn!("could not save settings: {e:#}");
+                }
+            }
+        });
         Self {
             cfg,
             dirty: false,
@@ -204,6 +216,7 @@ impl ClientApp {
             stream_failed: false,
             video_help: Arc::default(),
             asked_about_video: false,
+            save_tx,
             handover: None,
             display_at_connect: (0, 0),
             display_change: None,
@@ -248,14 +261,7 @@ impl ClientApp {
     fn commit(&mut self) {
         if self.dirty {
             self.dirty = false;
-            if let Err(e) = self.cfg.save() {
-                tracing::warn!("could not save settings: {e:#}");
-                self.notice = Some((
-                    Tone::Danger,
-                    format!("Couldn't save settings: {e}. They apply until Latch quits."),
-                    Instant::now(),
-                ));
-            }
+            let _ = self.save_tx.send(self.cfg.clone());
         }
     }
 
@@ -3424,6 +3430,18 @@ pub(crate) mod snapshots {
         let notice = h.state().notice.as_ref().unwrap();
         assert_eq!(notice.0, Tone::Info);
         assert_eq!(notice.1, "Another device is watching Gaming-PC.");
+    }
+
+    #[test]
+    fn commit_saves_settings_asynchronously_off_ui_thread() {
+        let mut h = build(Setup::new(pcs()), TYPICAL, 1.0, false);
+        h.state_mut().cfg.stream.fullscreen = true;
+        h.state_mut().dirty = true;
+        h.state_mut().commit();
+        // Background thread receives and persists
+        std::thread::sleep(Duration::from_millis(50));
+        let loaded: ClientConfig = latch_core::config::load("client.toml");
+        assert!(loaded.stream.fullscreen);
     }
 
     #[test]
