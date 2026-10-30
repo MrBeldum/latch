@@ -616,6 +616,19 @@ pub(super) fn header(first: usize, idr: bool, frame_num: u32, idr_id: u32, qp: u
     b
 }
 
+/// `mb_qp_delta` from `from` to `to`: the spec allows -26..=25 and wraps
+/// the sum modulo 52, so larger steps go the other way round.
+fn qp_delta(to: u8, from: u8) -> i32 {
+    let delta = to as i32 - from as i32;
+    if delta > 25 {
+        delta - 52
+    } else if delta < -26 {
+        delta + 52
+    } else {
+        delta
+    }
+}
+
 pub(super) fn encode(job: Job) -> Band {
     let w = job.source.padded_width() / 16;
     let rows = job.end - job.first;
@@ -1032,7 +1045,7 @@ pub(super) fn encode(job: Job) -> Band {
             b.ue(table.iter().position(|&v| v as u32 == cbp).unwrap() as u32);
         }
         if cbp != 0 || intra16 {
-            b.se(qp as i32 - qpy as i32);
+            b.se(qp_delta(qp, qpy));
             qpy = qp;
         }
         mbs[index].qp = qpy;
@@ -1080,6 +1093,19 @@ pub(super) fn encode(job: Job) -> Band {
 
 #[cfg(test)]
 mod tests {
+    use super::qp_delta;
+
+    #[test]
+    fn qp_deltas_stay_in_range_and_wrap_to_the_target() {
+        for from in 0..=51u8 {
+            for to in 0..=51u8 {
+                let delta = qp_delta(to, from);
+                assert!((-26..=25).contains(&delta), "{from} -> {to}: {delta}");
+                assert_eq!((from as i32 + delta).rem_euclid(52), to as i32);
+            }
+        }
+    }
+
     use super::*;
     #[test]
     fn unrelated_motion_is_not_a_scroll() {
