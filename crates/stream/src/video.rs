@@ -226,9 +226,14 @@ impl Fallback {
 }
 
 impl Decoder for Fallback {
-    fn decode(&mut self, annexb: &[u8], idr: bool, spare: Option<Frame>) -> Result<Option<Frame>> {
+    fn decode(
+        &mut self,
+        annexb: &[u8],
+        idr: bool,
+        mut spare: Option<Frame>,
+    ) -> Result<Option<Frame>> {
         if let Some(platform) = self.platform.as_mut() {
-            let result = platform.decode(annexb, idr, spare);
+            let result = platform.decode(annexb, idr, spare.take());
             if self.proven {
                 return result;
             }
@@ -257,8 +262,10 @@ impl Decoder for Fallback {
                 }
             }
         }
+        // Software fills the renderer's spare, once the platform has not
+        // taken it on the way here.
         match self.software.as_mut() {
-            Some(software) => software.decode(annexb, idr, None),
+            Some(software) => software.decode(annexb, idr, spare),
             None => Ok(None),
         }
     }
@@ -369,6 +376,18 @@ mod tests {
         assert_eq!((frame.width, frame.height), (64, 64));
         assert!(frame.y[0].abs_diff(200) <= 2);
         assert_eq!(decoder.name(), "Latch H.264 (software)");
+        // From then on software fills the renderer's spare buffers.
+        let spare = Frame {
+            y: Vec::with_capacity(64 * 64 * 2),
+            uv: Vec::with_capacity(64 * 64),
+            ..Default::default()
+        };
+        let (y_ptr, uv_ptr) = (spare.y.as_ptr(), spare.uv.as_ptr());
+        let frame = decoder
+            .decode(&idr, true, Some(spare))
+            .unwrap()
+            .expect("software's picture");
+        assert_eq!((frame.y.as_ptr(), frame.uv.as_ptr()), (y_ptr, uv_ptr));
     }
 
     #[test]
