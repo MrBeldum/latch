@@ -9,7 +9,7 @@ base=https://www.itu.int/wftp3/av-arch/jvt-site/draft_conformance/AVCv1
 while read -r sha name; do
     archive="$dest/.archives/$name.zip"
     if [ ! -f "$archive" ]; then
-        curl --fail --location --retry 3 "$base/$name.zip" -o "$archive.partial"
+        curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 "$base/$name.zip" -o "$archive.partial"
         mv "$archive.partial" "$archive"
     fi
     printf '%s  %s\n' "$sha" "$archive" | shasum -a 256 --check --status

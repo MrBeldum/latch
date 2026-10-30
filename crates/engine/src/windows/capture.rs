@@ -157,10 +157,10 @@ float4 ps(float4 p : SV_Position) : SV_Target {
     if(hdr != 0) {
         // scRGB is linear, with SDR white given by the display's white level.
         // Clip highlights to SDR and apply the sRGB transfer before cursor blending.
-        float3 linear = saturate(bg.rgb / white);
-        bg.rgb = float3(linear.r <= 0.0031308 ? 12.92*linear.r : 1.055*pow(linear.r,1.0/2.4)-0.055,
-                        linear.g <= 0.0031308 ? 12.92*linear.g : 1.055*pow(linear.g,1.0/2.4)-0.055,
-                        linear.b <= 0.0031308 ? 12.92*linear.b : 1.055*pow(linear.b,1.0/2.4)-0.055);
+        float3 lin = saturate(bg.rgb / white);
+        bg.rgb = float3(lin.r <= 0.0031308 ? 12.92*lin.r : 1.055*pow(lin.r,1.0/2.4)-0.055,
+                        lin.g <= 0.0031308 ? 12.92*lin.g : 1.055*pow(lin.g,1.0/2.4)-0.055,
+                        lin.b <= 0.0031308 ? 12.92*lin.b : 1.055*pow(lin.b,1.0/2.4)-0.055);
     }
     int2 c = pos - origin;
     if(kind == 0 || any(c < 0) || any(c >= int2(size))) return bg;
