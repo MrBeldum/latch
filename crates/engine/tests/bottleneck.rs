@@ -1,10 +1,11 @@
-//! A whole session through a bad network: the viewer reaches the host
-//! through a relay that loses (at random and in bursts), duplicates,
-//! reorders and delays datagrams in both directions, using the protocol's
-//! own simulator. The control connection is relayed untouched, as TCP
-//! would deliver it. Checks that the picture keeps coming, that lost
-//! frames are recovered (by FEC or a keyframe), and that every key press
-//! reaches the host exactly once and in order.
+//! Congestion feedback through an encoded noise-pattern desktop, UDP relay and viewer.
+//! A sustained downstream queue-delay step exercises adaptation even when a
+//! slow encoder underfills its budget. A fake-clock saturated FIFO separately
+//! checks convergence at 10 Mbps; an encoder budget is not measured traffic.
+
+// Exercise the production controller without widening its public API.
+#[path = "../src/congestion.rs"]
+mod congestion;
 
 use latch_core::http::{self, Response};
 use latch_engine::server::{Options, Server};
@@ -54,7 +55,7 @@ fn host() -> u16 {
 fn relay(
     host_port: u16,
     impairment: Impairment,
-    capacity: Arc<std::sync::atomic::AtomicU32>,
+    queue_delay_ms: Arc<std::sync::atomic::AtomicU32>,
 ) -> u16 {
     let (listener, udp) = loop {
         let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -119,11 +120,13 @@ fn relay(
         let mut buf = [0u8; 2048];
         loop {
             if let Ok((n, _)) = to_host.recv_from(&mut buf) {
-                link.set_bandwidth(
-                    capacity.load(std::sync::atomic::Ordering::Relaxed),
-                    Duration::from_millis(40),
-                );
-                link.send(Instant::now(), &buf[..n]);
+                // Model standing cross-traffic queueing independently of the
+                // encoder's offered rate. All downstream traffic, including
+                // ping/pong, waits in the same queue; TCP reports stay untouched.
+                let delay = Duration::from_millis(u64::from(
+                    queue_delay_ms.load(std::sync::atomic::Ordering::Relaxed),
+                ));
+                link.send(Instant::now() + delay, &buf[..n]);
             }
             if let Some(v) = *viewer.lock() {
                 for d in link.receive(Instant::now()) {
@@ -138,29 +141,31 @@ fn relay(
 }
 
 #[test]
-fn noise_stream_adapts_through_ten_megabit_bottleneck_and_recovers() {
+fn noise_stream_adapts_to_sustained_queue_delay_and_recovers() {
     use std::sync::atomic::{AtomicU32, Ordering};
     std::env::set_var("LATCH_TEST_PATTERN", "noise");
-    let capacity = Arc::new(AtomicU32::new(10_000));
-    let port = relay(host(), Impairment::NONE, capacity.clone());
+    let queue_delay_ms = Arc::new(AtomicU32::new(5));
+    let port = relay(host(), Impairment::NONE, queue_delay_ms.clone());
+    let frames = Arc::new(FrameSlot::default());
     let (tx, rx) = mpsc::channel();
     let session = Session::start(
         latch_stream::Server {
             address: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port,
         },
-        // Small enough that a CI runner's few cores encode noise at full
-        // rate, so the 10 Mbps link, not the encoder, is the limit.
+        // The pattern has a small noise patch, not full-frame entropy. Use a
+        // modest frame rate to deliberately underfill the requested bitrate;
+        // the standing queue must still drive adaptation on a slow CI runner.
         Settings {
             width: 640,
             height: 360,
-            fps: 60,
+            fps: 12,
             bitrate_kbps: 50_000,
             hevc: false,
             audio: false,
             name: "bottleneck test".into(),
         },
-        Arc::new(FrameSlot::default()),
+        frames.clone(),
         tx,
         || {},
     );
@@ -172,20 +177,36 @@ fn noise_stream_adapts_through_ten_megabit_bottleneck_and_recovers() {
             _ => assert!(start.elapsed() < Duration::from_secs(15), "never connected"),
         }
     }
-    // Wait for behaviour rather than a specific convergence timestamp. Require
-    // several clean windows so a transient empty receive window cannot pass.
+    // A 5 ms propagation delay keeps the unloaded RTT above integer-ms
+    // rounding; introduce an additional standing 40 ms queue after learning it.
+    // Count fresh decoded pictures, not repeated reads of one stats window.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let baseline = loop {
+        std::thread::sleep(Duration::from_millis(300));
+        let s = session.stats();
+        if frames.seq() >= 10 && s.rtt_ms > 0 && s.applied_bitrate_kbps > 0 {
+            break s;
+        }
+        assert!(Instant::now() < deadline, "no baseline: {s:?}");
+    };
+    eprintln!("baseline: {baseline:?}");
+    queue_delay_ms.store(45, Ordering::Relaxed);
     let mut clean = 0;
     let mut constrained = 0;
+    let mut last_frame = frames.seq();
     let deadline = Instant::now() + Duration::from_secs(45);
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(300));
         let s = session.stats();
+        let frame = frames.seq();
         eprintln!(
-            "limited: applied={} fps={:.1} loss={:.1} rtt={}",
-            s.applied_bitrate_kbps, s.fps, s.loss_pct, s.rtt_ms
+            "queued: applied={} received={:.2} fps={:.1} loss={:.1} rtt={}",
+            s.applied_bitrate_kbps, s.received_mbps, s.fps, s.loss_pct, s.rtt_ms
         );
         if s.applied_bitrate_kbps > 0
-            && s.applied_bitrate_kbps < 10_000
+            && s.applied_bitrate_kbps < baseline.applied_bitrate_kbps / 4
+            && s.rtt_ms >= baseline.rtt_ms + 20
+            && frame > last_frame
             && s.fps >= 5.0
             && s.loss_pct < 3.0
         {
@@ -197,19 +218,86 @@ fn noise_stream_adapts_through_ten_megabit_bottleneck_and_recovers() {
         } else {
             clean = 0;
         }
+        last_frame = frame;
     }
     assert!(clean >= 5, "never settled: {:?}", session.stats());
-    capacity.store(0, Ordering::Relaxed);
+    queue_delay_ms.store(5, Ordering::Relaxed);
     let deadline = Instant::now() + Duration::from_secs(40);
+    let recovery_frame = frames.seq();
     let mut recovered = false;
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(300));
         let s = session.stats();
-        if s.applied_bitrate_kbps > constrained * 2 && s.fps >= 5.0 && s.loss_pct < 3.0 {
+        if s.applied_bitrate_kbps > constrained * 2
+            && s.rtt_ms < baseline.rtt_ms + 20
+            && frames.seq() > recovery_frame + 10
+            && s.fps >= 5.0
+            && s.loss_pct < 3.0
+        {
+            eprintln!("recovered: {s:?}");
             recovered = true;
             break;
         }
     }
     session.stop();
     assert!(recovered, "bitrate did not recover: {:?}", session.stats());
+}
+
+#[test]
+fn saturated_ten_megabit_fifo_converges_and_recovers_with_fake_clock() {
+    let start = Instant::now();
+    let mut controller = congestion::Controller::new(50_000, start);
+    let mut link = Link::new(Impairment::NONE, 11);
+    let mut pressured = 0;
+    let mut clean = 0;
+    for tick in 0..256 {
+        let limited = (8..128).contains(&tick);
+        let now = start + Duration::from_millis(tick * 250);
+        link.set_bandwidth(
+            if limited { 10_000 } else { 50_000 },
+            Duration::from_millis(40),
+        );
+        // Generate the full wire budget, including Link's 80 byte overhead,
+        // without an encoder or scheduler limiting the offered load.
+        let packet = [0u8; 1200];
+        let spacing =
+            Duration::from_secs_f64(1280.0 * 8.0 / (f64::from(controller.budget()) * 1000.0));
+        let before = link.counts();
+        let mut at = now;
+        while at < now + Duration::from_millis(250) {
+            link.send(at, &packet);
+            link.receive(at);
+            at += spacing;
+        }
+        let after = link.counts();
+        let loss = (after.1 - before.1) as f32 * 100.0 / (after.0 - before.0) as f32;
+        let report = control::Report {
+            rtt_ms: 10.0,
+            loss_pct: loss,
+            unrecovered_loss_pct: Some(loss),
+            ..Default::default()
+        };
+        controller.update(now + Duration::from_millis(250), &report, 10.0, 0.0);
+        if limited && loss > 3.0 {
+            pressured += 1;
+        }
+        if limited && loss == 0.0 && controller.budget() <= 10_000 {
+            clean += 1;
+        }
+        if tick == 40 {
+            assert!(
+                controller.budget() < 10_000,
+                "did not converge: {}",
+                controller.budget()
+            );
+            assert!(congestion::video_budget(controller.budget(), 0, false) < 10_000);
+        }
+    }
+    assert!(pressured >= 4, "must exercise sustained overload");
+    assert!(clean >= 8, "must deliver clean windows under capacity");
+    assert_eq!(
+        controller.budget(),
+        50_000,
+        "must recover to requested rate"
+    );
 }
