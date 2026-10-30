@@ -28,9 +28,41 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
             }
             Err(e) => format!("Sharing setup failed: {e:#}"),
         };
+        let text = match linger() {
+            Some(note) => format!("{text}\n{note}"),
+            None => text,
+        };
         let _ = fs::write(log, text + "\n");
     }
     result
+}
+
+/// What the setup log adds when this user's services stop with their last
+/// login (IN-06). On a desktop that is right: without the session there is
+/// nothing to share, and a service started at boot would find no display.
+/// A headless machine whose display is a user unit needs lingering.
+#[cfg(any(target_os = "linux", test))]
+fn linger_note(linger: &str) -> Option<&'static str> {
+    (linger.trim() == "no").then_some(
+        "Lingering is off for this user, so Latch stops when the last login session ends (an SSH logout included). A headless machine needs `loginctl enable-linger`; see deploy/native/README.md.",
+    )
+}
+
+/// [`linger_note`] for this user, from `loginctl`.
+fn linger() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        let me = Command::new("id").arg("-un").output().ok()?;
+        let me = String::from_utf8_lossy(&me.stdout).trim().to_string();
+        let out = Command::new("loginctl")
+            .args(["show-user", &me, "-P", "Linger"])
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        linger_note(&String::from_utf8_lossy(&out.stdout))
+    }
+    #[cfg(not(target_os = "linux"))]
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -968,6 +1000,13 @@ mod tests {
         assert!(plist.contains("<string>--background</string>"));
         assert!(plist.contains("B&amp;L&apos;s &lt;app&gt;.app"), "{plist}");
         assert!(plist.contains("<key>RunAtLoad</key><true/>"));
+    }
+
+    #[test]
+    fn a_user_without_lingering_is_told_what_logout_does() {
+        assert!(linger_note("no\n").is_some_and(|n| n.contains("loginctl enable-linger")));
+        assert_eq!(linger_note("yes\n"), None);
+        assert_eq!(linger_note(""), None, "no loginctl: nothing to say");
     }
 
     #[test]
