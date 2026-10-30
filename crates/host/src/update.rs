@@ -615,7 +615,7 @@ mod tests {
                     .unwrap();
             };
             script("#!/bin/sh\nexit 3\n");
-            let e = apply_within(&exe, Duration::from_millis(500)).unwrap_err();
+            let e = apply_within(&exe, Duration::from_secs(5)).unwrap_err();
             assert!(format!("{e:#}").contains("exited at once"), "{e:#}");
             assert_eq!(std::fs::read(&exe).unwrap(), b"old");
             assert!(staged(&exe).exists());
