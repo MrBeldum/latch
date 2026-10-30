@@ -473,12 +473,12 @@ impl ClientApp {
     }
 
     fn disconnect(&mut self) {
+        let live = self.live.lock();
         let mut p = self.progress.lock();
         if p.active() {
             p.cancel = true;
         }
-        drop(p);
-        if let Some(l) = self.live.lock().as_ref() {
+        if let Some(l) = live.as_ref() {
             l.input.release_all();
             l.session.stop();
         }
@@ -506,6 +506,10 @@ impl ClientApp {
                         }
                     }
                     Event::Connected => {
+                        if prog.cancel || matches!(prog.step, Step::Ended { .. }) {
+                            live.session.stop();
+                            break;
+                        }
                         prog.step = Step::Streaming;
                         prog.since = Instant::now();
                         self.streamed = true;

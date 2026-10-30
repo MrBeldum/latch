@@ -979,12 +979,16 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         tx,
         move || ctx.request_repaint(),
     );
-    if stale(&c.progress, generation) {
-        drop(session);
+    let mut live_guard = c.live.lock();
+    let mut prog_guard = c.progress.lock();
+    if prog_guard.cancel || prog_guard.generation != generation {
+        drop(prog_guard);
+        drop(live_guard);
+        session.stop();
         bail!("cancelled");
     }
     let input = session.input();
-    *c.live.lock() = Some(Live {
+    *live_guard = Some(Live {
         pc: t.name.clone(),
         node_id: t.node_id.clone(),
         ip: t.ip,
@@ -1001,7 +1005,11 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         clipboard: clipboard::Sync::spawn(t.ip, c.ctx.clone()),
         shortcuts: clipboard::Shortcuts::for_os(if host.os.is_empty() { &t.os } else { &host.os }),
     });
-    report(Step::Connecting, "Connecting…".into());
+    prog_guard.step = Step::Connecting;
+    prog_guard.detail = "Connecting…".into();
+    prog_guard.since = Instant::now();
+    drop(prog_guard);
+    drop(live_guard);
     Ok(())
 }
 
@@ -1316,6 +1324,32 @@ mod tests {
             },
         );
         assert_eq!(checks, 2);
+    }
+
+    #[test]
+    fn cancelled_progress_does_not_publish_live() {
+        let pc = Pc {
+            name: "Test-PC".into(),
+            node_id: "test-node".into(),
+            ip: Some("127.0.0.1".parse().unwrap()),
+            online: true,
+            host: Some(Status::default()),
+            ..Default::default()
+        };
+        let c = Connect {
+            target: Target::from_pc(&pc).unwrap(),
+            settings: StreamSettings::default(),
+            native: (1920, 1080),
+            progress: Arc::default(),
+            live: Arc::default(),
+            ctx: egui::Context::default(),
+        };
+        let generation = 1;
+        c.progress.lock().generation = generation;
+        c.progress.lock().cancel = true;
+        let res = run(&c, generation);
+        assert!(res.is_err());
+        assert!(c.live.lock().is_none());
     }
 
     #[test]
