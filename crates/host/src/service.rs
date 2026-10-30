@@ -594,10 +594,12 @@ impl Service {
     /// is a process on this machine, as loopback is.
     fn own_address(&self, ip: IpAddr) -> bool {
         self.tailscale.lock().as_ref().map_or(true, |st| {
-            st.self_node
-                .tailscale_ips
-                .iter()
-                .any(|a| a.parse::<IpAddr>() == Ok(ip))
+            st.self_node.tailscale_ips.is_empty()
+                || st
+                    .self_node
+                    .tailscale_ips
+                    .iter()
+                    .any(|a| a.parse::<IpAddr>() == Ok(ip))
         })
     }
 
@@ -1653,6 +1655,9 @@ mod tests {
     #[test]
     fn stream_and_power_validate_their_bodies() {
         let svc = Service::new();
+        let mut st = tailscale::Status::default();
+        st.self_node.tailscale_ips = vec!["100.64.0.99".into()];
+        *svc.tailscale.lock() = Ok(st);
         let local: SocketAddr = "127.0.0.1:5".parse().unwrap();
         let peer_addr: SocketAddr = "100.64.0.5:5".parse().unwrap();
         svc.auth
@@ -1883,6 +1888,9 @@ mod tests {
         // The clipboard routes exist and answer JSON, whatever the platform
         // says about the clipboard itself.
         let svc = Service::new();
+        let mut st = tailscale::Status::default();
+        st.self_node.tailscale_ips = vec!["100.64.0.99".into()];
+        *svc.tailscale.lock() = Ok(st);
         let peer: SocketAddr = "100.64.0.5:5".parse().unwrap();
         svc.auth.lock().insert(peer.ip(), (Instant::now(), true));
         let r = svc.handle(
