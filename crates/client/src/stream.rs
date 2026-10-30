@@ -516,12 +516,21 @@ impl View {
                         );
                         ui.label(
                             RichText::new(format!(
-                                "Check that {} is awake and UDP port 47850 is permitted through its firewall.",
+                                "Check that {} is awake and signed in to Tailscale.",
                                 live.pc
                             ))
                             .font(theme::regular(theme::text::BODY - 1.0))
                             .color(P.text_secondary),
                         );
+                        if path.relayed() {
+                            ui.label(
+                                RichText::new(
+                                    "The connection is going through a Tailscale relay, which can be slow.",
+                                )
+                                .font(theme::regular(theme::text::BODY - 1.0))
+                                .color(P.text_secondary),
+                            );
+                        }
                     }
                     ui.add_space(space::SM);
                     if ui::secondary_button(ui, "Cancel").clicked() {
@@ -3626,7 +3635,14 @@ pub(crate) mod tests {
     #[test]
     fn waiting_shows_troubleshooting_guidance_after_10_seconds() {
         let (mut h, _) = recording(View::default(), false);
-        h.state_mut().live.as_mut().unwrap().started = Instant::now() - Duration::from_secs(11);
+        let live = h.state_mut().live.as_mut().unwrap();
+        live.started = Instant::now() - Duration::from_secs(11);
+        live.path = crate::path::Path {
+            direct: Some(true),
+            relay: String::new(),
+            peer_relay: String::new(),
+            rtt_ms: Some(25),
+        };
         h.run_steps(1);
         assert!(
             h.query_by_label("Connecting is taking longer than expected.")
@@ -3634,8 +3650,30 @@ pub(crate) mod tests {
             "10s timeout guidance must be shown"
         );
         assert!(
-            h.query_by_label_contains("UDP port 47850").is_some(),
-            "port advice must be shown"
+            h.query_by_label_contains("signed in to Tailscale").is_some(),
+            "Tailscale sign-in advice must be shown"
+        );
+        assert!(
+            h.query_by_label("The connection is going through a Tailscale relay, which can be slow.")
+                .is_none(),
+            "relay warning should not be shown when direct"
+        );
+
+        // When the lobby/discovery path is relayed:
+        let (mut h_relayed, _) = recording(View::default(), false);
+        h_relayed.state_mut().live.as_mut().unwrap().started = Instant::now() - Duration::from_secs(11);
+        h_relayed.state_mut().live.as_mut().unwrap().path = crate::path::Path {
+            direct: Some(false),
+            relay: "tok".into(),
+            peer_relay: String::new(),
+            rtt_ms: Some(150),
+        };
+        h_relayed.run_steps(1);
+        assert!(
+            h_relayed
+                .query_by_label("The connection is going through a Tailscale relay, which can be slow.")
+                .is_some(),
+            "relay warning must be shown when relayed"
         );
     }
 
