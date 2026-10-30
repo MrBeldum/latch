@@ -1,15 +1,21 @@
 //! RandR uses the same mode policy as stuzha-display, without changing
 //! desktop scaling. Grow the framebuffer before the CRTC, shrink it after.
 
+use super::X11;
 use crate::display::Previous;
 use anyhow::{ensure, Context};
+use std::time::Duration;
 use x11rb::connection::Connection;
 use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::ConnectionExt as _;
-use x11rb::rust_connection::RustConnection;
+
+/// A mode switch can keep a real GPU's X server busy for a second or two;
+/// a server silent for longer than this has stalled, and restore (the
+/// session's undo) must not wait on it forever.
+const SILENCE: Duration = Duration::from_secs(10);
 
 struct NewMode<'a> {
-    conn: &'a RustConnection,
+    conn: &'a X11,
     output: u32,
     mode: u32,
     keep: bool,
@@ -77,7 +83,7 @@ fn configure(
     fps: u32,
     min_refresh: f64,
 ) -> anyhow::Result<Option<Previous>> {
-    let (conn, screen) = x11rb::connect(None).context("connect to X11 for RandR")?;
+    let (conn, screen) = super::connect(SILENCE).context("connect to X11 for RandR")?;
     let root = conn.setup().roots[screen].root;
     conn.randr_query_version(1, 2)?.reply()?;
     let resources = conn.randr_get_screen_resources(root)?.reply()?;

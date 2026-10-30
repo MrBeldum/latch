@@ -2,6 +2,7 @@
 //! them safe to read. Damage bounds limit copies; the cursor never dirties
 //! the saved desktop, so moving it restores the old pixels automatically.
 
+use super::X11;
 use crate::input::DisplayRect;
 use crate::software::{Bgra, CpuCapture};
 use anyhow::{ensure, Context};
@@ -9,9 +10,9 @@ use std::os::fd::AsRawFd;
 use std::ptr::NonNull;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
+use x11rb::errors::ReplyError;
 use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::protocol::{damage, randr, shm, xfixes, xproto, Event};
-use x11rb::rust_connection::RustConnection;
 
 struct Segment {
     id: shm::Seg,
@@ -24,7 +25,7 @@ struct Segment {
 unsafe impl Send for Segment {}
 
 impl Segment {
-    fn new(conn: &RustConnection, len: usize) -> anyhow::Result<Self> {
+    fn new(conn: &X11, len: usize) -> anyhow::Result<Self> {
         let id = conn.generate_id()?;
         let reply = shm::create_segment(conn, id, u32::try_from(len)?, false)?.reply()?;
         // SAFETY: the server supplied an fd for a segment of exactly `len` bytes.
@@ -64,8 +65,9 @@ impl Drop for Segment {
 }
 
 /// Root-window capture on `$DISPLAY`, authenticated by x11rb using `$XAUTHORITY`.
+/// Every round trip fails after [`super::X11_SILENCE`] without an answer.
 pub struct X11Capture {
-    conn: RustConnection,
+    conn: X11,
     root: u32,
     width: u16,
     height: u16,
@@ -79,7 +81,8 @@ pub struct X11Capture {
 
 impl X11Capture {
     pub fn new() -> anyhow::Result<Self> {
-        let (conn, screen) = x11rb::connect(None).context("connect to X11 DISPLAY")?;
+        let (conn, screen) =
+            super::connect(super::X11_SILENCE).context("connect to X11 DISPLAY")?;
         let setup = conn.setup();
         let screen = &setup.roots[screen];
         let root = screen.root;
@@ -204,7 +207,9 @@ impl X11Capture {
                     ensure!(reply.size as usize >= len, "short MIT-SHM image");
                     segment.bytes(len)?
                 }
-                Err(_) => {
+                // A silent server is not a reason to try again without SHM.
+                Err(ReplyError::ConnectionError(e)) => return Err(e.into()),
+                Err(ReplyError::X11Error(_)) => {
                     // Remote X and some nested servers advertise SHM but reject GetImage.
                     owned = self
                         .conn
@@ -330,6 +335,7 @@ impl CpuCapture for X11Capture {
             }
             super::wait_fd(
                 self.conn.stream().as_raw_fd(),
+                libc::POLLIN,
                 remaining.min(Duration::from_millis(8)),
             )?;
         }
@@ -434,5 +440,109 @@ mod tests {
         composite(&mut frame, &cursor);
         assert_eq!(&frame.data[..4], &[66, 82, 114, 255]);
         assert_eq!(&frame.data[4..8], &[100; 4]);
+    }
+
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use x11rb::rust_connection::{DefaultStream, RustConnection};
+    use x11rb::x11_utils::Serialize;
+
+    /// A client connected to a scripted X server. `answer` gets each
+    /// request's opcode and sequence number and returns the bytes to send
+    /// back; nothing leaves that request unanswered.
+    fn fake_x(
+        silence: Duration,
+        mut answer: impl FnMut(u8, u16) -> Vec<u8> + Send + 'static,
+    ) -> X11 {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || {
+            // An unauthenticated setup request is exactly 12 bytes.
+            let mut request = [0; 12];
+            server.read_exact(&mut request).unwrap();
+            let mut setup = xproto::Setup {
+                status: 1,
+                protocol_major_version: 11,
+                resource_id_mask: 0xffff,
+                roots: vec![xproto::Screen::default()],
+                ..Default::default()
+            };
+            setup.length = ((setup.serialize().len() - 8) / 4) as u16;
+            server.write_all(&setup.serialize()).unwrap();
+            let mut sequence = 0u16;
+            loop {
+                let mut header = [0; 4];
+                if server.read_exact(&mut header).is_err() {
+                    return;
+                }
+                let length = usize::from(u16::from_ne_bytes([header[2], header[3]])) * 4;
+                let mut body = vec![0; length.saturating_sub(4)];
+                if server.read_exact(&mut body).is_err() {
+                    return;
+                }
+                sequence = sequence.wrapping_add(1);
+                if server.write_all(&answer(header[0], sequence)).is_err() {
+                    return;
+                }
+            }
+        });
+        let (stream, _) = DefaultStream::from_unix_stream(client).unwrap();
+        RustConnection::connect_to_stream(super::super::Bounded { stream, silence }, 0).unwrap()
+    }
+    /// x11rb serializes a reply's fields; the wire pads it to 32 bytes.
+    fn reply(fields: &[u8]) -> Vec<u8> {
+        let mut bytes = fields.to_vec();
+        bytes.resize(bytes.len().max(32), 0);
+        bytes
+    }
+    /// The QueryExtension answer for MIT-SHM and anything else asked about.
+    fn absent(sequence: u16) -> Vec<u8> {
+        reply(
+            &xproto::QueryExtensionReply {
+                sequence,
+                present: false,
+                ..Default::default()
+            }
+            .serialize(),
+        )
+    }
+    fn fake_capture(conn: X11, width: u16, height: u16) -> X11Capture {
+        let mut capture = X11Capture {
+            conn,
+            root: 1,
+            width,
+            height,
+            segment: None,
+            damage: None,
+            fixes: false,
+            desktop: Bgra::default(),
+            cursor: None,
+            first: true,
+        };
+        capture.allocate();
+        assert!(!capture.uses_shm());
+        capture
+    }
+
+    #[test]
+    fn a_silent_x_server_fails_the_grab_instead_of_holding_it() {
+        let conn = fake_x(Duration::from_millis(100), |opcode, sequence| {
+            if opcode == xproto::GET_IMAGE_REQUEST {
+                Vec::new()
+            } else {
+                absent(sequence)
+            }
+        });
+        let mut capture = fake_capture(conn, 4, 4);
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut frame = Bgra::default();
+            let result = capture.grab(&mut frame, Duration::ZERO);
+            let _ = done.send(result.map_err(|e| format!("{e:#}")));
+        });
+        let error = result
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the grab is still waiting for a silent X server")
+            .unwrap_err();
+        assert!(error.contains("did not answer"), "{error}");
     }
 }
