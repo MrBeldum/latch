@@ -325,6 +325,7 @@ impl Reassembler {
                 let frame = self.pending.remove(&next)?;
                 self.next = Some(next.wrapping_add(1));
                 if (self.last.is_none() || self.waiting) && !frame.keyframe {
+                    self.waiting = true;
                     self.stats.frames_skipped += 1;
                     continue;
                 }
