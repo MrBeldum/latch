@@ -276,14 +276,25 @@ fn record_power_ps() -> String {
     format!(
         r#"$latchSaved = '{key}'
 if (-not (Test-Path -LiteralPath $latchSaved)) {{
-    New-Item -Path $latchSaved -Force | Out-Null
-    $hb = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -ErrorAction SilentlyContinue).HiberbootEnabled
-    if ($null -ne $hb) {{ New-ItemProperty -LiteralPath $latchSaved -Name HiberbootEnabled -Value "$hb" -PropertyType String -Force | Out-Null }}
-    foreach ($s in @(@('StandbyTimeoutAC', 'STANDBYIDLE'), @('HibernateTimeoutAC', 'HIBERNATEIDLE'))) {{
-        $hex = [regex]::Matches((powercfg /query SCHEME_CURRENT SUB_SLEEP $s[1] | Out-String), '0x[0-9a-fA-F]{{8}}')
-        if ($hex.Count -ge 2) {{
-            New-ItemProperty -LiteralPath $latchSaved -Name $s[0] -Value ([string][Convert]::ToUInt32($hex[$hex.Count - 2].Value, 16)) -PropertyType String -Force | Out-Null
+    try {{
+        $scheme = [regex]::Match((powercfg /getactivescheme | Out-String), '[0-9a-fA-F]{{8}}(-[0-9a-fA-F]{{4}}){{3}}-[0-9a-fA-F]{{12}}').Value
+        if (-not $scheme) {{ throw 'Could not read the active power plan' }}
+        $values = @{{ PowerScheme = $scheme }}
+        $hb = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -ErrorAction SilentlyContinue).HiberbootEnabled
+        $values.HiberbootEnabled = if ($null -eq $hb) {{ 'absent' }} else {{ [string]$hb }}
+        foreach ($s in @(@('StandbyTimeoutAC', 'STANDBYIDLE'), @('HibernateTimeoutAC', 'HIBERNATEIDLE'))) {{
+            $hex = [regex]::Matches((powercfg /query SCHEME_CURRENT SUB_SLEEP $s[1] | Out-String), '0x[0-9a-fA-F]{{8}}')
+            if ($LASTEXITCODE -ne 0 -or $hex.Count -lt 2) {{ throw 'Could not read the power timeout' }}
+            $values[$s[0]] = [string][Convert]::ToUInt32($hex[$hex.Count - 2].Value, 16)
         }}
+        New-Item -Path $latchSaved -Force -ErrorAction Stop | Out-Null
+        foreach ($name in $values.Keys) {{
+            New-ItemProperty -LiteralPath $latchSaved -Name $name -Value $values[$name] -PropertyType String -Force -ErrorAction Stop | Out-Null
+        }}
+    }} catch {{
+        Remove-Item -LiteralPath $latchSaved -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Output "  power settings were not saved: $_; leaving them unchanged"
+        exit 1
     }}
 }} else {{ Write-Output "  kept from an earlier setup" }}"#,
         key = SAVED_KEY
@@ -665,14 +676,20 @@ $latchSaved = '{key}'
 $saved = Get-ItemProperty -LiteralPath $latchSaved -ErrorAction SilentlyContinue
 if ($saved) {{
     $restored = $true
+    $scheme = $saved.PowerScheme
+    if ($scheme -notmatch '^[0-9a-fA-F]{{8}}(-[0-9a-fA-F]{{4}}){{3}}-[0-9a-fA-F]{{12}}$') {{ $scheme = 'SCHEME_CURRENT' }} # older records
     foreach ($s in @(@('StandbyTimeoutAC', 'STANDBYIDLE'), @('HibernateTimeoutAC', 'HIBERNATEIDLE'))) {{
         $v = $saved.($s[0])
         if ($v -match '^[0-9]+$') {{
-            powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP $s[1] $v
+            powercfg /setacvalueindex $scheme SUB_SLEEP $s[1] $v
             if ($LASTEXITCODE -ne 0) {{ $restored = $false }}
         }}
     }}
     powercfg /setactive SCHEME_CURRENT
+    if ($LASTEXITCODE -ne 0) {{ $restored = $false }}
+    if ($saved.HiberbootEnabled -eq 'absent') {{
+        Remove-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -ErrorAction SilentlyContinue
+    }}
     if ($saved.HiberbootEnabled -match '^[0-9]+$') {{
         try {{ Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -Value ([int]$saved.HiberbootEnabled) -Type DWord -ErrorAction Stop }} catch {{ Write-Output "  Fast Startup: $_"; $restored = $false }}
     }}
@@ -852,7 +869,7 @@ mod tests {
         assert!(m.contains("'LatchEngineUser'"), "older names go too");
         assert!(m.contains(r"$latchSaved = 'HKLM:\SOFTWARE\Latch\Setup'"));
         for put_back in [
-            "powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP $s[1] $v",
+            "powercfg /setacvalueindex $scheme SUB_SLEEP $s[1] $v",
             "powercfg /setactive SCHEME_CURRENT",
             "-Name HiberbootEnabled -Value ([int]$saved.HiberbootEnabled)",
         ] {
@@ -894,6 +911,16 @@ mod tests {
             .unwrap();
         assert!(direct < launch.find("-Verb RunAs").unwrap());
         assert!(launch.contains("; exit $LASTEXITCODE }"), "{launch}");
+    }
+
+    #[test]
+    fn incomplete_power_backups_cannot_change_settings() {
+        let record = record_power_ps();
+        assert!(record.contains("throw 'Could not read the active power plan'"));
+        assert!(record.contains("throw 'Could not read the power timeout'"));
+        assert!(record.contains("PowerScheme = $scheme"));
+        assert!(uninstall_machine_ps().contains("$scheme = $saved.PowerScheme"));
+        assert!(uninstall_machine_ps().contains("$saved.HiberbootEnabled -eq 'absent'"));
     }
 
     #[test]
