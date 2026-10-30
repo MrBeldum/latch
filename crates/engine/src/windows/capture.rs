@@ -410,15 +410,20 @@ pub(super) struct Capture {
     retry: ReopenBackoff,
 }
 struct ReopenBackoff {
+    started: Instant,
     at: Instant,
     delay: Duration,
 }
 impl ReopenBackoff {
     fn new() -> Self {
         Self {
+            started: Instant::now(),
             at: Instant::now(),
             delay: Duration::from_millis(50),
         }
+    }
+    fn expired(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.started) >= Duration::from_secs(5)
     }
     fn defer(&mut self, now: Instant) {
         self.at = now + self.delay;
@@ -568,6 +573,10 @@ impl Capture {
     }
     pub fn grab(&mut self, timeout: Duration) -> Result<bool> {
         if self.duplication.is_none() {
+            anyhow::ensure!(
+                !self.retry.expired(Instant::now()),
+                "desktop duplication unavailable for five seconds after access loss"
+            );
             if Instant::now() < self.retry.at {
                 return Ok(false);
             }
@@ -600,6 +609,7 @@ impl Capture {
                 self.duplication = None;
                 self.has_frame = false;
                 self.cpu_seeded = false;
+                self.retry = ReopenBackoff::new();
                 self.retry.defer(Instant::now());
                 return Ok(false);
             }
@@ -954,6 +964,8 @@ mod tests {
         );
         let mut retry = ReopenBackoff::new();
         let now = Instant::now();
+        assert!(!retry.expired(retry.started + Duration::from_secs(4)));
+        assert!(retry.expired(retry.started + Duration::from_secs(5)));
         for millis in [50, 100, 200, 400, 800, 1000, 1000] {
             retry.defer(now);
             assert_eq!(retry.at.duration_since(now), Duration::from_millis(millis));
