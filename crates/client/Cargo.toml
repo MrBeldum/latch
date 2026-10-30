@@ -39,6 +39,7 @@ objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSEvent", "NSMe
 objc2-foundation = { version = "0.2", features = ["NSString", "NSThread"] }
 
 [dev-dependencies]
+x11rb = { version = "0.13", features = ["randr"] }
 toml.workspace = true
 egui_kittest = { version = "0.31", features = ["wgpu", "eframe"] }
 image = { version = "0.25", default-features = false, features = ["png"] }

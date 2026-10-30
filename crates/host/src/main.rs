@@ -81,6 +81,10 @@ fn log_file(args: &Args) -> Option<&'static str> {
 }
 
 fn main() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if latch_client::refresh::run_helper() {
+        return Ok(());
+    }
     // Before anything can replace it: which file this process is.
     let _ = service::started_from();
     let args = Args::parse();

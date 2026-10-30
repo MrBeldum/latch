@@ -27,6 +27,63 @@ pub fn hz() -> Option<u32> {
 
 #[cfg(target_os = "linux")]
 pub fn hz() -> Option<u32> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        return None;
+    }
+    let mut command = std::process::Command::new(std::env::current_exe().ok()?);
+    command.arg("--internal-display-hz");
+    query_child(command, std::time::Duration::from_secs(2))
+}
+
+/// Run before either executable initializes its UI or service. Isolation in a
+/// killable process bounds DNS, socket connect, Xauthority reads and replies,
+/// including libraries that offer no cancellation or socket deadline.
+#[cfg(target_os = "linux")]
+pub fn run_helper() -> bool {
+    if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--internal-display-hz"))
+    {
+        return false;
+    }
+    if let Some(hz) = query_x11() {
+        println!("latch-display-hz={hz}");
+    }
+    true
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn query_child(mut command: std::process::Command, timeout: std::time::Duration) -> Option<u32> {
+    use std::process::Stdio;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) => return None,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let output = child.wait_with_output().ok()?;
+    String::from_utf8(output.stdout)
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("latch-display-hz=")?.parse::<u32>().ok())
+        .filter(|hz| *hz > 0)
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn query_x11() -> Option<u32> {
     use x11rb::{connection::Connection, protocol::randr::ConnectionExt};
     // Xwayland describes a virtual output, not the compositor's real mode.
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -59,4 +116,92 @@ pub fn hz() -> Option<u32> {
     (pixels > 0)
         .then(|| (u64::from(mode.dot_clock) / pixels) as u32)
         .filter(|hz| *hz > 0)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn x11_query_helper() {
+        if std::env::var_os("LATCH_TEST_X11_HELPER").is_some() {
+            if let Some(hz) = query_x11() {
+                println!("latch-display-hz={hz}");
+            }
+        }
+    }
+
+    #[test]
+    fn silent_x11_and_blocked_auth_queries_are_killed_and_reaped() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+        for blocked_auth in [false, true] {
+            // X11 TCP uses port 6000 + display number.
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            assert!(port >= 6000);
+            let dir =
+                std::env::temp_dir().join(format!("latch-xauth-{:016x}", rand::random::<u64>()));
+            std::fs::create_dir(&dir).unwrap();
+            let auth = dir.join("authority");
+            if blocked_auth {
+                assert!(std::process::Command::new("mkfifo")
+                    .arg(&auth)
+                    .status()
+                    .unwrap()
+                    .success());
+            } else {
+                std::fs::write(&auth, []).unwrap();
+            }
+            let (observed, received) = mpsc::channel();
+            let (release, held) = mpsc::channel();
+            let server = std::thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    match listener.accept() {
+                        Ok((mut socket, _)) => {
+                            if !blocked_auth {
+                                socket
+                                    .set_read_timeout(Some(Duration::from_secs(10)))
+                                    .unwrap();
+                                let mut setup = [0; 12];
+                                socket.read_exact(&mut setup).unwrap();
+                                assert!(setup[0] == b'l' || setup[0] == b'B');
+                            }
+                            observed.send(()).unwrap();
+                            let _ = held.recv_timeout(Duration::from_secs(10));
+                            break;
+                        }
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(e) => panic!("helper never connected: {e}"),
+                    }
+                }
+            });
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", "refresh::tests::x11_query_helper", "--nocapture"])
+                .env("LATCH_TEST_X11_HELPER", "1")
+                .env_remove("WAYLAND_DISPLAY")
+                .env("DISPLAY", format!("127.0.0.1:{}", port - 6000))
+                .env("XAUTHORITY", &auth);
+            let started = Instant::now();
+            assert_eq!(query_child(command, Duration::from_secs(2)), None);
+            received.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "query failed to honor its deadline"
+            );
+            release.send(()).unwrap();
+            server.join().unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
 }
