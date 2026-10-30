@@ -41,6 +41,10 @@ const PING_EVERY: Duration = Duration::from_millis(500);
 const DECODE_QUEUE: usize = 8;
 const DECODE_MAX_AGE: Duration = Duration::from_millis(50);
 const REPORT_EVERY: Duration = Duration::from_millis(250);
+/// How long a stopping session waits for a decode in progress. A platform
+/// decoder can block inside the OS (VideoToolbox after a sleep or a GPU
+/// reset); the window must still be able to leave the stream.
+const DECODER_STOP: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -580,9 +584,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     };
     let decoding = {
         let inner = inner.clone();
-        std::thread::Builder::new()
-            .name("stream-decode".into())
-            .spawn(move || decode(&inner, decoder))
+        Worker::spawn("stream-decode", move || decode(&inner, decoder))
     };
     let outcome = control_loop(inner, &mut tcp, &accept);
     inner.stop.store(true, Ordering::Release);
@@ -593,13 +595,45 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         let _ = r.join();
     }
     if let Ok(d) = decoding {
-        let _ = d.join();
+        if !d.join_within(DECODER_STOP) {
+            tracing::warn!("the decoder did not return within {DECODER_STOP:?}; leaving it behind");
+        }
     }
     *inner.link.lock() = None;
     match outcome {
         Outcome::Stopped => {}
         Outcome::Failed(stage, message) => inner.emit(Event::Failed { stage, message }),
         Outcome::Ended(code, message) => inner.emit(Event::Terminated { code, message }),
+    }
+}
+
+/// A thread that can be waited for with a time limit.
+struct Worker {
+    handle: std::thread::JoinHandle<()>,
+    exited: mpsc::Receiver<()>,
+}
+
+impl Worker {
+    fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> std::io::Result<Self> {
+        let (alive, exited) = mpsc::channel();
+        let handle = std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || {
+                // Dropped when `f` returns or panics.
+                let _alive: Sender<()> = alive;
+                f()
+            })?;
+        Ok(Self { handle, exited })
+    }
+
+    /// Joins the thread if it ends within `limit`; otherwise leaves it to
+    /// end by itself and returns false.
+    fn join_within(self, limit: Duration) -> bool {
+        if let Err(mpsc::RecvTimeoutError::Timeout) = self.exited.recv_timeout(limit) {
+            return false;
+        }
+        let _ = self.handle.join();
+        true
     }
 }
 
@@ -1047,7 +1081,12 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
         };
         let start = Instant::now();
         let spare = inner.frames.spare();
-        match decoder.decode(&frame.data, frame.keyframe, spare) {
+        let decoded = decoder.decode(&frame.data, frame.keyframe, spare);
+        if inner.stopping() {
+            // The session may have finished without waiting for this.
+            return;
+        }
+        match decoded {
             Ok(Some(picture)) => {
                 let decoded = Instant::now();
                 if decoder.name() != named {
@@ -1117,6 +1156,21 @@ mod tests {
         assert_eq!(recovered, 8);
         assert!((raw - 10.0).abs() < 1e-3);
         assert_eq!(loss_in_window(&after, &after), (0.0, 0, 0.0));
+    }
+
+    #[test]
+    fn a_decoder_stuck_in_the_os_does_not_hold_the_session_open() {
+        let (release, stuck) = mpsc::channel::<()>();
+        let decoding = Worker::spawn("stuck-decode", move || {
+            let _ = stuck.recv();
+        })
+        .unwrap();
+        assert!(!decoding.join_within(Duration::from_millis(50)));
+        drop(release);
+        let decoding = Worker::spawn("decode", || {}).unwrap();
+        assert!(decoding.join_within(Duration::from_secs(10)));
+        let decoding = Worker::spawn("panicking-decode", || panic!("decoder bug")).unwrap();
+        assert!(decoding.join_within(Duration::from_secs(10)));
     }
 
     #[test]
