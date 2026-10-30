@@ -203,18 +203,18 @@ impl InputSink for X11Input {
                 )?;
             }
             Event::MouseMove { dx, dy } => {
-                let p = self.conn.query_pointer(self.root)?.reply()?;
-                let geometry = self.conn.get_geometry(self.root)?.reply()?;
-                let x =
-                    (i32::from(p.root_x) + i32::from(*dx)).clamp(0, i32::from(geometry.width) - 1);
-                let y =
-                    (i32::from(p.root_y) + i32::from(*dy)).clamp(0, i32::from(geometry.height) - 1);
-                self.fake(
+                // XTest MotionNotify detail=1 interprets x/y as relative deltas.
+                // Drop the void cookie: errors are handled by refresh, without a round trip.
+                drop(xtest::fake_input(
+                    &self.conn,
                     xproto::MOTION_NOTIFY_EVENT,
+                    1,
+                    x11rb::CURRENT_TIME,
+                    x11rb::NONE,
+                    *dx,
+                    *dy,
                     0,
-                    i16::try_from(x)?,
-                    i16::try_from(y)?,
-                )?;
+                )?);
             }
             Event::MouseButton { button, down } => {
                 let code = button_code(*button)?;
