@@ -8,6 +8,7 @@ pub mod handover;
 pub mod input;
 pub mod macos;
 pub mod path;
+mod refresh;
 pub mod session;
 pub mod settings;
 pub mod share;

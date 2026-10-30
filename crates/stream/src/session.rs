@@ -409,7 +409,7 @@ impl Session {
     pub fn stop(&self) {
         self.inner.stop.store(true, Ordering::Release);
         if let Some(tcp) = self.inner.tcp.lock().as_ref() {
-            let _ = tcp.shutdown(Shutdown::Read);
+            let _ = tcp.shutdown(Shutdown::Both);
         }
         self.inner.queue_cv.notify_all();
     }
@@ -451,6 +451,9 @@ fn refusal(status: u16, body: &str) -> String {
 }
 
 fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
+    if inner.stopping() {
+        return;
+    }
     let fail = |stage: &str, message: String| {
         if !inner.stopping() {
             inner.emit(Event::Failed {
@@ -493,12 +496,17 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     };
     let body = serde_json::to_vec(&request).unwrap_or_default();
     let host = SocketAddr::new(server.address, server.port);
-    let mut tcp = match latch_core::http::upgrade(
+    let mut tcp = match latch_core::http::upgrade_cancellable(
         host,
         control::PATH,
         control::UPGRADE,
         &body,
         START_TIMEOUT,
+        |stream| {
+            *inner.tcp.lock() = Some(stream.try_clone()?);
+            Ok(())
+        },
+        || inner.stopping(),
     ) {
         Ok(Ok(tcp)) => tcp,
         Ok(Err(reply)) => {
@@ -511,11 +519,15 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
                 },
             )
         }
-        Err(e) => return fail("connecting", format!("{e:#}")),
+        Err(e) => {
+            if inner.stopping() {
+                return;
+            }
+            return fail("connecting", format!("{e:#}"));
+        }
     };
     let _ = tcp.set_nodelay(true);
     let _ = tcp.set_read_timeout(Some(START_TIMEOUT));
-    *inner.tcp.lock() = tcp.try_clone().ok();
     if inner.stopping() {
         let _ = tcp.shutdown(Shutdown::Both);
         return;
@@ -1277,5 +1289,49 @@ mod tests {
             offer(&s).contains(&Codec::Hevc),
             video::decodable().contains(&Codec::Hevc)
         );
+    }
+
+    #[test]
+    fn stop_interrupts_blocked_upgrade() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let session = Session::start(
+            Server {
+                address: "127.0.0.1".parse().unwrap(),
+                port,
+            },
+            Settings {
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                bitrate_kbps: 10_000,
+                hevc: false,
+                audio: false,
+                name: "test".into(),
+            },
+            Arc::new(FrameSlot::default()),
+            std::sync::mpsc::channel().0,
+            || {},
+        );
+        let (mut server_sock, _) = listener.accept().unwrap();
+        server_sock
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        use std::io::Read;
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            server_sock.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
+        let start = Instant::now();
+        session.stop();
+        while !session.finished() {
+            if start.elapsed() > Duration::from_secs(3) {
+                panic!("session did not finish within 3 seconds of stop");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(server_sock);
     }
 }

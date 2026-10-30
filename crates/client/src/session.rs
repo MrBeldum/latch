@@ -12,7 +12,7 @@ use latch_stream::{Event, FrameSlot, Input, Session, Settings};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -123,17 +123,34 @@ pub struct Discovery {
 
 /// Rescan the tailnet every few seconds and remember what each PC needs to
 /// be woken.
-pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
+pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    spawn_discovery_worker(shared, ctx, stop.clone());
+    stop
+}
+
+pub fn spawn_discovery_worker(
+    shared: Arc<Mutex<Discovery>>,
+    ctx: egui::Context,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
     let nat: Arc<Mutex<Option<NatReport>>> = Arc::default();
-    spawn_netcheck(nat.clone());
+    spawn_netcheck(nat.clone(), stop.clone());
     let servers: Arc<Mutex<PeerRelayServers>> = Arc::default();
-    spawn_peer_relay_probe(servers.clone());
+    spawn_peer_relay_probe(servers.clone(), stop.clone());
+    let weak = Arc::downgrade(&shared);
     std::thread::spawn(move || {
         // Round trips per PC, newest last; the smallest of the last few is
         // the path's real round trip (a first connect also pays for the
         // WireGuard handshake).
         let mut rtts: BTreeMap<String, Vec<u32>> = BTreeMap::new();
         loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let Some(shared) = weak.upgrade() else {
+                break;
+            };
             let cfg = ClientConfig::load();
             let mut scan = scan(&cfg);
             for pc in &mut scan.pcs {
@@ -151,34 +168,63 @@ pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
             learn(&scan);
             let changed = listing_changed(&shared.lock(), &scan);
             *shared.lock() = scan;
+            drop(shared);
             if changed {
                 ctx.request_repaint();
             }
-            std::thread::sleep(Duration::from_secs(3));
+            for _ in 0..30 {
+                if stop.load(Ordering::Relaxed) || weak.strong_count() == 0 {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
-    });
+    })
+}
+
+fn normalize_for_comparison(d: &Discovery) -> Discovery {
+    let mut normalized = d.clone();
+    normalized.refreshed = None;
+    for pc in &mut normalized.pcs {
+        if let Some(host) = &mut pc.host {
+            host.wake_packet_age_secs = None;
+        }
+    }
+    normalized
 }
 
 /// Whether a new scan shows the window anything new. Every scan has a new
 /// time; that alone is no reason to draw the window again.
 fn listing_changed(old: &Discovery, new: &Discovery) -> bool {
     old.refreshed.is_none() != new.refreshed.is_none()
-        || *old
-            != (Discovery {
-                refreshed: old.refreshed,
-                ..new.clone()
-            })
+        || normalize_for_comparison(old) != normalize_for_comparison(new)
 }
 
 /// `tailscale netcheck` now and then, for [`Discovery::self_nat`]. The next
 /// scan carries it to the window.
-fn spawn_netcheck(slot: Arc<Mutex<Option<NatReport>>>) {
+fn spawn_netcheck(slot: Arc<Mutex<Option<NatReport>>>, stop: Arc<AtomicBool>) {
+    let weak = Arc::downgrade(&slot);
     std::thread::spawn(move || loop {
+        if stop.load(Ordering::Relaxed) || weak.strong_count() == 0 {
+            break;
+        }
         match tailscale::netcheck() {
-            Ok(n) => *slot.lock() = Some(n.report()),
+            Ok(n) => {
+                if let Some(slot) = weak.upgrade() {
+                    *slot.lock() = Some(n.report());
+                } else {
+                    break;
+                }
+            }
             Err(e) => tracing::info!("netcheck: {e}"),
         }
-        std::thread::sleep(NETCHECK_EVERY);
+        let intervals = NETCHECK_EVERY.as_millis() as u64 / 100;
+        for _ in 0..intervals {
+            if stop.load(Ordering::Relaxed) || weak.strong_count() == 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     });
 }
 
@@ -187,13 +233,28 @@ fn spawn_netcheck(slot: Arc<Mutex<Option<NatReport>>>) {
 /// bounded (see `tailscale::PEER_RELAY_SERVERS_TIMEOUT`). Any failure leaves
 /// the result `Unknown`, never a denial. The next scan carries it to the
 /// window.
-fn spawn_peer_relay_probe(slot: Arc<Mutex<PeerRelayServers>>) {
+fn spawn_peer_relay_probe(slot: Arc<Mutex<PeerRelayServers>>, stop: Arc<AtomicBool>) {
+    let weak = Arc::downgrade(&slot);
     std::thread::spawn(move || loop {
-        *slot.lock() = match tailscale::peer_relay_servers() {
+        if stop.load(Ordering::Relaxed) || weak.strong_count() == 0 {
+            break;
+        }
+        let result = match tailscale::peer_relay_servers() {
             Ok(servers) => PeerRelayServers::Known(servers),
             Err(_) => PeerRelayServers::Unknown,
         };
-        std::thread::sleep(PEER_RELAY_EVERY);
+        if let Some(slot) = weak.upgrade() {
+            *slot.lock() = result;
+        } else {
+            break;
+        }
+        let intervals = PEER_RELAY_EVERY.as_millis() as u64 / 100;
+        for _ in 0..intervals {
+            if stop.load(Ordering::Relaxed) || weak.strong_count() == 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     });
 }
 
@@ -453,7 +514,17 @@ fn timed_port_open(ip: Ipv4Addr, port: u16, timeout: Duration) -> (bool, Option<
 /// A fresh look at the path to `ip` right before connecting: direct or
 /// relayed from Tailscale's own view of the peer, latency from the best of
 /// a few connects.
-fn measure_path(node_id: &str, ip: Ipv4Addr, prior: &Path) -> Path {
+fn measure_path(node_id: &str, ip: Ipv4Addr, prior: &Path, stale: impl FnMut() -> bool) -> Path {
+    measure_path_on(node_id, ip, CONTROL_PORT, prior, stale)
+}
+
+fn measure_path_on(
+    node_id: &str,
+    ip: Ipv4Addr,
+    port: u16,
+    prior: &Path,
+    mut stale: impl FnMut() -> bool,
+) -> Path {
     let mut p = prior.clone();
     if let Ok(st) = tailscale::status() {
         if let Some(n) = st.peer.values().find(|n| n.id == node_id) {
@@ -466,8 +537,14 @@ fn measure_path(node_id: &str, ip: Ipv4Addr, prior: &Path) -> Path {
     }
     let mut best: Option<u32> = prior.rtt_ms;
     for _ in 0..3 {
-        if let (true, Some(ms)) = timed_port_open(ip, CONTROL_PORT, Duration::from_millis(1500)) {
-            best = Some(best.map_or(ms, |b| b.min(ms)));
+        if stale() {
+            break;
+        }
+        match timed_port_open(ip, port, Duration::from_millis(1500)) {
+            (true, Some(ms)) => {
+                best = Some(best.map_or(ms, |b| b.min(ms)));
+            }
+            _ => break,
         }
     }
     p.rtt_ms = best;
@@ -642,8 +719,8 @@ pub fn fit_to_host(
 ) -> (u32, u32, u32) {
     let fixed = fixed_desktop(capture_size);
     let (w, h) = match fixed {
-        Some(c) if wanted.0 > c.0 || wanted.1 > c.1 => c,
-        _ => wanted,
+        Some(c) => (wanted.0.min(c.0), wanted.1.min(c.1)),
+        None => wanted,
     };
     let fps = if max_fps > 0 {
         let (rw, rh) = fixed.unwrap_or((1920, 1080));
@@ -673,7 +750,18 @@ pub fn request_for(
     capture_size: Option<[u32; 2]>,
     max_fps: u32,
 ) -> (u32, u32, u32) {
-    let s = path::effective(settings);
+    let hz = settings.fps;
+    request_for_hz(settings, native, hz, capture_size, max_fps)
+}
+
+pub fn request_for_hz(
+    settings: &StreamSettings,
+    native: (u32, u32),
+    display_hz: u32,
+    capture_size: Option<[u32; 2]>,
+    max_fps: u32,
+) -> (u32, u32, u32) {
+    let s = path::effective_for(settings, display_hz);
     fit_to_host(s.resolution.pixels(native), s.fps, capture_size, max_fps)
 }
 
@@ -681,6 +769,7 @@ pub struct Connect {
     pub target: Target,
     pub settings: StreamSettings,
     pub native: (u32, u32),
+    pub display_hz: Option<u32>,
     pub progress: Arc<Mutex<Progress>>,
     pub live: Arc<Mutex<Option<Live>>>,
     pub ctx: egui::Context,
@@ -840,12 +929,17 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     }
 
     report(Step::Launching, "Measuring the path…".into());
-    let path = measure_path(&t.node_id, t.ip, &t.path);
-    let mut settings = path::effective(&c.settings);
+    let path = measure_path(&t.node_id, t.ip, &t.path, || stale(&c.progress, generation));
+    #[cfg(target_os = "linux")]
+    let hz = crate::refresh::hz().or(c.display_hz).unwrap_or(60);
+    #[cfg(not(target_os = "linux"))]
+    let hz = c.display_hz.unwrap_or(60);
+    let mut settings = path::effective_for(&c.settings, hz);
     let wanted = settings.resolution.pixels(c.native);
-    let (w, h, fps) = request_for(
+    let (w, h, fps) = request_for_hz(
         &c.settings,
         c.native,
+        hz,
         host.streamer.capture_size,
         host.streamer.max_fps,
     );
@@ -886,12 +980,16 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         tx,
         move || ctx.request_repaint(),
     );
-    if stale(&c.progress, generation) {
-        drop(session);
+    let mut live_guard = c.live.lock();
+    let mut prog_guard = c.progress.lock();
+    if prog_guard.cancel || prog_guard.generation != generation {
+        drop(prog_guard);
+        drop(live_guard);
+        session.stop();
         bail!("cancelled");
     }
     let input = session.input();
-    *c.live.lock() = Some(Live {
+    *live_guard = Some(Live {
         pc: t.name.clone(),
         node_id: t.node_id.clone(),
         ip: t.ip,
@@ -908,7 +1006,11 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         clipboard: clipboard::Sync::spawn(t.ip, c.ctx.clone()),
         shortcuts: clipboard::Shortcuts::for_os(if host.os.is_empty() { &t.os } else { &host.os }),
     });
-    report(Step::Connecting, "Connecting…".into());
+    prog_guard.step = Step::Connecting;
+    prog_guard.detail = "Connecting…".into();
+    prog_guard.since = Instant::now();
+    drop(prog_guard);
+    drop(live_guard);
     Ok(())
 }
 
@@ -1169,6 +1271,95 @@ mod tests {
     }
 
     #[test]
+    fn fit_to_host_clamps_each_dimension_without_inflating() {
+        let ultrawide = (Some([2560, 1080]), 60);
+        // Height exceeds fixed desktop (1200 > 1080), but width (1920) is within 2560.
+        // Width must not be inflated to 2560.
+        assert_eq!(
+            fit_to_host((1920, 1200), 60, ultrawide.0, ultrawide.1),
+            (1920, 1080, 60)
+        );
+    }
+
+    #[test]
+    fn measure_path_stops_immediately_when_cancelled_or_unreachable() {
+        // If cancelled before start, it must not attempt port opens.
+        let mut checks = 0;
+        let path = measure_path(
+            "test-node",
+            "127.0.0.1".parse().unwrap(),
+            &Path::default(),
+            || {
+                checks += 1;
+                true
+            },
+        );
+        assert_eq!(checks, 1);
+        assert_eq!(path.rtt_ms, None);
+
+        // If port is closed/unreachable, it must break after the first attempt instead of
+        // repeating 3 times.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let mut checks = 0;
+        let path = measure_path_on(
+            "test-node",
+            "127.0.0.1".parse().unwrap(),
+            closed_port,
+            &Path::default(),
+            || {
+                checks += 1;
+                false
+            },
+        );
+        assert_eq!(checks, 1);
+        assert_eq!(path.rtt_ms, None);
+
+        // If cancelled after first attempt, it stops on iteration 2 instead of continuing.
+        let mut checks = 0;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let _ = measure_path_on(
+            "test-node",
+            "127.0.0.1".parse().unwrap(),
+            listener.local_addr().unwrap().port(),
+            &Path::default(),
+            || {
+                checks += 1;
+                checks > 1
+            },
+        );
+        assert_eq!(checks, 2);
+    }
+
+    #[test]
+    fn cancelled_progress_does_not_publish_live() {
+        let pc = Pc {
+            name: "Test-PC".into(),
+            node_id: "test-node".into(),
+            ip: Some("127.0.0.1".parse().unwrap()),
+            online: true,
+            host: Some(Status::default()),
+            ..Default::default()
+        };
+        let c = Connect {
+            target: Target::from_pc(&pc).unwrap(),
+            settings: StreamSettings::default(),
+            native: (1920, 1080),
+            display_hz: Some(60),
+            progress: Arc::default(),
+            live: Arc::default(),
+            ctx: egui::Context::default(),
+        };
+        let generation = 1;
+        c.progress.lock().generation = generation;
+        c.progress.lock().cancel = true;
+        let res = run(&c, generation);
+        assert!(res.is_err());
+        assert!(c.live.lock().is_none());
+    }
+
+    #[test]
     fn a_target_carries_the_hosts_limits_and_os() {
         let pc = Pc {
             node_id: "n".into(),
@@ -1324,6 +1515,7 @@ mod tests {
                     ..cfg.stream.clone()
                 },
                 native: (3024, 1964),
+                display_hz: Some(60),
                 progress: Arc::default(),
                 live: Arc::default(),
                 ctx: egui::Context::default(),
@@ -1420,5 +1612,51 @@ mod tests {
         assert_eq!(p.since, since);
         p.set(Step::Ended { error: None }, "");
         assert!(!p.active());
+    }
+
+    #[test]
+    fn request_for_hz_respects_high_refresh_rate() {
+        let settings = StreamSettings::default();
+        let (w, h, fps) = request_for_hz(&settings, (1920, 1080), 120, None, 144);
+        assert_eq!((w, h, fps), (1920, 1080, 120));
+    }
+
+    #[test]
+    fn wake_packet_age_does_not_trigger_listing_changed_repaint() {
+        let mut d1 = Discovery::default();
+        let pc1 = Pc {
+            name: "Gaming-PC".into(),
+            host: Some(Status {
+                wake_packet_age_secs: Some(3),
+                ..Status::default()
+            }),
+            ..Pc::default()
+        };
+        d1.pcs.push(pc1.clone());
+
+        let mut d2 = Discovery::default();
+        let mut pc2 = pc1;
+        pc2.host.as_mut().unwrap().wake_packet_age_secs = Some(6);
+        d2.pcs.push(pc2);
+
+        assert!(!listing_changed(&d1, &d2));
+    }
+
+    #[test]
+    fn discovery_thread_exits_on_shutdown_signal() {
+        let disc = Arc::new(Mutex::new(Discovery::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = spawn_discovery_worker(disc, egui::Context::default(), stop.clone());
+        stop.store(true, Ordering::Relaxed);
+        assert!(handle.join().is_ok());
+    }
+
+    #[test]
+    fn discovery_thread_exits_when_shared_dropped() {
+        let disc = Arc::new(Mutex::new(Discovery::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = spawn_discovery_worker(disc.clone(), egui::Context::default(), stop);
+        drop(disc);
+        assert!(handle.join().is_ok());
     }
 }

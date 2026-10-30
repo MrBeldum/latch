@@ -1742,6 +1742,14 @@ fn toolbar_rule(ui: &mut egui::Ui) {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    pub fn hold_test_key(view: &mut super::View, input: &latch_stream::Input) {
+        view.held.key(input, 0x41, true);
+        assert!(view.held.any_down());
+    }
+    pub fn assert_no_held_input(view: &super::View) {
+        assert!(!view.held.any_down());
+    }
+
     use super::*;
     use crate::config::ClientConfig;
     use crate::session::Live;

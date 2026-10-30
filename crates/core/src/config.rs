@@ -123,10 +123,12 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 /// a newer build added, a typo) costs only that value: see [`salvage`].
 pub fn load<T: DeserializeOwned + Serialize + Default>(name: &str) -> T {
     let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    read_unlocked(name).unwrap_or_else(|e| {
-        tracing::warn!("{e:#}; using defaults");
-        T::default()
-    })
+    lock_config(name)
+        .and_then(|_lock| read_unlocked(name))
+        .unwrap_or_else(|e| {
+            tracing::warn!("{e:#}; using defaults");
+            T::default()
+        })
 }
 
 /// Read `name` exactly as it is: the default only when there is no file,
@@ -295,6 +297,99 @@ fn put(root: &mut toml::Table, path: &[String], value: toml::Value) {
     table.insert(last.clone(), value);
 }
 
+/// An OS-level advisory file lock held while updating or saving a config file.
+pub struct ConfigLock {
+    #[cfg(unix)]
+    file: std::fs::File,
+    #[cfg(windows)]
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        use std::os::windows::io::AsRawHandle;
+        let handle = self.file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        let mut overlapped =
+            std::mem::MaybeUninit::<windows_sys::Win32::System::IO::OVERLAPPED>::zeroed();
+        unsafe {
+            windows_sys::Win32::Storage::FileSystem::UnlockFileEx(
+                handle,
+                0,
+                !0,
+                !0,
+                overlapped.as_mut_ptr(),
+            );
+        }
+    }
+}
+
+pub fn lock_config(name: &str) -> Result<ConfigLock> {
+    let dir = data_dir()?;
+    let lock_path = dir.join(format!("{name}.lock"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd};
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&lock_path)
+            .with_context(|| format!("open lock file {}", lock_path.display()))?;
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("flock lock file {}", lock_path.display()));
+        }
+        Ok(ConfigLock { file })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("open lock file {}", lock_path.display()))?;
+        let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        let mut overlapped =
+            std::mem::MaybeUninit::<windows_sys::Win32::System::IO::OVERLAPPED>::zeroed();
+        let ret = unsafe {
+            windows_sys::Win32::Storage::FileSystem::LockFileEx(
+                handle,
+                windows_sys::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK,
+                0,
+                !0,
+                !0,
+                overlapped.as_mut_ptr(),
+            )
+        };
+        if ret == 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("LockFileEx {}", lock_path.display()));
+        }
+        Ok(ConfigLock { file })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(ConfigLock {})
+    }
+}
+
 /// Apply a read-modify-write transaction without allowing another in-process
 /// settings or discovery writer to replace the snapshot underneath it.
 /// A file that exists but cannot be read is left alone: the edit fails
@@ -304,6 +399,7 @@ pub fn update<T: Serialize + DeserializeOwned + Default + PartialEq>(
     edit: impl FnOnce(&mut T),
 ) -> Result<()> {
     let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _file_guard = lock_config(name)?;
     let mut value: T = read_unlocked(name)?;
     let before = toml::to_string(&value)?;
     edit(&mut value);
@@ -315,6 +411,7 @@ pub fn update<T: Serialize + DeserializeOwned + Default + PartialEq>(
 
 pub fn save<T: Serialize>(name: &str, value: &T) -> Result<()> {
     let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _file_guard = lock_config(name)?;
     save_unlocked(name, value)
 }
 
@@ -575,6 +672,70 @@ mod tests {
             );
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn config_process_writer() {
+        let Ok(name) = std::env::var("LATCH_TEST_CONFIG_NAME") else {
+            return;
+        };
+        if std::env::var_os("LATCH_TEST_EXIT_WITH_LOCK").is_some() {
+            let _lock = lock_config(&name).unwrap();
+            std::process::exit(0); // deliberately skip Drop, as a crashed process would
+        }
+        for _ in 0..20 {
+            update::<Cfg>(&name, |c| c.n += 1).unwrap();
+        }
+    }
+
+    #[test]
+    fn transactions_serialize_across_processes() {
+        let name = format!("processes-{}.toml", std::process::id());
+        save(&name, &Cfg { n: 0 }).unwrap();
+        let spawn = || {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "config::tests::config_process_writer"])
+                .env("LATCH_TEST_CONFIG_NAME", &name)
+                .spawn()
+                .unwrap()
+        };
+        let mut first = spawn();
+        let mut second = spawn();
+        assert!(first.wait().unwrap().success());
+        assert!(second.wait().unwrap().success());
+        assert_eq!(load::<Cfg>(&name).n, 40);
+        let exited = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "config::tests::config_process_writer"])
+            .env("LATCH_TEST_CONFIG_NAME", &name)
+            .env("LATCH_TEST_EXIT_WITH_LOCK", "1")
+            .status()
+            .unwrap();
+        assert!(exited.success());
+        // A leftover .lock file must not act as a stale ownership marker.
+        update::<Cfg>(&name, |c| c.n += 1).unwrap();
+        assert_eq!(load::<Cfg>(&name).n, 41);
+        std::fs::remove_file(data_dir().unwrap().join(name)).unwrap();
+    }
+
+    #[test]
+    fn file_lock_coordinates_exclusive_access() {
+        use std::time::Duration;
+        let name = format!("flock-test-{}.toml", std::process::id());
+        let lock1 = lock_config(&name).expect("acquire lock1");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let name_clone = name.clone();
+        let t = std::thread::spawn(move || {
+            let _lock2 = lock_config(&name_clone).expect("acquire lock2");
+            tx.send(true).unwrap();
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
+        drop(lock1);
+        assert_eq!(rx.recv_timeout(Duration::from_millis(500)), Ok(true));
+        t.join().unwrap();
+        let _ = std::fs::remove_file(data_dir().unwrap().join(format!("{name}.lock")));
     }
 
     /// `.cargo/config.toml` points `cargo test` at `target/latch-data`.

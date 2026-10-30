@@ -129,6 +129,12 @@ pub struct StreamSettings {
     pub bitrate_kbps: u32,
     pub codec: Codec,
     pub fullscreen: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_resolution: Option<Resolution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_fps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_bitrate_kbps: Option<u32>,
 }
 
 impl Default for StreamSettings {
@@ -140,6 +146,9 @@ impl Default for StreamSettings {
             bitrate_kbps: 50_000,
             codec: Codec::Auto,
             fullscreen: true,
+            custom_resolution: None,
+            custom_fps: None,
+            custom_bitrate_kbps: None,
         }
     }
 }
@@ -250,23 +259,56 @@ impl ClientConfig {
 
     /// The window owns preferences; discovery owns `pcs`. The
     /// window's copy of `pcs` is refreshed from the file at the same time, so
-    /// a PC seen during the run is known to the window too.
+    /// a PC seen during the run is known to the window too. Non-UI fields on
+    /// disk (such as `github_token`) are also refreshed.
     pub fn save(&mut self) -> anyhow::Result<()> {
         let mut pcs = None;
+        let mut github_token = None;
         Self::update(|current| {
             current.apply_preferences(self);
             pcs = Some(current.pcs.clone());
+            github_token = current.github_token.clone();
         })?;
         if let Some(pcs) = pcs {
             self.pcs = pcs;
         }
+        self.github_token = github_token;
         Ok(())
     }
 
+    pub fn save_changes(&self, before: &Self) -> anyhow::Result<()> {
+        Self::update(|disk| disk.apply_changes(before, self))
+    }
+
+    fn apply_changes(&mut self, before: &Self, after: &Self) {
+        macro_rules! changed {
+            ($($field:ident).+) => {
+                if after.$($field).+ != before.$($field).+ {
+                    self.$($field).+ = after.$($field).+;
+                }
+            };
+        }
+        changed!(stream.quality);
+        changed!(stream.resolution);
+        changed!(stream.fps);
+        changed!(stream.bitrate_kbps);
+        changed!(stream.codec);
+        changed!(stream.fullscreen);
+        changed!(stream.custom_resolution);
+        changed!(stream.custom_fps);
+        changed!(stream.custom_bitrate_kbps);
+        changed!(sleep_prompt);
+        changed!(cmd_is_ctrl);
+        changed!(capture_mouse);
+        changed!(auto_update);
+    }
+
     fn apply_preferences(&mut self, settings: &Self) {
-        let pcs = std::mem::take(&mut self.pcs);
-        *self = settings.clone();
-        self.pcs = pcs;
+        self.stream = settings.stream.clone();
+        self.sleep_prompt = settings.sleep_prompt;
+        self.cmd_is_ctrl = settings.cmd_is_ctrl;
+        self.capture_mouse = settings.capture_mouse;
+        self.auto_update = settings.auto_update;
     }
 
     /// One read-modify-write of the file, under the process-wide config lock.
@@ -287,6 +329,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn preference_delta_preserves_concurrent_changes() {
+        let before = ClientConfig::default();
+        let mut after = before.clone();
+        after.stream.bitrate_kbps = 20_000;
+        let mut disk = before.clone();
+        disk.stream.fps = 120;
+        disk.auto_update = false;
+        disk.github_token = Some("new".into());
+        disk.apply_changes(&before, &after);
+        assert_eq!(disk.stream.bitrate_kbps, 20_000);
+        assert_eq!(disk.stream.fps, 120);
+        assert!(!disk.auto_update);
+        assert_eq!(disk.github_token.as_deref(), Some("new"));
+    }
+
+    #[test]
     fn stale_window_settings_preserve_new_wake_details() {
         let mut window = ClientConfig::default();
         let mut disk = window.clone();
@@ -301,6 +359,18 @@ mod tests {
         disk.apply_preferences(&window);
         assert!(!disk.stream.fullscreen);
         assert_eq!(disk.pcs["pc"].mac.as_deref(), Some("02:00:00:00:00:01"));
+    }
+
+    #[test]
+    fn non_ui_fields_like_github_token_are_preserved_across_preference_updates() {
+        let window = ClientConfig {
+            github_token: Some("stale".into()),
+            ..Default::default()
+        };
+        let mut disk = window.clone();
+        disk.github_token = Some("ghp_secret".into());
+        disk.apply_preferences(&window);
+        assert_eq!(disk.github_token.as_deref(), Some("ghp_secret"));
     }
 
     #[test]
