@@ -856,7 +856,7 @@ impl eframe::App for ClientApp {
                 if let Some(on) = self.fullscreen_after.take() {
                     self.set_fullscreen(ctx, on);
                 }
-                if self.cfg.sleep_prompt && !self.power_sent.load(Ordering::Relaxed) {
+                if self.streamed && self.cfg.sleep_prompt && !self.power_sent.load(Ordering::Relaxed) {
                     self.offer_sleep = disc
                         .pcs
                         .iter()
@@ -3356,6 +3356,25 @@ pub(crate) mod snapshots {
         let h = failed(false);
         assert!(h.query_by_label("Couldn't connect to Gaming-PC").is_some());
         assert!(h.query_by_label("Try at 1080p, 20 Mbps").is_none());
+    }
+
+    #[test]
+    fn failed_connect_never_offers_sleep() {
+        let mut setup = Setup::new(pcs()).step(
+            "Gaming-PC",
+            Step::Ended { error: None },
+            "",
+        );
+        setup.prog.node_id = "n1".into();
+        setup.cfg.sleep_prompt = true;
+        setup.tweak = |app| {
+            app.ended_seen = false;
+            app.streamed = false;
+        };
+        let h = build(setup, MIN, 1.0, false);
+        assert!(h.query_by_label("Session with Gaming-PC ended").is_none());
+        assert!(h.query_by_label("Sleep Gaming-PC").is_none());
+        assert!(h.state().offer_sleep.is_none());
     }
 
     #[test]
