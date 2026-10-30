@@ -595,6 +595,18 @@ pub fn encode(pcm: &[i16], out: &mut Vec<u8>) {
     // Encode subframes
     encode_channel(&ch0, out);
     encode_channel(&ch1, out);
+    // Side channels can exceed i16; independent verbatim is a hard wire bound.
+    if out.len() > 3 + 2 * (1 + 2 * n) {
+        out.clear();
+        out.push(PROTOCOL_VERSION << 4);
+        out.extend_from_slice(&(n as u16).to_le_bytes());
+        for channel in 0..2 {
+            out.push(SUBFRAME_VERBATIM << 5);
+            for pair in pcm.chunks_exact(2) {
+                out.extend_from_slice(&pair[channel].to_le_bytes());
+            }
+        }
+    }
 }
 
 /// Decodes one frame into `pcm` (cleared first), interleaved stereo.
