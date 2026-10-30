@@ -142,6 +142,27 @@ impl Encoder {
                 kVTCompressionPropertyKey_ExpectedFrameRate,
                 number(config.fps as i64).0,
             )?;
+            // The viewer converts as BT.709 limited range, and the Windows
+            // encoder says so in the stream; untagged, other decoders guess.
+            // Tags only: VideoToolbox does not convert the pixels.
+            for (key, value) in [
+                (
+                    kVTCompressionPropertyKey_ColorPrimaries,
+                    kCVImageBufferColorPrimaries_ITU_R_709_2,
+                ),
+                (
+                    kVTCompressionPropertyKey_TransferFunction,
+                    kCVImageBufferTransferFunction_ITU_R_709_2,
+                ),
+                (
+                    kVTCompressionPropertyKey_YCbCrMatrix,
+                    kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+                ),
+            ] {
+                if let Err(error) = encoder.set(key, value) {
+                    tracing::debug!(%error, "VideoToolbox encoder does not take colour tags");
+                }
+            }
             encoder.bitrate(config.bitrate_kbps)?;
             check(
                 VTCompressionSessionPrepareToEncodeFrames(session),
