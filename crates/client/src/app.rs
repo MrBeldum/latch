@@ -308,7 +308,11 @@ impl ClientApp {
     fn notify_later(&mut self, job: impl FnOnce() -> (Tone, String) + Send + 'static) {
         let notice: Notice = Arc::default();
         let out = notice.clone();
-        std::thread::spawn(move || *out.lock() = Some(job()));
+        std::thread::spawn(move || {
+            if let Ok(res) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)) {
+                *out.lock() = Some(res);
+            }
+        });
         self.pending_notice = Some(notice);
     }
 
@@ -602,7 +606,11 @@ impl ClientApp {
     }
 
     fn poll_notice(&mut self) {
-        let ready = self.pending_notice.as_ref().and_then(|n| n.lock().take());
+        let (ready, done) = self.pending_notice.as_ref().map_or((None, false), |n| {
+            let val = n.lock().take();
+            let finished = val.is_some() || Arc::strong_count(n) == 1;
+            (val, finished)
+        });
         if let Some((tone, text)) = ready {
             // The machine list is out of sight while a stream runs: a
             // refused power action, say, has to be read over the picture.
@@ -610,6 +618,8 @@ impl ClientApp {
                 self.view.toast(tone, text.clone());
             }
             self.notice = Some((tone, text, Instant::now()));
+        }
+        if done {
             self.pending_notice = None;
         }
     }
@@ -3396,6 +3406,17 @@ pub(crate) mod snapshots {
         let notice = h.state().notice.as_ref().unwrap();
         assert_eq!(notice.0, Tone::Info);
         assert_eq!(notice.1, "Another device is watching Gaming-PC.");
+    }
+
+    #[test]
+    fn panicking_notify_job_clears_pending_notice() {
+        let mut h = build(Setup::new(pcs()), MIN, 1.0, false);
+        h.state_mut().notify_later(|| {
+            panic!("simulated panic in background job");
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        h.state_mut().poll_notice();
+        assert!(h.state().pending_notice.is_none());
     }
 
     #[test]
