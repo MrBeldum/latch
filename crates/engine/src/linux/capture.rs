@@ -196,7 +196,9 @@ impl X11Capture {
         Ok(true)
     }
 
-    fn pixels(&mut self, area: xproto::Rectangle) -> anyhow::Result<()> {
+    /// Reads `area` into the saved desktop. False when every pixel was
+    /// already there: damage also follows repaints of identical content.
+    fn pixels(&mut self, area: xproto::Rectangle) -> anyhow::Result<bool> {
         let stride = area.width as usize * 4;
         let len = stride * area.height as usize;
         let owned;
@@ -256,12 +258,17 @@ impl X11Capture {
             &owned
         };
         ensure!(bytes.len() >= len, "short X11 image");
+        let mut changed = false;
         for row in 0..area.height as usize {
             let dst = (area.y as usize + row) * self.desktop.stride + area.x as usize * 4;
-            self.desktop.data[dst..dst + stride]
-                .copy_from_slice(&bytes[row * stride..(row + 1) * stride]);
+            let dst = &mut self.desktop.data[dst..dst + stride];
+            let src = &bytes[row * stride..(row + 1) * stride];
+            if dst != src {
+                dst.copy_from_slice(src);
+                changed = true;
+            }
         }
-        Ok(())
+        Ok(changed)
     }
 }
 
@@ -318,21 +325,22 @@ impl CpuCapture for X11Capture {
                 (None, None) => false,
                 _ => true,
             };
+            let mut changed = false;
             if let Some(area) = dirty {
                 if let Some(id) = self.damage {
                     damage::subtract(&self.conn, id, x11rb::NONE, x11rb::NONE)?.check()?;
                 }
-                if let Err(error) = self.pixels(area) {
+                match self.pixels(area) {
+                    Ok(pixels) => changed = pixels,
                     // The root can shrink between the event poll and GetImage
                     // (BadMatch). That is a new size to capture, not a failure.
-                    if self.resize()? {
-                        continue;
-                    }
-                    return Err(error);
+                    Err(_) if self.resize()? => continue,
+                    Err(error) => return Err(error),
                 }
             }
             self.cursor = cursor;
-            if dirty.is_some() || cursor_changed || self.first {
+            // An unchanged picture costs the caller no conversion or encode.
+            if changed || cursor_changed || self.first {
                 frame.width = self.desktop.width;
                 frame.height = self.desktop.height;
                 frame.stride = self.desktop.stride;
@@ -344,7 +352,8 @@ impl CpuCapture for X11Capture {
                 return Ok(true);
             }
             let remaining = timeout.saturating_sub(start.elapsed());
-            if remaining.is_zero() {
+            // Without Damage each pass reads the whole root: one per call.
+            if remaining.is_zero() || self.damage.is_none() {
                 return Ok(false);
             }
             super::wait_fd(
@@ -604,5 +613,36 @@ mod tests {
         assert_eq!((frame.width, frame.height, frame.stride), (2, 2, 8));
         assert_eq!(frame.data, [7; 16]);
         assert_eq!(capture.size(), (2, 2));
+    }
+
+    #[test]
+    fn a_repaint_with_the_same_pixels_is_not_a_change() {
+        // Without Damage every grab reads the whole root; with it, a
+        // client repainting identical pixels still reports damage.
+        let mut images = 0;
+        let conn = fake_x(Duration::from_secs(10), move |opcode, sequence| {
+            if opcode != xproto::GET_IMAGE_REQUEST {
+                return absent(sequence);
+            }
+            images += 1;
+            let mut data = vec![7; 16];
+            data[5] = if images < 3 { 7 } else { 9 };
+            reply(
+                &xproto::GetImageReply {
+                    depth: 24,
+                    sequence,
+                    visual: 0,
+                    data,
+                }
+                .serialize(),
+            )
+        });
+        let mut capture = fake_capture(conn, 2, 2);
+        let mut frame = Bgra::default();
+        assert!(capture.grab(&mut frame, Duration::ZERO).unwrap());
+        assert!(!capture.grab(&mut frame, Duration::ZERO).unwrap());
+        assert_eq!(frame.data, [7; 16]);
+        assert!(capture.grab(&mut frame, Duration::ZERO).unwrap());
+        assert_eq!(frame.data[5], 9);
     }
 }
