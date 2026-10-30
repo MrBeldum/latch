@@ -199,6 +199,12 @@ impl Sink {
                 Event::Key { vk, down, .. } => {
                     if let Some(key) = crate::input::keymap::vk_to_mac(*vk) {
                         let e = Owned::new(CGEventCreateKeyboardEvent(ptr::null(), key, *down))?;
+                        // kCGKeyboardEventAutorepeat: repeated down while already held.
+                        CGEventSetIntegerValueField(
+                            e.0,
+                            8,
+                            i64::from(*down && self.held.keys.contains(vk)),
+                        );
                         if *vk == 0x14 && *down && !self.held.keys.contains(vk) {
                             self.caps_lock = !self.caps_lock;
                         }
@@ -361,6 +367,27 @@ mod tests {
             y: 20,
             width: 200,
             height: 100,
+        }
+    }
+    #[test]
+    fn repeated_key_down_sets_autorepeat_and_release_clears_it() {
+        let mut sink = sink();
+        for (down, repeat) in [(true, 0), (true, 1), (false, 0), (true, 0)] {
+            let events = sink
+                .build(
+                    &Event::Key {
+                        vk: 0x41,
+                        down,
+                        modifiers: 0,
+                    },
+                    display(),
+                    Point::default(),
+                )
+                .unwrap();
+            // SAFETY: inspect locally constructed keyboard events only.
+            unsafe {
+                assert_eq!(CGEventGetIntegerValueField(events[0].0, 8), repeat);
+            }
         }
     }
     #[test]
