@@ -230,6 +230,7 @@ impl AudioReceiver {
             && !self.parity.contains_key(&group)
         {
             // Nothing after it has arrived: it is not late yet.
+            self.held = None;
             return None;
         }
         // One timer for a run of missing packets: it restarts only once a

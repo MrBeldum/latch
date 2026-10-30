@@ -549,3 +549,19 @@ fn audio_after_a_lost_packet_is_released_when_the_host_goes_quiet() {
     assert_eq!(receiver.next_deadline(), None);
     assert_eq!(receiver.pop(later + Duration::from_secs(1)), None);
 }
+
+#[test]
+fn audio_given_up_at_the_end_of_a_sound_leaves_no_deadline_behind() {
+    let g = audio_group();
+    let start = Instant::now();
+    let mut receiver = AudioReceiver::new(1);
+    // Two packets lost, so parity cannot rebuild them; then silence.
+    let order = [&g[0][..], &g[1], &g[4]];
+    deliver_audio(&mut receiver, &order, start);
+    let later = start + AUDIO_HOLD;
+    assert_eq!(receiver.pop(later), Some(AudioOut::Missing { seq: 2 }));
+    assert_eq!(receiver.pop(later), Some(AudioOut::Missing { seq: 3 }));
+    assert_eq!(receiver.pop(later), None);
+    // A deadline in the past would spin the receive loop until sound resumes.
+    assert_eq!(receiver.next_deadline(), None);
+}
