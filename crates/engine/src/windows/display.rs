@@ -403,6 +403,7 @@ pub(super) fn restore(previous: &Previous) -> Result<()> {
 }
 #[cfg(test)]
 mod tests {
+    use super::selection_rank;
     #[test]
     fn virtual_output_wins_over_primary() {
         let candidates = [(false, true), (true, false)];
