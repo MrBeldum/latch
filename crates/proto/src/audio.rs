@@ -89,12 +89,13 @@ pub enum AudioOut {
 }
 
 /// Puts audio packets in order and rebuilds a lost one from its group's
-/// parity. A missing packet is given up on when its group's parity has
-/// arrived without rebuilding it, when a packet two or more past the end
-/// of its group has arrived, or [`AUDIO_HOLD`] after a later packet showed
-/// it missing. After a gap beyond the 64-packet window,
-/// jumps to the arriving packet's group start and clears stale state,
-/// rather than playing a long backlog of concealment or stalling forever.
+/// parity. A missing packet is given up on when a packet two or more past
+/// the end of its group has arrived, or [`AUDIO_HOLD`] after a later packet
+/// or its group's parity showed it missing; parity alone does not, since
+/// the group's data may have been reordered behind it. After a gap beyond
+/// the 64-packet window, jumps to the arriving packet's group start and
+/// clears stale state, rather than playing a long backlog of concealment
+/// or stalling forever.
 pub struct AudioReceiver {
     session: u32,
     packet_us: u32,
@@ -234,8 +235,7 @@ impl AudioReceiver {
         // One timer for a run of missing packets: it restarts only once a
         // packet is delivered.
         let held = *self.held.get_or_insert(now);
-        if self.parity.contains_key(&group)
-            || now.saturating_duration_since(held) >= AUDIO_HOLD
+        if now.saturating_duration_since(held) >= AUDIO_HOLD
             || self
                 .latest
                 .is_some_and(|n| !crate::video::before(n, group.wrapping_add(GROUP + 1)))

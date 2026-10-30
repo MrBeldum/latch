@@ -507,6 +507,28 @@ fn deliver_audio(
 }
 
 #[test]
+fn reordered_audio_parity_does_not_discard_data_that_arrives_after_it() {
+    let g = audio_group();
+    let (data, parity) = (&g[..4], &g[4]);
+    let now = Instant::now();
+    let all: Vec<Vec<u8>> = (0..4u8).map(|i| vec![i]).collect();
+    for order in [
+        vec![&data[0][..], &data[1], parity, &data[2], &data[3]],
+        vec![&parity[..], &data[0], &data[1], &data[2], &data[3]],
+    ] {
+        let mut receiver = AudioReceiver::new(1);
+        assert_eq!(
+            deliver_audio(&mut receiver, &order, now),
+            (all.clone(), vec![])
+        );
+    }
+    // One packet really lost: parity still rebuilds it.
+    let mut receiver = AudioReceiver::new(1);
+    let order = [&data[0][..], &data[1], &data[2], parity];
+    assert_eq!(deliver_audio(&mut receiver, &order, now), (all, vec![]));
+}
+
+#[test]
 fn audio_after_a_lost_packet_is_released_when_the_host_goes_quiet() {
     let g = audio_group();
     let start = Instant::now();
