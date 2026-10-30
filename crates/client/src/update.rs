@@ -630,10 +630,17 @@ fn replace_bundle(
 }
 
 fn rollback(bundle: &std::path::Path, parked: &std::path::Path) -> Result<()> {
+    let failed = parked.with_file_name("failed.app");
     if bundle.exists() {
-        std::fs::remove_dir_all(bundle).context("remove failed new bundle")?;
+        std::fs::rename(bundle, &failed).context("park failed new bundle")?;
     }
-    std::fs::rename(parked, bundle).context("restore previous bundle")?;
+    if let Err(e) = std::fs::rename(parked, bundle) {
+        if failed.exists() {
+            std::fs::rename(&failed, bundle).context("restore new bundle after rollback failed")?;
+        }
+        return Err(e).context("restore previous bundle");
+    }
+    let _ = std::fs::remove_dir_all(failed);
     Ok(())
 }
 
@@ -651,7 +658,7 @@ fn perform_relaunch(
     {
         Ok(_) => Ok(()),
         Err(e) => {
-            let _ = rollback(bundle, parked);
+            rollback(bundle, parked).context("relaunch failed and rollback failed")?;
             Err(anyhow!("spawn relaunch command: {e}"))
         }
     }
@@ -684,7 +691,7 @@ fn relaunch_command(
     // backticks and newlines). $0 is a diagnostic command name.
     command.args([
         "-c",
-        "sleep 1 && if /usr/bin/open \"$1\"; then rm -rf \"$2\"; else rm -rf \"$1\" && mv \"$3\" \"$1\" && rm -rf \"$2\"; fi",
+        "sleep 1 && if /usr/bin/open \"$1\"; then :; else rm -rf \"$1\" && mv \"$3\" \"$1\" && rm -rf \"$2\"; fi",
         "latch-relaunch",
     ]);
     command.arg(bundle);
@@ -897,7 +904,7 @@ mod tests {
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(
             args[1],
-            "sleep 1 && if /usr/bin/open \"$1\"; then rm -rf \"$2\"; else rm -rf \"$1\" && mv \"$3\" \"$1\" && rm -rf \"$2\"; fi"
+            "sleep 1 && if /usr/bin/open \"$1\"; then :; else rm -rf \"$1\" && mv \"$3\" \"$1\" && rm -rf \"$2\"; fi"
         );
         assert_eq!(args[3], path.as_os_str());
     }
@@ -960,6 +967,21 @@ mod tests {
         assert!(
             staged.parked.exists(),
             "previous.app must still exist in staging dir after replace_bundle returns Ok"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn review_failed_rollback_preserves_the_installed_bundle() {
+        let dir =
+            std::env::temp_dir().join(format!("latch-rollback-{:016x}", rand::random::<u64>()));
+        let bundle = dir.join("Latch.app");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("version"), "new").unwrap();
+        assert!(rollback(&bundle, &dir.join("missing.app")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(bundle.join("version")).unwrap(),
+            "new"
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
