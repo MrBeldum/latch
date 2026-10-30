@@ -1258,16 +1258,16 @@ impl ClientApp {
         };
         ui::icon_menu(ui, Icon::More, &format!("More for {}", pc.name), |ui| {
             if wake && ui::menu_item(ui, "Wake").clicked() {
-                self.notice = Some(match session::wake_only(pc) {
+                let pc = pc.clone();
+                self.notify_later(move || match session::wake_only(&pc) {
                     Ok(_) => (
                         Tone::Neutral,
                         format!(
                             "Wake packets sent to {}. It can take a minute to come online.",
                             pc.name
                         ),
-                        Instant::now(),
                     ),
-                    Err(e) => (Tone::Danger, format!("{}: {e}", pc.name), Instant::now()),
+                    Err(e) => (Tone::Danger, format!("{}: {e}", pc.name)),
                 });
             }
             if test_wake && ui::menu_item(ui, "Test waking it from this network").clicked() {
@@ -3075,6 +3075,24 @@ pub(crate) mod snapshots {
         h.run_steps(2);
         assert!(h.query_by_label("Restart…").is_some());
         assert!(h.query_by_label("Sleep").is_none(), "nothing could wake it");
+    }
+
+    #[test]
+    fn wake_action_runs_in_background() {
+        let mut h = build(Setup::new(pcs()), TYPICAL, 1.0, false);
+        h.get_by_label("More for Office").simulate_click();
+        h.run_steps(2);
+        h.get_by_label("Wake").simulate_click();
+        h.run_steps(1);
+        assert!(
+            h.state().pending_notice.is_some() || h.state().notice.is_some(),
+            "wake must dispatch notice"
+        );
+        // Wait for thread to finish and poll notice to verify notice content
+        std::thread::sleep(Duration::from_millis(50));
+        h.run_steps(1);
+        let notice = h.state().notice.as_ref().expect("notice delivered");
+        assert!(notice.1.contains("Wake packets sent to Office"));
     }
 
     #[test]
