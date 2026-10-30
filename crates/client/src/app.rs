@@ -42,6 +42,15 @@ const NOTICE_FOR: Duration = Duration::from_secs(12);
 /// A one-line result, filled in by a worker thread.
 type Notice = Arc<Mutex<Option<(Tone, String)>>>;
 
+enum ConfigEdit {
+    Preferences(Box<(ClientConfig, ClientConfig)>),
+    Forget {
+        node_id: String,
+        name: String,
+        notice: Notice,
+    },
+}
+
 /// A PC's fixed desktop size and frame-rate ceiling, from its last status.
 type HostLimits = (Option<[u32; 2]>, u32);
 
@@ -143,7 +152,7 @@ pub struct ClientApp {
     /// its way. Asked for once per stream, by the thread that answers.
     video_help: Arc<Mutex<Option<crate::display::Help>>>,
     asked_about_video: bool,
-    save_tx: Option<std::sync::mpsc::Sender<(ClientConfig, ClientConfig)>>,
+    save_tx: Option<std::sync::mpsc::Sender<ConfigEdit>>,
     save_baseline: ClientConfig,
     save_worker: Option<std::thread::JoinHandle<()>>,
     discovery_stop: Option<Arc<AtomicBool>>,
@@ -202,11 +211,29 @@ impl ClientApp {
         if let Some(rs) = &cc.wgpu_render_state {
             crate::video::install(rs);
         }
-        let (save_tx, rx) = std::sync::mpsc::channel::<(ClientConfig, ClientConfig)>();
+        let (save_tx, rx) = std::sync::mpsc::channel::<ConfigEdit>();
         let save_worker = std::thread::spawn(move || {
-            while let Ok((before, cfg)) = rx.recv() {
-                if let Err(e) = cfg.save_changes(&before) {
-                    tracing::warn!("could not save settings: {e:#}");
+            while let Ok(edit) = rx.recv() {
+                match edit {
+                    ConfigEdit::Preferences(values) => {
+                        let (before, cfg) = *values;
+                        if let Err(e) = cfg.save_changes(&before) {
+                            tracing::warn!("could not save settings: {e:#}");
+                        }
+                    }
+                    ConfigEdit::Forget {
+                        node_id,
+                        name,
+                        notice,
+                    } => {
+                        let result = ClientConfig::update(|c| {
+                            c.forget(&node_id);
+                        });
+                        *notice.lock() = Some(match result {
+                            Ok(()) => (Tone::Neutral, format!("Forgot {name}.")),
+                            Err(e) => (Tone::Danger, format!("Couldn't forget {name}: {e}")),
+                        });
+                    }
                 }
             }
         });
@@ -285,7 +312,10 @@ impl ClientApp {
             self.dirty = false;
             if let Some(tx) = &self.save_tx {
                 let before = std::mem::replace(&mut self.save_baseline, self.cfg.clone());
-                let _ = tx.send((before, self.cfg.clone()));
+                let _ = tx.send(ConfigEdit::Preferences(Box::new((
+                    before,
+                    self.cfg.clone(),
+                ))));
             }
         }
     }
@@ -1206,16 +1236,15 @@ impl ClientApp {
             .lock()
             .pcs
             .retain(|p| !(p.remembered && p.node_id == node_id));
-        let node_id = node_id.to_owned();
-        let name = name.to_owned();
-        self.notify_later(move || {
-            match ClientConfig::update(|c| {
-                c.forget(&node_id);
-            }) {
-                Ok(()) => (Tone::Neutral, format!("Forgot {name}.")),
-                Err(e) => (Tone::Danger, format!("Couldn't forget {name}: {e}")),
-            }
-        });
+        let notice: Notice = Arc::default();
+        if let Some(tx) = &self.save_tx {
+            let _ = tx.send(ConfigEdit::Forget {
+                node_id: node_id.to_owned(),
+                name: name.to_owned(),
+                notice: notice.clone(),
+            });
+        }
+        self.pending_notice = Some(notice);
     }
 
     fn machine_list(
@@ -3610,8 +3639,10 @@ pub(crate) mod snapshots {
         let out = saved.clone();
         h.state_mut().save_tx = Some(tx);
         h.state_mut().save_worker = Some(std::thread::spawn(move || {
-            while let Ok((_, cfg)) = rx.recv() {
-                out.lock().push(cfg.stream.fps);
+            while let Ok(edit) = rx.recv() {
+                if let ConfigEdit::Preferences(values) = edit {
+                    out.lock().push(values.1.stream.fps);
+                }
             }
         }));
         for fps in [90, 120] {
