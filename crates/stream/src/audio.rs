@@ -353,7 +353,8 @@ struct Mixer {
     prev: [f32; MAX_CHANNELS],
     next: [f32; MAX_CHANNELS],
     /// Source samples that must be queued before the first audible frame,
-    /// so a late first packet is not a click of silence. Zero in tests.
+    /// and again after the queue runs dry, so a late packet is not a click
+    /// of silence. Zero in tests.
     preroll: usize,
     started: bool,
     scratch: Vec<f32>,
@@ -404,6 +405,10 @@ impl Mixer {
                     for c in 0..self.src_channels {
                         self.next[c] = q.pop_front().unwrap_or(0.0);
                     }
+                } else {
+                    // Ran dry: rebuild the cushion before playing on, or
+                    // every later jitter spike would click too.
+                    self.started = false;
                 }
             }
             let t = self.pos as f32;
@@ -588,5 +593,26 @@ mod tests {
         let mut out = vec![9.0f32; 6 * 10];
         m.fill(&mut out);
         assert_eq!(&out[6 * 9..], &[0.25, -0.25, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn the_mixer_waits_for_its_preroll_again_after_running_dry() {
+        // Stereo at the device's rate with a four-frame preroll.
+        let queue: Arc<Mutex<VecDeque<f32>>> = Arc::default();
+        let mut m = Mixer::new(48_000, 2, 48_000, 2, queue.clone(), Arc::default(), 8);
+        queue.lock().extend([0.5; 8]);
+        let mut out = vec![9.0f32; 16];
+        m.fill(&mut out);
+        assert!(out.contains(&0.5), "{out:?}");
+        // A gap drained it. What trickles in next waits for a full preroll
+        // so the following jitter does not click too.
+        queue.lock().extend([0.5; 4]);
+        let mut out = vec![9.0f32; 4];
+        m.fill(&mut out);
+        assert_eq!(out, [0.0; 4]);
+        assert_eq!(queue.lock().len(), 4);
+        queue.lock().extend([0.5; 4]);
+        m.fill(&mut out);
+        assert!(out.contains(&0.5), "playing again: {out:?}");
     }
 }
