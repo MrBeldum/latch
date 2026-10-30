@@ -176,6 +176,14 @@ pub struct Streamer {
     pub encoder: String,
     /// Why the running or last session had no audio; empty when capture works.
     pub audio_problem: String,
+    /// Session transport targets and effective socket sizes; zero on older hosts.
+    pub requested_bitrate_kbps: u32,
+    pub applied_bitrate_kbps: u32,
+    pub pacing_queue_ms: f32,
+    pub send_errors: u64,
+    pub send_retries: u64,
+    pub socket_send_bytes: usize,
+    pub socket_receive_bytes: usize,
     /// The desktop the engine captures, `[width, height]`, when its size is
     /// fixed whatever a viewer asks for: a Linux X screen. Absent when the
     /// host matches the viewer's size itself (Windows' virtual display), and

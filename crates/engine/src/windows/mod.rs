@@ -30,6 +30,7 @@ struct MfPipeline {
     converter: Converter,
     encoder: Encoder,
     config: VideoConfig,
+    cadence: crate::cadence::Cadence,
     last_sent: Instant,
     last_capture: Instant,
 }
@@ -46,10 +47,7 @@ impl MfPipeline {
     }
     fn next(&mut self, keyframe: bool, idle: Duration) -> Result<EncodedVideo> {
         let interval = Duration::from_secs_f64(1.0 / f64::from(self.config.fps));
-        let due = self.last_sent + interval;
-        if let Some(wait) = due.checked_duration_since(Instant::now()) {
-            thread::sleep(wait);
-        }
+        self.cadence.wait();
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut force = keyframe;
         let mut buffered = false;
@@ -86,6 +84,7 @@ impl MfPipeline {
                 if !changed && !buffered {
                     self.last_capture = Instant::now();
                 }
+                self.last_sent = Instant::now();
                 let texture = self.converter.convert(&self.capture.frame)?;
                 let sample = if self.encoder.hardware {
                     Encoder::texture_sample(&texture)?
@@ -106,7 +105,6 @@ impl MfPipeline {
                     if force && !idr {
                         bail!("Media Foundation encoder did not honour force-IDR");
                     }
-                    self.last_sent = Instant::now();
                     return Ok(EncodedVideo {
                         data,
                         keyframe: idr,
@@ -116,6 +114,7 @@ impl MfPipeline {
                 // A synchronous MFT may initially buffer an input despite low latency.
                 force = keyframe;
                 buffered = true;
+                self.cadence.wait();
             }
             if Instant::now() >= deadline && (!self.capture.has_frame || buffered) {
                 bail!("desktop/encoder produced no frame within five seconds");
@@ -152,6 +151,7 @@ impl Pipeline {
                         converter,
                         encoder,
                         config: config.clone(),
+                        cadence: crate::cadence::Cadence::new(config.fps),
                         last_sent: Instant::now() - Duration::from_secs(1),
                         last_capture: Instant::now(),
                     })))

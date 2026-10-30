@@ -788,6 +788,7 @@ fn test_6_control_messages_roundtrip_and_errors() {
             loss_pct: 1.2,
             decode_ms: 3.5,
             rtt_ms: 12.0,
+            ..Default::default()
         }),
         Message::Unknown(42),
     ];
@@ -905,4 +906,131 @@ fn test_7_performance_video_and_fec() {
         "Decode took {:?}, expected < 5 ms",
         decode_time
     );
+}
+
+#[test]
+fn lost_startup_idr_requests_recovery_and_accepts_next_idr() {
+    let now = Instant::now();
+    let mut packetizer = Packetizer::new(42);
+    let mut rx = Reassembler::new(42);
+    let mut requests = latch_proto::video::KeyframeRequests::new();
+    for index in 0..4 {
+        packetizer.packetize(
+            &OutFrame {
+                data: &[7; 100],
+                keyframe: index == 0 || index == 3,
+                host_delay: 0,
+            },
+            |bytes| {
+                if index != 0 {
+                    if let Datagram::Video { shard, .. } = wire::parse(bytes).unwrap() {
+                        rx.push(&shard, now);
+                    }
+                }
+            },
+        );
+        let result = rx.poll(now);
+        if index == 1 {
+            assert!(result.is_none());
+            assert!(rx.waiting_for_keyframe());
+            assert!(requests.due(true, now, None));
+            assert!(!requests.due(true, now + Duration::from_millis(50), None));
+        }
+        if index == 3 {
+            assert!(matches!(result, Some(Reassembled::Frame(_))));
+            assert!(!rx.waiting_for_keyframe());
+        }
+    }
+}
+
+#[test]
+fn legacy_report_is_additive_and_socket_errors_are_portable() {
+    let report: Report =
+        serde_json::from_str(r#"{"fps":60.0,"loss_pct":2.0,"decode_ms":1.0,"rtt_ms":10.0}"#)
+            .unwrap();
+    assert_eq!(report.unrecovered_loss_pct, None);
+    assert_eq!(report.frames_lost, 0);
+    assert!(latch_proto::transport::send_buffer_full(
+        &std::io::Error::from(std::io::ErrorKind::WouldBlock)
+    ));
+    #[cfg(unix)]
+    assert!(latch_proto::transport::send_buffer_full(
+        &std::io::Error::from_raw_os_error(libc::ENOBUFS)
+    ));
+    #[cfg(windows)]
+    assert!(latch_proto::transport::send_buffer_full(
+        &std::io::Error::from_raw_os_error(10055)
+    ));
+}
+
+#[test]
+fn bottleneck_serializes_bounds_and_removes_queue() {
+    let start = Instant::now();
+    let mut link = Link::new(Impairment::NONE, 1);
+    link.set_bandwidth(1000, Duration::from_millis(20));
+    for _ in 0..100 {
+        link.send(start, &[0; 1170]);
+    }
+    assert_eq!(link.counts(), (100, 98, 0));
+    assert!(link.receive(start).is_empty());
+    assert_eq!(link.receive(start + Duration::from_millis(20)).len(), 2);
+    link.set_bandwidth(0, Duration::ZERO);
+    link.send(start + Duration::from_millis(30), &[1]);
+    assert_eq!(
+        link.receive(start + Duration::from_millis(30)),
+        vec![vec![1]]
+    );
+}
+
+#[test]
+fn recovered_audio_pts_follows_negotiated_five_ms_packets() {
+    let now = Instant::now();
+    for missing in [0, 3] {
+        let mut tx = AudioPacketizer::new(42);
+        let mut rx = AudioReceiver::with_format(42, 240, 48_000);
+        for seq in 0..4 {
+            tx.packetize(100_000 + seq * 5_000, &[seq as u8; 20], |bytes| {
+                if let Datagram::Audio { packet, .. } = wire::parse(bytes).unwrap() {
+                    if packet.parity || packet.seq != missing {
+                        rx.push(&packet, now);
+                    }
+                }
+            });
+        }
+        let mut found = false;
+        while let Some(output) = rx.pop() {
+            if let AudioOut::Frame { seq, pts, .. } = output {
+                assert_eq!(pts, 100_000 + seq * 5_000);
+                found |= seq == missing;
+            }
+        }
+        assert!(found);
+    }
+}
+
+#[test]
+fn startup_grace_bounds_silence_and_allows_a_healthy_idr_to_finish() {
+    let accepted = Instant::now();
+    let mut rx = Reassembler::new(42);
+    assert!(!rx.needs_keyframe(accepted, accepted + Duration::from_millis(499)));
+    assert!(rx.needs_keyframe(accepted, accepted + Duration::from_millis(500)));
+    let mut tx = Packetizer::new(42);
+    tx.packetize(
+        &OutFrame {
+            data: &[7; 3000],
+            keyframe: true,
+            host_delay: 0,
+        },
+        |bytes| {
+            if let Datagram::Video { shard, .. } = wire::parse(bytes).unwrap() {
+                rx.push(&shard, accepted + Duration::from_millis(80));
+                assert!(!rx.needs_keyframe(accepted, accepted + Duration::from_millis(80)));
+            }
+        },
+    );
+    assert!(matches!(
+        rx.poll(accepted + Duration::from_millis(90)),
+        Some(Reassembled::Frame(_))
+    ));
+    assert!(!rx.needs_keyframe(accepted, accepted + Duration::from_secs(1)));
 }

@@ -7,6 +7,7 @@ authors.workspace = true
 description = "The viewer side of a Latch stream: session, video decode, audio playback"
 
 [dependencies]
+mio = { version = "1", features = ["net", "os-poll"] }
 latch-core.workspace = true
 latch-proto.workspace = true
 latch-codec.workspace = true

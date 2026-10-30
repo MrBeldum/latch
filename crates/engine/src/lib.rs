@@ -7,8 +7,11 @@
 //! [`pattern`] a synthetic desktop for tests and measurements.
 
 pub mod audio;
+mod cadence;
+mod congestion;
 pub mod display;
 pub mod input;
+mod pacing;
 pub mod pattern;
 pub mod server;
 pub mod software;

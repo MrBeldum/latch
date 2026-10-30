@@ -92,6 +92,7 @@ pub enum AudioOut {
 /// rather than playing a long backlog of concealment or stalling forever.
 pub struct AudioReceiver {
     session: u32,
+    packet_us: u32,
     next: Option<u32>,
     frames: std::collections::HashMap<u32, (u32, Vec<u8>)>,
     parity: std::collections::HashMap<u32, Vec<u8>>,
@@ -101,8 +102,14 @@ pub struct AudioReceiver {
 
 impl AudioReceiver {
     pub fn new(session: u32) -> Self {
+        Self::with_format(session, 480, 48_000)
+    }
+
+    /// Packet duration from Accept; the legacy constructor retains 10 ms.
+    pub fn with_format(session: u32, samples: u32, rate: u32) -> Self {
         Self {
             session,
+            packet_us: (u64::from(samples) * 1_000_000 / u64::from(rate.max(1))) as u32,
             next: None,
             frames: Default::default(),
             parity: Default::default(),
@@ -116,7 +123,7 @@ impl AudioReceiver {
         if packet.parity && !packet.seq.is_multiple_of(GROUP) {
             return;
         }
-        let mut next = *self.next.get_or_insert(packet.seq);
+        let mut next = *self.next.get_or_insert(packet.seq - packet.seq % GROUP);
         if crate::video::before(packet.seq, next.wrapping_sub(GROUP - 1)) {
             return;
         }
@@ -188,7 +195,7 @@ impl AudioReceiver {
                 let n = group.wrapping_add(i);
                 self.frames
                     .get(&n)
-                    .map(|(p, _)| p.wrapping_add(seq.wrapping_sub(n).wrapping_mul(10_000)))
+                    .map(|(p, _)| p.wrapping_add(seq.wrapping_sub(n).wrapping_mul(self.packet_us)))
             })
             .unwrap_or(0);
         self.frames.insert(seq, (pts, data[2..2 + len].to_vec()));

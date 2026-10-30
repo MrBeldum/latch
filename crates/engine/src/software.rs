@@ -52,6 +52,7 @@ pub struct SoftwarePipeline<C: CpuCapture> {
     frame: Bgra,
     picture: Yuv420,
     encoder: Option<Encoder>,
+    cadence: crate::cadence::Cadence,
     last_sent: Option<Instant>,
     captured: Instant,
     timings: SoftwareTimings,
@@ -72,6 +73,7 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
             frame: Bgra::default(),
             picture: Yuv420::default(),
             encoder: None,
+            cadence: crate::cadence::Cadence::new(config.fps),
             last_sent: None,
             captured: Instant::now(),
             timings: SoftwareTimings::default(),
@@ -84,9 +86,7 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
 
     fn acquire(&mut self, keyframe: bool, idle: Duration) -> anyhow::Result<bool> {
         let interval = Duration::from_secs_f64(1.0 / self.config.fps as f64);
-        if let Some(last) = self.last_sent {
-            std::thread::sleep((last + interval).saturating_duration_since(Instant::now()));
-        }
+        self.cadence.wait();
         let deadline = self.last_sent.unwrap_or_else(Instant::now) + idle.max(interval);
         loop {
             let started = Instant::now();
@@ -200,7 +200,7 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
             .ok_or_else(|| anyhow::anyhow!("encoder unavailable"))?
             .encode(&self.picture, keyframe || resized, &mut data)?;
         self.timings.encode = started.elapsed();
-        self.last_sent = Some(started);
+        self.last_sent = Some(self.captured);
         Ok(EncodedVideo {
             data,
             keyframe: info.keyframe,
