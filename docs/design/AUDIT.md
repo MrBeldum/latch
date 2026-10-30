@@ -39,7 +39,7 @@ writes `target/ui-snapshots/`. Names below refer to that folder
 | # | Severity | Finding | State |
 |---|----------|---------|-------|
 | V1 | High | No design system: one palette struct, but sizes chosen inline (13.5, 12.5, 17, 28, 30, 40 pt), screen-local `semibold(28.0)` headlines, an inline `egui::Grid` for stats, inline colours. | Fixed: tokens in `theme.rs` (below); screens use only tokens and components. |
-| V2 | High | The app did not look like the product site: violet, pink and cyan chrome in Inter against bardbro.com's black, white, hairlines and Geist. | Fixed: Geist and Geist Mono, neutral surfaces, white primary, colour only for status. |
+| V2 | High | The app did not look like the product site: violet, pink and cyan chrome in Inter against the original product site's black, white, hairlines and Geist. | Fixed: Geist and Geist Mono, neutral surfaces, white primary, colour only for status. |
 | V3 | Medium | A marketing headline inside the app ("Your workspace, anywhere.") at 30 pt, pushing the machine list below the fold at 640×420. | Fixed: a plain page title. |
 | V4 | Medium | Status pills used as data chips ("1920 × 1080" in cyan, "60 fps" in grey): colour that meant nothing. | Fixed: mono tags; colour only on status. |
 | V5 | Medium | Three filled violet Connect buttons in a three-row list: the "primary" colour repeated until it said nothing. | Fixed: outlined Connect; one white primary per screen at most. |

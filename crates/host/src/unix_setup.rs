@@ -274,6 +274,7 @@ pub fn autostart_enabled() -> bool {
     {
         launch_agent_path().is_ok_and(|p| p.exists())
             || legacy_launch_agent_path().is_ok_and(|p| p.exists())
+            || prior_latch_launch_agent_path().is_ok_and(|p| p.exists())
     }
     #[cfg(target_os = "linux")]
     {
@@ -287,7 +288,7 @@ pub fn autostart_enabled() -> bool {
 }
 
 #[cfg(any(target_os = "macos", test))]
-const LAUNCH_AGENT_LABEL: &str = "com.bardbro.latch.node";
+const LAUNCH_AGENT_LABEL: &str = "io.github.MrBeldum.Latch.node";
 
 /// How to start the background service when nothing answers. A copy the
 /// window starts itself has no supervisor: launchd and systemd restart
@@ -392,7 +393,8 @@ pub fn start_supervised() -> Option<Result<&'static str>> {
 pub fn supervised() -> bool {
     #[cfg(target_os = "macos")]
     {
-        std::env::var("XPC_SERVICE_NAME").is_ok_and(|v| v == LAUNCH_AGENT_LABEL)
+        std::env::var("XPC_SERVICE_NAME")
+            .is_ok_and(|v| v == LAUNCH_AGENT_LABEL || v == crate::legacy::MAC_LATCH_LAUNCH_AGENT)
     }
     #[cfg(target_os = "linux")]
     {
@@ -517,12 +519,24 @@ fn legacy_launch_agent_path() -> Result<PathBuf> {
     )))
 }
 
+/// The login item an earlier Latch install wrote.
+#[cfg(target_os = "macos")]
+fn prior_latch_launch_agent_path() -> Result<PathBuf> {
+    Ok(dirs_home()?.join(format!(
+        "Library/LaunchAgents/{}.plist",
+        crate::legacy::MAC_LATCH_LAUNCH_AGENT
+    )))
+}
+
 /// Stop launchd starting the old agent at login, by removing its file. The
 /// job launchd already has loaded is left alone: it may be the process that
 /// is calling this.
 #[cfg(target_os = "macos")]
 fn retire_legacy_launch_agent() {
-    if let Ok(old) = legacy_launch_agent_path() {
+    for old in [legacy_launch_agent_path(), prior_latch_launch_agent_path()]
+        .into_iter()
+        .flatten()
+    {
         if old.exists() {
             let _ = fs::remove_file(&old);
         }
@@ -571,7 +585,8 @@ pub fn adopt_legacy_bundle(background: bool) -> Result<()> {
     fs::rename(&old, &new).with_context(|| format!("rename {}", old.display()))?;
     tracing::info!("moved {} to {}", old.display(), new.display());
     let exe = new.join("Contents/MacOS/Latch");
-    let had_agent = legacy_launch_agent_path().is_ok_and(|p| p.exists())
+    let had_agent = prior_latch_launch_agent_path().is_ok_and(|p| p.exists())
+        || legacy_launch_agent_path().is_ok_and(|p| p.exists())
         || launch_agent_path().is_ok_and(|p| p.exists());
     if had_agent {
         write_launch_agent(&exe)?;
@@ -632,7 +647,7 @@ fn launch_agent_plist(exe: &Path) -> String {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.bardbro.latch.node</string>
+  <key>Label</key><string>{LAUNCH_AGENT_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
     <string>{exe}</string>
@@ -852,7 +867,7 @@ mod tests {
         assert_eq!(start_plan(None), StartPlan::Spawn);
 
         let kick = kickstart_args("501");
-        assert_eq!(kick, ["kickstart", "gui/501/com.bardbro.latch.node"]);
+        assert_eq!(kick, ["kickstart", "gui/501/io.github.MrBeldum.Latch.node"]);
         assert!(
             !kick.iter().any(|a| a == "-k"),
             "-k would kill a service that runs"
@@ -867,7 +882,7 @@ mod tests {
         );
         assert_eq!(
             enable_args("501"),
-            ["enable", "gui/501/com.bardbro.latch.node"]
+            ["enable", "gui/501/io.github.MrBeldum.Latch.node"]
         );
     }
 
@@ -892,14 +907,16 @@ mod tests {
     #[test]
     fn a_disabled_login_item_and_a_systemd_service_are_recognised() {
         // `launchctl print-disabled gui/501` on the Mac, 2026-10-17.
-        let listing = "disabled services = {\n\t\t\"com.apple.x\" => enabled\n\t\t\"com.bardbro.latch.node\" => disabled\n\t}\n";
+        let listing = "disabled services = {\n\t\t\"com.apple.x\" => enabled\n\t\t\"io.github.MrBeldum.Latch.node\" => disabled\n\t}\n";
         assert!(listed_disabled(listing));
-        assert!(listed_disabled("\t\"com.bardbro.latch.node\" => true\n"));
-        assert!(!listed_disabled(
-            "\t\"com.bardbro.latch.node\" => enabled\n"
+        assert!(listed_disabled(
+            "\t\"io.github.MrBeldum.Latch.node\" => true\n"
         ));
         assert!(!listed_disabled(
-            "\t\"com.bardbro.latch.node.extra\" => disabled\n"
+            "\t\"io.github.MrBeldum.Latch.node\" => enabled\n"
+        ));
+        assert!(!listed_disabled(
+            "\t\"io.github.MrBeldum.Latch.node.extra\" => disabled\n"
         ));
         assert!(in_latch_unit(
             "0::/user.slice/user-1004.slice/user@1004.service/app.slice/latch.service\n"

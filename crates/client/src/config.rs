@@ -1,5 +1,5 @@
 //! Settings and what has been learned about each PC, in
-//! `~/Library/Application Support/com.bardbro.Latch/client.toml`.
+//! `~/Library/Application Support/io.github.MrBeldum.Latch/client.toml`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

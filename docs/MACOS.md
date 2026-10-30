@@ -228,7 +228,7 @@ asks for; the machine list shows the same. A session also reconnects by
 itself, at the new size, when this Mac's window moves to a display of a
 different size.
 
-Settings are saved in `~/Library/Application Support/com.bardbro.Latch/client.toml`,
+Settings are saved in `~/Library/Application Support/io.github.MrBeldum.Latch/client.toml`,
 along with the MAC, LAN address and pairing certificate of each PC Latch
 has paired with.
 
@@ -287,7 +287,7 @@ capture failing while the desktop plainly has a picture.
 
 The app checks GitHub for a new release about every six hours and twenty
 seconds after it starts. A newer version is downloaded to
-`~/Library/Application Support/com.bardbro.Latch/updates/<tag>/`, checked against the
+`~/Library/Application Support/io.github.MrBeldum.Latch/updates/<tag>/`, checked against the
 SHA-256 GitHub publishes for the asset and against its own code signature,
 and moved over `/Applications/Latch.app` once no stream is running; the
 app then relaunches. The Mac also sends the new `latch-host.exe` to each

@@ -1,4 +1,4 @@
-//! Compatibility identifiers used by versions before 4.1.0.
+//! Compatibility identifiers used by older versions.
 //!
 //! Installed copies, other machines on the tailnet and old settings
 //! folders keep the old names for a while after an upgrade, so the code
@@ -50,6 +50,18 @@ pub fn data_dir() -> Option<PathBuf> {
         directories::ProjectDirs::from("dev", "brolink", "BroLink")
             .map(|d| d.data_dir().to_path_buf())
     }
+}
+
+/// The original Latch settings directory, used only to carry existing installs
+/// into the GitHub namespace. Linux and Windows already use the same path.
+pub fn latch_data_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        directories::ProjectDirs::from("com", "bardbro", crate::APP_NAME)
+            .map(|d| d.data_dir().to_path_buf())
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
 }
 
 #[cfg(test)]

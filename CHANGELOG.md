@@ -4,7 +4,15 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
-## 5.0.0 (unreleased)
+## 5.0.1 (2026-10-29)
+
+- Remove unrelated maker branding and retired-domain links from the app and
+  documentation. Latch stands on its own.
+- Use `io.github.MrBeldum.Latch` for macOS application, login-item and data
+  identifiers. Existing settings and identities migrate on first launch;
+  installers retire the previous login item.
+
+## 5.0.0 (2026-10-29)
 
 - **Pure-Rust streaming engine.** Latch 5 replaces Sunshine (C++),
   moonlight-common-c (C), OpenH264 (C++), and libopus (C) with a custom,
@@ -194,13 +202,12 @@ GitHub release notes, so each version gets a heading of the form
 
 ## 4.1.0 (2026-10-02)
 
-- **Introducing Latch, by Bardbro.** The app, the repository
+- **Introducing Latch.** The app, the repository
   (`github.com/MrBeldum/latch`), the release files (`latch-macos-arm64.tar.gz`,
   `latch-windows-x64.zip`), the executables (`Latch.app`, `latch-host.exe`),
   the services and login items, the environment variables (`LATCH_*`) and
-  bardbro.com all carry the new name, with a new logo: a square with a
-  corner cut away, and a blue square in the cut. Bardbro is the
-  project behind it, for cloud gaming.
+  documentation all carry the new name, with a new logo: a square with a
+  corner cut away, and a blue square in the cut.
 - Older installs update to Latch. Settings, the pairing identity, paired
   devices and the streaming engine carry over. On a Mac the app moves to
   `Latch.app` the first time it runs and its login item with it; on Linux
@@ -214,7 +221,7 @@ GitHub release notes, so each version gets a heading of the form
   `crates/core/src/legacy.rs` and `crates/host/src/legacy.rs`.
 - `LATCH_DATA_DIR` and `LATCH_GITHUB_TOKEN` replace the old environment
   variable names, which still work. The Docker node and relay read `LATCH_*`.
-- The About page names Bardbro and links to bardbro.com. The accent
+- The About page links to the source code. The accent
   colour for focus and progress is the logo's blue, where it was violet.
 - The window is redesigned around one design system, in the product
   site's black, white and hairlines, set in Geist and Geist Mono. Colour

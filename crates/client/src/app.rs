@@ -35,7 +35,6 @@ const RELAY_GRANT: &str = "{\n  \"src\": [\"autogroup:member\"],\n  \"dst\": [\"
 const RELAY_DOCS: &str = "https://tailscale.com/docs/features/peer-relay";
 const DOWNLOAD_URL: &str = "https://github.com/MrBeldum/latch/releases/latest";
 const SOURCE_URL: &str = "https://github.com/MrBeldum/latch";
-const MAKER_URL: &str = "https://bardbro.com";
 
 /// How long a one-line result stays on the machine list.
 const NOTICE_FOR: Duration = Duration::from_secs(12);
@@ -1688,17 +1687,6 @@ impl ClientApp {
                 |ui| {
                     if ui::link(ui, "Source code").clicked() {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(SOURCE_URL));
-                    }
-                },
-            );
-            ui::row_separator(ui);
-            ui::setting_row(
-                ui,
-                "Bardbro",
-                Some("Latch is made by Bardbro, a personal project for cloud gaming."),
-                |ui| {
-                    if ui::link(ui, "bardbro.com").clicked() {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(MAKER_URL));
                     }
                 },
             );

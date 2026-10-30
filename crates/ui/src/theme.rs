@@ -2,7 +2,7 @@
 //! style built from them.
 //!
 //! One dark theme, deliberately. The client spends its life next to a black
-//! video surface and the product site (bardbro.com) is black, white and
+//! video surface and the visual identity is black, white and
 //! hairlines, so the app is too: neutral surfaces a step apart, one text
 //! colour in three strengths, white for the primary action and for "on",
 //! and colour only where it carries meaning — green, amber and red for

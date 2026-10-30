@@ -37,7 +37,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>Latch</string>
   <key>CFBundleDisplayName</key><string>Latch</string>
-  <key>CFBundleIdentifier</key><string>com.bardbro.latch</string>
+  <key>CFBundleIdentifier</key><string>io.github.MrBeldum.Latch</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleExecutable</key><string>Latch</string>
