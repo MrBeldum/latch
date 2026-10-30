@@ -123,10 +123,12 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 /// a newer build added, a typo) costs only that value: see [`salvage`].
 pub fn load<T: DeserializeOwned + Serialize + Default>(name: &str) -> T {
     let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    read_unlocked(name).unwrap_or_else(|e| {
-        tracing::warn!("{e:#}; using defaults");
-        T::default()
-    })
+    lock_config(name)
+        .and_then(|_lock| read_unlocked(name))
+        .unwrap_or_else(|e| {
+            tracing::warn!("{e:#}; using defaults");
+            T::default()
+        })
 }
 
 /// Read `name` exactly as it is: the default only when there is no file,
@@ -337,12 +339,13 @@ pub fn lock_config(name: &str) -> Result<ConfigLock> {
     let lock_path = dir.join(format!("{name}.lock"));
     #[cfg(unix)]
     {
-        use std::os::unix::io::AsRawFd;
+        use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd};
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
+            .mode(0o600)
             .open(&lock_path)
             .with_context(|| format!("open lock file {}", lock_path.display()))?;
         let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
@@ -669,6 +672,35 @@ mod tests {
             );
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn config_process_writer() {
+        let Ok(name) = std::env::var("LATCH_TEST_CONFIG_NAME") else {
+            return;
+        };
+        for _ in 0..20 {
+            update::<Cfg>(&name, |c| c.n += 1).unwrap();
+        }
+    }
+
+    #[test]
+    fn transactions_serialize_across_processes() {
+        let name = format!("processes-{}.toml", std::process::id());
+        save(&name, &Cfg { n: 0 }).unwrap();
+        let spawn = || {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "config::tests::config_process_writer"])
+                .env("LATCH_TEST_CONFIG_NAME", &name)
+                .spawn()
+                .unwrap()
+        };
+        let mut first = spawn();
+        let mut second = spawn();
+        assert!(first.wait().unwrap().success());
+        assert!(second.wait().unwrap().success());
+        assert_eq!(load::<Cfg>(&name).n, 40);
+        std::fs::remove_file(data_dir().unwrap().join(name)).unwrap();
     }
 
     #[test]
