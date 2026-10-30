@@ -1038,6 +1038,34 @@ mod tests {
         assert!(LAUNCH_AGENT_LABEL.starts_with(BUNDLE_ID));
     }
 
+    /// Every privacy prompt Latch causes has its reason in Info.plist:
+    /// ScreenCaptureKit (screen and sound) wants
+    /// `NSScreenCaptureUsageDescription` (IN-12).
+    #[test]
+    fn the_app_bundle_explains_each_permission_it_asks_for() {
+        let bundle = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/bundle-macos.sh"
+        ))
+        .unwrap();
+        for key in [
+            "NSScreenCaptureUsageDescription",
+            "NSLocalNetworkUsageDescription",
+            "NSAppleEventsUsageDescription",
+        ] {
+            let at = bundle
+                .find(&format!("<key>{key}</key>"))
+                .unwrap_or_else(|| panic!("{key}"));
+            assert!(
+                bundle[at..]
+                    .trim_start_matches(|c| c != '\n')
+                    .trim_start()
+                    .starts_with("<string>Latch "),
+                "{key}"
+            );
+        }
+    }
+
     #[test]
     fn the_service_starts_through_its_login_item_when_there_is_one() {
         use LoginItem::*;

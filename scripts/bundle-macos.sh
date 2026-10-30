@@ -49,6 +49,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHumanReadableCopyright</key>
   <string>Copyright © 2026 Latch Contributors</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Latch records this Mac's screen and sound to show them on your other machines while one is connected.</string>
   <key>NSLocalNetworkUsageDescription</key>
   <string>Latch sends the wake-up packet to your PC over the local network.</string>
   <key>NSAppleEventsUsageDescription</key>
