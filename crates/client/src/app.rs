@@ -143,7 +143,9 @@ pub struct ClientApp {
     /// its way. Asked for once per stream, by the thread that answers.
     video_help: Arc<Mutex<Option<crate::display::Help>>>,
     asked_about_video: bool,
-    save_tx: std::sync::mpsc::Sender<ClientConfig>,
+    save_tx: Option<std::sync::mpsc::Sender<(ClientConfig, ClientConfig)>>,
+    save_baseline: ClientConfig,
+    save_worker: Option<std::thread::JoinHandle<()>>,
     discovery_stop: Option<Arc<AtomicBool>>,
     /// An install of Latch Host through the stream, while it runs and a
     /// little after.
@@ -157,6 +159,11 @@ pub struct ClientApp {
 
 impl Drop for ClientApp {
     fn drop(&mut self) {
+        self.commit();
+        self.save_tx.take();
+        if let Some(worker) = self.save_worker.take() {
+            let _ = worker.join();
+        }
         if let Some(stop) = &self.discovery_stop {
             stop.store(true, Ordering::Relaxed);
         }
@@ -170,7 +177,11 @@ impl ClientApp {
         let mut app =
             Self::with_shared(cc, discovery.clone(), Arc::default(), ClientConfig::load());
         app.discovery_stop = Some(stop);
-        spawn_tailscale_probe(app.tailscale_ok.clone(), cc.egui_ctx.clone());
+        spawn_tailscale_probe(
+            app.tailscale_ok.clone(),
+            cc.egui_ctx.clone(),
+            app.discovery_stop.as_ref().unwrap().clone(),
+        );
         update::spawn(
             app.updates.clone(),
             discovery,
@@ -191,18 +202,16 @@ impl ClientApp {
         if let Some(rs) = &cc.wgpu_render_state {
             crate::video::install(rs);
         }
-        let (save_tx, rx) = std::sync::mpsc::channel::<ClientConfig>();
-        std::thread::spawn(move || {
-            while let Ok(mut cfg) = rx.recv() {
-                while let Ok(newer) = rx.try_recv() {
-                    cfg = newer;
-                }
-                if let Err(e) = cfg.save() {
+        let (save_tx, rx) = std::sync::mpsc::channel::<(ClientConfig, ClientConfig)>();
+        let save_worker = std::thread::spawn(move || {
+            while let Ok((before, cfg)) = rx.recv() {
+                if let Err(e) = cfg.save_changes(&before) {
                     tracing::warn!("could not save settings: {e:#}");
                 }
             }
         });
         Self {
+            save_baseline: cfg.clone(),
             cfg,
             dirty: false,
             discovery,
@@ -227,7 +236,8 @@ impl ClientApp {
             stream_failed: false,
             video_help: Arc::default(),
             asked_about_video: false,
-            save_tx,
+            save_tx: Some(save_tx),
+            save_worker: Some(save_worker),
             discovery_stop: None,
             handover: None,
             display_at_connect: (0, 0),
@@ -273,7 +283,10 @@ impl ClientApp {
     fn commit(&mut self) {
         if self.dirty {
             self.dirty = false;
-            let _ = self.save_tx.send(self.cfg.clone());
+            if let Some(tx) = &self.save_tx {
+                let before = std::mem::replace(&mut self.save_baseline, self.cfg.clone());
+                let _ = tx.send((before, self.cfg.clone()));
+            }
         }
     }
 
@@ -309,6 +322,10 @@ impl ClientApp {
             target,
             settings: self.cfg.stream.clone(),
             native: Self::native_pixels(ctx),
+            #[cfg(not(target_os = "linux"))]
+            display_hz: crate::refresh::hz(),
+            #[cfg(target_os = "linux")]
+            display_hz: None,
             progress: self.progress.clone(),
             live: self.live.clone(),
             ctx: ctx.clone(),
@@ -763,13 +780,21 @@ fn end_connection_to(
 
 /// Look for Tailscale's CLI every few seconds on a thread of its own, and
 /// repaint when the answer changes.
-fn spawn_tailscale_probe(ok: Arc<AtomicBool>, ctx: egui::Context) {
+fn spawn_tailscale_probe(ok: Arc<AtomicBool>, ctx: egui::Context, stop: Arc<AtomicBool>) {
     std::thread::spawn(move || loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
         let found = tailscale::cli().is_some();
         if ok.swap(found, Ordering::Relaxed) != found {
             ctx.request_repaint();
         }
-        std::thread::sleep(Duration::from_secs(if found { 30 } else { 3 }));
+        for _ in 0..if found { 300 } else { 30 } {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     });
 }
 
@@ -778,7 +803,10 @@ impl eframe::App for ClientApp {
         // The window's green button (or Globe-F) changes full screen behind
         // the app's back: what the system reports is what is true.
         if let Some(on) = ctx.input(|i| i.viewport().fullscreen) {
-            self.fullscreen = on;
+            if self.fullscreen != on {
+                self.view.reset(ctx, self.live.lock().as_ref());
+                self.fullscreen = on;
+            }
         }
         self.poll_live(ctx);
         self.poll_notice();
@@ -1073,13 +1101,11 @@ impl ClientApp {
                             .arg("Tailscale")
                             .spawn();
                         #[cfg(windows)]
-                        let _ = std::process::Command::new("cmd")
-                            .args(["/c", "start", "tailscale:"])
-                            .spawn();
+                        if let Some(cli) = tailscale::cli() {
+                            let _ = std::process::Command::new(cli.with_file_name("tailscale-ipn.exe")).spawn();
+                        }
                         #[cfg(target_os = "linux")]
-                        let _ = std::process::Command::new("xdg-open")
-                            .arg("https://login.tailscale.com/admin/machines")
-                            .spawn();
+                        ui.ctx().open_url(egui::OpenUrl::new_tab("https://tailscale.com/download/linux"));
                     }
                 },
             );
@@ -1161,21 +1187,20 @@ impl ClientApp {
     /// remembered row goes at once; a machine still on the tailnet stays
     /// listed again.
     fn forget(&mut self, node_id: &str, name: &str) {
-        let outcome = ClientConfig::update(|c| {
-            c.forget(node_id);
-        });
         self.cfg.forget(node_id);
         self.discovery
             .lock()
             .pcs
             .retain(|p| !(p.remembered && p.node_id == node_id));
-        self.notice = Some(match outcome {
-            Ok(()) => (Tone::Neutral, format!("Forgot {name}."), Instant::now()),
-            Err(e) => (
-                Tone::Danger,
-                format!("Couldn't forget {name}: {e}"),
-                Instant::now(),
-            ),
+        let node_id = node_id.to_owned();
+        let name = name.to_owned();
+        self.notify_later(move || {
+            match ClientConfig::update(|c| {
+                c.forget(&node_id);
+            }) {
+                Ok(()) => (Tone::Neutral, format!("Forgot {name}.")),
+                Err(e) => (Tone::Danger, format!("Couldn't forget {name}: {e}")),
+            }
         });
     }
 
@@ -3219,8 +3244,16 @@ pub(crate) mod snapshots {
             h.state().pending_notice.is_some() || h.state().notice.is_some(),
             "wake must dispatch notice"
         );
-        // Wait for thread to finish and poll notice to verify notice content
-        std::thread::sleep(Duration::from_millis(50));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while h
+            .state()
+            .pending_notice
+            .as_ref()
+            .is_some_and(|n| Arc::strong_count(n) > 1)
+        {
+            assert!(Instant::now() < deadline, "wake worker did not terminate");
+            std::thread::yield_now();
+        }
         h.run_steps(1);
         let notice = h.state().notice.as_ref().expect("notice delivered");
         assert!(notice.1.contains("Wake packets sent to Office"));
@@ -3554,15 +3587,43 @@ pub(crate) mod snapshots {
     }
 
     #[test]
-    fn commit_saves_settings_asynchronously_off_ui_thread() {
-        let mut h = build(Setup::new(pcs()), TYPICAL, 1.0, false);
-        h.state_mut().cfg.stream.fullscreen = true;
+    fn quit_drains_settings_in_order() {
+        let mut h = build(Setup::new(pcs()), MIN, 1.0, false);
+        h.state_mut().save_tx.take();
+        h.state_mut().save_worker.take().unwrap().join().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let out = saved.clone();
+        h.state_mut().save_tx = Some(tx);
+        h.state_mut().save_worker = Some(std::thread::spawn(move || {
+            while let Ok((_, cfg)) = rx.recv() {
+                out.lock().push(cfg.stream.fps);
+            }
+        }));
+        for fps in [90, 120] {
+            h.state_mut().cfg.stream.fps = fps;
+            h.state_mut().dirty = true;
+            h.state_mut().commit();
+        }
+        h.state_mut().cfg.stream.fps = 144;
         h.state_mut().dirty = true;
-        h.state_mut().commit();
-        // Background thread receives and persists
-        std::thread::sleep(Duration::from_millis(50));
-        let loaded: ClientConfig = latch_core::config::load("client.toml");
-        assert!(loaded.stream.fullscreen);
+        drop(h);
+        assert_eq!(*saved.lock(), [90, 120, 144]);
+    }
+
+    #[test]
+    fn connected_event_cannot_revive_cancelled_session() {
+        let mut h = build(Setup::new(pcs()), MIN, 1.0, false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut live = crate::stream::tests::dummy_live(&h.ctx);
+        live.events = rx;
+        *h.state().live.lock() = Some(live);
+        h.state().progress.lock().cancel = true;
+        tx.send(Event::Connected).unwrap();
+        let ctx = h.ctx.clone();
+        h.state_mut().poll_live(&ctx);
+        assert!(!h.state().streamed);
+        assert_ne!(h.state().progress.lock().step, Step::Streaming);
     }
 
     #[test]
@@ -3571,7 +3632,16 @@ pub(crate) mod snapshots {
         h.state_mut().notify_later(|| {
             panic!("simulated panic in background job");
         });
-        std::thread::sleep(Duration::from_millis(50));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while h
+            .state()
+            .pending_notice
+            .as_ref()
+            .is_some_and(|n| Arc::strong_count(n) > 1)
+        {
+            assert!(Instant::now() < deadline, "notice worker did not terminate");
+            std::thread::yield_now();
+        }
         h.state_mut().poll_notice();
         assert!(h.state().pending_notice.is_none());
     }
@@ -3581,9 +3651,11 @@ pub(crate) mod snapshots {
         let mut h = build(Setup::new(pcs()), MIN, 1.0, false);
         let ctx = h.ctx.clone();
         let live = crate::stream::tests::dummy_live(&ctx);
+        crate::stream::tests::hold_test_key(&mut h.state_mut().view, &live.input);
         *h.state().live.lock() = Some(live);
         h.state_mut().set_fullscreen(&ctx, true);
         assert!(h.state().fullscreen);
+        crate::stream::tests::assert_no_held_input(&h.state().view);
     }
 
     #[test]

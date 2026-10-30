@@ -54,8 +54,8 @@ fn find_cli() -> Option<PathBuf> {
                 use std::os::windows::process::CommandExt;
                 c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
             }
-            let out = c.output().ok()?;
-            out.status.success().then(|| PathBuf::from("tailscale"))
+            run_limited(&mut c, Duration::from_secs(2)).ok()?;
+            Some(PathBuf::from("tailscale"))
         })
 }
 
