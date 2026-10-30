@@ -20,7 +20,7 @@ use latch_proto::wire::{self, Datagram};
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -223,6 +223,7 @@ struct Inner {
     connected: AtomicBool,
     stop: AtomicBool,
     finished: AtomicBool,
+    audio_gain: Arc<AtomicU32>,
     done: Mutex<bool>,
     done_cv: Condvar,
 }
@@ -366,6 +367,7 @@ impl Session {
             connected: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             finished: AtomicBool::new(false),
+            audio_gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             done: Mutex::new(false),
             done_cv: Condvar::new(),
         });
@@ -409,6 +411,16 @@ impl Session {
         let mut stats = self.inner.stats.lock().clone();
         stats.video_problem = self.inner.video_health.lock().problem(Instant::now());
         stats
+    }
+
+    pub fn set_volume(&self, gain: f32) {
+        self.inner
+            .audio_gain
+            .store(gain.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.inner.audio_gain.load(Ordering::Relaxed))
     }
 
     pub fn input(&self) -> Input {
@@ -551,7 +563,12 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         }
     }
     let player = accept.audio.as_ref().and_then(|a| {
-        match Player::new(a.rate, a.channels as usize, a.frame_samples as usize) {
+        match Player::with_gain(
+            a.rate,
+            a.channels as usize,
+            a.frame_samples as usize,
+            inner.audio_gain.clone(),
+        ) {
             Ok(p) => Some(p),
             Err(e) => {
                 inner.emit(Event::NoAudio(format!("{e:#}")));
@@ -1180,6 +1197,7 @@ mod tests {
             connected: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             finished: AtomicBool::new(false),
+            audio_gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             done: Mutex::new(false),
             done_cv: Condvar::new(),
         });

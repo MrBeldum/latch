@@ -10,7 +10,7 @@ use anyhow::{bail, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 
@@ -48,6 +48,8 @@ pub struct Player {
     /// Frames the output device has pulled, silence included: proof that
     /// sound is leaving.
     pulled: Arc<AtomicU64>,
+    /// Volume gain multiplier as atomic f32 bits (1.0 = normal, 0.0 = muted).
+    gain: Arc<AtomicU32>,
     max_queued: usize,
     keep: usize,
     packets: u64,
@@ -57,6 +59,20 @@ pub struct Player {
 
 impl Player {
     pub fn new(sample_rate: u32, channels: usize, samples_per_frame: usize) -> Result<Self> {
+        Self::with_gain(
+            sample_rate,
+            channels,
+            samples_per_frame,
+            Arc::new(AtomicU32::new(1.0f32.to_bits())),
+        )
+    }
+
+    pub fn with_gain(
+        sample_rate: u32,
+        channels: usize,
+        samples_per_frame: usize,
+        gain: Arc<AtomicU32>,
+    ) -> Result<Self> {
         if channels == 0 || channels > MAX_CHANNELS {
             bail!("audio with {channels} channels is not something Latch plays");
         }
@@ -77,6 +93,7 @@ impl Player {
             stopped,
             output.clone(),
             pulled.clone(),
+            gain.clone(),
         );
         let per_ms = sample_rate as usize * channels / 1000;
         // Whole frames only: dropping half a frame would swap the channels.
@@ -90,12 +107,22 @@ impl Player {
             _output_thread: stop,
             output,
             pulled,
+            gain,
             max_queued: per_ms * MAX_QUEUED_MS,
             keep,
             packets: 0,
             lost: 0,
             undecodable: 0,
         })
+    }
+
+    pub fn set_volume(&self, gain: f32) {
+        self.gain
+            .store(gain.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.gain.load(Ordering::Relaxed))
     }
 
     /// Decode and queue one frame. An empty slice means the frame was lost:
@@ -192,6 +219,7 @@ fn output_thread(
     stop: mpsc::Receiver<()>,
     output: Arc<Mutex<Output>>,
     pulled: Arc<AtomicU64>,
+    gain: Arc<AtomicU32>,
 ) {
     std::thread::Builder::new()
         .name("audio-out".into())
@@ -235,6 +263,7 @@ fn output_thread(
                     queue.clone(),
                     pulled.clone(),
                     source_rate as usize * source_channels as usize * 40 / 1000,
+                    gain.clone(),
                 )
             };
             // CoreAudio moves a default-device stream to the new default by
@@ -343,6 +372,7 @@ fn output_thread(
 struct Mixer {
     queue: Arc<Mutex<VecDeque<f32>>>,
     pulled: Arc<AtomicU64>,
+    gain: Arc<AtomicU32>,
     src_channels: usize,
     out_channels: usize,
     /// Source frames per output frame: 48000 / 44100 ≈ 1.088.
@@ -360,6 +390,7 @@ struct Mixer {
 }
 
 impl Mixer {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         src_rate: u32,
         src_channels: usize,
@@ -368,10 +399,12 @@ impl Mixer {
         queue: Arc<Mutex<VecDeque<f32>>>,
         pulled: Arc<AtomicU64>,
         preroll: usize,
+        gain: Arc<AtomicU32>,
     ) -> Self {
         Self {
             queue,
             pulled,
+            gain,
             src_channels: src_channels.clamp(1, MAX_CHANNELS),
             out_channels: out_channels.max(1),
             step: src_rate.max(1) as f64 / out_rate.max(1) as f64,
@@ -394,6 +427,7 @@ impl Mixer {
             }
             self.started = true;
         }
+        let gain = f32::from_bits(self.gain.load(Ordering::Relaxed));
         let mut frames = 0u64;
         for frame in out.chunks_mut(self.out_channels) {
             while self.pos >= 1.0 {
@@ -409,7 +443,7 @@ impl Mixer {
             let t = self.pos as f32;
             let sample = |c: usize| self.prev[c] + (self.next[c] - self.prev[c]) * t;
             for (c, o) in frame.iter_mut().enumerate() {
-                *o = if self.out_channels == 1 && self.src_channels > 1 {
+                let s = if self.out_channels == 1 && self.src_channels > 1 {
                     (0..self.src_channels).map(sample).sum::<f32>() / self.src_channels as f32
                 } else if c < self.src_channels {
                     sample(c)
@@ -418,6 +452,7 @@ impl Mixer {
                 } else {
                     0.0
                 };
+                *o = s * gain;
             }
             self.pos += self.step;
             frames += 1;
@@ -569,7 +604,17 @@ mod tests {
             .lock()
             .extend([1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
         let pulled = Arc::new(AtomicU64::new(0));
-        let mut m = Mixer::new(48_000, 2, 96_000, 1, queue.clone(), pulled.clone(), 0);
+        let default_gain = || Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let mut m = Mixer::new(
+            48_000,
+            2,
+            96_000,
+            1,
+            queue.clone(),
+            pulled.clone(),
+            0,
+            default_gain(),
+        );
         let mut out = vec![9.0f32; 8];
         m.fill(&mut out);
         assert_eq!(pulled.load(Ordering::Relaxed), 8);
@@ -584,9 +629,53 @@ mod tests {
         queue
             .lock()
             .extend(std::iter::repeat_n([0.25f32, -0.25], 20).flatten());
-        let mut m = Mixer::new(48_000, 2, 48_000, 6, queue, Arc::new(AtomicU64::new(0)), 0);
+        let mut m = Mixer::new(
+            48_000,
+            2,
+            48_000,
+            6,
+            queue,
+            Arc::new(AtomicU64::new(0)),
+            0,
+            default_gain(),
+        );
         let mut out = vec![9.0f32; 6 * 10];
         m.fill(&mut out);
         assert_eq!(&out[6 * 9..], &[0.25, -0.25, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn mixer_applies_atomic_gain_and_mute() {
+        let queue: Arc<Mutex<VecDeque<f32>>> = Arc::default();
+        queue
+            .lock()
+            .extend(std::iter::repeat_n([0.8f32, 0.8], 30).flatten());
+        let gain = Arc::new(AtomicU32::new(0.5f32.to_bits()));
+        let mut m = Mixer::new(
+            48_000,
+            2,
+            48_000,
+            2,
+            queue.clone(),
+            Arc::new(AtomicU64::new(0)),
+            0,
+            gain.clone(),
+        );
+        let mut out = vec![0.0f32; 20];
+        m.fill(&mut out);
+        // 0.8 * 0.5 = 0.4
+        assert!(
+            out[4..].iter().all(|s| (s - 0.4).abs() < 1e-5),
+            "expected 0.4 with 0.5 gain: {out:?}"
+        );
+
+        // Mute by setting gain to 0.0
+        gain.store(0.0f32.to_bits(), Ordering::Relaxed);
+        let mut out = vec![0.0f32; 20];
+        m.fill(&mut out);
+        assert!(
+            out.iter().all(|s| *s == 0.0),
+            "expected silence when muted: {out:?}"
+        );
     }
 }

@@ -149,6 +149,8 @@ pub struct View {
     confirm: Option<PowerAction>,
     confirm_install: bool,
     pub(crate) confirm_disconnect: bool,
+    pub(crate) volume: u32,
+    pub(crate) muted: bool,
     poor: bool,
     poor_hinted: bool,
     toasts: Vec<Toast>,
@@ -240,6 +242,8 @@ impl Default for View {
             confirm: None,
             confirm_install: false,
             confirm_disconnect: false,
+            volume: 100,
+            muted: false,
             poor: false,
             poor_hinted: false,
             toasts: Vec::new(),
@@ -722,6 +726,13 @@ impl View {
                                     self.stats_button(ui);
                                     self.fullscreen_button(ui, env, actions);
                                     self.power_menu(ui, env);
+                                    if rect.width() >= 1100.0 {
+                                        self.volume_controls(ui, live);
+                                    } else {
+                                        ui::menu_button(ui, "Audio", |ui| {
+                                            self.volume_controls(ui, live);
+                                        });
+                                    }
                                 }
                                 if ui::ghost_button(ui, "Stream settings").clicked() {
                                     self.held.release_all(&live.input);
@@ -834,6 +845,8 @@ impl View {
             if ui::menu_choice(ui, "Stream performance", self.stats).clicked() {
                 self.stats = !self.stats;
             }
+            ui::menu_label(ui, "Audio");
+            self.volume_controls(ui, live);
             ui::menu_label(ui, "Mouse");
             self.mouse_items(ui, ctx, live, cfg, actions);
             ui::menu_label(ui, "Send keys");
@@ -843,6 +856,32 @@ impl View {
                 self.power_items(ui, env);
             }
         });
+    }
+
+    fn volume_controls(&mut self, ui: &mut egui::Ui, live: &Live) {
+        let mute_label = if self.muted { "Unmute" } else { "Mute" };
+        if ui::ghost_button(ui, mute_label).clicked() {
+            self.muted = !self.muted;
+            let gain = if self.muted {
+                0.0
+            } else {
+                self.volume as f32 / 100.0
+            };
+            live.session.set_volume(gain);
+        }
+        let mut vol = self.volume;
+        if ui::slider(ui, &mut vol, 0..=100, 60.0, "Volume").changed() {
+            self.volume = vol;
+            if self.muted && vol > 0 {
+                self.muted = false;
+            }
+            let gain = if self.muted {
+                0.0
+            } else {
+                self.volume as f32 / 100.0
+            };
+            live.session.set_volume(gain);
+        }
     }
 
     fn fullscreen_button(&self, ui: &mut egui::Ui, env: &Env<'_>, actions: &mut Vec<Action>) {
@@ -3504,5 +3543,30 @@ pub(crate) mod tests {
         h.get_by_label("Confirm Disconnect").simulate_click();
         h.run_steps(2);
         assert!(!h.state().view.confirm_disconnect);
+    }
+
+    #[test]
+    fn volume_slider_and_mute_control_audio_gain() {
+        let mut h = harness(Vec2::new(1400.0, 860.0));
+        assert!(h.query_by_label("Mute").is_some());
+        assert!(h.query_by_label("Volume").is_some());
+
+        // Initial state is 100% volume, unmuted
+        assert_eq!(h.state().view.volume, 100);
+        assert!(!h.state().view.muted);
+        assert!((h.state().live.as_ref().unwrap().session.volume() - 1.0).abs() < 1e-4);
+
+        // Click Mute
+        h.get_by_label("Mute").simulate_click();
+        h.run_steps(2);
+        assert!(h.state().view.muted);
+        assert_eq!(h.state().live.as_ref().unwrap().session.volume(), 0.0);
+        assert!(h.query_by_label("Unmute").is_some());
+
+        // Click Unmute
+        h.get_by_label("Unmute").simulate_click();
+        h.run_steps(2);
+        assert!(!h.state().view.muted);
+        assert!((h.state().live.as_ref().unwrap().session.volume() - 1.0).abs() < 1e-4);
     }
 }
