@@ -9,7 +9,7 @@ use anyhow::{ensure, Context};
 use std::os::fd::AsRawFd;
 use std::ptr::NonNull;
 use std::time::{Duration, Instant};
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection as _};
 use x11rb::errors::ReplyError;
 use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::protocol::{damage, randr, shm, xfixes, xproto, Event};
@@ -81,11 +81,25 @@ pub struct X11Capture {
 
 impl X11Capture {
     pub fn new() -> anyhow::Result<Self> {
-        let (conn, screen) =
-            super::connect(super::X11_SILENCE).context("connect to X11 DISPLAY")?;
+        let (conn, screen) = super::connect(super::X11_SILENCE).map_err(|e| {
+            let wayland = super::wayland_session(
+                std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+                std::env::var_os("XDG_SESSION_TYPE").as_deref(),
+            );
+            e.context(if wayland {
+                super::WAYLAND
+            } else {
+                "connect to X11 DISPLAY"
+            })
+        })?;
         let setup = conn.setup();
         let screen = &setup.roots[screen];
         let root = screen.root;
+        let randr = randr::query_version(&conn, 1, 3)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .is_some();
+        ensure!(!xwayland(&conn, root, randr)?, super::WAYLAND);
         let format = setup
             .pixmap_formats
             .iter()
@@ -122,11 +136,7 @@ impl X11Capture {
         } else {
             None
         };
-        if randr::query_version(&conn, 1, 2)
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .is_some()
-        {
+        if randr {
             randr::select_input(
                 &conn,
                 root,
@@ -375,6 +385,30 @@ impl Drop for X11Capture {
         }
         let _ = self.conn.flush();
     }
+}
+
+/// Rootless Xwayland: a Wayland session's X server, whose root window holds
+/// no desktop. Xwayland 23.1 and later announce themselves; all name their
+/// RandR outputs XWAYLAND0, XWAYLAND1, …
+fn xwayland(conn: &X11, root: u32, randr: bool) -> anyhow::Result<bool> {
+    if conn.extension_information("XWAYLAND")?.is_some() {
+        return Ok(true);
+    }
+    if !randr {
+        return Ok(false);
+    }
+    let Ok(resources) = randr::get_screen_resources_current(conn, root)?.reply() else {
+        return Ok(false);
+    };
+    let mut names = Vec::new();
+    for &output in &resources.outputs {
+        // An output that vanished meanwhile is no reason to refuse Xorg.
+        if let Ok(info) = randr::get_output_info(conn, output, resources.config_timestamp)?.reply()
+        {
+            names.push(info.name);
+        }
+    }
+    Ok(super::xwayland_outputs(names.iter().map(Vec::as_slice)))
 }
 
 fn union(
