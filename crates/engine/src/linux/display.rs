@@ -48,6 +48,16 @@ fn refresh(mode: &randr::ModeInfo) -> f64 {
     hz
 }
 
+/// A mode's size on screen, or the mode for a size on screen: a quarter
+/// turn swaps the sides. Requests and [`Previous`] are sizes on screen.
+fn on_screen(width: u32, height: u32, rotation: randr::Rotation) -> (u32, u32) {
+    if rotation.intersects(randr::Rotation::ROTATE90 | randr::Rotation::ROTATE270) {
+        (height, width)
+    } else {
+        (width, height)
+    }
+}
+
 fn timings(width: u32, height: u32) -> anyhow::Result<randr::ModeInfo> {
     ensure!(
         (640..=5120).contains(&width) && (360..=2880).contains(&height),
@@ -106,18 +116,22 @@ fn configure(
         .iter()
         .find(|m| m.id == crtc.mode)
         .context("active RandR mode missing")?;
+    let (old_width, old_height) =
+        on_screen(old_mode.width.into(), old_mode.height.into(), crtc.rotation);
     let previous = Previous {
-        width: old_mode.width.into(),
-        height: old_mode.height.into(),
+        width: old_width,
+        height: old_height,
         refresh_hz: refresh(old_mode).round() as u32,
     };
+    // The CRTC keeps its rotation, so the mode is the request turned back.
+    let (mode_width, mode_height) = on_screen(width, height, crtc.rotation);
     let target = resources
         .modes
         .iter()
         .filter(|m| {
             info.modes.contains(&m.id)
-                && u32::from(m.width) == width
-                && u32::from(m.height) == height
+                && u32::from(m.width) == mode_width
+                && u32::from(m.height) == mode_height
                 && refresh(m) >= min_refresh
         })
         .min_by(|a, b| {
@@ -129,22 +143,22 @@ fn configure(
     let mode = if let Some(mode) = target {
         mode.id
     } else {
-        let name = format!("{width}x{height}_60");
+        let name = format!("{mode_width}x{mode_height}_60");
         let mut offset = 0;
         let existing = resources.modes.iter().find(|m| {
             let end = offset + m.name_len as usize;
             let matches = resources.names.get(offset..end) == Some(name.as_bytes());
             offset = end;
             matches
-                && u32::from(m.width) == width
-                && u32::from(m.height) == height
+                && u32::from(m.width) == mode_width
+                && u32::from(m.height) == mode_height
                 && refresh(m) >= min_refresh
         });
         let mode = if let Some(mode) = existing {
             mode.id
         } else {
             let mode = conn
-                .randr_create_mode(root, timings(width, height)?, name.as_bytes())?
+                .randr_create_mode(root, timings(mode_width, mode_height)?, name.as_bytes())?
                 .reply()?
                 .mode;
             created = Some(NewMode {
@@ -253,5 +267,21 @@ mod tests {
         assert_eq!((m.htotal, m.vtotal), (3048, 1967));
         assert!(timings(1, 1080).is_err());
         assert!(prepare(6016, 3384, 60).unwrap().is_none());
+    }
+    #[test]
+    fn a_quarter_turn_swaps_the_mode_sides() {
+        use randr::Rotation;
+        // A portrait CRTC showing a rotated 1920x1080 mode: a 1280x720
+        // viewer needs the 720x1280 mode, and restore asks for 1080x1920.
+        assert_eq!(on_screen(1280, 720, Rotation::ROTATE90), (720, 1280));
+        assert_eq!(
+            on_screen(1920, 1080, Rotation::ROTATE270 | Rotation::REFLECT_X),
+            (1080, 1920)
+        );
+        assert_eq!(on_screen(1280, 720, Rotation::ROTATE180), (1280, 720));
+        assert_eq!(
+            on_screen(1280, 720, Rotation::ROTATE0 | Rotation::REFLECT_Y),
+            (1280, 720)
+        );
     }
 }
