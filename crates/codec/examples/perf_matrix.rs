@@ -259,14 +259,41 @@ fn run(kind: &str, w: u32, h: u32, threads: usize, frames: u32, kbps: u32, fps: 
                     .count();
             }
         }
+        let mut frame_mse = 0;
         for row in 0..h as usize {
             for x in 0..w as usize {
                 let d =
                     picture.y[row * picture.y_stride + x] as i32 - r.y[row * r.y_stride + x] as i32;
-                mse += (d * d) as u64;
+                frame_mse += (d * d) as u64;
             }
         }
+        mse += frame_mse;
         samples += w as u64 * h as u64;
+        if std::env::var_os("PERF_ROWS").is_some() && t + 1 == frames {
+            let rows: Vec<String> = (0..h as usize / 16)
+                .map(|my| {
+                    let mut m = 0u64;
+                    for row in my * 16..my * 16 + 16 {
+                        for x in 0..w as usize {
+                            let d = picture.y[row * picture.y_stride + x] as i32
+                                - r.y[row * r.y_stride + x] as i32;
+                            m += (d * d) as u64;
+                        }
+                    }
+                    format!("{:.1}", psnr(m, 16 * w as u64))
+                })
+                .collect();
+            println!("ROWS {label}: {}", rows.join(" "));
+        }
+        if std::env::var_os("PERF_FRAMES").is_some() {
+            println!(
+                "FRAME {label} {t}: psnr={:.2} bytes={} qp={} skipped={} enc={e:.2}",
+                psnr(frame_mse, w as u64 * h as u64),
+                out.len(),
+                info.qp,
+                info.skipped_mbs
+            );
+        }
         if t == 0 {
             println!(
                 "IDR {label}: enc={e:.3} dec={d:.3} bytes={} qp={}",
