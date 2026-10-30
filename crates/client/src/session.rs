@@ -750,7 +750,7 @@ pub fn request_for(
     capture_size: Option<[u32; 2]>,
     max_fps: u32,
 ) -> (u32, u32, u32) {
-    let hz = crate::macos::display_hz().unwrap_or(60);
+    let hz = settings.fps;
     request_for_hz(settings, native, hz, capture_size, max_fps)
 }
 
@@ -769,6 +769,7 @@ pub struct Connect {
     pub target: Target,
     pub settings: StreamSettings,
     pub native: (u32, u32),
+    pub display_hz: Option<u32>,
     pub progress: Arc<Mutex<Progress>>,
     pub live: Arc<Mutex<Option<Live>>>,
     pub ctx: egui::Context,
@@ -929,11 +930,16 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
 
     report(Step::Launching, "Measuring the path…".into());
     let path = measure_path(&t.node_id, t.ip, &t.path, || stale(&c.progress, generation));
-    let mut settings = path::effective(&c.settings);
+    #[cfg(target_os = "linux")]
+    let hz = crate::refresh::hz().or(c.display_hz).unwrap_or(60);
+    #[cfg(not(target_os = "linux"))]
+    let hz = c.display_hz.unwrap_or(60);
+    let mut settings = path::effective_for(&c.settings, hz);
     let wanted = settings.resolution.pixels(c.native);
-    let (w, h, fps) = request_for(
+    let (w, h, fps) = request_for_hz(
         &c.settings,
         c.native,
+        hz,
         host.streamer.capture_size,
         host.streamer.max_fps,
     );
@@ -1293,11 +1299,14 @@ mod tests {
 
         // If port is closed/unreachable, it must break after the first attempt instead of
         // repeating 3 times.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_port = closed.local_addr().unwrap().port();
+        drop(closed);
         let mut checks = 0;
         let path = measure_path_on(
             "test-node",
             "127.0.0.1".parse().unwrap(),
-            47851,
+            closed_port,
             &Path::default(),
             || {
                 checks += 1;
@@ -1309,9 +1318,11 @@ mod tests {
 
         // If cancelled after first attempt, it stops on iteration 2 instead of continuing.
         let mut checks = 0;
-        let _ = measure_path(
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let _ = measure_path_on(
             "test-node",
             "127.0.0.1".parse().unwrap(),
+            listener.local_addr().unwrap().port(),
             &Path::default(),
             || {
                 checks += 1;
@@ -1335,6 +1346,7 @@ mod tests {
             target: Target::from_pc(&pc).unwrap(),
             settings: StreamSettings::default(),
             native: (1920, 1080),
+            display_hz: Some(60),
             progress: Arc::default(),
             live: Arc::default(),
             ctx: egui::Context::default(),
@@ -1503,6 +1515,7 @@ mod tests {
                     ..cfg.stream.clone()
                 },
                 native: (3024, 1964),
+                display_hz: Some(60),
                 progress: Arc::default(),
                 live: Arc::default(),
                 ctx: egui::Context::default(),
