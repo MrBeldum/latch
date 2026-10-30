@@ -213,7 +213,16 @@ fn run(kind: &str, w: u32, h: u32, threads: usize, frames: u32, kbps: u32, fps: 
         let picture = frame(kind, w, h, t, &mut rng);
         let mut out = vec![];
         let now = Instant::now();
-        let info = match enc.encode(&picture, false, &mut out) {
+        // Repeated recovery IDRs, including cuts, expose the tail hidden by a first-frame timing.
+        let idr_every: u32 = std::env::var("PERF_IDR_EVERY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let info = match enc.encode(
+            &picture,
+            idr_every != 0 && t.is_multiple_of(idr_every),
+            &mut out,
+        ) {
             Ok(i) => i,
             Err(e) => {
                 println!("ENCODE_ERROR {label} frame={t}: {e}");
@@ -294,7 +303,7 @@ fn run(kind: &str, w: u32, h: u32, threads: usize, frames: u32, kbps: u32, fps: 
                 info.skipped_mbs
             );
         }
-        if t == 0 {
+        if info.keyframe {
             println!(
                 "IDR {label}: enc={e:.3} dec={d:.3} bytes={} qp={}",
                 out.len(),
@@ -311,7 +320,7 @@ fn run(kind: &str, w: u32, h: u32, threads: usize, frames: u32, kbps: u32, fps: 
     }
     println!("PSNR {label}: {:.3}", psnr(mse, samples));
     if mismatched > 0 {
-        println!("RECON_MISMATCH {label}: visible_different={mismatched}");
+        panic!("RECON_MISMATCH {label}: visible_different={mismatched}");
     }
     let skip = (frames as usize / 6).min(et.len().saturating_sub(1));
     println!(
