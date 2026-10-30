@@ -42,7 +42,7 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
         if ui::segmented(ui, &options, &mut profile) {
             match profile {
                 Profile::Recommended => {
-                    if s.quality == Quality::Custom {
+                    if s.quality == Quality::Custom && s.preset().is_none() {
                         s.custom_resolution = Some(s.resolution);
                         s.custom_fps = Some(s.fps);
                         s.custom_bitrate_kbps = Some(s.bitrate_kbps);
@@ -114,7 +114,7 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
         Some("The encoder aims at this while the picture moves; a still screen uses less."),
         |ui| {
             let mut mbps = if s.quality == Quality::Auto {
-                s.custom_bitrate_kbps.map_or(50, |k| k / 1000)
+                50
             } else {
                 s.bitrate_kbps / 1000
             };
