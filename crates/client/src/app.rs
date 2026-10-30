@@ -1117,8 +1117,21 @@ impl ClientApp {
                 "Forget",
             ),
         };
+        let power_unavailable =
+            matches!(q.action, Confirmable::Power(_)) && power_target(disc, &q.node_id).is_none();
+        let body = if power_unavailable {
+            format!("{name} is offline or no longer takes power actions from here.")
+        } else {
+            body
+        };
         ui::banner(ui, Tone::Danger, &title, Some(&body), |ui| {
-            if ui::destructive_button(ui, button).clicked() {
+            if power_unavailable {
+                let _ = ui
+                    .add_enabled(false, egui::Button::new(button))
+                    .on_disabled_hover_text(
+                        "This machine is offline or not accepting power actions",
+                    );
+            } else if ui::destructive_button(ui, button).clicked() {
                 match q.action {
                     Confirmable::Power(action) => match power_target(disc, &q.node_id) {
                         Some(ip) => self.power(ip, &q.name, action),
@@ -3568,6 +3581,22 @@ pub(crate) mod snapshots {
         disc.error = Some("tailscale is stopped".into());
         let h = build(Setup::new(disc), TYPICAL, 1.0, false);
         assert!(h.query_by_label("Open Tailscale").is_some());
+    }
+
+    #[test]
+    fn confirm_banner_disables_power_when_host_drops_offline() {
+        let mut setup = Setup::new(pcs());
+        setup.tweak = |app| {
+            app.confirm = Some(Confirm {
+                node_id: "non-existent-or-offline-node".into(),
+                name: "Offline-PC".into(),
+                action: Confirmable::Power(PowerAction::Restart),
+            });
+        };
+        let h = build(setup, TYPICAL, 1.0, false);
+        assert!(h
+            .query_by_label_contains("offline or no longer takes power actions")
+            .is_some());
     }
 
     #[test]
