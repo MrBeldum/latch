@@ -192,7 +192,12 @@ impl HostApp {
                 });
             let mut s = shared.lock();
             s.setup_running = false;
-            s.setup_log = read_setup_log();
+            // A declined prompt ran nothing: the log on disk is an older run's.
+            s.setup_log = if declined(&result) {
+                Vec::new()
+            } else {
+                read_setup_log()
+            };
             s.setup_result = Some(result);
             s.touch();
             drop(s);
@@ -557,16 +562,19 @@ impl HostApp {
                 };
                 ui::empty_state(ui, &format!("{what}… {secs} s"), true);
             } else if !done || result.is_some() {
+                let declined = result.is_some_and(declined);
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = space::MD;
-                    let label = if admin_items.is_empty() {
+                    let label = if declined {
+                        "Try again"
+                    } else if admin_items.is_empty() {
                         "Run setup again"
                     } else if self.os == Os::Windows {
                         "Set up as administrator"
                     } else {
                         "Set up sharing"
                     };
-                    let primary = !admin_items.is_empty();
+                    let primary = declined || !admin_items.is_empty();
                     let clicked = if primary {
                         ui::primary_button(ui, label).clicked()
                     } else {
@@ -587,13 +595,18 @@ impl HostApp {
                 }
                 Some(Err(e)) => {
                     let friendly = setup_error(e, self.os);
+                    let declined = e == setup::ADMIN_DECLINED;
                     ui::banner(
                         ui,
                         Tone::Danger,
-                        "Setup didn't finish",
+                        if declined {
+                            "Administrator approval needed"
+                        } else {
+                            "Setup didn't finish"
+                        },
                         Some(&friendly),
                         |ui| {
-                            if !friendly.contains(e.trim_end_matches('.')) {
+                            if !declined && !friendly.contains(e.trim_end_matches('.')) {
                                 ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(e)
@@ -863,14 +876,19 @@ fn network_sentence(n: &latch_core::api::NatReport, noun: &str) -> String {
 
 /// A setup failure in words: what happened, then what to do.
 fn setup_error(e: &str, os: Os) -> String {
-    let lower = e.to_lowercase();
-    if os == Os::Windows && lower.contains("declined") {
-        return "The administrator prompt was declined, or setup stopped part way. Try again and choose Yes; the setup log below shows the last step reached.".into();
+    if os == Os::Windows && e == setup::ADMIN_DECLINED {
+        return "Latch needs an administrator's approval once, to let your other machines through Windows Firewall and to set up waking this PC. Click Try again and choose Yes when Windows asks; it names the request Windows PowerShell.".into();
     }
     format!(
         "{}. The setup log below shows the last step reached; run setup again once it is fixed.",
         sentence_case(e.trim_end_matches('.'))
     )
+}
+
+/// Whether setup ended at a declined administrator prompt, before
+/// anything ran.
+fn declined(result: &Result<(), String>) -> bool {
+    matches!(result, Err(e) if e == setup::ADMIN_DECLINED)
 }
 
 /// Capitalise the first letter.
@@ -1174,12 +1192,16 @@ mod tests {
 
     #[test]
     fn a_declined_prompt_says_what_to_do() {
-        let e = setup_error(
-            "the administrator prompt was declined or setup failed",
-            Os::Windows,
+        let e = setup_error(setup::ADMIN_DECLINED, Os::Windows);
+        assert!(
+            e.contains("administrator's approval") && e.contains("Try again"),
+            "{e}"
         );
         assert!(e.contains("choose Yes"), "{e}");
-        assert!(!e.contains("setup failed"), "no echo of the raw error: {e}");
+        assert!(!e.contains("setup.log") && !e.contains("AppData"), "{e}");
+        assert!(declined(&Err(setup::ADMIN_DECLINED.into())));
+        assert!(!declined(&Err("setup stopped part way".into())));
+        assert!(!declined(&Ok(())));
         let e = setup_error("curl: (6) Could not resolve host", Os::Mac);
         assert!(e.starts_with("Curl"), "{e}");
         assert!(e.contains("run setup again"), "{e}");
@@ -1316,7 +1338,9 @@ mod snapshots {
         ];
         Shared {
             status: Some(st),
-            setup_result: Some(Err("the administrator prompt was declined or setup failed (see C:\\Users\\Example User\\AppData\\Local\\Latch\\setup.log)".into())),
+            setup_result: Some(Err(
+                "setup stopped part way; the setup log shows the last step reached".into(),
+            )),
             setup_log: vec![
                 "[14:02:11] Latch setup started".into(),
                 "[14:02:11] Setting up sharing".into(),
@@ -1339,6 +1363,14 @@ mod snapshots {
                 },
             ),
             ("setup-failed", Os::Windows, failed()),
+            (
+                "setup-declined",
+                Os::Windows,
+                Shared {
+                    setup_result: Some(Err(setup::ADMIN_DECLINED.into())),
+                    ..needs_setup()
+                },
+            ),
             (
                 "setup-done",
                 Os::Windows,
@@ -1523,6 +1555,25 @@ mod snapshots {
             h.query_by_label_contains("Keep this").is_none(),
             "a Linux server does not idle-sleep; the switch would do nothing"
         );
+    }
+
+    /// A declined UAC prompt offers Try again and no log path (agy 1.3).
+    #[test]
+    fn a_declined_prompt_offers_try_again() {
+        let tall = egui::vec2(1280.0, 2400.0);
+        let declined = states()
+            .into_iter()
+            .find(|(n, ..)| *n == "setup-declined")
+            .unwrap()
+            .2;
+        let h = build(declined, Os::Windows, tall, 1.0, false);
+        assert!(h.query_by_label("Try again").is_some());
+        assert!(h
+            .query_by_label_contains("Administrator approval needed")
+            .is_some());
+        assert!(h.query_by_label_contains("setup.log").is_none());
+        assert!(h.query_by_label("Setup log").is_none());
+        assert!(h.query_by_label("Set up as administrator").is_none());
     }
 
     #[test]
