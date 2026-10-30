@@ -980,13 +980,28 @@ mod tests {
     #[test]
     fn fp16_sc_rgb_white_becomes_sdr_white() -> anyhow::Result<()> {
         use super::*;
-        let _runtime = super::super::runtime::Runtime::new(false)?;
-        let output = match display::select() {
-            Ok(output) => output,
-            Err(e) if super::super::unavailable(&e, "DXGI output") => return Ok(()),
-            Err(e) => return Err(e),
+        // This tests shader output, not capture or video acceleration. WARP
+        // runs the shader even on CI adapters without D3D11 video support.
+        let (mut device, mut context) = (None, None);
+        // SAFETY: Valid output pointers; WARP requires no explicit adapter.
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )?;
+        }
+        let gpu = Gpu {
+            device: device.context("WARP returned no device")?,
+            context: context.context("WARP returned no context")?,
+            staging: RefCell::new(None),
         };
-        let gpu = Gpu::new(&output.adapter)?;
         let source = gpu.texture(
             2,
             1,
