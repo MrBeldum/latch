@@ -115,8 +115,11 @@ exit $p.ExitCode
 /// fixes when it is approved, rather than in a file the user could edit.
 #[cfg(any(windows, test))]
 fn launch_script(stage: &str) -> String {
+    // Already elevated (an administrator's SSH session, a window started as
+    // administrator): no prompt to show, and none could be shown in
+    // session 0.
     format!(
-        "try {{ $p = Start-Process -FilePath '{ps}' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile -NonInteractive -EncodedCommand {encoded}' -ErrorAction Stop }} catch {{ exit {declined} }}; if ($null -eq $p) {{ exit {declined} }}; exit $p.ExitCode",
+        "if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{ & '{ps}' -NoProfile -NonInteractive -EncodedCommand {encoded}; exit $LASTEXITCODE }}; try {{ $p = Start-Process -FilePath '{ps}' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile -NonInteractive -EncodedCommand {encoded}' -ErrorAction Stop }} catch {{ exit {declined} }}; if ($null -eq $p) {{ exit {declined} }}; exit $p.ExitCode",
         ps = q(&powershell_exe().display().to_string()),
         encoded = encoded_command(stage),
         declined = exit::DECLINED,
@@ -469,6 +472,203 @@ fn plausible_program(path: &str) -> bool {
         && !path.contains(['"', '\n', '\r'])
 }
 
+/// Undo what setup and the installers registered, for this user and (on
+/// Windows, through one administrator prompt) for the PC: the service and
+/// its login entry, the firewall rules, tasks, the power settings setup
+/// changed, and on a Mac the privacy grants. The program, its settings and
+/// its logs stay. Safe to run again. Returns one line per thing done or
+/// left; an error carries the same lines and what did not happen.
+pub fn uninstall() -> Result<Vec<String>> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let user = std::process::Command::new(powershell_exe())
+            .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
+            .arg(encoded_command(&uninstall_user_ps(std::process::id())))
+            .creation_flags(0x0800_0000)
+            .output()
+            .context("run the uninstall script")?;
+        let mut done: Vec<String> = String::from_utf8_lossy(&user.stdout)
+            .lines()
+            .map(str::trim_end)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect();
+        let status = std::process::Command::new(powershell_exe())
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &launch_script(&uninstall_machine_ps()),
+            ])
+            .creation_flags(0x0800_0000)
+            .status()
+            .context("launch the administrator step")?;
+        match status.code() {
+            Some(0) => done.push(
+                "Removed the firewall rules and tasks, put back the power settings setup changed, and removed setup's folder in Program Files.".into(),
+            ),
+            Some(exit::DECLINED) => {
+                done.push("The administrator prompt was declined: the firewall rules and power settings are unchanged. Run latch-host --uninstall again and choose Yes.".into());
+                anyhow::bail!(done.join("\n"));
+            }
+            _ => {
+                done.push("The administrator step did not finish. Run latch-host --uninstall again.".into());
+                anyhow::bail!(done.join("\n"));
+            }
+        }
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(Path::to_path_buf))
+        {
+            done.push(format!(
+                "Left in place: the program, your settings and its logs in {}. Delete that folder to remove them.",
+                dir.display()
+            ));
+        }
+        Ok(done)
+    }
+    #[cfg(not(windows))]
+    crate::unix_setup::uninstall()
+}
+
+/// Say how a command-line run went: on standard output, and on Windows
+/// also in a message box, since `latch-host.exe` has no console and the
+/// Apps page in Settings starts `--uninstall` with no window to print in.
+/// Not in session 0 (SSH), where nobody would see the box or close it.
+pub fn tell(title: &str, text: &str, failed: bool) {
+    #[cfg(not(windows))]
+    let _ = title;
+    if failed {
+        eprintln!("{text}");
+    } else {
+        println!("{text}");
+    }
+    #[cfg(windows)]
+    {
+        use windows::core::HSTRING;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            MessageBoxW, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
+        };
+        let mut session = 0;
+        // SAFETY: a valid out pointer for the session id.
+        let interactive = unsafe { ProcessIdToSessionId(std::process::id(), &mut session) }.is_ok()
+            && session != 0;
+        if interactive {
+            let icon = if failed {
+                MB_ICONWARNING
+            } else {
+                MB_ICONINFORMATION
+            };
+            // SAFETY: both strings outlive the call; no owner window.
+            unsafe {
+                MessageBoxW(
+                    HWND::default(),
+                    &HSTRING::from(text),
+                    &HSTRING::from(title),
+                    MB_OK | icon,
+                );
+            }
+        }
+    }
+}
+
+/// The signed-in user's part of `--uninstall`: stop Latch (but not this
+/// process, `own_pid`), remove its Run values, the task an install over SSH
+/// starts it with, the shortcuts and the Apps entry `install-host.ps1`
+/// writes.
+#[cfg(any(windows, test))]
+fn uninstall_user_ps(own_pid: u32) -> String {
+    format!(
+        r#"$ErrorActionPreference = 'Continue'
+try {{ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:{port}/v1/quit' -ContentType 'application/json' -Body '{{}}' -TimeoutSec 2 | Out-Null; Start-Sleep -Milliseconds 800 }} catch {{}}
+$session = (Get-Process -Id $PID).SessionId
+Get-Process latch-host, brolink-host -ErrorAction SilentlyContinue | Where-Object {{ $_.Id -ne {own_pid} -and $_.SessionId -eq $session }} | Stop-Process -Force -ErrorAction SilentlyContinue
+Write-Output "Stopped Latch."
+$run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+foreach ($name in '{run}', '{legacy_run}') {{ Remove-ItemProperty -LiteralPath $run -Name $name -ErrorAction SilentlyContinue }}
+if (Get-ScheduledTask -TaskName '{task}' -ErrorAction SilentlyContinue) {{
+    Unregister-ScheduledTask -TaskName '{task}' -Confirm:$false -ErrorAction SilentlyContinue
+}}
+Write-Output "Latch no longer starts when you sign in."
+foreach ($folder in @([Environment]::GetFolderPath('Desktop'), (Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs'))) {{
+    foreach ($name in 'Latch Host.lnk', 'BroLink Host.lnk') {{ Remove-Item -LiteralPath (Join-Path $folder $name) -Force -ErrorAction SilentlyContinue }}
+}}
+Remove-Item -LiteralPath '{apps}' -Recurse -Force -ErrorAction SilentlyContinue
+Write-Output "Removed the shortcuts and the entry in Settings > Apps."
+"#,
+        port = CONTROL_PORT,
+        run = "LatchHost",
+        legacy_run = crate::legacy::WINDOWS_RUN_VALUE,
+        task = START_TASK,
+        apps = APPS_KEY,
+    )
+}
+
+/// The task `install-host.ps1` starts the service with over SSH.
+#[cfg(any(windows, test))]
+const START_TASK: &str = "LatchHostStart";
+/// The Settings > Apps entry `install-host.ps1` writes for this user.
+#[cfg(any(windows, test))]
+const APPS_KEY: &str = r"HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Latch";
+
+/// The administrator's part of `--uninstall`, a fixed script that names no
+/// file of the user's: the firewall rules (and every older name, through
+/// the same retire step setup runs), the start task, the power settings
+/// recorded under [`SAVED_KEY`] put back, and setup's folder in Program
+/// Files. The network card's wake settings and the virtual display's sizes
+/// stay: they change nothing until something asks for them.
+#[cfg(any(windows, test))]
+fn uninstall_machine_ps() -> String {
+    format!(
+        r#"# Latch uninstall, the administrator's part. Generated by latch-host.
+$ErrorActionPreference = 'Continue'
+function Step($m) {{ Write-Output "[$(Get-Date -Format HH:mm:ss)] $m" }}
+$setupFailed = $false
+Step "Latch uninstall started"
+{retire}
+Step "Removing Latch's firewall rules and start task"
+foreach ($rule in 'Latch Host', 'Latch Media', 'Latch wake') {{ netsh advfirewall firewall delete rule name="$rule" | Out-Null }}
+if (Get-ScheduledTask -TaskName '{task}' -ErrorAction SilentlyContinue) {{
+    Unregister-ScheduledTask -TaskName '{task}' -Confirm:$false -ErrorAction SilentlyContinue
+}}
+Step "Putting back the power settings setup changed"
+$latchSaved = '{key}'
+$saved = Get-ItemProperty -LiteralPath $latchSaved -ErrorAction SilentlyContinue
+if ($saved) {{
+    $restored = $true
+    foreach ($s in @(@('StandbyTimeoutAC', 'STANDBYIDLE'), @('HibernateTimeoutAC', 'HIBERNATEIDLE'))) {{
+        $v = $saved.($s[0])
+        if ($v -match '^[0-9]+$') {{
+            powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP $s[1] $v
+            if ($LASTEXITCODE -ne 0) {{ $restored = $false }}
+        }}
+    }}
+    powercfg /setactive SCHEME_CURRENT
+    if ($saved.HiberbootEnabled -match '^[0-9]+$') {{
+        try {{ Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -Value ([int]$saved.HiberbootEnabled) -Type DWord -ErrorAction Stop }} catch {{ Write-Output "  Fast Startup: $_"; $restored = $false }}
+    }}
+    # Kept until everything is back, so running this again finishes the job.
+    if ($restored) {{ Remove-Item -LiteralPath $latchSaved -Recurse -Force }} else {{ $setupFailed = $true }}
+}} else {{ Write-Output "  nothing recorded; the power settings stay as they are" }}
+Step "Removing setup's folder"
+$latchDir = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Latch'
+Remove-Item -LiteralPath (Join-Path $latchDir 'Setup') -Recurse -Force -ErrorAction SilentlyContinue
+foreach ($empty in @($latchDir, 'HKLM:\SOFTWARE\Latch')) {{
+    if ((Test-Path -LiteralPath $empty) -and -not (Get-ChildItem -LiteralPath $empty -Force)) {{ Remove-Item -LiteralPath $empty -Force }}
+}}
+if ($setupFailed) {{ Step "Some steps failed. See the lines above."; exit 1 }}
+Step "Latch uninstall finished"
+exit 0
+"#,
+        retire = crate::legacy::retire_windows_ps(),
+        task = START_TASK,
+        key = SAVED_KEY,
+    )
+}
+
 /// Register or remove `latch-host.exe --background` under the current
 /// user's Run key.
 pub fn set_start_with_windows(enable: bool, exe: &Path) -> Result<()> {
@@ -611,6 +811,68 @@ mod tests {
         assert!(s.contains("powercfg /query SCHEME_CURRENT SUB_SLEEP $s[1]"));
     }
 
+    /// `--uninstall` reverses setup: firewall rules, tasks, the recorded
+    /// power settings, setup's folder, and for the user the Run values,
+    /// shortcuts and Apps entry. The administrator's part names no file of
+    /// the user's (IN-07, IN-11).
+    #[test]
+    fn uninstall_reverses_what_setup_and_the_installer_registered() {
+        let m = uninstall_machine_ps();
+        for rule in ["'Latch Host'", "'Latch Media'", "'Latch wake'"] {
+            assert!(m.contains(rule), "{rule}");
+        }
+        assert!(m.contains("netsh advfirewall firewall delete rule name=\"$rule\""));
+        assert!(m.contains("Unregister-ScheduledTask -TaskName 'LatchHostStart'"));
+        assert!(m.contains("'LatchEngineUser'"), "older names go too");
+        assert!(m.contains(r"$latchSaved = 'HKLM:\SOFTWARE\Latch\Setup'"));
+        for put_back in [
+            "powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP $s[1] $v",
+            "powercfg /setactive SCHEME_CURRENT",
+            "-Name HiberbootEnabled -Value ([int]$saved.HiberbootEnabled)",
+        ] {
+            let at = m.find(put_back).unwrap_or_else(|| panic!("{put_back}"));
+            assert!(at < m.find("Remove-Item -LiteralPath $latchSaved").unwrap());
+        }
+        // Setup records the very names uninstall reads back.
+        let setup = script(&Plan {
+            exe: Path::new("C:\\Latch\\latch-host.exe"),
+            adapter: "",
+            adapter_description: "",
+        });
+        for (name, setting) in [
+            ("StandbyTimeoutAC", "STANDBYIDLE"),
+            ("HibernateTimeoutAC", "HIBERNATEIDLE"),
+        ] {
+            let pair = format!("@('{name}', '{setting}')");
+            assert!(setup.contains(&pair) && m.contains(&pair), "{pair}");
+        }
+        assert!(m.contains("Join-Path $latchDir 'Setup'"));
+        assert!(!m.contains("LOCALAPPDATA") && !m.contains("HKCU"));
+        assert!(m.contains("exit 1") && m.ends_with("exit 0\n"));
+
+        let u = uninstall_user_ps(4242);
+        assert!(u.contains("$_.Id -ne 4242"), "never stops itself");
+        assert!(u.contains("/v1/quit"));
+        assert!(u.contains("'LatchHost', 'BroLinkHost'"));
+        assert!(u.contains(r"HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"));
+        assert!(u.contains("'Latch Host.lnk'"));
+        assert!(u.contains(r"'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Latch'"));
+        assert!(u.contains("Unregister-ScheduledTask -TaskName 'LatchHostStart'"));
+    }
+
+    #[test]
+    fn an_elevated_caller_runs_the_step_without_a_prompt() {
+        let launch = launch_script("exit 0");
+        let direct = launch
+            .find("IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)")
+            .unwrap();
+        assert!(direct < launch.find("-Verb RunAs").unwrap());
+        assert!(
+            launch.contains("-EncodedCommand ZQB4AGkAdAAgADAA; exit $LASTEXITCODE"),
+            "{launch}"
+        );
+    }
+
     #[test]
     fn setup_during_a_stream_needs_a_second_click() {
         let now = std::time::Instant::now();
@@ -672,8 +934,13 @@ mod tests {
         let encoded = launch
             .split("-EncodedCommand ")
             .nth(1)
-            .and_then(|rest| rest.split('\'').next())
+            .and_then(|rest| rest.split(['\'', ';']).next())
             .unwrap();
+        assert_eq!(
+            launch.matches(encoded).count(),
+            2,
+            "elevated or prompted, the same script"
+        );
         let utf16 = stage
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
@@ -768,6 +1035,11 @@ mod tests {
             }),
         )
         .unwrap();
+        // Both parts of --uninstall, which CI also runs.
+        if let Ok(out) = std::env::var("LATCH_DUMP_UNINSTALL_SCRIPT") {
+            std::fs::write(format!("{out}.user.ps1"), uninstall_user_ps(0)).unwrap();
+            std::fs::write(out, uninstall_machine_ps()).unwrap();
+        }
         // The elevated staging step and the one-line launcher around it.
         if let Ok(out) = std::env::var("LATCH_DUMP_STAGE_SCRIPT") {
             let stage = stage_script(&exe, &"0".repeat(64));

@@ -46,6 +46,12 @@ struct Args {
     /// Share this machine (UAC).
     #[arg(long, conflicts_with_all = ["background"])]
     setup: bool,
+    /// Undo setup and the installer: stop the service and remove its login
+    /// item, firewall rules, tasks and the power settings setup changed
+    /// (Windows asks for an administrator once). The program and its
+    /// settings stay.
+    #[arg(long, conflicts_with_all = ["background", "setup", "setup_elevated"])]
+    uninstall: bool,
     /// Run setup as administrator. The unelevated panel launches this so
     /// the script is generated after UAC, not from a user-writable file.
     #[arg(long, conflicts_with_all = ["background"])]
@@ -106,6 +112,15 @@ fn main() -> Result<()> {
     }
     if args.setup_elevated {
         return latch_host::setup::run_as_admin(args.program.as_deref());
+    }
+    if args.uninstall {
+        let result = latch_host::setup::uninstall();
+        let text = match &result {
+            Ok(done) => done.join("\n"),
+            Err(e) => format!("{e:#}"),
+        };
+        latch_host::setup::tell("Uninstall Latch", &text, result.is_err());
+        return result.map(drop);
     }
     if service::starts_with_window(&latch_host::config::HostConfig::load()) {
         service::ensure_service_running();
@@ -229,6 +244,9 @@ mod tests {
         assert_eq!(log_file(&staged), None);
         assert!(staged.program.is_some());
         assert!(Args::try_parse_from(["latch-host", "--program", "x.exe"]).is_err());
+        assert!(Args::try_parse_from(["latch-host", "--uninstall", "--background"]).is_err());
+        let uninstall = Args::try_parse_from(["latch-host", "--uninstall"]).unwrap();
+        assert_eq!(log_file(&uninstall), Some("panel.log"));
         let service = Args::try_parse_from(["latch-host", "--background"]).unwrap();
         assert_eq!(log_file(&service), Some("service.log"));
         let window = Args::try_parse_from(["latch-host"]).unwrap();

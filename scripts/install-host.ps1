@@ -1,7 +1,9 @@
 # Install Latch Host for the current user: copy the exe into
-# %LOCALAPPDATA%\Latch, add Start Menu and Desktop
-# shortcuts, and open it. The app itself runs the one administrator step
-# (firewall, Wake-on-LAN, virtual-display modes) when you click "Set up this PC".
+# %LOCALAPPDATA%\Latch, add Start Menu and Desktop shortcuts and an entry
+# in Settings > Apps, and open it. The app itself runs the one
+# administrator step (firewall, Wake-on-LAN, virtual-display modes) when you
+# click "Set up this PC". Uninstalling (from
+# Settings > Apps, or `latch-host.exe --uninstall`) undoes both.
 #
 # -NoStart leaves the window closed. The background service this stops to
 # replace the exe always comes back, in the signed-in user's session: run
@@ -71,6 +73,23 @@ foreach ($folder in @($Desktop, $StartMenu)) {
 $Run = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 Remove-ItemProperty -Path $Run -Name "BroLinkHost" -ErrorAction SilentlyContinue
 New-ItemProperty -Path $Run -Name "LatchHost" -Value "`"$DestExe`" --background" -PropertyType String -Force | Out-Null
+
+# Settings > Apps lists it, and its Uninstall runs latch-host --uninstall.
+$Apps = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Latch"
+New-Item -Path $Apps -Force | Out-Null
+$Version = (Get-Item -LiteralPath $DestExe).VersionInfo.ProductVersion
+foreach ($v in @(
+        @('DisplayName', 'Latch'),
+        @('DisplayIcon', $DestExe),
+        @('DisplayVersion', "$Version"),
+        @('InstallLocation', $DestDir),
+        @('UninstallString', "`"$DestExe`" --uninstall")
+    )) {
+    New-ItemProperty -Path $Apps -Name $v[0] -Value $v[1] -PropertyType String -Force | Out-Null
+}
+foreach ($flag in 'NoModify', 'NoRepair') {
+    New-ItemProperty -Path $Apps -Name $flag -Value 1 -PropertyType DWord -Force | Out-Null
+}
 
 if (Test-Path $OldDir) {
     Remove-Item -LiteralPath $OldDir -Recurse -Force -ErrorAction SilentlyContinue
