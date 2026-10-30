@@ -749,6 +749,15 @@ impl ClientApp {
     }
 }
 
+fn reconnect_pc(discovery: &Discovery, saved: Pc) -> Pc {
+    discovery
+        .pcs
+        .iter()
+        .find(|p| p.node_id == saved.node_id && p.ip.is_some())
+        .cloned()
+        .unwrap_or(saved)
+}
+
 /// Full screen or not once a stream has finished. A restart, new settings
 /// or a new display reconnect at once, so the window stays as it is rather
 /// than leaving full screen and coming back; otherwise it goes back to what
@@ -850,12 +859,7 @@ impl eframe::App for ClientApp {
                     ctx.request_repaint_after(Duration::from_millis(250));
                 } else {
                     let disc = self.discovery.lock().clone();
-                    let fresh = disc
-                        .pcs
-                        .iter()
-                        .find(|p| p.node_id == pc.node_id)
-                        .cloned()
-                        .unwrap_or(pc);
+                    let fresh = reconnect_pc(&disc, pc);
                     self.connect(ctx, &fresh);
                     self.commit();
                 }
@@ -962,12 +966,7 @@ impl eframe::App for ClientApp {
                 ctx.request_repaint_after(Duration::from_millis(250));
             } else {
                 // Fresh details if discovery has them; the saved ones otherwise.
-                let fresh = disc
-                    .pcs
-                    .iter()
-                    .find(|p| p.node_id == pc.node_id)
-                    .cloned()
-                    .unwrap_or(pc);
+                let fresh = reconnect_pc(&disc, pc);
                 self.connect(ctx, &fresh);
                 self.commit();
                 return;
@@ -4118,6 +4117,25 @@ mod live_snapshot {
                 );
             }
         }
+    }
+
+    #[test]
+    fn review_reconnect_retains_address_when_discovery_loses_it() {
+        let saved = Pc {
+            node_id: "a".into(),
+            ip: Some("100.64.0.1".parse().unwrap()),
+            ..Default::default()
+        };
+        let mut discovery = Discovery {
+            pcs: vec![Pc {
+                node_id: "a".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(reconnect_pc(&discovery, saved.clone()).ip, saved.ip);
+        discovery.pcs[0].ip = Some("100.64.0.2".parse().unwrap());
+        assert_eq!(reconnect_pc(&discovery, saved).ip, discovery.pcs[0].ip);
     }
 
     #[test]
