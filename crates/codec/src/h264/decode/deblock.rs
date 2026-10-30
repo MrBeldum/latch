@@ -12,7 +12,6 @@
 
 use super::mb::MbState;
 use super::tables::{block_index, ALPHA_TABLE, BETA_TABLE, TC0_TABLE};
-use std::vec::Vec;
 
 /// Boundary strengths for one MB: vertical edges at luma x = {0,4,8,12}
 /// and horizontal at y = {0,4,8,12}; each entry is the strength of the
@@ -208,55 +207,6 @@ fn filter_v_edge(
     }
 }
 
-/// Filters a horizontal edge: 4 sets of samples, each on column `x0+k`,
-/// crossing row `y`.
-#[allow(clippy::too_many_arguments)]
-fn filter_h_edge(
-    plane: &mut [u8],
-    stride: usize,
-    x0: usize,
-    y: usize,
-    bs: &[u8; 4],
-    qp_p: u8,
-    qp_q: u8,
-    off_a: i32,
-    off_b: i32,
-    chroma: bool,
-) {
-    if bs.iter().all(|&b| b == 0) {
-        return;
-    }
-    let qp_av = (i32::from(qp_p) + i32::from(qp_q) + 1) >> 1;
-    let index_a = (qp_av + off_a).clamp(0, 51) as usize;
-    let alpha = i32::from(ALPHA_TABLE[index_a]);
-    let beta = i32::from(BETA_TABLE[(qp_av + off_b).clamp(0, 51) as usize]);
-    if alpha == 0 || beta == 0 {
-        return;
-    }
-    for (k, &b) in bs.iter().enumerate() {
-        if b == 0 {
-            continue;
-        }
-        let x = x0 + k;
-        let px = |dy: i32| i32::from(plane[(y as i32 + dy) as usize * stride + x]);
-        if (px(-1) - px(0)).abs() >= alpha
-            || (px(-2) - px(-1)).abs() >= beta
-            || (px(1) - px(0)).abs() >= beta
-        {
-            continue;
-        }
-        let p: [i32; 4] = [px(-1), px(-2), px(-3), px(-4)];
-        let q: [i32; 4] = [px(0), px(1), px(2), px(3)];
-        let (po, qo) = filter_set(&p, &q, b, index_a, alpha, beta, chroma);
-        plane[(y - 1) * stride + x] = po[0].clamp(0, 255) as u8;
-        plane[(y - 2) * stride + x] = po[1].clamp(0, 255) as u8;
-        plane[(y - 3) * stride + x] = po[2].clamp(0, 255) as u8;
-        plane[y * stride + x] = qo[0].clamp(0, 255) as u8;
-        plane[(y + 1) * stride + x] = qo[1].clamp(0, 255) as u8;
-        plane[(y + 2) * stride + x] = qo[2].clamp(0, 255) as u8;
-    }
-}
-
 /// Runs the whole deblocking pass over a reconstructed frame.
 ///
 /// `y`, `cb`, `cr` are the picture planes (row-major, `stride` luma
@@ -287,23 +237,6 @@ pub(crate) fn filter_frame(
     for (i, v) in qpcr.iter_mut().enumerate() {
         *v = qp_chroma[(i as i32 + chroma_off_cr).clamp(0, 51) as usize];
     }
-    // Per-MB boundary strengths first (they're read for chroma too and
-    // are independent of filtering order).
-    let mut maps: Vec<BsMap> = Vec::with_capacity(mbs.len());
-    for mb_y in 0..height_mbs {
-        for mb_x in 0..width_mbs {
-            let idx = mb_y * width_mbs + mb_x;
-            let cur = &mbs[idx];
-            let a = if mb_x > 0 { Some(&mbs[idx - 1]) } else { None };
-            let b = if mb_y > 0 {
-                Some(&mbs[idx - width_mbs])
-            } else {
-                None
-            };
-            maps.push(compute_bs(cur, a, b));
-        }
-    }
-
     for mb_y in 0..height_mbs {
         for mb_x in 0..width_mbs {
             let idx = mb_y * width_mbs + mb_x;
@@ -311,7 +244,11 @@ pub(crate) fn filter_frame(
             if cur.disable_deblock_idc == 1 {
                 continue;
             }
-            let bs = maps[idx];
+            let bs = compute_bs(
+                cur,
+                (mb_x > 0).then(|| &mbs[idx - 1]),
+                (mb_y > 0).then(|| &mbs[idx - width_mbs]),
+            );
             let off_a = i32::from(cur.filter_offset_a);
             let off_b = i32::from(cur.filter_offset_b);
             let off_ca = off_a; // chroma uses the same slice offsets
@@ -362,108 +299,72 @@ pub(crate) fn filter_frame(
                     qp_p.fill(cur.qp_y);
                 }
                 if do_edge {
-                    // h edge at yy covers 4 columns groups: bs.h[band][k] per 4-col
-                    // filter_h_edge covers cols x0..x0+3 per call -> need 4 calls
-                    for cg in 0..4usize {
-                        let one = bs.h[band][cg];
-                        filter_h_edge(
-                            y,
-                            stride,
-                            mb_x * 16 + cg * 4,
-                            yy,
-                            &[one; 4],
-                            qp_p[0],
-                            cur.qp_y,
-                            off_a,
-                            off_b,
-                            false,
-                        );
-                    }
+                    let edge = thresholds(bs.h[band], qp_p[0], cur.qp_y, off_a, off_b);
+                    crate::h264::loopfilter::luma(y, stride, yy * stride + mb_x * 16, false, &edge);
                 }
             }
 
-            // CHROMA: vertical edges at chroma x = {0, 4} (luma {0, 8});
-            // horizontal at chroma y = {0, 4}. Strength = luma bS of
-            // the edge containing the luma sample (2x, 2y).
-            for (plane, qpc) in [(&mut *cb, &qpcb), (&mut *cr, &qpcr)] {
+            // The planes are independent; batch both without changing edge order.
+            for vertical in [true, false] {
                 for e in 0..2usize {
-                    let lx = e * 2; // luma edge index 0 or 2
-                                    // Chroma sample row r of this edge coincides with
-                                    // luma rows 2r..2r+1 => luma bS band r/2 of luma
-                                    // edge `lx` (spec 8.7.2.4 eq. 8-463).
-                    let x = mb_x * 8 + e * 4;
-                    let mut qp_p = [0u8; 4];
-                    if e == 0 {
+                    let neighbour = if e != 0 {
+                        cur
+                    } else if vertical {
                         if mb_x == 0 {
                             continue;
                         }
-                        let nb = &mbs[idx - 1];
-                        if nb.slice_id != cur.slice_id && cur.disable_deblock_idc == 2 {
-                            continue;
-                        }
-                        qp_p.fill(qpc[nb.qp_y as usize]);
+                        &mbs[idx - 1]
                     } else {
-                        qp_p.fill(qpc[cur.qp_y as usize]);
-                    }
-                    // 8 chroma sample rows per edge = two 4-sample sets;
-                    // chroma row 4*half+k uses luma band 2*half + k/2.
-                    for half in 0..2usize {
-                        let mut bs4 = [0u8; 4];
-                        for (k, dst) in bs4.iter_mut().enumerate() {
-                            *dst = bs.v[lx][2 * half + k / 2];
-                        }
-                        filter_v_edge(
-                            plane,
-                            stride / 2,
-                            x,
-                            mb_y * 8 + half * 4,
-                            &bs4,
-                            qp_p[0],
-                            qpc[cur.qp_y as usize],
-                            off_a,
-                            off_b,
-                            true,
-                        );
-                    }
-                }
-                for e in 0..2usize {
-                    let ly = e * 2;
-                    // Same band mapping as the vertical case: chroma
-                    // column 4*half+k uses luma band 2*half + k/2.
-                    let yy = mb_y * 8 + e * 4;
-                    let mut qp_p = [0u8; 4];
-                    if e == 0 {
                         if mb_y == 0 {
                             continue;
                         }
-                        let nb = &mbs[idx - width_mbs];
-                        if nb.slice_id != cur.slice_id && cur.disable_deblock_idc == 2 {
-                            continue;
-                        }
-                        qp_p.fill(qpc[nb.qp_y as usize]);
-                    } else {
-                        qp_p.fill(qpc[cur.qp_y as usize]);
-                    }
-                    for half in 0..2usize {
-                        let mut bs4 = [0u8; 4];
-                        for (k, dst) in bs4.iter_mut().enumerate() {
-                            *dst = bs.h[ly][2 * half + k / 2];
-                        }
-                        filter_h_edge(
-                            plane,
-                            stride / 2,
-                            mb_x * 8 + half * 4,
-                            yy,
-                            &bs4,
-                            qp_p[0],
-                            qpc[cur.qp_y as usize],
-                            off_a,
-                            off_b,
-                            true,
-                        );
-                    }
+                        &mbs[idx - width_mbs]
+                    };
+                    let strengths = if vertical { bs.v[e * 2] } else { bs.h[e * 2] };
+                    let u = thresholds(
+                        strengths,
+                        qpcb[neighbour.qp_y as usize],
+                        qpcb[cur.qp_y as usize],
+                        off_a,
+                        off_b,
+                    );
+                    let v = thresholds(
+                        strengths,
+                        qpcr[neighbour.qp_y as usize],
+                        qpcr[cur.qp_y as usize],
+                        off_a,
+                        off_b,
+                    );
+                    let x = mb_x * 8 + if vertical { e * 4 } else { 0 };
+                    let yy = mb_y * 8 + if vertical { 0 } else { e * 4 };
+                    crate::h264::loopfilter::chroma(
+                        cb,
+                        cr,
+                        stride / 2,
+                        yy * (stride / 2) + x,
+                        vertical,
+                        &u,
+                        &v,
+                    );
                 }
             }
         }
+    }
+}
+
+fn thresholds(bs: [u8; 4], p: u8, q: u8, off_a: i32, off_b: i32) -> crate::h264::loopfilter::Edge {
+    let qp = (i32::from(p) + i32::from(q) + 1) >> 1;
+    let a = (qp + off_a).clamp(0, 51) as usize;
+    crate::h264::loopfilter::Edge {
+        alpha: ALPHA_TABLE[a],
+        beta: BETA_TABLE[(qp + off_b).clamp(0, 51) as usize],
+        bs,
+        tc0: bs.map(|b| {
+            if b == 0 || b == 4 {
+                0
+            } else {
+                TC0_TABLE[a][b as usize - 1]
+            }
+        }),
     }
 }

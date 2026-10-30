@@ -8,6 +8,7 @@
 
 mod decode;
 mod encode;
+mod loopfilter;
 pub mod nal;
 
 pub use decode::Decoder;
