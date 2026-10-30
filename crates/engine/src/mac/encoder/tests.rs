@@ -286,3 +286,65 @@ fn software_iosurface_roundtrips() {
         roundtrip(codec, false);
     }
 }
+
+/// A property as the session reports it back; None when it has no value.
+fn property(encoder: &Encoder, key: Ref) -> Option<Owned> {
+    let mut value = ptr::null();
+    // SAFETY: the session is live; a successful copy returns one owned reference.
+    let status = unsafe { VTSessionCopyProperty(encoder.session.0, key, ptr::null(), &mut value) };
+    check(status, "copy VideoToolbox property").ok()?;
+    Owned::new(value).ok()
+}
+#[test]
+fn sessions_are_real_time_without_reordering_and_tagged_bt709() {
+    let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    for (codec, allow_hardware) in [
+        (Codec::Hevc, true),
+        (Codec::H264High, true),
+        (Codec::H264Baseline, true),
+        (Codec::H264Baseline, false),
+    ] {
+        let config = VideoConfig {
+            width: WIDTH as u32,
+            height: HEIGHT as u32,
+            fps: FPS,
+            bitrate_kbps: 10_000,
+            codec,
+        };
+        let encoder = Encoder::create(&config, allow_hardware).unwrap();
+        // SAFETY: each copied value is the documented CF type for its key.
+        unsafe {
+            let real_time = property(&encoder, kVTCompressionPropertyKey_RealTime);
+            assert!(CFBooleanGetValue(real_time.expect("RealTime").0));
+            let reordering = property(&encoder, kVTCompressionPropertyKey_AllowFrameReordering);
+            assert!(!CFBooleanGetValue(
+                reordering.expect("AllowFrameReordering").0
+            ));
+            let rate = property(&encoder, kVTCompressionPropertyKey_ExpectedFrameRate);
+            let mut fps = 0i64;
+            assert!(CFNumberGetValue(
+                rate.expect("ExpectedFrameRate").0,
+                4,
+                (&mut fps as *mut i64).cast(),
+            ));
+            assert_eq!(fps, i64::from(FPS), "{codec:?}");
+            for (key, value) in [
+                (
+                    kVTCompressionPropertyKey_ColorPrimaries,
+                    kCVImageBufferColorPrimaries_ITU_R_709_2,
+                ),
+                (
+                    kVTCompressionPropertyKey_TransferFunction,
+                    kCVImageBufferTransferFunction_ITU_R_709_2,
+                ),
+                (
+                    kVTCompressionPropertyKey_YCbCrMatrix,
+                    kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+                ),
+            ] {
+                let tag = property(&encoder, key).expect("colour tag");
+                assert!(CFEqual(tag.0, value), "{codec:?}");
+            }
+        }
+    }
+}
