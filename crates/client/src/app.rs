@@ -1061,7 +1061,23 @@ impl ClientApp {
                     "{}. Open Tailscale and sign in with the account your other machines use. Machines seen before are listed, but can't be reached until then.",
                     sentence(e)
                 )),
-                |_| {},
+                |ui| {
+                    if ui::primary_button(ui, "Open Tailscale").clicked() {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("open")
+                            .arg("-a")
+                            .arg("Tailscale")
+                            .spawn();
+                        #[cfg(windows)]
+                        let _ = std::process::Command::new("cmd")
+                            .args(["/c", "start", "tailscale:"])
+                            .spawn();
+                        #[cfg(target_os = "linux")]
+                        let _ = std::process::Command::new("xdg-open")
+                            .arg("https://login.tailscale.com/admin/machines")
+                            .spawn();
+                    }
+                },
             );
         }
     }
@@ -3544,6 +3560,14 @@ pub(crate) mod snapshots {
         *h.state().live.lock() = Some(live);
         h.state_mut().set_fullscreen(&ctx, true);
         assert!(h.state().fullscreen);
+    }
+
+    #[test]
+    fn tailscale_disconnected_banner_offers_open_tailscale() {
+        let mut disc = pcs();
+        disc.error = Some("tailscale is stopped".into());
+        let h = build(Setup::new(disc), TYPICAL, 1.0, false);
+        assert!(h.query_by_label("Open Tailscale").is_some());
     }
 
     #[test]
