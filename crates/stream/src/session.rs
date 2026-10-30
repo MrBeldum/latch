@@ -41,6 +41,10 @@ const PING_EVERY: Duration = Duration::from_millis(500);
 const DECODE_QUEUE: usize = 8;
 const DECODE_MAX_AGE: Duration = Duration::from_millis(50);
 const REPORT_EVERY: Duration = Duration::from_millis(250);
+/// How long a stopping session waits for a decode in progress. A platform
+/// decoder can block inside the OS (VideoToolbox after a sleep or a GPU
+/// reset); the window must still be able to leave the stream.
+const DECODER_STOP: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -92,7 +96,12 @@ pub struct Settings {
 #[derive(Debug, Clone, Default)]
 pub struct Stats {
     pub fps: f32,
+    /// Encoded video in the frames that came together, in Mbps: what the
+    /// bitrate setting caps. FEC parity, headers and audio are not in it.
     pub mbps: f32,
+    /// Every video and audio datagram the host's media brought, FEC parity
+    /// and Latch headers included, in Mbps: what the network delivered.
+    pub received_mbps: f32,
     pub rtt_ms: u32,
     pub rtt_var_ms: u32,
     pub decode_ms: f32,
@@ -580,9 +589,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     };
     let decoding = {
         let inner = inner.clone();
-        std::thread::Builder::new()
-            .name("stream-decode".into())
-            .spawn(move || decode(&inner, decoder))
+        Worker::spawn("stream-decode", move || decode(&inner, decoder))
     };
     let outcome = control_loop(inner, &mut tcp, &accept);
     inner.stop.store(true, Ordering::Release);
@@ -593,13 +600,45 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         let _ = r.join();
     }
     if let Ok(d) = decoding {
-        let _ = d.join();
+        if !d.join_within(DECODER_STOP) {
+            tracing::warn!("the decoder did not return within {DECODER_STOP:?}; leaving it behind");
+        }
     }
     *inner.link.lock() = None;
     match outcome {
         Outcome::Stopped => {}
         Outcome::Failed(stage, message) => inner.emit(Event::Failed { stage, message }),
         Outcome::Ended(code, message) => inner.emit(Event::Terminated { code, message }),
+    }
+}
+
+/// A thread that can be waited for with a time limit.
+struct Worker {
+    handle: std::thread::JoinHandle<()>,
+    exited: mpsc::Receiver<()>,
+}
+
+impl Worker {
+    fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> std::io::Result<Self> {
+        let (alive, exited) = mpsc::channel();
+        let handle = std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || {
+                // Dropped when `f` returns or panics.
+                let _alive: Sender<()> = alive;
+                f()
+            })?;
+        Ok(Self { handle, exited })
+    }
+
+    /// Joins the thread if it ends within `limit`; otherwise leaves it to
+    /// end by itself and returns false.
+    fn join_within(self, limit: Duration) -> bool {
+        if let Err(mpsc::RecvTimeoutError::Timeout) = self.exited.recv_timeout(limit) {
+            return false;
+        }
+        let _ = self.handle.join();
+        true
     }
 }
 
@@ -713,7 +752,7 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
                 loss_pct: inner.raw_loss_milli.load(Ordering::Relaxed) as f32 / 1000.0,
                 decode_ms: stats.decode_ms,
                 rtt_ms: stats.rtt_ms as f32,
-                received_kbps: (stats.mbps * 1000.0) as u32,
+                received_kbps: (stats.received_mbps * 1000.0) as u32,
                 frames_lost: stats.frames_lost,
                 unrecovered_loss_pct: Some(stats.loss_pct),
                 queue_ms: stats.queue_ms,
@@ -791,7 +830,7 @@ fn receive(
     let mut last_hello: Option<Instant> = None;
     let mut last_ping = Instant::now();
     let mut window_start = Instant::now();
-    let mut window_bytes = 0u64;
+    let mut throughput = Throughput::default();
     let mut window_base = reassembler.stats();
     let mut poor = false;
     let mut good_windows = 0u32;
@@ -827,9 +866,8 @@ fn receive(
                                 &mut reassembler,
                                 &mut audio_rx,
                                 &mut rtt,
-                                player.as_mut(),
                                 &mut media_seen,
-                                &mut window_bytes,
+                                &mut throughput,
                                 n,
                             );
                         }
@@ -840,6 +878,9 @@ fn receive(
                     let now = Instant::now();
                     let deadline = reassembler
                         .next_deadline()
+                        .into_iter()
+                        .chain(audio_rx.next_deadline())
+                        .min()
                         .unwrap_or(now + Duration::from_millis(20));
                     let wait = deadline
                         .saturating_duration_since(now)
@@ -851,9 +892,20 @@ fn receive(
             }
         }
         let now = Instant::now();
+        // Also when no audio arrived: a lost packet at the end of a sound
+        // must not hold the rest of it until the next sound.
+        while let Some(out) = audio_rx.pop(now) {
+            if let Some(player) = player.as_mut() {
+                match out {
+                    AudioOut::Frame { payload, .. } => player.push(&payload),
+                    AudioOut::Missing { .. } => player.push(&[]),
+                }
+            }
+        }
         while let Some(event) = reassembler.poll(now) {
             match event {
                 Reassembled::Frame(frame) => {
+                    throughput.frame(&frame);
                     let mut q = inner.queue.lock();
                     if q.frames.len() >= DECODE_QUEUE
                         || q.frames.front().is_some_and(|(_, at)| {
@@ -900,7 +952,7 @@ fn receive(
                 s.window_ms = (secs * 1000.0) as u32;
                 s.frames_lost = lost_count;
                 s.fps = decode.frames as f32 / secs;
-                s.mbps = window_bytes as f32 * 8.0 / secs / 1e6;
+                (s.mbps, s.received_mbps) = throughput.take(secs);
                 s.decode_ms = decode.decode_us as f32 / frames / 1000.0;
                 s.queue_ms = decode.queue_us as f32 / frames / 1000.0;
                 s.host_ms = decode.host_tenths as f32 / frames / 10.0;
@@ -918,7 +970,6 @@ fn receive(
                     };
                 }
             }
-            window_bytes = 0;
             let bad = loss > 1.0 || lost_frames;
             if bad && !poor {
                 poor = true;
@@ -932,6 +983,34 @@ fn receive(
                 }
             }
         }
+    }
+}
+
+/// Media bytes in the current statistics window.
+#[derive(Default)]
+struct Throughput {
+    /// Video and audio datagrams as received.
+    received: u64,
+    /// Encoded video in the frames put back together.
+    video: u64,
+}
+
+impl Throughput {
+    fn datagram(&mut self, datagram: &Datagram<'_>, len: usize) {
+        if matches!(datagram, Datagram::Video { .. } | Datagram::Audio { .. }) {
+            self.received += len as u64;
+        }
+    }
+
+    fn frame(&mut self, frame: &InFrame) {
+        self.video += frame.data.len() as u64;
+    }
+
+    /// Video and received Mbps over `secs`; starts the next window.
+    fn take(&mut self, secs: f32) -> (f32, f32) {
+        let window = std::mem::take(self);
+        let mbps = |bytes: u64| bytes as f32 * 8.0 / secs / 1e6;
+        (mbps(window.video), mbps(window.received))
     }
 }
 
@@ -964,17 +1043,16 @@ fn handle(
     reassembler: &mut Reassembler,
     audio_rx: &mut AudioReceiver,
     rtt: &mut RttEstimator,
-    player: Option<&mut Player>,
     media_seen: &mut bool,
-    window_bytes: &mut u64,
+    throughput: &mut Throughput,
     len: usize,
 ) {
     let session = datagram.session();
     let now = Instant::now();
+    throughput.datagram(datagram, len);
     match datagram {
         Datagram::Hello { .. } => {}
         Datagram::Video { shard, .. } => {
-            *window_bytes += len as u64;
             if !*media_seen {
                 *media_seen = true;
                 let mut health = inner.video_health.lock();
@@ -985,19 +1063,7 @@ fn handle(
             }
             reassembler.push(shard, now);
         }
-        Datagram::Audio { packet, .. } => {
-            audio_rx.push(packet, now);
-            if let Some(player) = player {
-                while let Some(out) = audio_rx.pop() {
-                    match out {
-                        AudioOut::Frame { payload, .. } => player.push(&payload),
-                        AudioOut::Missing { .. } => player.push(&[]),
-                    }
-                }
-            } else {
-                while audio_rx.pop().is_some() {}
-            }
-        }
+        Datagram::Audio { packet, .. } => audio_rx.push(packet, now),
         Datagram::InputAck { next, .. } => {
             if let Some(link) = inner.link.lock().as_mut() {
                 link.sender.ack(*next);
@@ -1048,7 +1114,12 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
         };
         let start = Instant::now();
         let spare = inner.frames.spare();
-        match decoder.decode(&frame.data, frame.keyframe, spare) {
+        let decoded = decoder.decode(&frame.data, frame.keyframe, spare);
+        if inner.stopping() {
+            // The session may have finished without waiting for this.
+            return;
+        }
+        match decoded {
             Ok(Some(picture)) => {
                 let decoded = Instant::now();
                 if decoder.name() != named {
@@ -1118,6 +1189,65 @@ mod tests {
         assert_eq!(recovered, 8);
         assert!((raw - 10.0).abs() < 1e-3);
         assert_eq!(loss_in_window(&after, &after), (0.0, 0, 0.0));
+    }
+
+    #[test]
+    fn a_decoder_stuck_in_the_os_does_not_hold_the_session_open() {
+        let (release, stuck) = mpsc::channel::<()>();
+        let decoding = Worker::spawn("stuck-decode", move || {
+            let _ = stuck.recv();
+        })
+        .unwrap();
+        assert!(!decoding.join_within(Duration::from_millis(50)));
+        drop(release);
+        let decoding = Worker::spawn("decode", || {}).unwrap();
+        assert!(decoding.join_within(Duration::from_secs(10)));
+        let decoding = Worker::spawn("panicking-decode", || panic!("decoder bug")).unwrap();
+        assert!(decoding.join_within(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn the_bitrate_is_encoded_video_and_received_counts_fec_and_audio() {
+        use latch_proto::audio::AudioPacketizer;
+        use latch_proto::video::{OutFrame, Packetizer};
+        let mut datagrams = Vec::new();
+        let mut video = Packetizer::new(1);
+        video.set_fec_percent(50);
+        let frame = OutFrame {
+            data: &[7; 100_000],
+            keyframe: true,
+            host_delay: 0,
+        };
+        video.packetize(&frame, |dg| datagrams.push(dg.to_vec()));
+        let mut audio = AudioPacketizer::new(1);
+        for seq in 0..8 {
+            audio.packetize(seq * 5000, &[1; 500], |dg| datagrams.push(dg.to_vec()));
+        }
+        let now = Instant::now();
+        let mut reassembler = Reassembler::new(1);
+        let mut throughput = Throughput::default();
+        for dg in &datagrams {
+            let datagram = wire::parse(dg).unwrap();
+            throughput.datagram(&datagram, dg.len());
+            if let Datagram::Video { shard, .. } = datagram {
+                reassembler.push(&shard, now);
+            }
+        }
+        let mut hello = Vec::new();
+        wire::write_hello(&mut hello, 1, None);
+        throughput.datagram(&wire::parse(&hello).unwrap(), hello.len());
+        while let Some(Reassembled::Frame(f)) = reassembler.poll(now) {
+            throughput.frame(&f);
+        }
+        let (mbps, received) = throughput.take(1.0);
+        assert_eq!(mbps, 0.8, "100 000 bytes of video in one second");
+        let all: usize = datagrams.iter().map(Vec::len).sum();
+        assert_eq!(received, all as f32 * 8.0 / 1e6);
+        assert!(
+            received > 1.5 * mbps,
+            "parity, headers and audio: {received}"
+        );
+        assert_eq!(throughput.take(1.0), (0.0, 0.0), "a new window");
     }
 
     #[test]

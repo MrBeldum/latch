@@ -575,6 +575,10 @@ impl View {
                             ),
                         ),
                         Kv::new(
+                            "Received",
+                            format!("{:.1} Mbps with FEC and audio", stats.received_mbps),
+                        ),
+                        Kv::new(
                             "Round trip",
                             format!("{} ± {} ms", stats.rtt_ms, stats.rtt_var_ms),
                         ),

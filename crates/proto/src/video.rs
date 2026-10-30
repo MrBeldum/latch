@@ -366,9 +366,14 @@ impl Reassembler {
                     assembly: frame.complete?.saturating_duration_since(frame.first),
                 }));
             }
-            let timeout = self.pending.values().any(|f| {
-                f.complete.is_none() && now.saturating_duration_since(f.first) >= FRAME_TIMEOUT
-            });
+            // A frame still assembling gets its own full timeout; one that
+            // never arrived is lost once any later frame times out.
+            let timeout = match self.pending.get(&next) {
+                Some(f) => now.saturating_duration_since(f.first) >= FRAME_TIMEOUT,
+                None => self.pending.values().any(|f| {
+                    f.complete.is_none() && now.saturating_duration_since(f.first) >= FRAME_TIMEOUT
+                }),
+            };
             let later = self.pending.iter().any(|(&n, f)| {
                 before(next, n)
                     && f.complete
@@ -406,12 +411,15 @@ impl Reassembler {
     /// timeout is noticed; `None` when nothing is pending.
     pub fn next_deadline(&self) -> Option<Instant> {
         let next = self.next?;
-        let timeout = self
-            .pending
-            .values()
-            .filter(|f| f.complete.is_none())
-            .map(|f| f.first + FRAME_TIMEOUT)
-            .min();
+        let timeout = match self.pending.get(&next) {
+            Some(f) => f.complete.is_none().then_some(f.first + FRAME_TIMEOUT),
+            None => self
+                .pending
+                .values()
+                .filter(|f| f.complete.is_none())
+                .map(|f| f.first + FRAME_TIMEOUT)
+                .min(),
+        };
         let later = self
             .pending
             .iter()
