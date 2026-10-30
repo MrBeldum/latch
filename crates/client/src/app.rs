@@ -1063,7 +1063,22 @@ impl ClientApp {
         let Some(q) = self.confirm.clone() else {
             return;
         };
-        let name = &q.name;
+        let duplicate_name = disc
+            .pcs
+            .iter()
+            .filter(|p| p.name == q.name)
+            .count()
+            > 1;
+        let display_name = if duplicate_name {
+            if let Some(ip) = disc.pcs.iter().find(|p| p.node_id == q.node_id).and_then(|p| p.ip) {
+                format!("{} ({ip})", q.name)
+            } else {
+                q.name.clone()
+            }
+        } else {
+            q.name.clone()
+        };
+        let name = &display_name;
         let (title, body, button) = match q.action {
             Confirmable::Power(action) => (
                 format!("{} {name}?", action.label()),
@@ -1083,7 +1098,7 @@ impl ClientApp {
             if ui::destructive_button(ui, button).clicked() {
                 match q.action {
                     Confirmable::Power(action) => match power_target(disc, &q.node_id) {
-                        Some(ip) => self.power(ip, name, action),
+                        Some(ip) => self.power(ip, &q.name, action),
                         None => {
                             self.notice = Some((
                                 Tone::Danger,
@@ -1092,7 +1107,7 @@ impl ClientApp {
                             ))
                         }
                     },
-                    Confirmable::Forget => self.forget(&q.node_id, name),
+                    Confirmable::Forget => self.forget(&q.node_id, &q.name),
                 }
                 self.confirm = None;
             }
@@ -1152,25 +1167,27 @@ impl ClientApp {
                 }
                 first = false;
                 let (tone, detail) = describe(pc);
-                ui::list_row(ui, Some(tone), &pc.name, &detail, |ui| {
-                    if pc.can_stream() && !pc.remembered {
-                        let label = if pc.online {
-                            "Connect"
-                        } else {
-                            "Wake and connect"
-                        };
-                        let clicked = ui
-                            .add_enabled_ui(!prog.active(), |ui| {
-                                ui::secondary_button(ui, label)
-                                    .on_disabled_hover_text("Another connection is in progress.")
-                            })
-                            .inner
-                            .clicked();
-                        if clicked {
-                            self.connect(ctx, pc);
+                ui.push_id(&pc.node_id, |ui| {
+                    ui::list_row(ui, Some(tone), &pc.name, &detail, |ui| {
+                        if pc.can_stream() && !pc.remembered {
+                            let label = if pc.online {
+                                "Connect"
+                            } else {
+                                "Wake and connect"
+                            };
+                            let clicked = ui
+                                .add_enabled_ui(!prog.active(), |ui| {
+                                    ui::secondary_button(ui, label)
+                                        .on_disabled_hover_text("Another connection is in progress.")
+                                })
+                                .inner
+                                .clicked();
+                            if clicked {
+                                self.connect(ctx, pc);
+                            }
                         }
-                    }
-                    self.row_menu(ui, pc);
+                        self.row_menu(ui, pc);
+                    });
                 });
             }
         });
@@ -1283,7 +1300,7 @@ impl ClientApp {
             name: pc.name.clone(),
             action,
         };
-        ui::icon_menu(ui, Icon::More, &format!("More for {}", pc.name), |ui| {
+        ui::icon_menu_id(ui, Icon::More, &format!("More for {}", pc.name), &pc.node_id, |ui| {
             if wake && ui::menu_item(ui, "Wake").clicked() {
                 let pc = pc.clone();
                 self.notify_later(move || match session::wake_only(&pc) {
@@ -3093,6 +3110,42 @@ pub(crate) mod snapshots {
             h.query_by_label("Restart").is_some(),
             "the confirming button"
         );
+    }
+
+    #[test]
+    fn duplicate_machine_names_disambiguate_in_confirm_banner() {
+        let pc1 = Pc {
+            node_id: "n1".into(),
+            name: "Office".into(),
+            ip: Some("100.64.0.1".parse().unwrap()),
+            online: true,
+            host: Some(Status {
+                power_allowed: true,
+                ..Status::default()
+            }),
+            ..Pc::default()
+        };
+        let pc2 = Pc {
+            node_id: "n2".into(),
+            name: "Office".into(),
+            ip: Some("100.64.0.2".parse().unwrap()),
+            online: true,
+            host: Some(Status {
+                power_allowed: true,
+                ..Status::default()
+            }),
+            ..Pc::default()
+        };
+        let mut disc = Discovery::default();
+        disc.pcs = vec![pc1, pc2];
+        let mut h = build(Setup::new(disc), TYPICAL, 1.0, false);
+        h.state_mut().confirm = Some(Confirm {
+            node_id: "n2".into(),
+            name: "Office".into(),
+            action: Confirmable::Power(PowerAction::Restart),
+        });
+        h.run_steps(1);
+        assert!(h.query_by_label_contains("Restart Office (100.64.0.2)?").is_some());
     }
 
     #[test]

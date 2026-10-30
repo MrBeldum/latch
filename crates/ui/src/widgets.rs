@@ -1178,7 +1178,16 @@ fn popup_menu<R>(
     label: &str,
     add: impl FnOnce(&mut Ui) -> R,
 ) -> Option<R> {
-    let id = Id::new("latch.menu").with(label);
+    popup_menu_id(ui, trigger, label, add)
+}
+
+fn popup_menu_id<R>(
+    ui: &mut Ui,
+    trigger: &Response,
+    id_source: impl std::hash::Hash,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    let id = Id::new("latch.menu").with(id_source);
     if trigger.clicked() {
         ui.memory_mut(|m| m.toggle_popup(id));
     }
@@ -1247,8 +1256,19 @@ pub fn icon_menu<R>(
     label: &str,
     add: impl FnOnce(&mut Ui) -> R,
 ) -> Option<R> {
+    icon_menu_id(ui, icon, label, label, add)
+}
+
+/// An icon button that opens a menu, with a distinct ID source.
+pub fn icon_menu_id<R>(
+    ui: &mut Ui,
+    icon: Icon,
+    label: &str,
+    id_source: impl std::hash::Hash,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
     let trigger = icon_button(ui, icon, label);
-    popup_menu(ui, &trigger, label, add)
+    popup_menu_id(ui, &trigger, id_source, add)
 }
 
 fn menu_row(ui: &mut Ui, label: &str, checked: Option<bool>, enabled: bool) -> Response {
