@@ -1457,6 +1457,16 @@ impl View {
                 link.live.clipboard.poke();
             }
             Event::Paste(text) if at.keys_to_pc => self.paste(link, text),
+            Event::Text(text) if at.keys_to_pc => {
+                if !text.is_empty() {
+                    out.text(&text);
+                }
+            }
+            Event::Ime(egui::ImeEvent::Commit(text)) if at.keys_to_pc => {
+                if !text.is_empty() {
+                    out.text(&text);
+                }
+            }
             Event::PointerButton {
                 pos,
                 button,
@@ -3396,5 +3406,29 @@ pub(crate) mod tests {
         h.state_mut().view.bar_shown = false;
         h.run_steps(2);
         assert!(h.ctx.memory(|m| m.focused()).is_none());
+    }
+
+    #[test]
+    fn text_and_ime_commit_events_are_forwarded_to_pc() {
+        let (mut h, tap) = recording(View::default(), true);
+        frame(
+            &mut h,
+            vec![
+                Event::Text("hello".into()),
+                Event::Ime(egui::ImeEvent::Commit("世界".into())),
+            ],
+            Modifiers::NONE,
+        );
+        let sent = tap.take();
+        assert!(
+            sent.iter()
+                .any(|s| matches!(s, Sent::Text(t) if t == "hello")),
+            "Event::Text must be forwarded to PC: {sent:?}"
+        );
+        assert!(
+            sent.iter()
+                .any(|s| matches!(s, Sent::Text(t) if t == "世界")),
+            "Event::Ime Commit must be forwarded to PC: {sent:?}"
+        );
     }
 }
