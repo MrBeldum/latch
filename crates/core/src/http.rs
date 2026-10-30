@@ -403,6 +403,50 @@ pub fn upgrade(
     upgrade_cancellable(addr, path, protocol, body, timeout, |_| Ok(()), || false)
 }
 
+/// Handshake I/O checks cancellation between bounded socket waits. In
+/// particular, do not rely on shutdown of a clone to wake a blocking recv.
+struct UpgradeIo<'a, C> {
+    stream: &'a mut TcpStream,
+    deadline: Instant,
+    cancelled: C,
+}
+
+impl<C: Fn() -> bool> UpgradeIo<'_, C> {
+    fn retry<T>(
+        &mut self,
+        mut operation: impl FnMut(&mut TcpStream) -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        loop {
+            if (self.cancelled)() {
+                return Err(std::io::Error::new(
+                    ErrorKind::ConnectionAborted,
+                    "cancelled",
+                ));
+            }
+            if Instant::now() >= self.deadline {
+                return Err(std::io::Error::new(ErrorKind::TimedOut, "timed out"));
+            }
+            match operation(self.stream) {
+                Err(e) if is_timeout(&e) || e.kind() == ErrorKind::Interrupted => continue,
+                result => return result,
+            }
+        }
+    }
+}
+impl<C: Fn() -> bool> Read for UpgradeIo<'_, C> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.retry(|stream| stream.read(buf))
+    }
+}
+impl<C: Fn() -> bool> Write for UpgradeIo<'_, C> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.retry(|stream| stream.write(buf))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.retry(TcpStream::flush)
+    }
+}
+
 /// A cancellable variant of [`upgrade`] that exposes the connected socket before
 /// sending or waiting on headers, and checks a cancellation predicate.
 pub fn upgrade_cancellable(
@@ -471,29 +515,35 @@ pub fn upgrade_cancellable(
         let _ = stream.shutdown(std::net::Shutdown::Both);
         bail!("cancelled");
     }
-    stream.set_read_timeout(Some(timeout)).map_err(io_err)?;
-    stream.set_write_timeout(Some(timeout)).map_err(io_err)?;
+    let poll = timeout.min(Duration::from_millis(100));
+    stream.set_read_timeout(Some(poll)).map_err(io_err)?;
+    stream.set_write_timeout(Some(poll)).map_err(io_err)?;
     let _ = stream.set_nodelay(true);
+    let mut io = UpgradeIo {
+        stream: &mut stream,
+        deadline,
+        cancelled: &cancelled,
+    };
     let head = format!(
         "POST {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: {protocol}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
-    stream.write_all(head.as_bytes()).map_err(io_err)?;
-    stream.write_all(body).map_err(io_err)?;
-    stream.flush().map_err(io_err)?;
+    io.write_all(head.as_bytes()).map_err(io_err)?;
+    io.write_all(body).map_err(io_err)?;
+    io.flush().map_err(io_err)?;
     // Byte by byte up to the blank line, so nothing the new protocol sends
     // right behind the head is swallowed by a buffer.
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
         if cancelled() {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
+            let _ = io.stream.shutdown(std::net::Shutdown::Both);
             bail!("cancelled");
         }
         if head.len() >= MAX_HEADER {
             bail!("reply head too large");
         }
-        match stream.read(&mut byte).map_err(io_err)? {
+        match io.read(&mut byte).map_err(io_err)? {
             0 => bail!("connection closed before the reply"),
             _ => head.push(byte[0]),
         }
@@ -515,10 +565,12 @@ pub fn upgrade_cancellable(
         if !header(&headers, "upgrade").is_some_and(|u| u.eq_ignore_ascii_case(protocol)) {
             bail!("the server switched to another protocol");
         }
+        stream.set_read_timeout(Some(timeout)).map_err(io_err)?;
+        stream.set_write_timeout(Some(timeout)).map_err(io_err)?;
         return Ok(Ok(stream));
     }
     let mut body = Vec::new();
-    let mut rest = BufReader::new(&mut stream);
+    let mut rest = BufReader::new(&mut io);
     read_response_body(&mut rest, &headers, &mut body, MAX_BODY as u64, false)?;
     Ok(Err(Response {
         status,
@@ -885,6 +937,85 @@ pub fn post_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
 mod tests {
     use super::*;
     use std::io::ErrorKind;
+
+    #[test]
+    fn upgrade_waits_across_poll_intervals_and_restores_protocol_timeouts() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                peer.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            std::thread::sleep(Duration::from_millis(250));
+            peer.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: test\r\nConnection: Upgrade\r\n\r\nnext").unwrap();
+        });
+        let timeout = Duration::from_secs(10);
+        let mut stream = upgrade(addr, "/stream", "test", b"", timeout)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stream.read_timeout().unwrap(), Some(timeout));
+        assert_eq!(stream.write_timeout().unwrap(), Some(timeout));
+        let mut next = [0; 4];
+        stream.read_exact(&mut next).unwrap();
+        assert_eq!(&next, b"next");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn upgrade_cancellation_does_not_require_socket_shutdown() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        };
+        // Cover a silent upgrade head and a refusal that stalls in its body.
+        for reply in [
+            b"".as_slice(),
+            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 5\r\n\r\nx",
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let stopped = cancel.clone();
+            let (tx, rx) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let result = upgrade_cancellable(
+                    addr,
+                    "/stream",
+                    "test",
+                    b"",
+                    Duration::from_secs(30),
+                    |_| Ok(()),
+                    || stopped.load(Ordering::Acquire),
+                );
+                tx.send(result.is_err()).unwrap();
+            });
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                peer.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            peer.write_all(reply).unwrap();
+            // Give the handshake time to enter a blocking read. Cancellation
+            // must also work if this runner instead schedules it later.
+            std::thread::sleep(Duration::from_millis(200));
+            cancel.store(true, Ordering::Release);
+            let result = rx.recv_timeout(Duration::from_secs(5));
+            // Always release/join the worker, even when testing broken code.
+            drop(peer);
+            worker.join().unwrap();
+            assert!(result.unwrap(), "the handshake must stop without shutdown");
+        }
+    }
 
     #[test]
     fn client_and_server_agree_over_loopback() {
