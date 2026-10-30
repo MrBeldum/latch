@@ -92,6 +92,9 @@ pub struct HostApp {
     live: bool,
     os: Os,
     note: Option<(Tone, String, Instant)>,
+    /// A macOS privacy pane was opened from here: a permission granted
+    /// there reaches Latch only after it restarts, so the page offers to.
+    privacy_opened: bool,
 }
 
 impl HostApp {
@@ -126,6 +129,36 @@ impl HostApp {
             live: false,
             os,
             note: None,
+            privacy_opened: false,
+        }
+    }
+
+    /// Open the System Settings pane an item names (see [`privacy_pane`]).
+    fn open_privacy_pane(&mut self, anchor: &str) {
+        self.privacy_opened = true;
+        if self.live {
+            let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
+            if let Err(e) = std::process::Command::new("/usr/bin/open")
+                .arg(&url)
+                .spawn()
+            {
+                tracing::warn!("could not open {url}: {e}");
+            }
+        }
+    }
+
+    /// Restart the background service, the process that records the screen
+    /// and moves the pointer, so a permission granted since it started
+    /// applies.
+    fn restart_for_permissions(&mut self) {
+        self.privacy_opened = false;
+        self.note = Some((
+            Tone::Neutral,
+            "Restarting Latch's background service…".into(),
+            Instant::now(),
+        ));
+        if self.live {
+            std::thread::spawn(crate::service::restart_service);
         }
     }
 
@@ -552,6 +585,26 @@ impl HostApp {
             }
             for item in &admin_items {
                 ui::dot_label(ui, Tone::Warning, item);
+                if self.os == Os::Mac {
+                    if let Some((label, anchor)) = privacy_pane(item) {
+                        if ui::secondary_button(ui, label).clicked() {
+                            self.open_privacy_pane(anchor);
+                        }
+                    }
+                }
+            }
+            if self.os == Os::Mac
+                && (self.privacy_opened || matches!(result, Some(Ok(()))))
+                && admin_items.iter().any(|i| privacy_pane(i).is_some())
+            {
+                ui::notice(
+                    ui,
+                    Tone::Neutral,
+                    "macOS applies Screen Recording and Accessibility only after Latch restarts. Once Latch is switched on in System Settings, restart it here.",
+                );
+                if ui::primary_button(ui, "Restart Latch").clicked() {
+                    self.restart_for_permissions();
+                }
             }
             ui.add_space(space::XS);
             if running {
@@ -586,6 +639,13 @@ impl HostApp {
                 });
             }
             match result {
+                Some(Ok(())) if self.os == Os::Mac && !admin_items.is_empty() => {
+                    ui::notice(
+                        ui,
+                        Tone::Success,
+                        "Setup finished. The items above clear once the permissions are allowed and Latch has restarted.",
+                    );
+                }
                 Some(Ok(())) => {
                     ui::notice(
                         ui,
@@ -883,6 +943,19 @@ fn setup_error(e: &str, os: Os) -> String {
         "{}. The setup log below shows the last step reached; run setup again once it is fixed.",
         sentence_case(e.trim_end_matches('.'))
     )
+}
+
+/// The button and System Settings anchor for a macOS permission item:
+/// Screen Recording or Accessibility, under Privacy & Security. macOS asks
+/// only once; after that the switch is in Settings, so the page links it.
+fn privacy_pane(item: &str) -> Option<(&'static str, &'static str)> {
+    if item.contains("Screen Recording") {
+        Some(("Open Screen Recording settings", "Privacy_ScreenCapture"))
+    } else if item.contains("Accessibility") {
+        Some(("Open Accessibility settings", "Privacy_Accessibility"))
+    } else {
+        None
+    }
 }
 
 /// Whether setup ended at a declined administrator prompt, before
@@ -1188,6 +1261,21 @@ mod tests {
         assert_eq!(pill(Some(&s), None), ("Needs setup", Tone::Warning));
         s.setup.push("Tailscale: not running".into());
         assert_eq!(pill(Some(&s), None), ("Tailscale off", Tone::Danger));
+    }
+
+    #[test]
+    fn each_mac_permission_item_links_its_settings_pane() {
+        let screen = "Allow Latch to record the screen in System Settings → Privacy & Security → Screen Recording.";
+        let input = "Allow Latch in System Settings → Privacy & Security → Accessibility to use the keyboard and mouse.";
+        assert_eq!(
+            privacy_pane(screen),
+            Some(("Open Screen Recording settings", "Privacy_ScreenCapture"))
+        );
+        assert_eq!(
+            privacy_pane(input),
+            Some(("Open Accessibility settings", "Privacy_Accessibility"))
+        );
+        assert_eq!(privacy_pane("Sharing setup needs attention."), None);
     }
 
     #[test]
@@ -1555,6 +1643,34 @@ mod snapshots {
             h.query_by_label_contains("Keep this").is_none(),
             "a Linux server does not idle-sleep; the switch would do nothing"
         );
+    }
+
+    /// A Mac missing its permissions links each System Settings pane, and
+    /// once one has been opened offers to restart Latch (agy 1.1).
+    #[test]
+    fn a_mac_without_permissions_links_settings_and_offers_a_restart() {
+        let tall = egui::vec2(1280.0, 2400.0);
+        let mut status = ready_status("macOS");
+        status.setup = vec![
+            "Allow Latch to record the screen in System Settings → Privacy & Security → Screen Recording.".into(),
+            "Allow Latch in System Settings → Privacy & Security → Accessibility to use the keyboard and mouse.".into(),
+        ];
+        let shared = Shared {
+            status: Some(status),
+            ..Default::default()
+        };
+        let mut h = build(shared, Os::Mac, tall, 1.0, false);
+        assert!(
+            h.query_by_label("Restart Latch").is_none(),
+            "nothing granted yet"
+        );
+        h.get_by_label("Open Screen Recording settings").click();
+        h.run_steps(3);
+        assert!(h.query_by_label("Open Accessibility settings").is_some());
+        assert!(h.query_by_label("Restart Latch").is_some());
+        h.get_by_label("Restart Latch").click();
+        h.run_steps(3);
+        assert!(h.query_by_label("Restart Latch").is_none());
     }
 
     /// A declined UAC prompt offers Try again and no log path (agy 1.3).
