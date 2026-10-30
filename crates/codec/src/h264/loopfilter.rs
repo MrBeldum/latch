@@ -791,7 +791,7 @@ mod sse2 {
 
     #[inline(always)]
     unsafe fn strong_side(s: [__m128i; 6]) -> [__m128i; 3] {
-        let wide = s.map(widen);
+        let wide = s.map(|v| widen(v));
         let lo = strong_half(wide.map(|w| w.0));
         let hi = strong_half(wide.map(|w| w.1));
         [
