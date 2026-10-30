@@ -76,18 +76,17 @@ fn input_overflow_preserves_oldest_and_critical_events() {
     for event in &critical {
         sender.push(event.clone());
     }
-    assert_eq!(sender.unacked(), MAX_UNACKED + critical.len());
+    assert_eq!(sender.unacked(), 1034 + critical.len());
     let applied = drain_input(&mut sender, start + Duration::from_secs(9));
     assert_eq!(
-        &applied[..MAX_UNACKED - 1],
-        &(0..1023).map(position).collect::<Vec<_>>()
+        &applied[..1034],
+        &(0..1034).map(position).collect::<Vec<_>>()
     );
-    assert_eq!(applied[MAX_UNACKED - 1], position(1033));
-    assert_eq!(&applied[MAX_UNACKED..], &critical);
+    assert_eq!(&applied[1034..], &critical);
 }
 
 #[test]
-fn input_full_queue_merges_relative_motion_saturating() {
+fn input_full_queue_preserves_relative_motion_without_saturation() {
     let mut sender = InputSender::new(1);
     for _ in 0..MAX_UNACKED - 1 {
         sender.push(Event::ReleaseAll);
@@ -101,31 +100,31 @@ fn input_full_queue_merges_relative_motion_saturating() {
         dy: -10_000,
     });
     let applied = drain_input(&mut sender, Instant::now());
-    assert_eq!(applied.len(), MAX_UNACKED);
+    assert_eq!(applied.len(), MAX_UNACKED + 1);
     assert_eq!(
         applied.last(),
         Some(&Event::MouseMove {
-            dx: i16::MAX,
-            dy: i16::MIN
+            dx: 10_000,
+            dy: -10_000
         })
     );
 }
 
 #[test]
-fn input_hard_cap_refuses_only_new_events_without_sequence_gaps() {
+fn input_backlog_never_discards_critical_events_or_creates_sequence_gaps() {
     let mut sender = InputSender::new(1);
     for _ in 0..65_536 + 1 {
         sender.push(Event::ReleaseAll);
     }
-    assert_eq!(sender.unacked(), 65_536);
-    assert_eq!(drain_input(&mut sender, Instant::now()).len(), 65_536);
+    assert_eq!(sender.unacked(), 65_537);
+    assert_eq!(drain_input(&mut sender, Instant::now()).len(), 65_537);
     sender.push(position(1));
     let mut out = Vec::new();
     assert!(sender.poll(Instant::now(), &mut out));
     let Datagram::Input { first, .. } = wire::parse(&out).unwrap() else {
         panic!()
     };
-    assert_eq!(first, 65_536);
+    assert_eq!(first, 65_537);
 }
 
 #[test]
@@ -419,4 +418,69 @@ fn video_initial_keyframe_requests_start_only_after_loss() {
             assert!(!requests.due(receiver.waiting_for_keyframe(), now, None));
         }
     }
+}
+
+#[test]
+fn input_lost_ack_does_not_mutate_already_applied_motion() {
+    let mut sender = InputSender::new(1);
+    let mut receiver = InputReceiver::new();
+    let mut out = Vec::new();
+    let now = Instant::now();
+    let mut total = 0i64;
+    for i in 0..10_000 {
+        sender.push(Event::MouseMove { dx: 1, dy: 0 });
+        // Polling marks the oldest batch in flight, even when the ACK is lost.
+        assert!(sender.poll(now + Duration::from_millis(i), &mut out));
+        let Datagram::Input { first, events, .. } = wire::parse(&out).unwrap() else {
+            panic!()
+        };
+        receiver.receive(first, events.iter(), |e| {
+            if let Event::MouseMove { dx, .. } = e {
+                total += i64::from(dx);
+            }
+        });
+    }
+    // Once acknowledgements resume all 1000 Hz motion must arrive exactly once.
+    sender.ack(receiver.next());
+    for step in 0..1000 {
+        if sender.unacked() == 0 {
+            break;
+        }
+        assert!(sender.poll(now + Duration::from_secs(10) + RESEND * step, &mut out));
+        let Datagram::Input { first, events, .. } = wire::parse(&out).unwrap() else {
+            panic!()
+        };
+        sender.ack(receiver.receive(first, events.iter(), |e| {
+            if let Event::MouseMove { dx, .. } = e {
+                total += i64::from(dx);
+            }
+        }));
+    }
+    assert_eq!(sender.unacked(), 0);
+    assert_eq!(total, 10_000);
+}
+
+#[test]
+fn input_full_queue_never_changes_sent_payload_or_moves_across_keys() {
+    let mut sender = InputSender::new(1);
+    let now = Instant::now();
+    let mut out = Vec::new();
+    sender.push(Event::MouseMove { dx: 1, dy: 0 });
+    sender.poll(now, &mut out);
+    let original = out.clone();
+    for _ in 1..MAX_UNACKED {
+        sender.push(Event::ReleaseAll);
+    }
+    sender.push(Event::MouseMove { dx: 2, dy: 0 });
+    sender.poll(now, &mut out);
+    let Datagram::Input { events, .. } = wire::parse(&original).unwrap() else {
+        panic!()
+    };
+    let first = events.iter().next().unwrap();
+    let Datagram::Input { events, .. } = wire::parse(&out).unwrap() else {
+        panic!()
+    };
+    assert_eq!(events.iter().next().unwrap(), first);
+    let applied = drain_input(&mut sender, now);
+    assert_eq!(applied.last(), Some(&Event::MouseMove { dx: 2, dy: 0 }));
 }

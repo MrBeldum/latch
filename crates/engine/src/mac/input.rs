@@ -54,6 +54,7 @@ pub fn open() -> Result<Box<dyn InputSink>> {
         caps_lock: false,
         posting: true,
         clicks: ClickCounter::new(),
+        stream_size: None,
     }))
 }
 struct Sink {
@@ -61,6 +62,7 @@ struct Sink {
     caps_lock: bool,
     posting: bool,
     clicks: ClickCounter,
+    stream_size: Option<(u32, u32)>,
 }
 struct ClickCounter {
     last: Option<(u32, Instant, Point)>,
@@ -150,16 +152,21 @@ impl Sink {
         unsafe {
             match event {
                 Event::MouseMove { dx, dy } => {
+                    let scale = self.stream_size.map_or(1.0, |(w, h)| {
+                        let content = display.fitted(w, h);
+                        f64::from(display.width) / f64::from(content.width)
+                    });
+                    let (dx, dy) = (f64::from(*dx) * scale, f64::from(*dy) * scale);
                     let point = clamp(
                         Point {
-                            x: current.x + f64::from(*dx),
-                            y: current.y + f64::from(*dy),
+                            x: current.x + dx,
+                            y: current.y + dy,
                         },
                         display,
                     );
                     let e = self.movement(point)?;
-                    CGEventSetIntegerValueField(e.0, 4, i64::from(*dx));
-                    CGEventSetIntegerValueField(e.0, 5, i64::from(*dy));
+                    CGEventSetIntegerValueField(e.0, 4, dx.round() as i64);
+                    CGEventSetIntegerValueField(e.0, 5, dy.round() as i64);
                     events.push(e);
                 }
                 Event::MousePosition {
@@ -199,6 +206,12 @@ impl Sink {
                 Event::Key { vk, down, .. } => {
                     if let Some(key) = crate::input::keymap::vk_to_mac(*vk) {
                         let e = Owned::new(CGEventCreateKeyboardEvent(ptr::null(), key, *down))?;
+                        // kCGKeyboardEventAutorepeat: repeated down while already held.
+                        CGEventSetIntegerValueField(
+                            e.0,
+                            8,
+                            i64::from(*down && self.held.keys.contains(vk)),
+                        );
                         if *vk == 0x14 && *down && !self.held.keys.contains(vk) {
                             self.caps_lock = !self.caps_lock;
                         }
@@ -292,9 +305,17 @@ impl Sink {
     }
 }
 impl InputSink for Sink {
+    fn set_stream_size(&mut self, width: u32, height: u32) {
+        self.stream_size = Some((width.max(1), height.max(1)));
+    }
+
     fn apply(&mut self, event: &Event, display: DisplayRect) -> Result<()> {
         if matches!(event, Event::ReleaseAll) {
             self.release_all();
+            anyhow::ensure!(
+                self.held.keys.is_empty() && self.held.buttons.is_empty(),
+                "input releases still pending"
+            );
             return Ok(());
         }
         let current = Self::current()?;
@@ -353,6 +374,7 @@ mod tests {
             caps_lock: false,
             posting: false,
             clicks: ClickCounter::new(),
+            stream_size: None,
         }
     }
     fn display() -> DisplayRect {
@@ -361,6 +383,45 @@ mod tests {
             y: 20,
             width: 200,
             height: 100,
+        }
+    }
+    #[test]
+    fn retina_relative_motion_maps_stream_pixels_to_display_points() {
+        let mut sink = sink();
+        sink.set_stream_size(400, 200);
+        let events = sink
+            .build(
+                &Event::MouseMove { dx: 20, dy: -10 },
+                display(),
+                Point { x: 0., y: 70. },
+            )
+            .unwrap();
+        // SAFETY: inspecting constructed events without posting.
+        unsafe {
+            assert_eq!(CGEventGetLocation(events[0].0), Point { x: 10., y: 65. });
+            assert_eq!(CGEventGetIntegerValueField(events[0].0, 4), 10);
+            assert_eq!(CGEventGetIntegerValueField(events[0].0, 5), -5);
+        }
+    }
+    #[test]
+    fn repeated_key_down_sets_autorepeat_and_release_clears_it() {
+        let mut sink = sink();
+        for (down, repeat) in [(true, 0), (true, 1), (false, 0), (true, 0)] {
+            let events = sink
+                .build(
+                    &Event::Key {
+                        vk: 0x41,
+                        down,
+                        modifiers: 0,
+                    },
+                    display(),
+                    Point::default(),
+                )
+                .unwrap();
+            // SAFETY: inspect locally constructed keyboard events only.
+            unsafe {
+                assert_eq!(CGEventGetIntegerValueField(events[0].0, 8), repeat);
+            }
         }
     }
     #[test]

@@ -17,7 +17,7 @@ tracing.workspace = true
 rand.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.13", features = ["shm", "xfixes", "randr", "xtest", "damage"] }
+x11rb = { version = "0.13", features = ["shm", "xfixes", "randr", "xtest", "damage", "xkb"] }
 libc = "0.2"
 pulseaudio = "0.3.2"
 futures = "0.3"

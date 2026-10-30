@@ -8,7 +8,7 @@ use anyhow::{ensure, Context};
 use std::collections::BTreeMap;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::ConnectionExt as _;
-use x11rb::protocol::{xproto, xtest, Event as XEvent};
+use x11rb::protocol::{xkb, xproto, xtest, Event as XEvent};
 use x11rb::rust_connection::RustConnection;
 
 pub(super) struct X11Input {
@@ -16,6 +16,7 @@ pub(super) struct X11Input {
     root: u32,
     mapping: xproto::GetKeyboardMappingReply,
     min_keycode: u8,
+    key_names: xkb::GetNamesReply,
     held: Held,
     pressed: BTreeMap<u16, u8>,
     scroll: [i32; 2],
@@ -24,6 +25,16 @@ impl X11Input {
     pub(super) fn new() -> anyhow::Result<Self> {
         let (conn, screen) = x11rb::connect(None).context("connect to X11 for XTest")?;
         xtest::get_version(&conn, 2, 2)?.reply()?;
+        ensure!(
+            xkb::use_extension(&conn, 1, 0)?.reply()?.supported,
+            "XKB unavailable"
+        );
+        let key_names = xkb::get_names(
+            &conn,
+            xkb::ID::USE_CORE_KBD.into(),
+            xkb::NameDetail::KEY_NAMES,
+        )?
+        .reply()?;
         let setup = conn.setup();
         let root = setup.roots[screen].root;
         let min_keycode = setup.min_keycode;
@@ -35,6 +46,7 @@ impl X11Input {
             root,
             mapping,
             min_keycode,
+            key_names,
             held: Held::default(),
             pressed: BTreeMap::new(),
             scroll: [0; 2],
@@ -50,6 +62,12 @@ impl X11Input {
             }
         }
         if changed {
+            self.key_names = xkb::get_names(
+                &self.conn,
+                xkb::ID::USE_CORE_KBD.into(),
+                xkb::NameDetail::KEY_NAMES,
+            )?
+            .reply()?;
             self.mapping = self
                 .conn
                 .get_keyboard_mapping(
@@ -160,16 +178,17 @@ impl InputSink for X11Input {
                     if !down {
                         return Ok(());
                     }
-                    let symbol =
-                        crate::input::keymap::vk_to_keysym(*vk).context("unmapped virtual key")?;
-                    let per = self.mapping.keysyms_per_keycode as usize;
-                    ensure!(per > 0, "empty X keyboard mapping");
-                    self.mapping
-                        .keysyms
-                        .chunks(per)
-                        .position(|s| s.contains(&symbol))
-                        .map(|i| self.min_keycode + i as u8)
-                        .context("keysym absent from X keyboard mapping")?
+                    let name = crate::input::keymap::vk_to_xkb_name(*vk)
+                        .context("unmapped virtual key")?;
+                    self.key_names
+                        .value_list
+                        .key_names
+                        .as_ref()
+                        .context("XKB key names unavailable")?
+                        .iter()
+                        .position(|key| key.name == name)
+                        .map(|i| self.key_names.first_key + i as u8)
+                        .context("physical key absent from XKB keyboard mapping")?
                 };
                 self.fake(
                     if *down {
@@ -203,18 +222,18 @@ impl InputSink for X11Input {
                 )?;
             }
             Event::MouseMove { dx, dy } => {
-                let p = self.conn.query_pointer(self.root)?.reply()?;
-                let geometry = self.conn.get_geometry(self.root)?.reply()?;
-                let x =
-                    (i32::from(p.root_x) + i32::from(*dx)).clamp(0, i32::from(geometry.width) - 1);
-                let y =
-                    (i32::from(p.root_y) + i32::from(*dy)).clamp(0, i32::from(geometry.height) - 1);
-                self.fake(
+                // XTest MotionNotify detail=1 interprets x/y as relative deltas.
+                // Drop the void cookie: errors are handled by refresh, without a round trip.
+                drop(xtest::fake_input(
+                    &self.conn,
                     xproto::MOTION_NOTIFY_EVENT,
+                    1,
+                    x11rb::CURRENT_TIME,
+                    x11rb::NONE,
+                    *dx,
+                    *dy,
                     0,
-                    i16::try_from(x)?,
-                    i16::try_from(y)?,
-                )?;
+                )?);
             }
             Event::MouseButton { button, down } => {
                 let code = button_code(*button)?;
@@ -242,7 +261,13 @@ impl InputSink for X11Input {
                 }
             }
             Event::Text(text) => self.text(text)?,
-            Event::ReleaseAll => self.release_all(),
+            Event::ReleaseAll => {
+                self.release_all();
+                ensure!(
+                    self.held.keys.is_empty() && self.held.buttons.is_empty(),
+                    "input releases still pending"
+                );
+            }
         }
         self.conn.flush()?;
         Ok(())
