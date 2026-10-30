@@ -91,6 +91,103 @@ impl VideoPipeline for Video {
 }
 
 #[test]
+fn a_viewer_that_does_not_read_cannot_block_the_control_writer() {
+    let server = Server::bind(0, Options::default()).unwrap();
+    let session = session("127.0.0.1:9".parse().unwrap());
+    let (mut host, _client) = sockets();
+    host.set_nonblocking(true).unwrap();
+    let until = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < until {
+        match host.write(&[0; 65536]) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1))
+            }
+            Err(e) => panic!("prefill failed: {e}"),
+        }
+    }
+    host.set_nonblocking(false).unwrap();
+    let accept = Accept {
+        session: session.id,
+        token: control::token_hex(&session.token),
+        codec: Codec::H264Baseline,
+        width: 64,
+        height: 64,
+        fps: 60,
+        bitrate_kbps: 1000,
+        encoder: "x".repeat(60_000),
+        audio: None,
+        audio_problem: String::new(),
+    };
+    let (tx, rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let reason = server.control(&session, host, accept, None, || {
+            panic!("blocked Accept must fail")
+        });
+        tx.send(reason).unwrap();
+    });
+    assert!(rx
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+        .contains("before the stream started"));
+    worker.join().unwrap();
+}
+
+#[test]
+fn an_opening_reservation_is_busy_before_a_viewer_is_installed() {
+    let server = Server::bind(0, Options::default()).unwrap();
+    assert!(!server.busy());
+    let guard = server.opening.lock();
+    assert!(server.busy());
+    assert!(server.status().viewer.is_none());
+    drop(guard);
+    assert!(!server.busy());
+}
+
+#[test]
+fn ending_revokes_and_releases_input_immediately() {
+    struct Sink(Arc<AtomicUsize>);
+    impl InputSink for Sink {
+        fn apply(&mut self, _: &input::Event, _: DisplayRect) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn release_all(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let session = session("127.0.0.1:9".parse().unwrap());
+    let releases = Arc::new(AtomicUsize::new(0));
+    session.input.lock().sink = Some(Box::new(Sink(releases.clone())));
+    session.end(end::ENDED, "done");
+    assert!(session.input.lock().sink.is_none());
+    assert_eq!(releases.load(Ordering::Relaxed), 1);
+    session.end(end::ENDED, "again");
+    assert_eq!(releases.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn video_reopen_failure_uses_remaining_budget() {
+    let server = Server::bind(0, Options::default()).unwrap();
+    let session = session("127.0.0.1:9".parse().unwrap());
+    let mut attempts = 0;
+    let pipeline = || {
+        Box::new(Video {
+            info: info(),
+            held: Arc::new(AtomicBool::new(true)),
+            next: Box::new(|_, _, _| anyhow::bail!("capture lost")),
+        }) as Box<dyn VideoPipeline>
+    };
+    send_video(&server, &session, pipeline(), config(), |_| {
+        attempts += 1;
+        if attempts == 1 {
+            anyhow::bail!("temporarily busy");
+        }
+        Ok(pipeline())
+    });
+    assert_eq!(attempts, VIDEO_RECOVERIES);
+}
+
+#[test]
 fn repeated_video_errors_release_exclusive_capture_and_have_a_retry_budget() {
     let server = Server::bind(0, Options::default()).unwrap();
     let session = session("127.0.0.1:9".parse().unwrap());

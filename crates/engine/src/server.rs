@@ -156,13 +156,22 @@ impl Server {
         status
     }
 
+    /// Includes a prepared stream waiting for its HTTP upgrade.
+    pub fn busy(&self) -> bool {
+        *self.opening.busy.lock() || self.current.lock().is_some()
+    }
+
     /// Ends the running session, if any.
-    pub fn stop(&self, code: u32, message: &str) {
+    pub fn stop(&self, code: u32, message: &str) -> bool {
         let current = self.current.lock().clone();
         if let Some(session) = current {
             session.end(code, message);
-            session.wait_finished(TAKEOVER_WAIT);
+            if !session.wait_finished(TAKEOVER_WAIT) {
+                self.log("stream cleanup did not finish before the stop deadline".into());
+                return false;
+            }
         }
+        !self.busy()
     }
 
     fn log(&self, line: String) {
@@ -361,7 +370,7 @@ impl Server {
         });
         {
             let mut state = session.input.lock();
-            if let Some(sink) = state.sink.as_mut() {
+            if let Some(mut sink) = state.sink.take() {
                 sink.release_all();
             }
         }
@@ -395,6 +404,9 @@ impl Server {
             Option<std::thread::JoinHandle<()>>,
         ),
     ) -> String {
+        if let Err(e) = tcp.set_write_timeout(Some(Duration::from_secs(2))) {
+            return format!("cannot bound control writes: {e}");
+        }
         let _ = tcp.set_nodelay(true);
         let mut writer = match tcp.try_clone() {
             Ok(w) => w,
@@ -518,7 +530,9 @@ impl Server {
             }
             let addr = *session.addr.lock();
             match addr {
-                None if now - last_hello >= HELLO_EVERY => {
+                None if !session.announced.ip().is_loopback()
+                    && now - last_hello >= HELLO_EVERY =>
+                {
                     let mut buf = Vec::with_capacity(16);
                     wire::write_hello(&mut buf, session.id, None);
                     let _ = self.udp.send_to(&buf, session.announced);
@@ -675,6 +689,10 @@ impl TransportState {
 
 impl Session {
     fn end(&self, code: u32, message: &str) {
+        let mut input = self.input.lock();
+        if let Some(mut sink) = input.sink.take() {
+            sink.release_all();
+        }
         let mut ended = self.ended.lock();
         if ended.is_none() {
             *ended = Some(End {
@@ -770,18 +788,23 @@ fn receive(server: Weak<Server>) {
             Datagram::Input { first, events, .. } => {
                 let next = {
                     let mut guard = session.input.lock();
+                    if session.stopping() {
+                        continue;
+                    }
                     let state = &mut *guard;
                     let display = state.display;
                     let sink = &mut state.sink;
-                    state.receiver.receive(first, events.iter(), |event| {
+                    state.receiver.try_receive(first, events.iter(), |event| {
                         let Some(sink) = sink.as_mut() else {
-                            return;
+                            return Ok(());
                         };
                         if event == input::Event::ReleaseAll {
                             sink.release_all();
                         } else if let Err(e) = sink.apply(&event, display) {
-                            tracing::debug!("input {event:?}: {e:#}");
+                            tracing::warn!("input {event:?}: {e:#}");
+                            return Err(e);
                         }
+                        Ok(())
                     })
                 };
                 wire::write_input_ack(&mut out, session.id, next);
@@ -864,21 +887,35 @@ fn encode_video(
                 server.log(format!("video stopped: {e:#}; starting it again"));
                 // Some capture APIs allow only one owner of an output.
                 drop(pipeline);
-                let now = Instant::now();
-                recoveries.retain(|t| now - *t < VIDEO_RECOVERY_WINDOW);
-                if recoveries.len() < VIDEO_RECOVERIES {
+                let mut failure = e;
+                loop {
+                    if session.stopping() {
+                        return;
+                    }
+                    let now = Instant::now();
+                    recoveries.retain(|t| now - *t < VIDEO_RECOVERY_WINDOW);
+                    if recoveries.len() >= VIDEO_RECOVERIES {
+                        session.end(
+                            end::CAPTURE_FAILED,
+                            &format!("The host could not capture its screen: {failure:#}"),
+                        );
+                        return;
+                    }
                     recoveries.push_back(now);
-                    if let Ok(p) = reopen(&config) {
-                        pipeline = p;
-                        session.keyframe.store(true, Ordering::Release);
-                        continue;
+                    match reopen(&config) {
+                        Ok(p) => {
+                            pipeline = p;
+                            break;
+                        }
+                        Err(e) => {
+                            server.log(format!("video reopen failed: {e:#}"));
+                            failure = e;
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
                     }
                 }
-                session.end(
-                    end::CAPTURE_FAILED,
-                    &format!("The host could not capture its screen: {e:#}"),
-                );
-                return;
+                session.keyframe.store(true, Ordering::Release);
+                continue;
             }
         };
         let next_info = pipeline.info();

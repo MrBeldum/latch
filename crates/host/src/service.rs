@@ -20,8 +20,8 @@ use crate::update;
 use crate::wake::{self, WakeInfo};
 use anyhow::{Context, Result};
 use latch_core::api::{
-    Ack, Clipboard, DisplayRequest, NatReport, PowerAction, PowerRequest, Status, Streamer,
-    CLIPBOARD_PATH, UPDATE_PATH,
+    Ack, Clipboard, DisplayRequest, NatReport, PowerRequest, Status, Streamer, CLIPBOARD_PATH,
+    UPDATE_PATH,
 };
 use latch_core::http::{self, Request, Response};
 use latch_core::tailscale::{self, is_tailnet_ip};
@@ -86,6 +86,8 @@ pub struct Service {
     nat: Mutex<Option<NatReport>>,
     nat_running: AtomicBool,
     update_running: Arc<AtomicBool>,
+    admission: Mutex<()>,
+    power_pending: Arc<AtomicBool>,
 }
 
 impl Service {
@@ -111,6 +113,8 @@ impl Service {
             nat: Mutex::new(None),
             nat_running: AtomicBool::new(false),
             update_running: Arc::new(AtomicBool::new(false)),
+            admission: Mutex::new(()),
+            power_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -119,16 +123,12 @@ impl Service {
     }
 
     fn someone_watching(&self) -> bool {
-        self.server
-            .lock()
-            .as_ref()
-            .is_some_and(|s| s.status().viewer.is_some())
+        self.server.lock().as_ref().is_some_and(|s| s.busy())
     }
 
-    fn stop_stream(&self) {
-        if let Some(server) = self.server.lock().as_ref() {
-            server.stop(end::HOST_STOPPING, "This host is stopping.");
-        }
+    fn stop_stream(&self) -> bool {
+        let server = self.server.lock().clone();
+        server.is_none_or(|server| server.stop(end::HOST_STOPPING, "This host is stopping."))
     }
 
     fn streaming_status(&self) -> Streamer {
@@ -257,13 +257,7 @@ impl Service {
         http::serve_with_auth(
             listener,
             move |peer| authorizer.authorized(peer.ip()),
-            move |peer, path, _headers, _len| {
-                if path == UPDATE_PATH {
-                    body_authorizer.caller(peer).allowed()
-                } else {
-                    false
-                }
-            },
+            move |peer, _path, _headers, _len| body_authorizer.caller(peer).allowed(),
             move |peer, req| handler.handle(peer, req),
         );
         Ok(())
@@ -423,16 +417,10 @@ impl Service {
         }
         // Once: a new copy that cannot start is not retried every minute.
         self.reinstall_tried.store(true, Ordering::Release);
-        match update::hand_over(stamp.path(), update::STARTUP_GRACE) {
-            Ok(_) => {
-                self.stop_stream();
-                self.log("Latch was reinstalled; the new copy takes over the service");
-                std::process::exit(0);
-            }
-            Err(e) => self.log(format!(
-                "Latch was reinstalled, but the new copy did not start: {e:#}"
-            )),
-        }
+        self.log(format!(
+            "Latch was reinstalled at {}; restart it locally to use the new copy (no service supervisor is running)",
+            stamp.path().display()
+        ));
     }
 
     /// `tailscale netcheck` on its own thread, once at a time.
@@ -734,7 +722,9 @@ impl Service {
                 Err(_) => Response::json(400, &Ack::err("expected {\"text\"}")),
             },
             ("POST", "/v1/quit") if local => {
-                self.stop_stream();
+                if !self.stop_stream() {
+                    return Response::json(409, &Ack::err("stream cleanup is still running"));
+                }
                 self.log("control panel asked the service to stop");
                 std::thread::spawn(|| {
                     std::thread::sleep(Duration::from_millis(300));
@@ -771,6 +761,7 @@ impl Service {
                 ),
             );
         }
+        let _admission = self.admission.lock();
         if self.update_running.swap(true, Ordering::AcqRel) {
             return Response::json(409, &Ack::err("an update is already being installed"));
         }
@@ -835,6 +826,11 @@ impl Service {
     }
 
     fn stream(&self, peer: SocketAddr, req: &Request) -> Response {
+        let _admission = self.admission.lock();
+        if self.update_running.load(Ordering::Acquire) || self.power_pending.load(Ordering::Acquire)
+        {
+            return Response::json(409, &Ack::err("the host is updating or stopping"));
+        }
         if req.header("upgrade") != Some(control::UPGRADE) {
             return Response::json(400, &Ack::err("expected the Latch stream Upgrade header"));
         }
@@ -844,6 +840,11 @@ impl Service {
         };
         let Some(server) = self.server.lock().clone() else {
             return Response::json(503, &Ack::err("the stream server is not listening"));
+        };
+        let peer = if peer.ip().is_loopback() {
+            media_peer(peer, tailscale::whois_addr(peer).ok().flatten())
+        } else {
+            peer
         };
         match server.prepare(request, peer) {
             Ok(prepared) => {
@@ -913,26 +914,30 @@ impl Service {
             self.log(format!("{what} requested by {from}, refused: {why}"));
             return Response::json(200, &Ack::err(why));
         }
-        self.stop_stream();
-        self.log(format!("{what} requested by {from}"));
-        if cfg!(target_os = "macos") && action != PowerAction::Sleep {
-            // System Events answers at once, or not without someone at the
-            // Mac; either way the one who asked hears which.
-            return match crate::power::perform(action) {
-                Ok(()) => Response::json(200, &Ack::ok()),
-                Err(e) => {
-                    self.log(format!("{what} failed: {e:#}"));
-                    Response::json(200, &Ack::err(format!("{e:#}")))
-                }
-            };
+        let _admission = self.admission.lock();
+        if self.power_pending.swap(true, Ordering::AcqRel) {
+            return Response::json(409, &Ack::err("a power action is already pending"));
         }
-        // Reply first: sleep can suspend the machine before the bytes leave.
+        self.log(format!("{what} requested by {from}"));
+        let server = self.server.lock().clone();
         let log = self.log.clone();
+        let pending = self.power_pending.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(400));
+            if let Some(server) = server {
+                if !server.stop(end::HOST_STOPPING, "This host is stopping.") {
+                    push_log(
+                        &log,
+                        "power action cancelled: stream cleanup did not finish".into(),
+                    );
+                    pending.store(false, Ordering::Release);
+                    return;
+                }
+            }
             if let Err(e) = crate::power::perform(action) {
                 push_log(&log, format!("{what} failed: {e:#}"));
             }
+            pending.store(false, Ordering::Release);
         });
         Response::json(200, &Ack::ok())
     }
@@ -1007,6 +1012,16 @@ impl Caller {
             Caller::Peer { allowed } => allowed,
         }
     }
+}
+
+fn media_peer(peer: SocketAddr, who: Option<tailscale::WhoIs>) -> SocketAddr {
+    let ip = who.and_then(|w| {
+        w.node.addresses.into_iter().find_map(|s| {
+            let ip: IpAddr = s.split('/').next()?.parse().ok()?;
+            (ip.is_ipv4() && tailscale::is_tailnet_ip(ip)).then_some(ip)
+        })
+    });
+    ip.map_or(peer, |ip| SocketAddr::new(ip, peer.port()))
 }
 
 /// Who is behind a loopback connection. Only with userspace networking
@@ -1308,6 +1323,32 @@ fn push_log(log: &Mutex<VecDeque<String>>, msg: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn userspace_media_announcement_uses_the_whois_tailnet_address() {
+        let peer = "127.0.0.1:1234".parse().unwrap();
+        let who = serde_json::from_str(
+            r#"{"Node":{"Addresses":["fd7a:115c:a1e0::1/128","100.64.0.3/32"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            media_peer(peer, Some(who)),
+            "100.64.0.3:1234".parse().unwrap()
+        );
+        assert_eq!(media_peer(peer, None), peer);
+    }
+
+    #[test]
+    fn pending_update_and_power_refuse_streams_before_preparation() {
+        let svc = Service::new();
+        let req = Request::default();
+        let peer = "100.64.0.1:1234".parse().unwrap();
+        svc.update_running.store(true, Ordering::Release);
+        assert_eq!(svc.stream(peer, &req).status, 409);
+        svc.update_running.store(false, Ordering::Release);
+        svc.power_pending.store(true, Ordering::Release);
+        assert_eq!(svc.stream(peer, &req).status, 409);
+    }
 
     #[test]
     fn only_a_mac_that_is_not_shared_opens_without_the_service() {

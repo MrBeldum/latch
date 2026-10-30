@@ -153,10 +153,6 @@ impl<'a> DeadlineStream<'a> {
             deadline: Some(deadline),
         }
     }
-
-    fn clear_deadline(&mut self) {
-        self.deadline = None;
-    }
 }
 
 impl<'a> Read for DeadlineStream<'a> {
@@ -186,12 +182,13 @@ pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
 
 fn read_request_from<B>(
     deadline_stream: &mut DeadlineStream<'_>,
-    allow_large_body: B,
+    allow_body: B,
 ) -> Result<Option<std::result::Result<Request, Response>>>
 where
     B: FnOnce(&str, &[(String, String)], u64) -> bool,
 {
-    let mut reader = BufReader::new(deadline_stream);
+    // Never read past the request: the socket may be upgraded below.
+    let mut reader = BufReader::with_capacity(1, deadline_stream);
     let mut remaining = MAX_HEADER;
     let Some(line) = read_line(&mut reader, &mut remaining)? else {
         return Ok(None);
@@ -212,26 +209,14 @@ where
     if content_length > max_body(&path) as u64 {
         bail!("body too large ({content_length} bytes)");
     }
-    reader.get_mut().clear_deadline();
-
+    if !allow_body(&path, &headers, content_length) {
+        return Ok(Some(Err(Response::json(
+            403,
+            &crate::api::Ack::err("not a machine on this PC's Tailscale account"),
+        ))));
+    }
     if content_length > MAX_BODY as u64 {
-        if !allow_large_body(&path, &headers, content_length) {
-            return Ok(Some(Err(Response::json(
-                403,
-                &crate::api::Ack::err("not a machine on this PC's Tailscale account"),
-            ))));
-        }
-        reader
-            .get_mut()
-            .stream
-            .set_read_timeout(Some(UPDATE_BODY_TIMEOUT))
-            .map_err(io_err)?;
-    } else {
-        reader
-            .get_mut()
-            .stream
-            .set_read_timeout(Some(IDLE_TIMEOUT))
-            .map_err(io_err)?;
+        reader.get_mut().deadline = Some(Instant::now() + UPDATE_BODY_TIMEOUT);
     }
 
     // Grow only as bytes arrive; an untrusted size must not reserve the
@@ -318,13 +303,13 @@ where
     serve_with_auth(
         listener,
         authorize,
-        |_, path, _, _| path == crate::api::UPDATE_PATH,
+        |_, path, _, len| len <= MAX_BODY as u64 || path == crate::api::UPDATE_PATH,
         handler,
     );
 }
 
 /// Like [`serve_with_peer_check`], but runs `allow_body` after reading the
-/// request head and before reading or buffering a large body (over `MAX_BODY`).
+/// request head and before reading any body.
 pub fn serve_with_auth<A, B, F>(listener: TcpListener, authorize: A, allow_body: B, handler: F)
 where
     A: Fn(SocketAddr) -> bool + Send + Sync + 'static,
@@ -930,7 +915,8 @@ mod tests {
         let mut s = TcpStream::connect(addr).unwrap();
         s.write_all(b"not http at all\r\n\r\n").unwrap();
         let mut out = String::new();
-        s.read_to_string(&mut out).unwrap();
+        let result = s.read_to_string(&mut out);
+        assert!(result.is_ok() || result.is_err_and(|e| e.kind() == ErrorKind::ConnectionReset));
         assert!(out.starts_with("HTTP/1.1 400"), "{out}");
     }
 
@@ -1005,6 +991,38 @@ mod tests {
         .unwrap()
         .unwrap_err();
         assert_eq!(refused.status, 404);
+    }
+
+    #[test]
+    fn request_reader_leaves_pipelined_control_bytes_on_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client
+            .write_all(b"POST /v1/stream HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}MARK")
+            .unwrap();
+        let (mut host, _) = listener.accept().unwrap();
+        host.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        assert_eq!(read_request(&mut host).unwrap().unwrap().body, b"{}");
+        let mut marker = [0; 4];
+        host.read_exact(&mut marker).unwrap();
+        assert_eq!(&marker, b"MARK");
+    }
+
+    #[test]
+    fn small_body_is_authorized_before_it_is_read() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client
+            .write_all(b"POST /v1/power HTTP/1.1\r\nContent-Length: 2\r\n\r\n")
+            .unwrap();
+        let (mut host, _) = listener.accept().unwrap();
+        let mut stream =
+            DeadlineStream::new(&mut host, Instant::now() + Duration::from_millis(100));
+        let result = read_request_from(&mut stream, |_, _, _| false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.unwrap_err().status, 403);
     }
 
     #[test]

@@ -72,8 +72,8 @@ impl RotatingLog {
     /// rename a file that is still open, and to replace an existing
     /// destination, hence dropping the handle and clearing `.1` first.
     ///
-    /// Logging continues whatever happens: a failed move still leaves an
-    /// open file behind, and the caller keeps writing to it.
+    /// A failed move leaves the old file intact; writes are discarded until
+    /// rotation succeeds so disk usage stays bounded.
     fn rotate(&mut self) -> io::Result<()> {
         if let Some(mut f) = self.file.take() {
             let _ = f.flush();
@@ -93,17 +93,22 @@ impl RotatingLog {
 impl Write for RotatingLog {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.written + buf.len() as u64 > self.max_bytes {
-            // A failed rollover must not lose the line or kill logging: an
-            // unwritable `.1` (a permission or disk problem) leaves the
-            // live file as it was and the write goes on as an append.
-            let _ = self.rotate();
+            // An unwritable backup must not allow unlimited append growth.
+            if self.rotate().is_err() {
+                // Preserve the existing log rather than grow it without a cap.
+                return Ok(buf.len());
+            }
         }
         let file = match self.file.as_mut() {
             Some(f) => f,
             // Only reachable if a rollover could not reopen the log.
             None => self.file.insert(Self::append_to(&self.path)?),
         };
-        let n = file.write(buf)?;
+        let available = self.max_bytes.saturating_sub(self.written) as usize;
+        if available == 0 {
+            return Ok(buf.len());
+        }
+        let n = file.write(&buf[..buf.len().min(available)])?;
         self.written += n as u64;
         Ok(n)
     }
@@ -125,6 +130,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn failed_rotation_and_oversized_writes_remain_bounded() {
+        let dir = tmpdir("failed-roll");
+        let path = dir.join("service.log");
+        std::fs::create_dir(rotated_path(&path)).unwrap();
+        let mut log = RotatingLog::with_max(path.clone(), 64).unwrap();
+        for _ in 0..3 {
+            log.write_all(&[b'x'; 100]).unwrap();
+        }
+        log.flush().unwrap();
+        assert!(std::fs::metadata(path).unwrap().len() <= 64);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

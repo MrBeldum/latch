@@ -371,6 +371,19 @@ impl InputReceiver {
         events: impl IntoIterator<Item = Event>,
         mut apply: impl FnMut(Event),
     ) -> u32 {
+        self.try_receive(first, events, |event| {
+            apply(event);
+            Ok::<_, ()>(())
+        })
+    }
+
+    /// Failed injection stays pending and is not acknowledged.
+    pub fn try_receive<E>(
+        &mut self,
+        first: u32,
+        events: impl IntoIterator<Item = Event>,
+        mut apply: impl FnMut(Event) -> Result<(), E>,
+    ) -> u32 {
         for (i, event) in events.into_iter().enumerate() {
             let seq = first.wrapping_add(i as u32);
             let offset = seq.wrapping_sub(self.next);
@@ -379,7 +392,10 @@ impl InputReceiver {
             }
         }
         while let Some(event) = self.pending.remove(&self.next) {
-            apply(event);
+            if apply(event.clone()).is_err() {
+                self.pending.insert(self.next, event);
+                break;
+            }
             self.next = self.next.wrapping_add(1);
         }
         self.next
@@ -393,5 +409,24 @@ impl InputReceiver {
 impl Default for InputReceiver {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod fallible_tests {
+    use super::*;
+    #[test]
+    fn failed_release_is_retried_before_acknowledging() {
+        let mut receiver = InputReceiver::new();
+        assert_eq!(receiver.try_receive(0, [Event::ReleaseAll], |_| Err(())), 0);
+        let mut applied = 0;
+        assert_eq!(
+            receiver.try_receive(0, [Event::ReleaseAll], |_| {
+                applied += 1;
+                Ok::<_, ()>(())
+            }),
+            1
+        );
+        assert_eq!(applied, 1);
     }
 }
