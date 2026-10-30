@@ -436,7 +436,11 @@ impl View {
         actions: &mut Vec<Action>,
     ) {
         let live = env.live;
-        let w = overlay_width(420.0, screen.width());
+        let elapsed = live.started.elapsed();
+        if elapsed < Duration::from_secs(10) {
+            ctx.request_repaint_after(Duration::from_secs(10) - elapsed);
+        }
+        let w = overlay_width(440.0, screen.width());
         egui::Area::new(Id::new("stream-waiting"))
             .order(egui::Order::Middle)
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
@@ -461,6 +465,22 @@ impl View {
                             .font(theme::mono(theme::text::MONO - 0.5))
                             .color(P.text_tertiary),
                     );
+                    if elapsed >= Duration::from_secs(10) {
+                        ui.add_space(space::SM);
+                        ui.label(
+                            RichText::new("Connecting is taking longer than expected.")
+                                .font(theme::medium(theme::text::BODY))
+                                .color(P.warning),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "Check that {} is awake and UDP port 47850 is permitted through its firewall.",
+                                live.pc
+                            ))
+                            .font(theme::regular(theme::text::BODY - 1.0))
+                            .color(P.text_secondary),
+                        );
+                    }
                     ui.add_space(space::SM);
                     if ui::secondary_button(ui, "Cancel").clicked() {
                         actions.push(Action::Disconnect);
@@ -3429,6 +3449,22 @@ pub(crate) mod tests {
             sent.iter()
                 .any(|s| matches!(s, Sent::Text(t) if t == "世界")),
             "Event::Ime Commit must be forwarded to PC: {sent:?}"
+        );
+    }
+
+    #[test]
+    fn waiting_shows_troubleshooting_guidance_after_10_seconds() {
+        let (mut h, _) = recording(View::default(), false);
+        h.state_mut().live.as_mut().unwrap().started = Instant::now() - Duration::from_secs(11);
+        h.run_steps(1);
+        assert!(
+            h.query_by_label("Connecting is taking longer than expected.")
+                .is_some(),
+            "10s timeout guidance must be shown"
+        );
+        assert!(
+            h.query_by_label_contains("UDP port 47850").is_some(),
+            "port advice must be shown"
         );
     }
 }
