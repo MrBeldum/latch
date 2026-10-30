@@ -595,6 +595,16 @@ impl ClientApp {
         ctx: &egui::Context,
         (asked, limits): ((u32, u32, u32), Option<HostLimits>),
     ) {
+        // Only reconnect if monitor_size is known, or if currently fullscreen.
+        // In windowed mode with unknown monitor_size, screen_rect fluctuations are window resizes.
+        let monitor_size_known = ctx.input(|i| i.viewport().monitor_size.is_some());
+        let is_fullscreen = self.cfg.stream.fullscreen
+            || ctx.input(|i| i.viewport().fullscreen == Some(true));
+        if !monitor_size_known && !is_fullscreen {
+            self.display_change = None;
+            return;
+        }
+
         let size = Self::native_pixels(ctx);
         if size == self.display_at_connect || self.reconnect.is_some() {
             self.display_change = None;
@@ -3464,6 +3474,16 @@ pub(crate) mod snapshots {
         std::thread::sleep(Duration::from_millis(50));
         h.state_mut().poll_notice();
         assert!(h.state().pending_notice.is_none());
+    }
+
+    #[test]
+    fn window_resize_in_windowed_mode_with_unknown_monitor_does_not_arm_reconnect() {
+        let mut h = build(Setup::new(pcs()), MIN, 1.0, false);
+        h.state_mut().cfg.stream.fullscreen = false;
+        h.state_mut().display_at_connect = (1920, 1080);
+        let ctx = h.ctx.clone();
+        h.state_mut().follow_display(&ctx, ((1920, 1080, 60), None));
+        assert!(h.state().display_change.is_none());
     }
 
     #[test]
