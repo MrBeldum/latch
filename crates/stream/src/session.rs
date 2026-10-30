@@ -1174,10 +1174,13 @@ mod tests {
     #[test]
     fn decoded_picture_updates_session_stats_dimensions() {
         let (tx, _rx) = mpsc::channel();
+        let (wake_tx, wake_rx) = mpsc::channel();
         let frames = Arc::new(FrameSlot::default());
         let inner = Arc::new(Inner {
             events: tx,
-            wake: Box::new(|| {}),
+            wake: Box::new(move || {
+                let _ = wake_tx.send(());
+            }),
             frames,
             stats: Mutex::new(Stats {
                 width: 64,
@@ -1238,14 +1241,12 @@ mod tests {
             decode(&inner_clone, Box::new(FakeDecoder));
         });
 
-        let start = Instant::now();
-        while inner.stats.lock().width == 64 && start.elapsed() < Duration::from_millis(300) {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let decoded = wake_rx.recv_timeout(Duration::from_secs(10));
         inner.stop.store(true, Ordering::Release);
         inner.queue_cv.notify_all();
         handle.join().unwrap();
 
+        decoded.expect("decoder did not publish a frame");
         assert_eq!(inner.stats.lock().width, 128);
         assert_eq!(inner.stats.lock().height, 64);
     }

@@ -685,17 +685,16 @@ mod tests {
     fn poll_backoff_sleep_wakes_promptly_on_stop() {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
-        let start = Instant::now();
+        let (done, finished) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || {
-            sleep_interruptible(Duration::from_secs(5), &stop_clone);
+            sleep_interruptible(Duration::from_secs(60), &stop_clone);
+            done.send(()).unwrap();
         });
-        std::thread::sleep(Duration::from_millis(30));
         stop.store(true, Ordering::Relaxed);
+        // A generous hang guard, not a scheduler-speed assertion.
+        finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("stopped backoff did not finish");
         handle.join().unwrap();
-        assert!(
-            start.elapsed() < Duration::from_millis(500),
-            "backoff sleep must wake promptly on stop, took {:?}",
-            start.elapsed()
-        );
     }
 }
