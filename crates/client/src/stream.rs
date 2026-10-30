@@ -106,12 +106,74 @@ pub enum Action {
     MouseCapture(bool),
 }
 
+/// An unexpected connection drop reconnection state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectState {
+    pub attempt: u32,
+    pub deadline: Instant,
+    pub in_flight: bool,
+}
+
+pub fn delay_for_attempt(attempt: u32) -> Duration {
+    match attempt {
+        1 => Duration::from_secs(2),
+        2 => Duration::from_secs(5),
+        _ => Duration::from_secs(10),
+    }
+}
+
+impl ReconnectState {
+    pub fn new(now: Instant) -> Self {
+        Self::with_attempt(1, now)
+    }
+
+    pub fn with_attempt(attempt: u32, now: Instant) -> Self {
+        Self {
+            attempt,
+            deadline: now + delay_for_attempt(attempt),
+            in_flight: false,
+        }
+    }
+
+    pub fn remaining(&self, now: Instant) -> Duration {
+        self.deadline.saturating_duration_since(now)
+    }
+
+    pub fn remaining_secs(&self, now: Instant) -> u64 {
+        let rem = self.remaining(now);
+        if rem.is_zero() {
+            0
+        } else {
+            (rem.as_millis() as u64).div_ceil(1000)
+        }
+    }
+
+    pub fn is_due(&self, now: Instant) -> bool {
+        now >= self.deadline
+    }
+
+    pub fn next_attempt(&self, now: Instant) -> Option<Self> {
+        if self.attempt >= 3 {
+            None
+        } else {
+            Some(Self::with_attempt(self.attempt + 1, now))
+        }
+    }
+}
+
 /// An interruption in the live stream before dropping the stream window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Interruption {
-    Reconnecting,
+    Reconnecting(ReconnectState),
+    Failed,
     TakenOver(String),
     HostSleeping,
+}
+
+impl Interruption {
+    pub fn reconnecting(now: Instant) -> Self {
+        Self::Reconnecting(ReconnectState::new(now))
+    }
 }
 
 /// What the window knows that the stream screen should show.
@@ -367,6 +429,32 @@ impl View {
         }
     }
 
+    pub fn handle_interruption_at(&mut self, now: Instant) {
+        match &mut self.interrupted {
+            Some(Interruption::Reconnecting(state)) => {
+                if let Some(next) = state.next_attempt(now) {
+                    *state = next;
+                } else {
+                    self.interrupted = Some(Interruption::Failed);
+                }
+            }
+            Some(Interruption::Failed)
+            | Some(Interruption::TakenOver(_))
+            | Some(Interruption::HostSleeping) => {}
+            None => {
+                self.interrupted = Some(Interruption::reconnecting(now));
+            }
+        }
+    }
+
+    pub fn handle_interruption(&mut self) {
+        self.handle_interruption_at(Instant::now());
+    }
+
+    pub fn cancel_reconnect(&mut self) {
+        self.interrupted = None;
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, env: &Env<'_>) -> Vec<Action> {
         let live = env.live;
         let mut actions = Vec::new();
@@ -401,10 +489,10 @@ impl View {
         #[cfg(not(test))]
         let connected = live.session.connected();
 
-        let interruption = self
-            .interrupted
-            .clone()
-            .or((!connected && !waiting).then_some(Interruption::Reconnecting));
+        if !connected && !waiting && self.interrupted.is_none() {
+            self.handle_interruption();
+        }
+        let interruption = self.interrupted.clone();
 
         egui::CentralPanel::default()
             .frame(Frame::new().fill(Color32::BLACK))
@@ -559,24 +647,79 @@ impl View {
                     ui.vertical_centered(|ui| {
                         ui.spacing_mut().item_spacing.y = space::SM;
                         match interruption {
-                            Interruption::Reconnecting => {
-                                ui.add(ui::spinner(20.0, P.accent));
-                                ui.add_space(space::XS);
+                            Interruption::Reconnecting(state) => {
+                                let now = Instant::now();
+                                let remaining_secs = state.remaining_secs(now);
                                 ui.label(
                                     RichText::new("Connection lost")
                                         .font(theme::semibold(theme::text::TITLE))
                                         .color(P.text),
                                 );
-                                ui::muted(
-                                    ui,
-                                    format!("Attempting to restore stream to {}…", live.pc),
-                                );
+                                if remaining_secs > 0 && !state.in_flight {
+                                    ui::muted(
+                                        ui,
+                                        format!(
+                                            "Reconnecting in {remaining_secs} s · attempt {} of 3",
+                                            state.attempt
+                                        ),
+                                    );
+                                    let rem = state.remaining(now);
+                                    let subsecond = rem.subsec_nanos();
+                                    let next_tick = if subsecond == 0 {
+                                        Duration::from_secs(1)
+                                    } else {
+                                        Duration::from_nanos(subsecond as u64)
+                                    };
+                                    ctx.request_repaint_after(next_tick);
+                                } else {
+                                    if !state.in_flight {
+                                        if let Some(Interruption::Reconnecting(ref mut s)) =
+                                            self.interrupted
+                                        {
+                                            s.in_flight = true;
+                                        }
+                                        actions.push(Action::Reconnect);
+                                    }
+                                    ui::muted(
+                                        ui,
+                                        format!("Attempting to restore stream to {}…", live.pc),
+                                    );
+                                }
                                 ui.add_space(space::XS);
                                 ui.horizontal(|ui| {
                                     if ui::primary_button(ui, "Reconnect now").clicked() {
+                                        if let Some(Interruption::Reconnecting(ref mut s)) =
+                                            self.interrupted
+                                        {
+                                            s.in_flight = true;
+                                        }
                                         actions.push(Action::Reconnect);
                                     }
                                     if ui::ghost_button(ui, "Back to machines").clicked() {
+                                        self.cancel_reconnect();
+                                        actions.push(Action::Disconnect);
+                                    }
+                                });
+                            }
+                            Interruption::Failed => {
+                                ui.label(
+                                    RichText::new(format!("Couldn't reconnect to {}", live.pc))
+                                        .font(theme::semibold(theme::text::TITLE))
+                                        .color(P.text),
+                                );
+                                ui.add_space(space::XS);
+                                ui.horizontal(|ui| {
+                                    if ui::primary_button(ui, "Try again").clicked() {
+                                        self.interrupted =
+                                            Some(Interruption::Reconnecting(ReconnectState {
+                                                attempt: 1,
+                                                deadline: Instant::now(),
+                                                in_flight: true,
+                                            }));
+                                        actions.push(Action::Reconnect);
+                                    }
+                                    if ui::ghost_button(ui, "Back to machines").clicked() {
+                                        self.cancel_reconnect();
                                         actions.push(Action::Disconnect);
                                     }
                                 });
@@ -594,6 +737,7 @@ impl View {
                                         actions.push(Action::Reconnect);
                                     }
                                     if ui::ghost_button(ui, "Back to machines").clicked() {
+                                        self.cancel_reconnect();
                                         actions.push(Action::Disconnect);
                                     }
                                 });
@@ -608,6 +752,7 @@ impl View {
                                 ui.add_space(space::XS);
                                 ui.horizontal(|ui| {
                                     if ui::ghost_button(ui, "Back to machines").clicked() {
+                                        self.cancel_reconnect();
                                         actions.push(Action::Disconnect);
                                     }
                                 });
@@ -3660,18 +3805,22 @@ pub(crate) mod tests {
             "10s timeout guidance must be shown"
         );
         assert!(
-            h.query_by_label_contains("signed in to Tailscale").is_some(),
+            h.query_by_label_contains("signed in to Tailscale")
+                .is_some(),
             "Tailscale sign-in advice must be shown"
         );
         assert!(
-            h.query_by_label("The connection is going through a Tailscale relay, which can be slow.")
-                .is_none(),
+            h.query_by_label(
+                "The connection is going through a Tailscale relay, which can be slow."
+            )
+            .is_none(),
             "relay warning should not be shown when direct"
         );
 
         // When the lobby/discovery path is relayed:
         let (mut h_relayed, _) = recording(View::default(), false);
-        h_relayed.state_mut().live.as_mut().unwrap().started = Instant::now() - Duration::from_secs(11);
+        h_relayed.state_mut().live.as_mut().unwrap().started =
+            Instant::now() - Duration::from_secs(11);
         h_relayed.state_mut().live.as_mut().unwrap().path = crate::path::Path {
             direct: Some(false),
             relay: "tok".into(),
@@ -3681,7 +3830,9 @@ pub(crate) mod tests {
         h_relayed.run_steps(1);
         assert!(
             h_relayed
-                .query_by_label("The connection is going through a Tailscale relay, which can be slow.")
+                .query_by_label(
+                    "The connection is going through a Tailscale relay, which can be slow."
+                )
                 .is_some(),
             "relay warning must be shown when relayed"
         );
@@ -3753,8 +3904,8 @@ pub(crate) mod tests {
         live.frames.publish(latch_stream::video::Frame::default());
         assert!(live.frames.seq() > 0);
 
-        // Using Tap or explicit interrupted state to avoid sleeping
-        view.interrupted = Some(Interruption::Reconnecting);
+        // Using explicit interrupted state to avoid sleeping
+        view.interrupted = Some(Interruption::reconnecting(Instant::now()));
 
         let mut h = harness_with(
             Vec2::new(1400.0, 860.0),
@@ -3776,5 +3927,123 @@ pub(crate) mod tests {
         h.get_by_label("Back to machines").simulate_click();
         h.run_steps(2);
         assert!(h.state().actions.contains(&Action::Disconnect));
+    }
+
+    #[test]
+    fn reconnect_state_transitions_countdown_and_attempts() {
+        let mut view = View::default();
+        let t0 = Instant::now();
+
+        // 1. Initial interruption: attempt 1 scheduled after 2 s
+        view.handle_interruption_at(t0);
+        let Some(Interruption::Reconnecting(ref s1)) = view.interrupted else {
+            panic!("expected Reconnecting state");
+        };
+        assert_eq!(s1.attempt, 1);
+        assert_eq!(s1.deadline, t0 + Duration::from_secs(2));
+        assert_eq!(s1.remaining_secs(t0), 2);
+        assert_eq!(s1.remaining_secs(t0 + Duration::from_millis(1500)), 1);
+        assert_eq!(s1.remaining_secs(t0 + Duration::from_secs(2)), 0);
+        assert!(s1.is_due(t0 + Duration::from_secs(2)));
+
+        // 2. Attempt 1 fails: attempt 2 scheduled after 5 s
+        let t1 = t0 + Duration::from_secs(2);
+        view.handle_interruption_at(t1);
+        let Some(Interruption::Reconnecting(ref s2)) = view.interrupted else {
+            panic!("expected Reconnecting state for attempt 2");
+        };
+        assert_eq!(s2.attempt, 2);
+        assert_eq!(s2.deadline, t1 + Duration::from_secs(5));
+        assert_eq!(s2.remaining_secs(t1), 5);
+        assert_eq!(s2.remaining_secs(t1 + Duration::from_secs(5)), 0);
+        assert!(s2.is_due(t1 + Duration::from_secs(5)));
+
+        // 3. Attempt 2 fails: attempt 3 scheduled after 10 s
+        let t2 = t1 + Duration::from_secs(5);
+        view.handle_interruption_at(t2);
+        let Some(Interruption::Reconnecting(ref s3)) = view.interrupted else {
+            panic!("expected Reconnecting state for attempt 3");
+        };
+        assert_eq!(s3.attempt, 3);
+        assert_eq!(s3.deadline, t2 + Duration::from_secs(10));
+        assert_eq!(s3.remaining_secs(t2), 10);
+        assert_eq!(s3.remaining_secs(t2 + Duration::from_secs(10)), 0);
+        assert!(s3.is_due(t2 + Duration::from_secs(10)));
+
+        // 4. Attempt 3 fails: exhausted retries transitions to Failed
+        let t3 = t2 + Duration::from_secs(10);
+        view.handle_interruption_at(t3);
+        assert_eq!(view.interrupted, Some(Interruption::Failed));
+    }
+
+    #[test]
+    fn reconnect_state_cancel_stops_retries() {
+        let mut view = View::default();
+        let t0 = Instant::now();
+        view.handle_interruption_at(t0);
+        assert!(view.interrupted.is_some());
+
+        // Cancelling stops pending retries and clears state
+        view.cancel_reconnect();
+        assert!(view.interrupted.is_none());
+    }
+
+    #[test]
+    fn reconnect_state_takeover_does_not_retry() {
+        let mut view = View {
+            interrupted: Some(Interruption::TakenOver("Another device connected".into())),
+            ..Default::default()
+        };
+
+        // Interruption handler must not overwrite or retry takeover
+        let t0 = Instant::now();
+        view.handle_interruption_at(t0);
+        assert_eq!(
+            view.interrupted,
+            Some(Interruption::TakenOver("Another device connected".into()))
+        );
+    }
+
+    #[test]
+    fn in_stream_reconnecting_overlay_countdown_and_exhaustion_ui() {
+        let mut view = view_with_bar();
+        let live = dummy_live(&egui::Context::default());
+        live.frames.publish(latch_stream::video::Frame::default());
+
+        let t0 = Instant::now();
+        view.handle_interruption_at(t0);
+
+        let mut h = harness_with(
+            Vec2::new(1400.0, 860.0),
+            1.0,
+            false,
+            fixture(view, Extra::default()),
+        );
+        h.state_mut().live = Some(live);
+        h.run_steps(1);
+
+        // Shows countdown
+        assert!(h.query_by_label("Connection lost").is_some());
+        assert!(h.query_by_label_contains("Reconnecting in").is_some());
+        assert!(h.query_by_label_contains("attempt 1 of 3").is_some());
+        assert!(h.query_by_label("Reconnect now").is_some());
+
+        // Primary click triggers Action::Reconnect
+        h.get_by_label("Reconnect now").simulate_click();
+        h.run_steps(1);
+        assert!(h.state().actions.contains(&Action::Reconnect));
+
+        // When exhausted, Failed state shows "Couldn't reconnect to {pc}" with Try again
+        h.state_mut().actions.clear();
+        h.state_mut().view.interrupted = Some(Interruption::Failed);
+        h.run_steps(1);
+        assert!(h.query_by_label_contains("Couldn't reconnect to").is_some());
+        assert!(h.query_by_label("Try again").is_some());
+        assert!(h.query_by_label("Back to machines").is_some());
+
+        // "Try again" initiates Reconnect
+        h.get_by_label("Try again").simulate_click();
+        h.run_steps(1);
+        assert!(h.state().actions.contains(&Action::Reconnect));
     }
 }

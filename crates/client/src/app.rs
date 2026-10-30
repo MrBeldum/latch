@@ -509,6 +509,7 @@ impl ClientApp {
                         } else {
                             fit_window_to(ctx, live.requested.0, live.requested.1);
                         }
+                        self.view.interrupted = None;
                         self.view.stream_started(ctx, live, self.cfg.capture_mouse);
                         if let Some(problem) = host_audio_problem(&self.discovery, &live.node_id) {
                             self.view.toast(
@@ -529,7 +530,7 @@ impl ClientApp {
                         );
                         self.stream_failed = !cancelled;
                         if !cancelled && live.frames.seq() > 0 {
-                            self.view.interrupted = Some(crate::stream::Interruption::Reconnecting);
+                            self.view.handle_interruption();
                         }
                         prog.step = Step::Ended {
                             error: (!cancelled).then(|| stream_failure(&message)),
@@ -545,7 +546,7 @@ impl ClientApp {
                         } else if self.power_sent.load(Ordering::Relaxed) {
                             self.view.interrupted = Some(crate::stream::Interruption::HostSleeping);
                         } else if error && live.frames.seq() > 0 {
-                            self.view.interrupted = Some(crate::stream::Interruption::Reconnecting);
+                            self.view.handle_interruption();
                         }
                         if code != 0 {
                             tracing::warn!(
@@ -567,6 +568,13 @@ impl ClientApp {
                         .view
                         .toast(Tone::Warning, format!("No sound on this machine: {e}.")),
                 }
+            }
+            let is_reconnecting = matches!(
+                self.view.interrupted,
+                Some(crate::stream::Interruption::Reconnecting(ref s)) if s.in_flight
+            );
+            if is_reconnecting && matches!(prog.step, Step::Ended { .. }) && !prog.cancel {
+                self.view.handle_interruption();
             }
             // A stop we asked for ends without a Terminated event.
             let ended = matches!(prog.step, Step::Ended { .. });
@@ -799,8 +807,29 @@ impl eframe::App for ClientApp {
 
         let streaming = self.live.lock().is_some();
         if streaming {
-            // The stream repaints itself on every decoded frame.
-            ctx.request_repaint_after(Duration::from_millis(250));
+            if self.view.interrupted.is_none() {
+                // The stream repaints itself on every decoded frame.
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+
+            if let Some(pc) = self.reconnect.take() {
+                let prog_active = self.progress.lock().active();
+                if prog_active {
+                    self.reconnect = Some(pc);
+                    ctx.request_repaint_after(Duration::from_millis(250));
+                } else {
+                    let disc = self.discovery.lock().clone();
+                    let fresh = disc
+                        .pcs
+                        .iter()
+                        .find(|p| p.node_id == pc.node_id)
+                        .cloned()
+                        .unwrap_or(pc);
+                    self.connect(ctx, &fresh);
+                    self.commit();
+                }
+            }
+
             let live = self.live.clone();
             let guard = live.lock();
             if let Some(l) = guard.as_ref() {
@@ -852,10 +881,12 @@ impl eframe::App for ClientApp {
                 drop(guard);
                 for a in actions {
                     match a {
-                        Action::Disconnect => self.disconnect(),
+                        Action::Disconnect => {
+                            self.view.cancel_reconnect();
+                            self.disconnect();
+                        }
                         Action::Reconnect => {
                             self.reconnect = self.last_pc.clone();
-                            self.disconnect();
                         }
                         Action::Power(action) => self.power(ip, &name, action),
                         Action::Fullscreen(on) => {
