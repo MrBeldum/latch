@@ -148,6 +148,7 @@ pub struct View {
     bar_h: f32,
     confirm: Option<PowerAction>,
     confirm_install: bool,
+    pub(crate) confirm_disconnect: bool,
     poor: bool,
     poor_hinted: bool,
     toasts: Vec<Toast>,
@@ -238,6 +239,7 @@ impl Default for View {
             bar_h: size::TOOLBAR,
             confirm: None,
             confirm_install: false,
+            confirm_disconnect: false,
             poor: false,
             poor_hinted: false,
             toasts: Vec::new(),
@@ -318,6 +320,7 @@ impl View {
         self.confirm = None;
         self.settings = None;
         self.confirm_install = false;
+        self.confirm_disconnect = false;
         self.poor = false;
         self.poor_hinted = false;
         self.toasts.clear();
@@ -367,6 +370,9 @@ impl View {
         let bottom_gap = screen.bottom() - video.bottom();
         let popup = ctx.memory(|m| m.any_popup_open());
         let bar_visible = self.bar_shown || popup || self.confirm.is_some() || self.confirm_install;
+        if !bar_visible {
+            self.confirm_disconnect = false;
+        }
         let mut bar_rect = bar_visible
             .then(|| Rect::from_min_size(screen.min, Vec2::new(screen.width(), self.bar_h)));
         let waiting = live.frames.seq() == 0;
@@ -721,10 +727,21 @@ impl View {
                                     self.held.release_all(&live.input);
                                     self.set_captured(ctx, false);
                                     self.settings = Some(cfg.stream.clone());
+                                    self.confirm_disconnect = false;
                                 }
                                 toolbar_rule(ui);
-                                if ui::danger_button(ui, "Disconnect").clicked() {
-                                    actions.push(Action::Disconnect);
+                                let disc_label = if self.confirm_disconnect {
+                                    "Confirm Disconnect"
+                                } else {
+                                    "Disconnect"
+                                };
+                                if ui::danger_button(ui, disc_label).clicked() {
+                                    if self.confirm_disconnect {
+                                        actions.push(Action::Disconnect);
+                                        self.confirm_disconnect = false;
+                                    } else {
+                                        self.confirm_disconnect = true;
+                                    }
                                 }
                             });
                         });
@@ -1493,6 +1510,14 @@ impl View {
                 pressed,
                 modifiers: m,
             } if self.captured || at.over_stream || (!pressed && self.held.any_down()) => {
+                // The click lands where it was made: the pointer goes
+                // there first, before a capture would zero the motion.
+                if self.captured {
+                    self.flush_motion(out);
+                } else {
+                    self.moved_to = None;
+                    self.send_position(link, pos);
+                }
                 // A click on the picture puts the toolbar away and, when
                 // capture is on, takes the mouse. We complete capture before
                 // synchronizing modifiers and sending the click so grab's
@@ -1506,14 +1531,6 @@ impl View {
                 }
                 if at.keys_to_pc && !(m.ctrl && m.alt) {
                     self.held.modifiers(out, m, cmd_is_ctrl);
-                }
-                // The click lands where it was made: the pointer goes
-                // there first, before a capture would zero the motion.
-                if self.captured && !recaptured {
-                    self.flush_motion(out);
-                } else {
-                    self.moved_to = None;
-                    self.send_position(link, pos);
                 }
                 if let Some(b) = input::button(button) {
                     self.held.button(out, b, pressed);
@@ -3466,5 +3483,26 @@ pub(crate) mod tests {
             h.query_by_label_contains("UDP port 47850").is_some(),
             "port advice must be shown"
         );
+    }
+
+    #[test]
+    fn disconnect_requires_confirmation_in_toolbar() {
+        let mut h = harness(Vec2::new(1400.0, 860.0));
+        assert!(h.query_by_label("Disconnect").is_some());
+        assert!(h.query_by_label("Confirm Disconnect").is_none());
+
+        // First click requests confirmation
+        h.get_by_label("Disconnect").simulate_click();
+        h.run_steps(2);
+        assert!(
+            h.query_by_label("Confirm Disconnect").is_some(),
+            "Disconnect click must switch to Confirm Disconnect"
+        );
+        assert!(h.state().view.confirm_disconnect);
+
+        // Second click confirms and resets
+        h.get_by_label("Confirm Disconnect").simulate_click();
+        h.run_steps(2);
+        assert!(!h.state().view.confirm_disconnect);
     }
 }
