@@ -1,11 +1,9 @@
 //! A desktop encoder with one independently predicted slice per worker band.
 
-mod analyse;
 mod bits;
 mod cavlc;
 mod deblock;
 mod predict;
-mod rate;
 mod transform;
 mod worker;
 
@@ -37,8 +35,8 @@ pub struct EncodedInfo {
 }
 
 struct Worker {
-    tx: Option<mpsc::Sender<worker::Task>>,
-    rx: mpsc::Receiver<worker::Reply>,
+    tx: Option<mpsc::Sender<worker::Job>>,
+    rx: mpsc::Receiver<worker::Band>,
     handle: Option<JoinHandle<()>>,
 }
 impl Drop for Worker {
@@ -55,58 +53,14 @@ pub struct Encoder {
     workers: Vec<Worker>,
     reconstruction: Arc<Yuv420>,
     source: Option<Arc<Yuv420>>,
-    /// Row hashes of `source`, for the next frame's scroll search.
-    hashes: Arc<Vec<u64>>,
-    /// Motion vectors of the last coded frame, per macroblock.
-    mvs: Arc<Vec<(i32, i32)>>,
-    /// Its most common nonzero motion vector.
-    dominant: (i32, i32),
     quality: Arc<Vec<u8>>,
     frame_num: u32,
     idr_id: u32,
-    /// QP of the last coded frame, for skip-only frames.
     qp: u8,
-    rate: rate::RateControl,
+    model: f64,
     subpixel: bool,
     refresh_start: usize,
     window: VecDeque<usize>,
-    /// Each worker's last band, handed back for its buffers.
-    bands: Vec<Option<worker::Band>>,
-}
-
-/// What every band of one frame shares.
-struct Frame {
-    source: Arc<Yuv420>,
-    previous: Option<Arc<Yuv420>>,
-    half_pel: Option<Arc<predict::HalfPelPlanes>>,
-    /// Each band's scroll.
-    globals: Vec<(i32, i32)>,
-    /// The analysis's displacement per macroblock.
-    hints: Arc<Vec<(i32, i32)>>,
-    is_motion: bool,
-    idr: bool,
-    frame_num: u32,
-    refresh: usize,
-}
-
-/// One pass over the picture: its quantizer, bits for what changed and
-/// for refining what did not.
-struct Pass {
-    q: i32,
-    content: f64,
-    refine: f64,
-}
-
-/// A coded picture before deblocking.
-struct Coded {
-    data: Vec<u8>,
-    rec: Yuv420,
-    mbs: Vec<worker::Mb>,
-    skipped: u32,
-    qp_sum: u32,
-    /// Effective quantizer weighted by cost.
-    q: f64,
-    refine_bits: usize,
 }
 
 impl Encoder {
@@ -145,8 +99,8 @@ impl Encoder {
             let handle = thread::Builder::new()
                 .name(format!("h264-{i}"))
                 .spawn(move || {
-                    while let Ok(task) = rx.recv() {
-                        if out_tx.send(worker::run(task)).is_err() {
+                    while let Ok(job) = rx.recv() {
+                        if out_tx.send(worker::encode(job)).is_err() {
                             break;
                         }
                     }
@@ -160,19 +114,15 @@ impl Encoder {
         }
         let total = reconstruction.padded_width() / 16 * rows;
         Ok(Self {
-            rate: rate::RateControl::new(config.bitrate_kbps, config.fps),
             config,
-            bands: (0..workers.len()).map(|_| None).collect(),
             workers,
             reconstruction,
             source: None,
-            hashes: Arc::new(Vec::new()),
-            mvs: Arc::new(Vec::new()),
-            dominant: (0, 0),
             quality: Arc::new(vec![45; total]),
             frame_num: 0,
             idr_id: 0,
             qp: 30,
+            model: 0.,
             subpixel: true,
             refresh_start: 0,
             window: VecDeque::new(),
@@ -196,132 +146,203 @@ impl Encoder {
         }
         let frame_num = if idr { 0 } else { self.frame_num };
         let source = Arc::new(picture.clone());
-        let rows = picture.padded_height() / 16;
-        let width = picture.padded_width() / 16;
-        let total_mbs = rows * width;
-        let previous = if idr { None } else { self.source.clone() };
-
-        // Each worker looks at its band first: scroll, change and cost.
-        let analyses = self.analyse(&source, &previous)?;
-        let hashes: Vec<u64> = analyses
-            .iter()
-            .flat_map(|a| a.hashes.iter().copied())
-            .collect();
-        let row_costs: Vec<u32> = analyses
-            .iter()
-            .flat_map(|a| a.cost.iter().copied())
-            .collect();
-        let changed_mbs: usize = analyses.iter().map(|a| a.changed).sum();
-        let cost: f64 = row_costs.iter().map(|&c| c as f64).sum();
-        let intra: f64 = analyses
-            .iter()
-            .flat_map(|a| &a.intra)
-            .map(|&c| c as f64)
-            .sum();
-        let mut frame = Frame {
-            source,
-            previous,
-            half_pel: None,
-            globals: analyses.iter().map(|a| a.global).collect(),
-            hints: Arc::new(
-                analyses
-                    .iter()
-                    .flat_map(|a| a.mvs.iter().copied())
-                    .collect(),
-            ),
-            is_motion: changed_mbs * 2 > total_mbs,
-            idr,
-            frame_num,
-            refresh: (self.rate.budget() / 32.).max(1.) as usize,
+        let budget = self.config.bitrate_kbps as f64 * 1000. / self.config.fps as f64;
+        let complexity = complexity(picture, self.source.as_deref());
+        let debt =
+            self.window.iter().sum::<usize>() as f64 * 8. - budget * self.window.len() as f64;
+        let target = (budget - debt * 0.5).clamp(budget * 0.5, budget * 1.5);
+        let proposed = if self.model > 0. {
+            6. * (self.model * complexity / target).max(1e-6).log2() + 24.
+        } else {
+            // Start from bits per pixel rather than over-quantizing smaller/high-bitrate pictures.
+            8. + 6. * (picture.width as f64 * picture.height as f64 / budget).log2()
         };
-        let mut plan = self.rate.plan(
-            idr,
-            cost,
-            intra,
-            changed_mbs as f64 / total_mbs as f64,
-            self.quality.iter().any(|&q| q > 18),
-        );
-        if plan.intra() {
-            // Nothing earlier predicts this picture's bits: measure them.
-            let qa = rate::RateControl::first_trial(&plan);
-            let mut trials = vec![(qa, self.trial(&frame, &row_costs, qa)?)];
-            if let Some(qb) = self.rate.second_trial(&plan, qa, trials[0].1) {
-                trials.push((qb, self.trial(&frame, &row_costs, qb)?));
+        let lo = if self.source.is_none() {
+            18
+        } else {
+            self.qp.saturating_sub(4).max(18)
+        };
+        let hi = if self.source.is_none() {
+            51
+        } else {
+            (self.qp + 4).min(51)
+        };
+        let mut qp = (proposed.round() as u8).clamp(lo, hi);
+        // Exhaust normal quantization before dropping individual coefficients.
+        let mut suppression = if qp == 51 {
+            ((proposed - 51.).max(0.) / 6.).floor().min(10.) as u8
+        } else {
+            0
+        };
+        let changed_mbs = if let Some(old) = &self.source {
+            let pw = picture.padded_width();
+            let ph = picture.padded_height();
+            let mb_cols = pw / 16;
+            let mb_rows = ph / 16;
+            let mut changed_mbs = 0;
+            for my in 0..mb_rows {
+                let y = my * 16 + 8;
+                let s_row = y * picture.y_stride;
+                let o_row = y * old.y_stride;
+                for mx in 0..mb_cols {
+                    let x = mx * 16 + 8;
+                    if picture.y[s_row + x] != old.y[o_row + x] {
+                        changed_mbs += 1;
+                    }
+                }
             }
-            self.rate.fit(&mut plan, cost, &trials);
-        }
+            changed_mbs
+        } else {
+            0
+        };
+        let rows = picture.padded_height() / 16;
+        let total_mbs = rows * picture.padded_width() / 16;
+        let is_motion = changed_mbs * 2 > total_mbs;
+        let globals: Vec<_> = (0..self.workers.len())
+            .map(|i| {
+                if idr {
+                    (0, 0)
+                } else {
+                    worker::scroll(
+                        picture,
+                        self.source.as_ref().unwrap(),
+                        i * rows / self.workers.len(),
+                        (i + 1) * rows / self.workers.len(),
+                    )
+                }
+            })
+            .collect();
         // At high QP fractional search costs more than its quality gain; also skip tiny updates and scrolls.
-        let refine_motion = self.subpixel
-            && rate::split(plan.q).0 < 38
-            && changed_mbs * 32 > total_mbs
-            && frame.globals.contains(&(0, 0));
-        if !idr && refine_motion {
-            frame.half_pel = Some(Arc::new(predict::compute_half_pel(
+        let refine_motion =
+            self.subpixel && qp < 38 && changed_mbs * 32 > total_mbs && globals.contains(&(0, 0));
+        let half_pel = if !idr && refine_motion {
+            Some(Arc::new(predict::compute_half_pel(
                 &self.reconstruction.y,
                 self.reconstruction.y_stride,
                 self.reconstruction.padded_width(),
                 self.reconstruction.padded_height(),
-            )));
-        }
-        let budget = self.rate.budget();
-        let slope = self.rate.slope(&plan);
-        let mut pass = Pass {
-            q: plan.q,
-            content: plan.content,
-            refine: plan.refine,
+            )))
+        } else {
+            None
         };
-        let mut second = false;
-        let coded = loop {
-            let coded = self.code(&frame, &row_costs, &pass, slope)?;
-            let bits = coded.data.len() as f64 * 8.;
-            // One more pass at most: the first pass's size says how far off the plan was.
-            if !second && bits > plan.limit && pass.q < rate::MAX_Q {
-                pass = Pass {
-                    q: self.rate.replan(&plan, coded.q, bits),
-                    content: plan.content * 0.85,
-                    refine: 0.,
-                };
-                second = true;
-                continue;
+        let (data, rec, mbs, skipped, qp_sum) = loop {
+            let rows = picture.padded_height() / 16;
+            let width = picture.padded_width() / 16;
+            let refresh = (budget / 128.).max(1.) as usize;
+            for (i, worker) in self.workers.iter().enumerate() {
+                worker
+                    .tx
+                    .as_ref()
+                    .unwrap()
+                    .send(worker::Job {
+                        source: source.clone(),
+                        previous: self.source.clone(),
+                        reference: self.reconstruction.clone(),
+                        half_pel: half_pel.clone(),
+                        quality: self.quality.clone(),
+                        first: i * rows / self.workers.len(),
+                        end: (i + 1) * rows / self.workers.len(),
+                        qp,
+                        suppression,
+                        subpixel: half_pel.is_some() && qp < 38,
+                        is_motion,
+                        global: globals[i],
+                        idr,
+                        frame_num,
+                        idr_id: self.idr_id,
+                        refresh,
+                        refresh_start: self.refresh_start,
+                    })
+                    .map_err(|_| CodecError::Config("encoder worker stopped"))?;
+            }
+            let mut data = Vec::new();
+            if idr {
+                parameter_sets(&self.config, &mut data)?;
+            }
+            let mut rec = Yuv420::new(self.config.width, self.config.height);
+            let mut mbs = Vec::with_capacity(width * rows);
+            let mut skipped = 0;
+            let mut qp_sum = 0;
+            for worker in &self.workers {
+                let band = worker
+                    .rx
+                    .recv()
+                    .map_err(|_| CodecError::Config("encoder worker stopped"))?;
+                data.extend_from_slice(&band.nal);
+                skipped += band.skipped;
+                qp_sum += band.qp_sum;
+                let first = band.first * 16;
+                for (dp, sp, ds, ss, n) in [
+                    (
+                        &mut rec.y,
+                        &band.picture.y,
+                        rec.y_stride,
+                        band.picture.y_stride,
+                        1,
+                    ),
+                    (
+                        &mut rec.u,
+                        &band.picture.u,
+                        rec.c_stride,
+                        band.picture.c_stride,
+                        2,
+                    ),
+                    (
+                        &mut rec.v,
+                        &band.picture.v,
+                        rec.c_stride,
+                        band.picture.c_stride,
+                        2,
+                    ),
+                ] {
+                    for row in 0..band.picture.padded_height() / n {
+                        let d = (first / n + row) * ds;
+                        dp[d..d + ds].copy_from_slice(&sp[row * ss..row * ss + ds]);
+                    }
+                }
+                mbs.extend(band.mbs);
+            }
+            if data.len() as f64 * 8. > if idr { budget * 4. } else { target * 1.3 } {
+                if qp < 51 {
+                    let step = (6.
+                        * (data.len() as f64 * 8. / if idr { budget * 3.5 } else { target }).log2())
+                    .ceil() as u8;
+                    qp = (qp + step.clamp(1, 12)).min(51);
+                    continue;
+                }
+                if suppression < 10 {
+                    suppression += 1;
+                    continue;
+                }
             }
             // Refusing an impossible access unit preserves the reference and the caller's output.
-            if bits > budget * 8. {
+            if data.len() as f64 * 8. > budget * 8. {
                 return Err(CodecError::Config(
                     "frame exceeds eight bitrate intervals at the allowed QP",
                 ));
             }
-            break coded;
+            break (data, rec, mbs, skipped, qp_sum);
         };
-        let Coded {
-            mut data,
-            mut rec,
-            mbs,
-            skipped,
-            qp_sum,
-            q,
-            refine_bits,
-        } = coded;
-        if idr {
-            let mut sets = Vec::new();
-            parameter_sets(&self.config, &mut sets)?;
-            data.splice(0..0, sets);
-        }
+        let mut rec = rec;
         deblock::filter(&mut rec, &mbs);
         self.reconstruction = Arc::new(rec);
-        self.source = Some(frame.source);
-        self.hashes = Arc::new(hashes);
-        self.mvs = Arc::new(mbs.iter().map(|m| m.mv).collect());
-        self.dominant = dominant(&self.mvs);
+        self.source = Some(source);
         self.quality = Arc::new(mbs.iter().map(|m| m.quality).collect());
         self.frame_num = (frame_num + 1) & 65535;
         if idr {
             self.idr_id ^= 1;
         }
-        let bits = data.len() as f64 * 8.;
-        self.rate
-            .update(&plan, cost, bits, bits - refine_bits as f64, q);
-        self.qp = (qp_sum / mbs.len() as u32) as u8;
-        self.refresh_start = (self.refresh_start + frame.refresh) % self.quality.len();
+        self.qp = qp;
+        let measurement =
+            data.len() as f64 * 8. * 2f64.powf((qp as f64 + suppression as f64 * 6. - 24.) / 6.)
+                / complexity;
+        self.model = if self.model == 0. {
+            measurement
+        } else {
+            self.model * 0.2 + measurement * 0.8
+        };
+        self.refresh_start =
+            (self.refresh_start + (budget / 128.).max(1.) as usize) % self.quality.len();
         self.window.push_back(data.len());
         if self.window.len() > self.config.fps as usize {
             self.window.pop_front();
@@ -337,185 +358,8 @@ impl Encoder {
         })
     }
 
-    fn band(&self, i: usize) -> (usize, usize) {
-        let rows = self.reconstruction.padded_height() / 16;
-        let n = self.workers.len();
-        (i * rows / n, (i + 1) * rows / n)
-    }
-
-    fn analyse(
-        &self,
-        source: &Arc<Yuv420>,
-        previous: &Option<Arc<Yuv420>>,
-    ) -> Result<Vec<analyse::Analysis>, CodecError> {
-        for (i, worker) in self.workers.iter().enumerate() {
-            let (first, end) = self.band(i);
-            send(
-                worker,
-                worker::Task::Analyse(analyse::Job {
-                    source: source.clone(),
-                    previous: previous.clone(),
-                    previous_hashes: self.hashes.clone(),
-                    previous_mvs: self.mvs.clone(),
-                    dominant: self.dominant,
-                    first,
-                    end,
-                }),
-            )?;
-        }
-        self.workers
-            .iter()
-            .map(|worker| match receive(worker)? {
-                worker::Reply::Analysis(a) => Ok(a),
-                worker::Reply::Band(_) => unreachable!("an analysis was asked for"),
-            })
-            .collect()
-    }
-
-    fn job(&self, frame: &Frame, (first, end): (usize, usize), q: i32) -> worker::Job {
-        // The band holding row `first`, for its scroll.
-        let band = (0..self.workers.len())
-            .rposition(|i| self.band(i).0 <= first)
-            .unwrap_or(0);
-        worker::Job {
-            scratch: None,
-            source: frame.source.clone(),
-            previous: frame.previous.clone(),
-            reference: self.reconstruction.clone(),
-            half_pel: frame.half_pel.clone(),
-            quality: self.quality.clone(),
-            first,
-            end,
-            q,
-            rows: rate::RowControl::default(),
-            refine_bits: 0.,
-            subpixel: frame.half_pel.is_some() && rate::split(q).0 < 38,
-            is_motion: frame.is_motion,
-            global: frame.globals[band],
-            hints: frame.hints.clone(),
-            idr: frame.idr,
-            frame_num: frame.frame_num,
-            idr_id: self.idr_id,
-            refresh: frame.refresh,
-            refresh_start: self.refresh_start,
-        }
-    }
-
-    /// Estimates the frame's bits at quantizer `q` by coding a few rows
-    /// spread over the picture, scaled up by their share of the cost.
-    fn trial(&self, frame: &Frame, row_costs: &[u32], q: i32) -> Result<f64, CodecError> {
-        let rows = row_costs.len();
-        let width = self.reconstruction.padded_width() / 16;
-        let n = rows.min(8);
-        let sample: Vec<usize> = (0..n).map(|j| (2 * j + 1) * rows / (2 * n)).collect();
-        let weight = |r: usize| row_costs[r] as f64 + 32. * width as f64;
-        let scale =
-            (0..rows).map(weight).sum::<f64>() / sample.iter().map(|&r| weight(r)).sum::<f64>();
-        let workers = self.workers.len();
-        for (k, &row) in sample.iter().enumerate() {
-            let job = self.job(frame, (row, row + 1), q);
-            send(
-                &self.workers[k % workers],
-                worker::Task::Encode(Box::new(job)),
-            )?;
-        }
-        let mut bits = 0.;
-        for k in 0..sample.len() {
-            match receive(&self.workers[k % workers])? {
-                worker::Reply::Band(band) => bits += band.nal.len() as f64 * 8.,
-                worker::Reply::Analysis(_) => unreachable!("a band was asked for"),
-            }
-        }
-        Ok(bits * scale)
-    }
-
-    /// Codes the whole picture once, every band in parallel.
-    fn code(
-        &mut self,
-        frame: &Frame,
-        row_costs: &[u32],
-        pass: &Pass,
-        slope: f64,
-    ) -> Result<Coded, CodecError> {
-        let rows = row_costs.len();
-        let width = self.reconstruction.padded_width() / 16;
-        let cost: f64 =
-            row_costs.iter().map(|&c| c as f64).sum::<f64>() + 32. * (rows * width) as f64;
-        let mut shares = Vec::with_capacity(self.workers.len());
-        for i in 0..self.workers.len() {
-            let (first, end) = self.band(i);
-            let costs = &row_costs[first..end];
-            let share = (costs.iter().map(|&c| c as f64).sum::<f64>()
-                + 32. * ((end - first) * width) as f64)
-                / cost;
-            shares.push(share);
-            let mut job = self.job(frame, (first, end), pass.q);
-            job.scratch = self.bands[i].take();
-            job.rows = rate::RowControl::new(pass.content * share, costs, width, pass.q, slope);
-            // Refinement is spread by area: unchanged macroblocks cost nothing in the analysis.
-            job.refine_bits = pass.refine * (end - first) as f64 / rows as f64;
-            job.global = frame.globals[i];
-            send(&self.workers[i], worker::Task::Encode(Box::new(job)))?;
-        }
-        let mut coded = Coded {
-            data: Vec::new(),
-            rec: Yuv420::new(self.config.width, self.config.height),
-            mbs: Vec::with_capacity(width * rows),
-            skipped: 0,
-            qp_sum: 0,
-            q: 0.,
-            refine_bits: 0,
-        };
-        for (i, worker) in self.workers.iter().enumerate() {
-            let band = match receive(worker)? {
-                worker::Reply::Band(band) => band,
-                worker::Reply::Analysis(_) => unreachable!("a band was asked for"),
-            };
-            coded.data.extend_from_slice(&band.nal);
-            coded.skipped += band.skipped;
-            coded.qp_sum += band.qp_sum;
-            coded.q += band.q * shares[i];
-            coded.refine_bits += band.refine_bits;
-            let rec = &mut coded.rec;
-            let first = band.first * 16;
-            for (dp, sp, ds, ss, n) in [
-                (
-                    &mut rec.y,
-                    &band.picture.y,
-                    rec.y_stride,
-                    band.picture.y_stride,
-                    1,
-                ),
-                (
-                    &mut rec.u,
-                    &band.picture.u,
-                    rec.c_stride,
-                    band.picture.c_stride,
-                    2,
-                ),
-                (
-                    &mut rec.v,
-                    &band.picture.v,
-                    rec.c_stride,
-                    band.picture.c_stride,
-                    2,
-                ),
-            ] {
-                for row in 0..band.picture.padded_height() / n {
-                    let d = (first / n + row) * ds;
-                    dp[d..d + ds].copy_from_slice(&sp[row * ss..row * ss + ds]);
-                }
-            }
-            coded.mbs.extend_from_slice(&band.mbs);
-            self.bands[i] = Some(band);
-        }
-        Ok(coded)
-    }
-
     pub fn set_bitrate(&mut self, kbps: u32) {
         self.config.bitrate_kbps = kbps.max(1);
-        self.rate
-            .set_rate(self.config.bitrate_kbps, self.config.fps);
     }
 
     /// Enables adaptive fractional search (on by default); tiny desktop updates and scrolls skip it.
@@ -550,12 +394,12 @@ impl Encoder {
             b.ue((end - first) as u32);
             b.nal(0x41, &mut data);
         }
-        if data.len() as f64 * 8. > self.rate.budget() * 8. {
+        let budget = self.config.bitrate_kbps as f64 * 1000. / self.config.fps as f64;
+        if data.len() as f64 * 8. > budget * 8. {
             return Err(CodecError::Config(
                 "skip headers exceed eight bitrate intervals",
             ));
         }
-        self.rate.record(data.len() as f64 * 8.);
         self.frame_num = (self.frame_num + 1) & 65535;
         self.window.push_back(data.len());
         if self.window.len() > self.config.fps as usize {
@@ -594,31 +438,19 @@ impl Encoder {
     }
 }
 
-/// The most common nonzero vector, by whole samples.
-fn dominant(mvs: &[(i32, i32)]) -> (i32, i32) {
-    let mut whole: Vec<(i32, i32)> = mvs
-        .iter()
-        .filter(|&&mv| mv.0 / 4 != 0 || mv.1 / 4 != 0)
-        .map(|&(x, y)| (x / 4 * 4, y / 4 * 4))
-        .collect();
-    whole.sort_unstable();
-    whole
-        .chunk_by(|a, b| a == b)
-        .max_by_key(|run| run.len())
-        .map_or((0, 0), |run| run[0])
-}
-fn send(worker: &Worker, task: worker::Task) -> Result<(), CodecError> {
-    worker
-        .tx
-        .as_ref()
-        .and_then(|tx| tx.send(task).ok())
-        .ok_or(CodecError::Config("encoder worker stopped"))
-}
-fn receive(worker: &Worker) -> Result<worker::Reply, CodecError> {
-    worker
-        .rx
-        .recv()
-        .map_err(|_| CodecError::Config("encoder worker stopped"))
+fn complexity(p: &Yuv420, old: Option<&Yuv420>) -> f64 {
+    let mut sum = 0u64;
+    for y in (0..p.height as usize).step_by(4) {
+        for x in (0..p.width as usize).step_by(4) {
+            let v = p.y[y * p.y_stride + x];
+            sum += if let Some(o) = old {
+                v.abs_diff(o.y[y * o.y_stride + x]) as u64
+            } else {
+                v.abs_diff(128) as u64
+            } + 1;
+        }
+    }
+    sum as f64
 }
 fn level(c: &EncoderConfig) -> Result<u8, CodecError> {
     let fs = (c.width as u64).div_ceil(16) * (c.height as u64).div_ceil(16);

@@ -1,8 +1,6 @@
 use super::{
-    analyse,
     bits::{signed_bits, Bits},
     cavlc, predict,
-    rate::{self, RowControl},
     transform::{self, SCAN},
 };
 use crate::Yuv420;
@@ -18,24 +16,7 @@ pub(super) struct Mb {
     pub qp: u8,
     pub quality: u8,
 }
-/// What a worker thread is asked to do.
-pub(super) enum Task {
-    Analyse(analyse::Job),
-    Encode(Box<Job>),
-}
-pub(super) enum Reply {
-    Analysis(analyse::Analysis),
-    Band(Band),
-}
-pub(super) fn run(task: Task) -> Reply {
-    match task {
-        Task::Analyse(job) => Reply::Analysis(analyse::run(&job)),
-        Task::Encode(job) => Reply::Band(encode(*job)),
-    }
-}
 pub(super) struct Job {
-    /// The band this worker returned last time, reused for its buffers.
-    pub scratch: Option<Band>,
     pub source: Arc<Yuv420>,
     pub previous: Option<Arc<Yuv420>>,
     pub reference: Arc<Yuv420>,
@@ -43,16 +24,11 @@ pub(super) struct Job {
     pub quality: Arc<Vec<u8>>,
     pub first: usize,
     pub end: usize,
-    /// Effective quantizer (`qp + 6 * suppression`) of the first row.
-    pub q: i32,
-    pub rows: RowControl,
-    /// Bits this band may spend refining unchanged macroblocks.
-    pub refine_bits: f64,
+    pub qp: u8,
+    pub suppression: u8,
     pub subpixel: bool,
     pub is_motion: bool,
     pub global: (i32, i32),
-    /// The analysis's displacement per macroblock of the picture.
-    pub hints: Arc<Vec<(i32, i32)>>,
     pub idr: bool,
     pub frame_num: u32,
     pub idr_id: u32,
@@ -66,10 +42,6 @@ pub(super) struct Band {
     pub nal: Vec<u8>,
     pub skipped: u32,
     pub qp_sum: u32,
-    /// Effective quantizer averaged with the row-control weights.
-    pub q: f64,
-    /// Bits spent refining unchanged macroblocks.
-    pub refine_bits: usize,
 }
 fn pos(i: usize) -> (usize, usize) {
     (
@@ -431,6 +403,77 @@ fn motion_cost(
     }
     cost
 }
+pub(super) fn scroll(src: &Yuv420, old: &Yuv420, first: usize, end: usize) -> (i32, i32) {
+    let width = src.padded_width();
+    let start = first * 16;
+    let end = end * 16;
+    let mut changed = 0;
+    let mut samples = 0;
+    for y in (start..end).step_by(8) {
+        for x in (0..width).step_by(16) {
+            samples += 1;
+            changed += usize::from(src.y[y * src.y_stride + x] != old.y[y * old.y_stride + x]);
+        }
+    }
+    if changed * 256 < samples {
+        return (0, 0);
+    }
+    let hash = |p: &Yuv420, row: usize| -> u64 {
+        p.y[row * p.y_stride..row * p.y_stride + width]
+            .iter()
+            .step_by(16)
+            .fold(0xcbf29ce484222325u64, |h, &v| {
+                (h ^ v as u64).wrapping_mul(0x100000001b3)
+            })
+    };
+    let mut hist = [0u32; 257];
+    let old_hash: Vec<_> = (0..old.padded_height()).map(|y| hash(old, y)).collect();
+    for y in (start..end).step_by(8) {
+        let h = hash(src, y);
+        for dy in -128i32..=128 {
+            let yy = y as i32 + dy;
+            if yy >= 0 && (yy as usize) < old_hash.len() && old_hash[yy as usize] == h {
+                hist[(dy + 128) as usize] += 1;
+            }
+        }
+    }
+    let best = (0..257)
+        .max_by_key(|&i| (hist[i], std::cmp::Reverse(i.abs_diff(128))))
+        .unwrap();
+    if best != 128 && hist[best] > hist[128] + 2 {
+        return (0, (best as i32 - 128) * 4);
+    }
+    let mut best = (0, 0);
+    let mut best_cost = u64::MAX;
+    let mut zero_cost = 0;
+    let mut samples = 0;
+    for dx in -128i32..=128 {
+        let mut cost = 0u64;
+        for y in (start..end).step_by(32) {
+            for x in (128..width.saturating_sub(128)).step_by(16) {
+                if dx == 0 {
+                    samples += 1;
+                }
+                cost += src.y[y * src.y_stride + x]
+                    .abs_diff(old.y[y * old.y_stride + (x as i32 + dx) as usize])
+                    as u64;
+            }
+        }
+        if dx == 0 {
+            zero_cost = cost;
+        }
+        if cost < best_cost {
+            best_cost = cost;
+            best = (dx * 4, 0);
+        }
+    }
+    // A noisy best offset is not evidence of scrolling. Keep the motion path enabled.
+    if best_cost <= samples * 2 && best_cost * 4 < zero_cost {
+        best
+    } else {
+        (0, 0)
+    }
+}
 #[allow(clippy::too_many_arguments)]
 fn motion(
     job: &Job,
@@ -442,14 +485,12 @@ fn motion(
     y: usize,
     pred: (i32, i32),
     scroll: (i32, i32),
-    hint: (i32, i32),
     lambda: u32,
 ) -> ((i32, i32), u32) {
-    let mut candidates = [(0, 0); 7];
+    let mut candidates = [(0, 0); 6];
     candidates[1] = pred;
     candidates[2] = scroll;
-    candidates[3] = hint;
-    let mut count = 4;
+    let mut count = 3;
     let (a, b, c) = neighbours(mbs, w, index);
     for m in [a, b, c].into_iter().flatten() {
         if !m.intra {
@@ -575,75 +616,21 @@ pub(super) fn header(first: usize, idr: bool, frame_num: u32, idr_id: u32, qp: u
     b
 }
 
-/// `mb_qp_delta` from `from` to `to`: the spec allows -26..=25 and wraps
-/// the sum modulo 52, so larger steps go the other way round.
-fn qp_delta(to: u8, from: u8) -> i32 {
-    let delta = to as i32 - from as i32;
-    if delta > 25 {
-        delta - 52
-    } else if delta < -26 {
-        delta + 52
-    } else {
-        delta
-    }
-}
-
-fn lambda(qp: u8) -> u32 {
-    (0.85 * 2f64.powf((qp as f64 - 12.) / 6.)).sqrt().round() as u32
-}
-
-pub(super) fn encode(mut job: Job) -> Band {
+pub(super) fn encode(job: Job) -> Band {
     let w = job.source.padded_width() / 16;
     let rows = job.end - job.first;
-    let (mut rec, mut mbs, mut nal) = match job.scratch.take() {
-        Some(band)
-            if band.picture.width == job.source.width
-                && band.picture.padded_height() == rows * 16 =>
-        {
-            (band.picture, band.mbs, band.nal)
-        }
-        _ => (
-            Yuv420::new(job.source.width, rows as u32 * 16),
-            Vec::new(),
-            Vec::new(),
-        ),
-    };
-    mbs.clear();
-    mbs.resize(w * rows, Mb::default());
-    nal.clear();
-    let (slice_qp, _) = rate::split(job.q);
-    let mut b = header(job.first * w, job.idr, job.frame_num, job.idr_id, slice_qp);
+    let mut rec = Yuv420::new(job.source.width, rows as u32 * 16);
+    let mut mbs = vec![Mb::default(); w * rows];
+    let mut b = header(job.first * w, job.idr, job.frame_num, job.idr_id, job.qp);
     let mut skip_run = 0;
     let mut skipped = 0;
-    let mut qpy = slice_qp;
+    let mut qpy = job.qp;
     let mut qp_sum = 0;
     let global = job.global;
-    // Row control state: the row's effective quantizer and what the plan
-    // expected the rows so far to cost at the quantizers they used.
-    let mut row_q = job.q;
-    let mut planned = 0.;
-    let mut q_weighted = 0.;
-    let (mut row_qp, mut suppression) = rate::split(row_q);
-    let mut lambda = lambda(row_qp);
-    // Bits spent refining, and where the last refined macroblock began.
-    let mut refine_bits = 0;
-    let mut refining = None;
+    let lambda = (0.85 * 2f64.powf((job.qp as f64 - 12.) / 6.))
+        .sqrt()
+        .round() as u32;
     for index in 0..mbs.len() {
-        if let Some(start) = refining.take() {
-            refine_bits += b.len - start;
-        }
-        if index % w == 0 {
-            let row = index / w;
-            if row > 0 {
-                planned += job.rows.planned(row - 1, row_q);
-                row_q = job
-                    .rows
-                    .next(row, (b.len - refine_bits) as f64, planned, row_q);
-                (row_qp, suppression) = rate::split(row_q);
-                lambda = self::lambda(row_qp);
-            }
-            q_weighted += job.rows.weights.get(row).copied().unwrap_or(0.) * row_q as f64;
-        }
         let x = (index % w) * 16;
         let y = (index / w) * 16;
         let gy = y + job.first * 16;
@@ -684,15 +671,11 @@ pub(super) fn encode(mut job: Job) -> Band {
         let previous_quality = reuse.map_or(job.quality[gi], |v| v.1);
         let refine = reuse.is_some()
             && previous_quality > 18
-            && (refine_bits as f64) < job.refine_bits
             && (gi + job.quality.len() - job.refresh_start) % job.quality.len() < job.refresh;
-        if refine {
-            refining = Some(b.len);
-        }
         let qp = if refine {
-            previous_quality.saturating_sub(4).max(18).min(row_qp)
+            previous_quality.saturating_sub(4).max(18).min(job.qp)
         } else {
-            row_qp
+            job.qp
         };
         let pred = mv_predict(&mbs, w, index, false);
         let skip_mv = mv_predict(&mbs, w, index, true);
@@ -727,10 +710,7 @@ pub(super) fn encode(mut job: Job) -> Band {
         let (mv, inter_cost) = if job.idr {
             ((0, 0), u32::MAX)
         } else {
-            let hint = job.hints.get(gi).copied().unwrap_or_default();
-            motion(
-                &job, is_motion, &mbs, w, index, x, gy, pred, global, hint, lambda,
-            )
+            motion(&job, is_motion, &mbs, w, index, x, gy, pred, global, lambda)
         };
         // A single DC trial avoids evaluating every intra mode for an obvious temporal match.
         let intra_trial = predict::intra_plane(&rec.y, rec.y_stride, x, y, 16, 2, false);
@@ -744,7 +724,7 @@ pub(super) fn encode(mut job: Job) -> Band {
         let intra = job.idr || intra_cost + lambda * 24 < inter_cost;
         mbs[index].intra = intra;
         mbs[index].mv = if intra { (0, 0) } else { mv };
-        mbs[index].quality = if suppression == 0 { qp } else { 51 };
+        mbs[index].quality = if job.suppression == 0 { qp } else { 51 };
         if !intra {
             copy_mc(
                 &mut rec,
@@ -756,7 +736,7 @@ pub(super) fn encode(mut job: Job) -> Band {
                 mv,
             );
         }
-        let luma_quantizer = transform::Quantizer::new(qp, intra, suppression);
+        let luma_quantizer = transform::Quantizer::new(qp, intra, job.suppression);
         let mut coeffs = [[0i32; 16]; 16];
         let mut modes = [(2u8, 2u8); 16];
         let mut cbp = 0u32;
@@ -872,7 +852,10 @@ pub(super) fn encode(mut job: Job) -> Band {
                     dc[(by / 4) * 4 + bx / 4] = transformed[0];
                 }
                 let dc = transform::hadamard(dc).map(|v| {
-                    transform::suppress(transform::quant((v + 1) >> 1, qp, 0, true, 1), suppression)
+                    transform::suppress(
+                        transform::quant((v + 1) >> 1, qp, 0, true, 1),
+                        job.suppression,
+                    )
                 });
                 for i in 0..16 {
                     ldc[i] = dc[SCAN[i]];
@@ -903,7 +886,7 @@ pub(super) fn encode(mut job: Job) -> Band {
         let mut cc = [[[0i32; 16]; 4]; 2];
         let mut dc = [[0i32; 4]; 2];
         let cqp = transform::chroma_qp(qp);
-        let chroma_quantizer = transform::Quantizer::new(cqp, intra, suppression);
+        let chroma_quantizer = transform::Quantizer::new(cqp, intra, job.suppression);
         let mut cmode = 0;
         if intra {
             let mut best = u32::MAX;
@@ -970,8 +953,9 @@ pub(super) fn encode(mut job: Job) -> Band {
                 }
                 transformed[i] = transform::forward(input);
             }
-            dc[plane] = transform::chroma_dc(transformed.map(|c| c[0]))
-                .map(|v| transform::suppress(transform::quant(v, cqp, 0, intra, 1), suppression));
+            dc[plane] = transform::chroma_dc(transformed.map(|c| c[0])).map(|v| {
+                transform::suppress(transform::quant(v, cqp, 0, intra, 1), job.suppression)
+            });
             if dc[plane].iter().any(|&v| v != 0) {
                 chroma_cbp = chroma_cbp.max(1);
             }
@@ -1048,7 +1032,7 @@ pub(super) fn encode(mut job: Job) -> Band {
             b.ue(table.iter().position(|&v| v as u32 == cbp).unwrap() as u32);
         }
         if cbp != 0 || intra16 {
-            b.se(qp_delta(qp, qpy));
+            b.se(qp as i32 - qpy as i32);
             qpy = qp;
         }
         mbs[index].qp = qpy;
@@ -1079,12 +1063,10 @@ pub(super) fn encode(mut job: Job) -> Band {
             }
         }
     }
-    if let Some(start) = refining {
-        refine_bits += b.len - start;
-    }
     if !job.idr && skip_run > 0 {
         b.ue(skip_run);
     }
+    let mut nal = Vec::new();
     b.nal(if job.idr { 0x65 } else { 0x41 }, &mut nal);
     Band {
         first: job.first,
@@ -1093,27 +1075,75 @@ pub(super) fn encode(mut job: Job) -> Band {
         nal,
         skipped,
         qp_sum,
-        q: if job.rows.weights.is_empty() {
-            job.q as f64
-        } else {
-            q_weighted
-        },
-        refine_bits,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::qp_delta;
-
+    use super::*;
     #[test]
-    fn qp_deltas_stay_in_range_and_wrap_to_the_target() {
-        for from in 0..=51u8 {
-            for to in 0..=51u8 {
-                let delta = qp_delta(to, from);
-                assert!((-26..=25).contains(&delta), "{from} -> {to}: {delta}");
-                assert_eq!((from as i32 + delta).rem_euclid(52), to as i32);
+    fn unrelated_motion_is_not_a_scroll() {
+        let mut a = Yuv420::new(640, 368);
+        let mut b = a.clone();
+        let mut seed = 17u32;
+        for pixel in a.y.iter_mut().chain(b.y.iter_mut()) {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            *pixel = (seed >> 16) as u8;
+        }
+        assert_eq!(scroll(&a, &b, 0, 23), (0, 0));
+    }
+    #[test]
+    fn sixty_four_pixel_scrolls_are_exact_in_both_directions() {
+        let mut old = Yuv420::new(640, 368);
+        let mut seed = 7u32;
+        for v in &mut old.y {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            *v = seed as u8;
+        }
+        for delta in [(0, 64), (64, 0), (0, -64), (-64, 0)] {
+            let mut source = old.clone();
+            for y in 0..368 {
+                for x in 0..640 {
+                    source.y[y * 640 + x] = predict::sample(
+                        &old.y,
+                        640,
+                        640,
+                        368,
+                        x as i32 + delta.0,
+                        y as i32 + delta.1,
+                    ) as u8;
+                }
             }
+            let job = Job {
+                source: Arc::new(source),
+                previous: Some(Arc::new(old.clone())),
+                reference: Arc::new(old.clone()),
+                half_pel: None,
+                quality: Arc::new(vec![18; 40 * 23]),
+                first: 0,
+                end: 23,
+                qp: 30,
+                suppression: 0,
+                subpixel: false,
+                is_motion: false,
+                global: (0, 0),
+                idr: false,
+                frame_num: 1,
+                idr_id: 0,
+                refresh: 0,
+                refresh_start: 0,
+            };
+            assert_eq!(
+                scroll(
+                    &job.source,
+                    job.previous.as_ref().unwrap(),
+                    job.first,
+                    job.end
+                ),
+                (delta.0 * 4, delta.1 * 4)
+            );
         }
     }
 }
