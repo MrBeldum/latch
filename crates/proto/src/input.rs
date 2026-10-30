@@ -18,16 +18,11 @@ pub const MOD_META: u8 = 8;
 pub const MAX_TEXT: usize = 64;
 /// How often unacknowledged events are sent again.
 pub const RESEND: Duration = Duration::from_millis(20);
-/// Soft cap: once reached, incoming pointer motion updates the newest
-/// queued event of the same kind (relative deltas sum saturating; absolute
-/// positions replace). If there is no such event, only the new motion is
-/// dropped. Its sequence is unchanged: an already applied event is deduped
-/// by the host, so an update can lose motion but cannot apply input twice.
-/// Never discard an older unacknowledged event: it may be an unfilled gap.
+/// Backlog threshold retained for callers monitoring input congestion.
+/// Motion only merges with an adjacent, unsent event, regardless of backlog.
 pub const MAX_UNACKED: usize = 1024;
-/// Non-motion events may exceed the soft cap up to this limit, far beyond
-/// human typing during the session's ten-second silence timeout. At this
-/// hard cap only new events are refused, without assigning a sequence.
+/// Enough for 65 seconds of uncoalesced 1000 Hz input, beyond the session's
+/// ten-second silence timeout. Never mutate an event already assigned and sent.
 /// The receiver uses the same window so it can retain the whole backlog.
 pub const HARD_MAX_UNACKED: usize = 65_536;
 
@@ -214,8 +209,7 @@ impl InputSender {
 
     /// Queues an event. Text longer than [`MAX_TEXT`] is split at character
     /// boundaries. A relative move right after another not yet sent is
-    /// merged into it if the sum fits; see [`MAX_UNACKED`] for the overflow
-    /// policy when the queue is full.
+    /// merged into it if the sum fits. Sent payloads remain immutable.
     pub fn push(&mut self, event: Event) {
         if let Event::Text(text) = &event {
             if text.is_empty() {
@@ -250,36 +244,6 @@ impl InputSender {
     }
 
     fn enqueue(&mut self, event: Event) {
-        if self.queue.len() >= MAX_UNACKED {
-            match event {
-                Event::MouseMove { dx, dy } => {
-                    if let Some((_, Event::MouseMove { dx: x, dy: y }, _)) = self
-                        .queue
-                        .iter_mut()
-                        .rev()
-                        .find(|(_, event, _)| matches!(event, Event::MouseMove { .. }))
-                    {
-                        *x = x.saturating_add(dx);
-                        *y = y.saturating_add(dy);
-                        self.changed = true;
-                    }
-                    return;
-                }
-                Event::MousePosition { .. } => {
-                    if let Some((_, queued, _)) = self
-                        .queue
-                        .iter_mut()
-                        .rev()
-                        .find(|(_, event, _)| matches!(event, Event::MousePosition { .. }))
-                    {
-                        *queued = event;
-                        self.changed = true;
-                    }
-                    return;
-                }
-                _ => {}
-            }
-        }
         if self.queue.len() >= HARD_MAX_UNACKED {
             return;
         }
