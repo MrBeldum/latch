@@ -4,14 +4,39 @@ use crate::video::{Codec, VideoConfig};
 use anyhow::{bail, Context, Result};
 use std::{
     mem::ManuallyDrop,
-    thread,
+    sync::mpsc,
     time::{Duration, Instant},
 };
 use windows::{
-    core::{Interface, GUID, VARIANT},
+    core::{implement, Interface, GUID, VARIANT},
     Win32::{Graphics::Direct3D11::ID3D11Texture2D, Media::MediaFoundation::*, System::Com::*},
 };
 
+// One outstanding callback, one bounded wakeup. The MF callback never waits
+// for the video worker and passes only owned status/type values across threads.
+#[implement(IMFAsyncCallback)]
+struct EventCallback {
+    generator: IMFMediaEventGenerator,
+    reply: mpsc::SyncSender<windows::core::Result<u32>>,
+}
+impl IMFAsyncCallback_Impl for EventCallback_Impl {
+    fn GetParameters(&self, _: *mut u32, _: *mut u32) -> windows::core::Result<()> {
+        Err(windows::core::Error::from_hresult(
+            windows::Win32::Foundation::E_NOTIMPL,
+        ))
+    }
+    fn Invoke(&self, result: Option<&IMFAsyncResult>) -> windows::core::Result<()> {
+        // SAFETY: MF supplies the result for this generator's BeginGetEvent.
+        let event = unsafe {
+            self.generator.EndGetEvent(result).and_then(|event| {
+                event.GetStatus()?.ok()?;
+                event.GetType()
+            })
+        };
+        let _ = self.reply.try_send(event);
+        Ok(())
+    }
+}
 pub(super) fn media_type(subtype: &GUID, config: &VideoConfig) -> Result<IMFMediaType> {
     // SAFETY: MF is started on the calling worker; the returned type is owned.
     unsafe {
@@ -108,6 +133,8 @@ pub(super) struct Encoder {
     time: i64,
     sequence: Vec<u8>,
     activation: Option<IMFActivate>,
+    output_sample: Option<IMFSample>,
+    output_capacity: u32,
 }
 impl Encoder {
     pub fn new(config: &VideoConfig, gpu: &Gpu) -> Result<Self> {
@@ -264,6 +291,8 @@ impl Encoder {
                 time: 0,
                 sequence: Vec::new(),
                 activation: None,
+                output_sample: None,
+                output_capacity: 0,
             })
         }
     }
@@ -282,38 +311,28 @@ impl Encoder {
             .events
             .as_ref()
             .context("missing asynchronous event generator")?;
-        loop {
-            // SAFETY: NO_WAIT prevents a driver from indefinitely blocking shutdown.
-            match unsafe { events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
-                Ok(event) => {
-                    // SAFETY: The event owns its attribute store.
-                    unsafe {
-                        event
-                            .GetStatus()?
-                            .ok()
-                            .context("asynchronous encoder event failed")?;
-                        let kind = event.GetType()?;
-                        if kind == METransformNeedInput.0 as u32 {
-                            self.input_credit = self.input_credit.saturating_add(1);
-                        }
-                        if kind == METransformHaveOutput.0 as u32 {
-                            self.output_credit = self.output_credit.saturating_add(1);
-                        }
-                        if kind == MEError.0 as u32 {
-                            bail!("encoder reported MEError");
-                        }
-                    }
-                    return Ok(());
-                }
-                Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => {
-                    if Instant::now() >= deadline {
-                        bail!("Media Foundation encoder event timed out");
-                    }
-                    thread::sleep(Duration::from_millis(1));
-                }
-                Err(e) => return Err(e).context("encoder GetEvent"),
-            }
+        let (reply, receive) = mpsc::sync_channel(1);
+        let callback: IMFAsyncCallback = EventCallback {
+            generator: events.clone(),
+            reply,
         }
+        .into();
+        // SAFETY: MF retains the callback until Invoke; no apartment state crosses it.
+        unsafe { events.BeginGetEvent(&callback, None) }.context("encoder BeginGetEvent")?;
+        let kind = receive
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .context("Media Foundation encoder event timed out")?
+            .context("asynchronous encoder event failed")?;
+        if kind == METransformNeedInput.0 as u32 {
+            self.input_credit = self.input_credit.saturating_add(1);
+        }
+        if kind == METransformHaveOutput.0 as u32 {
+            self.output_credit = self.output_credit.saturating_add(1);
+        }
+        if kind == MEError.0 as u32 {
+            bail!("encoder reported MEError");
+        }
+        Ok(())
     }
     pub fn encode(
         &mut self,
@@ -354,16 +373,25 @@ impl Encoder {
         // SAFETY: ABI fields use ManuallyDrop, so release samples and event
         // collections on every HRESULT, including NEED_MORE_INPUT/STREAM_CHANGE.
         unsafe {
-            for _ in 0..4 {
+            for _ in 0..16 {
                 let info = self.transform.GetOutputStreamInfo(0)?;
                 let sample = if info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 == 0 {
-                    let sample = mf::MFCreateSample()?;
-                    let buffer = mf::MFCreateAlignedMemoryBuffer(
-                        info.cbSize.max(1),
-                        info.cbAlignment.saturating_sub(1),
-                    )?;
-                    sample.AddBuffer(&buffer)?;
-                    Some(sample)
+                    let required = info.cbSize.max(self.output_capacity).max(1);
+                    if self.output_sample.is_none() || self.output_capacity < required {
+                        let sample = mf::MFCreateSample()?;
+                        sample.AddBuffer(&mf::MFCreateAlignedMemoryBuffer(
+                            required,
+                            info.cbAlignment.saturating_sub(1),
+                        )?)?;
+                        self.output_sample = Some(sample);
+                        self.output_capacity = required;
+                    }
+                    let sample = self
+                        .output_sample
+                        .as_ref()
+                        .context("missing output sample")?;
+                    sample.GetBufferByIndex(0)?.SetCurrentLength(0)?;
+                    Some(sample.clone())
                 } else {
                     None
                 };
@@ -380,7 +408,16 @@ impl Encoder {
                 ManuallyDrop::drop(&mut output.pEvents);
                 match result {
                     Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
+                    Err(e) if e.code() == MF_E_BUFFERTOOSMALL => {
+                        self.output_capacity = grown_output_capacity(
+                            self.output_capacity,
+                            self.transform.GetOutputStreamInfo(0)?.cbSize,
+                        )?;
+                        self.output_sample = None;
+                        continue;
+                    }
                     Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                        self.output_sample = None;
                         let ty = self.transform.GetOutputAvailableType(0, 0)?;
                         self.transform.SetOutputType(0, &ty, 0)?;
                         continue;
@@ -444,7 +481,7 @@ impl Encoder {
                 return Ok(Some((bytes, idr)));
             }
         }
-        bail!("encoder repeatedly changed its output type")
+        bail!("encoder exceeded bounded output retries")
     }
     pub fn texture_sample(texture: &ID3D11Texture2D) -> Result<IMFSample> {
         // SAFETY: The surface buffer retains a COM reference to the owned texture.
@@ -473,6 +510,11 @@ impl Drop for Encoder {
             }
         }
     }
+}
+fn grown_output_capacity(current: u32, advertised: u32) -> Result<u32> {
+    let size = current.saturating_mul(2).max(advertised).max(1);
+    anyhow::ensure!(size <= 64 * 1024 * 1024, "encoder output exceeds 64 MiB");
+    Ok(size)
 }
 fn nals(data: &[u8]) -> Vec<&[u8]> {
     let mut starts = Vec::new();
@@ -553,6 +595,17 @@ mod tests {
         assert_eq!(nal_types(&normalize(&header)?), [7, 8]);
         assert_eq!(normalize(&[0, 0, 0, 2, 0x65, 3])?, [0, 0, 0, 1, 0x65, 3]);
         assert!(normalize(&[0, 0, 0, 9, 0x65]).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    #[test]
+    fn short_output_buffer_grows_even_if_driver_size_is_stale() -> anyhow::Result<()> {
+        assert_eq!(super::grown_output_capacity(1024, 8192)?, 8192);
+        assert_eq!(super::grown_output_capacity(1024, 1024)?, 2048);
+        assert!(super::grown_output_capacity(64 * 1024 * 1024, 1).is_err());
         Ok(())
     }
 }
