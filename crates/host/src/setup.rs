@@ -203,9 +203,10 @@ Step "Opening TCP and UDP {port} to the tailnet for Latch"
 $latchExe = '{exe}'
 Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | Where-Object {{ $_.Program -ieq $latchExe }} | Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object {{ $_.Action -eq 'Block' -and $_.Direction -eq 'Inbound' }} | Remove-NetFirewallRule -ErrorAction SilentlyContinue
 foreach ($rule in 'Latch Host', 'Latch Media') {{ netsh advfirewall firewall delete rule name="$rule" | Out-Null }}
-netsh advfirewall firewall add rule name="Latch Host" dir=in action=allow protocol=TCP localport={port} remoteip=100.64.0.0/10 program='{exe}' | Out-Null
+# Tailscale's addresses only: its IPv4 range and its IPv6 one.
+netsh advfirewall firewall add rule name="Latch Host" dir=in action=allow protocol=TCP localport={port} remoteip={tailnet} program='{exe}' | Out-Null
 if ($LASTEXITCODE -ne 0) {{ $setupFailed = $true }}
-netsh advfirewall firewall add rule name="Latch Media" dir=in action=allow protocol=UDP localport={port} remoteip=100.64.0.0/10 program='{exe}' | Out-Null
+netsh advfirewall firewall add rule name="Latch Media" dir=in action=allow protocol=UDP localport={port} remoteip={tailnet} program='{exe}' | Out-Null
 if ($LASTEXITCODE -ne 0) {{ $setupFailed = $true }}
 Step "Opening UDP 9 to check the wake path while this PC is awake"
 netsh advfirewall firewall delete rule name="Latch wake" | Out-Null
@@ -226,6 +227,7 @@ exit 0
 "#,
         retire = crate::legacy::retire_windows_ps(),
         port = CONTROL_PORT,
+        tailnet = "100.64.0.0/10,fd7a:115c:a1e0::/48",
         exe = q(&p.exe.display().to_string()),
         virtual_display = crate::virtual_display::setup_ps()
     )
@@ -532,8 +534,13 @@ mod tests {
             adapter: "Ethernet",
             adapter_description: "Realtek",
         });
-        assert!(s.contains("protocol=TCP localport=47850 remoteip=100.64.0.0/10"));
-        assert!(s.contains("protocol=UDP localport=47850 remoteip=100.64.0.0/10"));
+        // Tailscale's IPv4 range and its IPv6 one (IN-10).
+        assert!(
+            s.contains("protocol=TCP localport=47850 remoteip=100.64.0.0/10,fd7a:115c:a1e0::/48")
+        );
+        assert!(
+            s.contains("protocol=UDP localport=47850 remoteip=100.64.0.0/10,fd7a:115c:a1e0::/48")
+        );
         assert!(s.contains("O''Brien"));
         assert!(s.contains("HiberbootEnabled"));
         assert!(s.contains("*WakeOnMagicPacket"));
