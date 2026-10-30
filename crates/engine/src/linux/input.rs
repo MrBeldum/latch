@@ -261,7 +261,13 @@ impl InputSink for X11Input {
                 }
             }
             Event::Text(text) => self.text(text)?,
-            Event::ReleaseAll => self.release_all(),
+            Event::ReleaseAll => {
+                self.release_all();
+                ensure!(
+                    self.held.keys.is_empty() && self.held.buttons.is_empty(),
+                    "input releases still pending"
+                );
+            }
         }
         self.conn.flush()?;
         Ok(())

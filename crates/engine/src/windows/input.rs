@@ -154,6 +154,10 @@ impl InputSink for Injector {
     fn apply(&mut self, event: &Event, display: DisplayRect) -> Result<()> {
         if matches!(event, Event::ReleaseAll) {
             self.release_all();
+            anyhow::ensure!(
+                self.held.keys.is_empty() && self.held.buttons.is_empty(),
+                "input releases still pending"
+            );
             return Ok(());
         }
         let inputs = construct(event, display)?;

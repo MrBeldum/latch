@@ -802,9 +802,7 @@ fn receive(server: Weak<Server>) {
                         let Some(sink) = sink.as_mut() else {
                             return Ok(());
                         };
-                        if event == input::Event::ReleaseAll {
-                            sink.release_all();
-                        } else if let Err(e) = sink.apply(&event, display) {
+                        if let Err(e) = sink.apply(&event, display) {
                             tracing::warn!("input {event:?}: {e:#}");
                             return Err(e);
                         }
