@@ -1090,11 +1090,21 @@ impl ClientApp {
                 Tone::Danger,
                 "Tailscale isn't connected",
                 Some(&format!(
-                    "{}. Open Tailscale and sign in with the account your other machines use. Machines seen before are listed, but can't be reached until then.",
-                    sentence(e)
+                    "{}. {} Machines seen before are listed, but can't be reached until then.",
+                    sentence(e),
+                    if cfg!(target_os = "linux") {
+                        "Run tailscale up in a terminal and sign in with the account your other machines use."
+                    } else {
+                        "Open Tailscale and sign in with the account your other machines use."
+                    }
                 )),
                 |ui| {
-                    if ui::primary_button(ui, "Open Tailscale").clicked() {
+                    let label = if cfg!(target_os = "linux") {
+                        "Tailscale setup"
+                    } else {
+                        "Open Tailscale"
+                    };
+                    if ui::primary_button(ui, label).clicked() {
                         #[cfg(target_os = "macos")]
                         let _ = std::process::Command::new("open")
                             .arg("-a")
@@ -1102,10 +1112,14 @@ impl ClientApp {
                             .spawn();
                         #[cfg(windows)]
                         if let Some(cli) = tailscale::cli() {
-                            let _ = std::process::Command::new(cli.with_file_name("tailscale-ipn.exe")).spawn();
+                            let _ =
+                                std::process::Command::new(cli.with_file_name("tailscale-ipn.exe"))
+                                    .spawn();
                         }
                         #[cfg(target_os = "linux")]
-                        ui.ctx().open_url(egui::OpenUrl::new_tab("https://tailscale.com/download/linux"));
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(
+                            "https://tailscale.com/download/linux",
+                        ));
                     }
                 },
             );
@@ -3663,7 +3677,13 @@ pub(crate) mod snapshots {
         let mut disc = pcs();
         disc.error = Some("tailscale is stopped".into());
         let h = build(Setup::new(disc), TYPICAL, 1.0, false);
-        assert!(h.query_by_label("Open Tailscale").is_some());
+        assert!(h
+            .query_by_label(if cfg!(target_os = "linux") {
+                "Tailscale setup"
+            } else {
+                "Open Tailscale"
+            })
+            .is_some());
     }
 
     #[test]
