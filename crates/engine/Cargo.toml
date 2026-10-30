@@ -25,6 +25,10 @@ futures = "0.3"
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.58"
 windows = { version = "0.58", features = [
+    # COM callbacks (#[implement]): the MFT event callback and the default-
+    # device notification. The workspace build gets this from other crates;
+    # building this crate alone must not depend on that.
+    "implement",
     "Win32_Foundation",
     "Win32_Devices_Display",
     "Win32_Graphics_Direct3D",
