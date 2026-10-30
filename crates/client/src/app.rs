@@ -471,6 +471,7 @@ impl ClientApp {
             p.cancel = true;
         }
         drop(p);
+        self.view.interrupted = None;
         if let Some(l) = self.live.lock().as_ref() {
             l.input.release_all();
             l.session.stop();
@@ -527,6 +528,9 @@ impl ClientApp {
                             if cancelled { " after a stop" } else { "" }
                         );
                         self.stream_failed = !cancelled;
+                        if !cancelled && live.frames.seq() > 0 {
+                            self.view.interrupted = Some(crate::stream::Interruption::Reconnecting);
+                        }
                         prog.step = Step::Ended {
                             error: (!cancelled).then(|| stream_failure(&message)),
                         };
@@ -536,6 +540,12 @@ impl ClientApp {
                         let error = code != 0 && code != 1 && !cancelled;
                         if code == 1 && !cancelled {
                             self.notice = Some((Tone::Info, message.clone(), Instant::now()));
+                            self.view.interrupted =
+                                Some(crate::stream::Interruption::TakenOver(message.clone()));
+                        } else if self.power_sent.load(Ordering::Relaxed) {
+                            self.view.interrupted = Some(crate::stream::Interruption::HostSleeping);
+                        } else if error && live.frames.seq() > 0 {
+                            self.view.interrupted = Some(crate::stream::Interruption::Reconnecting);
                         }
                         if code != 0 {
                             tracing::warn!(
@@ -561,14 +571,20 @@ impl ClientApp {
             // A stop we asked for ends without a Terminated event.
             let ended = matches!(prog.step, Step::Ended { .. });
             if live.session.finished() {
-                if !ended {
-                    prog.step = Step::Ended { error: None };
+                if self.view.interrupted.is_some() && !prog.cancel {
+                    // Retain in-stream view to show interruption overlay until user acts
+                } else {
+                    if !ended {
+                        prog.step = Step::Ended { error: None };
+                    }
+                    self.view.reset(ctx, Some(live));
+                    *guard = None;
+                    fullscreen = fullscreen_when_finished(
+                        self.reconnect.is_some(),
+                        &mut self.fullscreen_after,
+                    );
                 }
-                self.view.reset(ctx, Some(live));
-                *guard = None;
-                fullscreen =
-                    fullscreen_when_finished(self.reconnect.is_some(), &mut self.fullscreen_after);
-            } else if ended {
+            } else if ended && self.view.interrupted.is_none() {
                 live.session.stop();
             }
         }
@@ -837,6 +853,10 @@ impl eframe::App for ClientApp {
                 for a in actions {
                     match a {
                         Action::Disconnect => self.disconnect(),
+                        Action::Reconnect => {
+                            self.reconnect = self.last_pc.clone();
+                            self.disconnect();
+                        }
                         Action::Power(action) => self.power(ip, &name, action),
                         Action::Fullscreen(on) => {
                             self.set_fullscreen(ctx, on);
@@ -3420,6 +3440,38 @@ pub(crate) mod snapshots {
         let notice = h.state().notice.as_ref().unwrap();
         assert_eq!(notice.0, Tone::Info);
         assert_eq!(notice.1, "Another device is watching Gaming-PC.");
+    }
+
+    #[test]
+    fn takeover_displays_in_stream_overlay_without_dropping_live() {
+        let mut h = build(Setup::new(pcs()), MIN, 1.0, false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut live = crate::stream::tests::dummy_live(&h.ctx);
+        live.events = rx;
+        *h.state().live.lock() = Some(live);
+        tx.send(Event::Terminated {
+            code: 1,
+            message: "Another device is watching Gaming-PC.".into(),
+        })
+        .unwrap();
+        let ctx = h.ctx.clone();
+        h.state_mut().poll_live(&ctx);
+
+        assert_eq!(
+            h.state().view.interrupted,
+            Some(crate::stream::Interruption::TakenOver(
+                "Another device is watching Gaming-PC.".into()
+            ))
+        );
+        assert!(h.state().live.lock().is_some());
+
+        h.run_steps(1);
+        assert!(h.query_by_label("Stream Taken Over").is_some());
+        assert!(h
+            .query_by_label("Another device is watching Gaming-PC.")
+            .is_some());
+        assert!(h.query_by_label("Reconnect Now").is_some());
+        assert!(h.query_by_label("Return to Machines").is_some());
     }
 
     #[test]

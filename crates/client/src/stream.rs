@@ -93,6 +93,7 @@ fn is_mac_os(os: &str) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Disconnect,
+    Reconnect,
     /// Ask the PC to leave HDR, which is what a black capture usually is.
     TurnOffHdr,
     Power(PowerAction),
@@ -103,6 +104,14 @@ pub enum Action {
     ApplySettings(StreamSettings),
     /// Whether a click on the picture captures the mouse.
     MouseCapture(bool),
+}
+
+/// An interruption in the live stream before dropping the stream window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Interruption {
+    Reconnecting,
+    TakenOver(String),
+    HostSleeping,
 }
 
 /// What the window knows that the stream screen should show.
@@ -151,6 +160,7 @@ pub struct View {
     pub(crate) confirm_disconnect: bool,
     pub(crate) volume: u32,
     pub(crate) muted: bool,
+    pub(crate) interrupted: Option<Interruption>,
     poor: bool,
     poor_hinted: bool,
     toasts: Vec<Toast>,
@@ -244,6 +254,7 @@ impl Default for View {
             confirm_disconnect: false,
             volume: 100,
             muted: false,
+            interrupted: None,
             poor: false,
             poor_hinted: false,
             toasts: Vec::new(),
@@ -325,6 +336,7 @@ impl View {
         self.settings = None;
         self.confirm_install = false;
         self.confirm_disconnect = false;
+        self.interrupted = None;
         self.poor = false;
         self.poor_hinted = false;
         self.toasts.clear();
@@ -380,6 +392,19 @@ impl View {
         let mut bar_rect = bar_visible
             .then(|| Rect::from_min_size(screen.min, Vec2::new(screen.width(), self.bar_h)));
         let waiting = live.frames.seq() == 0;
+        #[cfg(test)]
+        let connected = self
+            .tap
+            .as_ref()
+            .map(|t| t.connected.get())
+            .unwrap_or_else(|| live.session.connected());
+        #[cfg(not(test))]
+        let connected = live.session.connected();
+
+        let interruption = self
+            .interrupted
+            .clone()
+            .or((!connected && !waiting).then_some(Interruption::Reconnecting));
 
         egui::CentralPanel::default()
             .frame(Frame::new().fill(Color32::BLACK))
@@ -398,7 +423,9 @@ impl View {
                     self.status_line(ui, screen, video, env, &stats, bottom_gap >= STATUS);
                 }
             });
-        if waiting {
+        if let Some(intr) = interruption.as_ref() {
+            self.interruption_overlay(ctx, screen, env, intr, &mut actions);
+        } else if waiting {
             self.waiting(ctx, screen, env, &mut actions);
         }
 
@@ -432,7 +459,12 @@ impl View {
         if self.stats {
             self.diagnostics(ctx, env, below_bar, &stats);
         }
-        self.input(ctx, live, env.cfg, video, bar_rect);
+        if interruption.is_none() {
+            self.input(ctx, live, env.cfg, video, bar_rect);
+        } else {
+            self.set_captured(ctx, false);
+            self.held.release_all(&live.input);
+        }
         actions
     }
 
@@ -495,6 +527,84 @@ impl View {
                     if ui::secondary_button(ui, "Cancel").clicked() {
                         actions.push(Action::Disconnect);
                     }
+                });
+            });
+    }
+
+    fn interruption_overlay(
+        &mut self,
+        ctx: &egui::Context,
+        screen: Rect,
+        env: &Env<'_>,
+        interruption: &Interruption,
+        actions: &mut Vec<Action>,
+    ) {
+        let live = env.live;
+        let w = overlay_width(440.0, screen.width());
+        egui::Area::new(Id::new("stream-interruption"))
+            .order(egui::Order::Foreground)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui::overlay_frame().show(ui, |ui| {
+                    ui.set_width(w);
+                    ui.vertical_centered(|ui| {
+                        ui.spacing_mut().item_spacing.y = space::SM;
+                        match interruption {
+                            Interruption::Reconnecting => {
+                                ui.add(ui::spinner(20.0, P.accent));
+                                ui.add_space(space::XS);
+                                ui.label(
+                                    RichText::new("Connection Interrupted")
+                                        .font(theme::semibold(theme::text::TITLE))
+                                        .color(P.text),
+                                );
+                                ui::muted(
+                                    ui,
+                                    format!("Attempting to restore stream to {}…", live.pc),
+                                );
+                                ui.add_space(space::XS);
+                                ui.horizontal(|ui| {
+                                    if ui::primary_button(ui, "Reconnect Now").clicked() {
+                                        actions.push(Action::Reconnect);
+                                    }
+                                    if ui::ghost_button(ui, "Return to Machines").clicked() {
+                                        actions.push(Action::Disconnect);
+                                    }
+                                });
+                            }
+                            Interruption::TakenOver(reason) => {
+                                ui.label(
+                                    RichText::new("Stream Taken Over")
+                                        .font(theme::semibold(theme::text::TITLE))
+                                        .color(P.text),
+                                );
+                                ui::muted(ui, reason);
+                                ui.add_space(space::XS);
+                                ui.horizontal(|ui| {
+                                    if ui::primary_button(ui, "Reconnect Now").clicked() {
+                                        actions.push(Action::Reconnect);
+                                    }
+                                    if ui::ghost_button(ui, "Return to Machines").clicked() {
+                                        actions.push(Action::Disconnect);
+                                    }
+                                });
+                            }
+                            Interruption::HostSleeping => {
+                                ui.label(
+                                    RichText::new(format!("{} is going to sleep", live.pc))
+                                        .font(theme::semibold(theme::text::TITLE))
+                                        .color(P.text),
+                                );
+                                ui::muted(ui, "The remote machine was put to sleep.");
+                                ui.add_space(space::XS);
+                                ui.horizontal(|ui| {
+                                    if ui::ghost_button(ui, "Return to Machines").clicked() {
+                                        actions.push(Action::Disconnect);
+                                    }
+                                });
+                            }
+                        }
+                    });
                 });
             });
     }
@@ -2011,6 +2121,7 @@ pub(crate) mod tests {
         pub cfg: ClientConfig,
         pub fullscreen: bool,
         pub extra: Extra,
+        pub actions: Vec<Action>,
         applied: bool,
     }
 
@@ -2102,7 +2213,10 @@ pub(crate) mod tests {
             power_allowed: extra.power_allowed,
             can_sleep: extra.can_sleep,
         };
-        view.show(ctx, &env);
+        let actions = view.show(ctx, &env);
+        if !actions.is_empty() {
+            f.actions = actions;
+        }
     }
 
     /// A view with the toolbar dropped, as the host key leaves it.
@@ -2120,6 +2234,7 @@ pub(crate) mod tests {
             cfg: ClientConfig::default(),
             fullscreen: false,
             extra,
+            actions: Vec::new(),
             applied: false,
         }
     }
@@ -3568,5 +3683,39 @@ pub(crate) mod tests {
         h.run_steps(2);
         assert!(!h.state().view.muted);
         assert!((h.state().live.as_ref().unwrap().session.volume() - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn in_stream_reconnecting_overlay_appears_when_connection_interrupted() {
+        let view = view_with_bar();
+        let live = dummy_live(&egui::Context::default());
+        live.frames.publish(latch_stream::video::Frame::default());
+        assert!(live.frames.seq() > 0);
+
+        live.session.stop();
+        while live.session.connected() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut h = harness_with(
+            Vec2::new(1400.0, 860.0),
+            1.0,
+            false,
+            fixture(view, Extra::default()),
+        );
+        h.state_mut().live = Some(live);
+        h.run_steps(2);
+
+        assert!(
+            h.query_by_label("Connection Interrupted").is_some(),
+            "Connection Interrupted overlay must appear when disconnected during stream"
+        );
+        assert!(h.query_by_label("Reconnect Now").is_some());
+        assert!(h.query_by_label("Return to Machines").is_some());
+
+        // Clicking Return to Machines sends Disconnect
+        h.get_by_label("Return to Machines").simulate_click();
+        h.run_steps(2);
+        assert!(h.state().actions.contains(&Action::Disconnect));
     }
 }
