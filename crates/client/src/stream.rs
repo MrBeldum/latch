@@ -1513,6 +1513,11 @@ impl View {
     /// The stream has just connected: take the mouse if the window has
     /// focus, and say once how to get it back.
     pub fn stream_started(&mut self, ctx: &egui::Context, live: &Live, capture: bool) {
+        live.session.set_volume(if self.muted {
+            0.0
+        } else {
+            self.volume as f32 / 100.0
+        });
         // Capture as soon as the stream connects, whenever the window has
         // focus, without waiting for the pointer to be over the picture. A
         // game that reads raw relative motion (Genshin's camera, say) only
@@ -1690,7 +1695,20 @@ impl View {
             keys_to_pc,
             over_stream,
         };
+        let physical_text = events.iter().any(
+            |ev| matches!(ev, Event::Key { key, pressed: true, .. } if input::vk(*key).is_some()),
+        );
+        let commits: Vec<_> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                Event::Ime(egui::ImeEvent::Commit(t)) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
         for ev in events {
+            if matches!(&ev, Event::Text(t) if physical_text || commits.contains(t)) {
+                continue;
+            }
             match ev {
                 // The pointer is never held back behind a paste.
                 Event::PointerMoved(p) if !self.captured && over_stream => self.moved_to = Some(p),
@@ -3765,6 +3783,55 @@ pub(crate) mod tests {
         h.state_mut().view.bar_shown = false;
         h.run_steps(2);
         assert!(h.ctx.memory(|m| m.focused()).is_none());
+    }
+
+    #[test]
+    fn review_physical_text_and_ime_are_not_typed_twice() {
+        let (mut h, tap) = recording(View::default(), true);
+        frame(
+            &mut h,
+            vec![
+                key(Key::A, true, Modifiers::NONE),
+                Event::Text("a".into()),
+                key(Key::A, false, Modifiers::NONE),
+            ],
+            Modifiers::NONE,
+        );
+        assert!(
+            !tap.take().iter().any(|s| matches!(s, Sent::Text(_))),
+            "physical key already types a"
+        );
+        frame(
+            &mut h,
+            vec![
+                Event::Ime(egui::ImeEvent::Commit("世界".into())),
+                Event::Text("世界".into()),
+            ],
+            Modifiers::NONE,
+        );
+        assert_eq!(
+            tap.take()
+                .iter()
+                .filter(|s| matches!(s, Sent::Text(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn review_new_session_restores_mute() {
+        let (mut h, _) = recording(
+            View {
+                muted: true,
+                volume: 35,
+                ..Default::default()
+            },
+            true,
+        );
+        let ctx = h.ctx.clone();
+        let f = h.state_mut();
+        f.view.stream_started(&ctx, f.live.as_ref().unwrap(), false);
+        assert_eq!(f.live.as_ref().unwrap().session.volume(), 0.0);
     }
 
     #[test]
