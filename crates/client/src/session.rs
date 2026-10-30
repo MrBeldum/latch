@@ -12,7 +12,7 @@ use latch_stream::{Event, FrameSlot, Input, Session, Settings};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -123,17 +123,34 @@ pub struct Discovery {
 
 /// Rescan the tailnet every few seconds and remember what each PC needs to
 /// be woken.
-pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
+pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    spawn_discovery_worker(shared, ctx, stop.clone());
+    stop
+}
+
+pub fn spawn_discovery_worker(
+    shared: Arc<Mutex<Discovery>>,
+    ctx: egui::Context,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
     let nat: Arc<Mutex<Option<NatReport>>> = Arc::default();
-    spawn_netcheck(nat.clone());
+    spawn_netcheck(nat.clone(), stop.clone());
     let servers: Arc<Mutex<PeerRelayServers>> = Arc::default();
-    spawn_peer_relay_probe(servers.clone());
+    spawn_peer_relay_probe(servers.clone(), stop.clone());
+    let weak = Arc::downgrade(&shared);
     std::thread::spawn(move || {
         // Round trips per PC, newest last; the smallest of the last few is
         // the path's real round trip (a first connect also pays for the
         // WireGuard handshake).
         let mut rtts: BTreeMap<String, Vec<u32>> = BTreeMap::new();
         loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let Some(shared) = weak.upgrade() else {
+                break;
+            };
             let cfg = ClientConfig::load();
             let mut scan = scan(&cfg);
             for pc in &mut scan.pcs {
@@ -151,12 +168,18 @@ pub fn spawn_discovery(shared: Arc<Mutex<Discovery>>, ctx: egui::Context) {
             learn(&scan);
             let changed = listing_changed(&shared.lock(), &scan);
             *shared.lock() = scan;
+            drop(shared);
             if changed {
                 ctx.request_repaint();
             }
-            std::thread::sleep(Duration::from_secs(3));
+            for _ in 0..30 {
+                if stop.load(Ordering::Relaxed) || weak.strong_count() == 0 {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
-    });
+    })
 }
 
 fn normalize_for_comparison(d: &Discovery) -> Discovery {
@@ -179,13 +202,29 @@ fn listing_changed(old: &Discovery, new: &Discovery) -> bool {
 
 /// `tailscale netcheck` now and then, for [`Discovery::self_nat`]. The next
 /// scan carries it to the window.
-fn spawn_netcheck(slot: Arc<Mutex<Option<NatReport>>>) {
+fn spawn_netcheck(slot: Arc<Mutex<Option<NatReport>>>, stop: Arc<AtomicBool>) {
+    let weak = Arc::downgrade(&slot);
     std::thread::spawn(move || loop {
+        if stop.load(Ordering::Relaxed) || weak.strong_count() == 0 {
+            break;
+        }
         match tailscale::netcheck() {
-            Ok(n) => *slot.lock() = Some(n.report()),
+            Ok(n) => {
+                if let Some(slot) = weak.upgrade() {
+                    *slot.lock() = Some(n.report());
+                } else {
+                    break;
+                }
+            }
             Err(e) => tracing::info!("netcheck: {e}"),
         }
-        std::thread::sleep(NETCHECK_EVERY);
+        let intervals = NETCHECK_EVERY.as_millis() as u64 / 100;
+        for _ in 0..intervals {
+            if stop.load(Ordering::Relaxed) || weak.strong_count() == 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     });
 }
 
@@ -194,13 +233,28 @@ fn spawn_netcheck(slot: Arc<Mutex<Option<NatReport>>>) {
 /// bounded (see `tailscale::PEER_RELAY_SERVERS_TIMEOUT`). Any failure leaves
 /// the result `Unknown`, never a denial. The next scan carries it to the
 /// window.
-fn spawn_peer_relay_probe(slot: Arc<Mutex<PeerRelayServers>>) {
+fn spawn_peer_relay_probe(slot: Arc<Mutex<PeerRelayServers>>, stop: Arc<AtomicBool>) {
+    let weak = Arc::downgrade(&slot);
     std::thread::spawn(move || loop {
-        *slot.lock() = match tailscale::peer_relay_servers() {
+        if stop.load(Ordering::Relaxed) || weak.strong_count() == 0 {
+            break;
+        }
+        let result = match tailscale::peer_relay_servers() {
             Ok(servers) => PeerRelayServers::Known(servers),
             Err(_) => PeerRelayServers::Unknown,
         };
-        std::thread::sleep(PEER_RELAY_EVERY);
+        if let Some(slot) = weak.upgrade() {
+            *slot.lock() = result;
+        } else {
+            break;
+        }
+        let intervals = PEER_RELAY_EVERY.as_millis() as u64 / 100;
+        for _ in 0..intervals {
+            if stop.load(Ordering::Relaxed) || weak.strong_count() == 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     });
 }
 
@@ -1544,5 +1598,23 @@ mod tests {
         d2.pcs.push(pc2);
 
         assert!(!listing_changed(&d1, &d2));
+    }
+
+    #[test]
+    fn discovery_thread_exits_on_shutdown_signal() {
+        let disc = Arc::new(Mutex::new(Discovery::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = spawn_discovery_worker(disc, egui::Context::default(), stop.clone());
+        stop.store(true, Ordering::Relaxed);
+        assert!(handle.join().is_ok());
+    }
+
+    #[test]
+    fn discovery_thread_exits_when_shared_dropped() {
+        let disc = Arc::new(Mutex::new(Discovery::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = spawn_discovery_worker(disc.clone(), egui::Context::default(), stop);
+        drop(disc);
+        assert!(handle.join().is_ok());
     }
 }

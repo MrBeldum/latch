@@ -144,6 +144,7 @@ pub struct ClientApp {
     video_help: Arc<Mutex<Option<crate::display::Help>>>,
     asked_about_video: bool,
     save_tx: std::sync::mpsc::Sender<ClientConfig>,
+    discovery_stop: Option<Arc<AtomicBool>>,
     /// An install of Latch Host through the stream, while it runs and a
     /// little after.
     handover: Option<Handover>,
@@ -154,11 +155,20 @@ pub struct ClientApp {
     share_page: Option<Box<dyn share::SharePage>>,
 }
 
+impl Drop for ClientApp {
+    fn drop(&mut self) {
+        if let Some(stop) = &self.discovery_stop {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 impl ClientApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let discovery = Arc::new(Mutex::new(Discovery::default()));
-        session::spawn_discovery(discovery.clone(), cc.egui_ctx.clone());
-        let app = Self::with_shared(cc, discovery.clone(), Arc::default(), ClientConfig::load());
+        let stop = session::spawn_discovery(discovery.clone(), cc.egui_ctx.clone());
+        let mut app = Self::with_shared(cc, discovery.clone(), Arc::default(), ClientConfig::load());
+        app.discovery_stop = Some(stop);
         spawn_tailscale_probe(app.tailscale_ok.clone(), cc.egui_ctx.clone());
         update::spawn(
             app.updates.clone(),
@@ -217,6 +227,7 @@ impl ClientApp {
             video_help: Arc::default(),
             asked_about_video: false,
             save_tx,
+            discovery_stop: None,
             handover: None,
             display_at_connect: (0, 0),
             display_change: None,
