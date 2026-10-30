@@ -400,9 +400,31 @@ pub fn upgrade(
     body: &[u8],
     timeout: Duration,
 ) -> Result<std::result::Result<TcpStream, Response>> {
+    upgrade_cancellable(addr, path, protocol, body, timeout, |_| {}, || false)
+}
+
+/// A cancellable variant of [`upgrade`] that exposes the connected socket before
+/// sending or waiting on headers, and checks a cancellation predicate.
+pub fn upgrade_cancellable(
+    addr: SocketAddr,
+    path: &str,
+    protocol: &str,
+    body: &[u8],
+    timeout: Duration,
+    on_socket: impl FnOnce(&TcpStream),
+    cancelled: impl Fn() -> bool,
+) -> Result<std::result::Result<TcpStream, Response>> {
+    if cancelled() {
+        bail!("cancelled");
+    }
     validate_target("POST", path)?;
     validate_header("Upgrade", protocol)?;
     let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(io_err)?;
+    on_socket(&stream);
+    if cancelled() {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        bail!("cancelled");
+    }
     stream.set_read_timeout(Some(timeout)).map_err(io_err)?;
     stream.set_write_timeout(Some(timeout)).map_err(io_err)?;
     let _ = stream.set_nodelay(true);
@@ -418,6 +440,10 @@ pub fn upgrade(
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
+        if cancelled() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            bail!("cancelled");
+        }
         if head.len() >= MAX_HEADER {
             bail!("reply head too large");
         }
