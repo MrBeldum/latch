@@ -75,8 +75,8 @@ when run from an administrator's SSH session:
 
 - `install-host.ps1` starts the background service in the signed-in
   user's session through a one-off scheduled task (`LatchHostStart`, no
-  trigger; it stays registered and does nothing on its own, and
-  `--uninstall` removes it). If nobody is signed in it says so, and the Run
+  trigger; its registration is removed after the startup attempt without
+  stopping the running host). If nobody is signed in it says so, and the Run
   key starts the service at the next sign-in.
 - `latch-host.exe --setup-elevated`, run from the installed copy, does
   what the button does without a prompt (the session is already

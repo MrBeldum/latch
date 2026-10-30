@@ -129,9 +129,11 @@ if ((Get-Process -Id $PID).SessionId -eq 0) {
         }
     } catch {
         Write-Host "Could not start Latch Host in the signed-in session: $_"
+    } finally {
+        # Deleting a task does not terminate its running instances. Remove
+        # the temporary registration even when startup failed or timed out.
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     }
-    # The task has no trigger, so left registered it never runs by itself;
-    # removing it could end the copy it just started.
     if ($up) {
         Write-Host "Latch Host is running in the signed-in user's session."
     } else {

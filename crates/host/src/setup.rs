@@ -986,6 +986,13 @@ mod tests {
     }
 
     #[test]
+    fn the_session_zero_start_task_is_removed_even_on_failure() {
+        let installer = include_str!("../../../scripts/install-host.ps1");
+        assert!(installer.contains("} finally {"));
+        assert!(installer.contains("Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false"));
+    }
+
+    #[test]
     fn base64_matches_the_rfc_vectors() {
         for (plain, coded) in [
             ("", ""),
