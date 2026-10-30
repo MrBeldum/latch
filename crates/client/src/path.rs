@@ -90,10 +90,17 @@ impl Path {
 /// Recommended starting quality. RTT measures delay, not throughput: neither
 /// a VPS relay nor a distant direct connection implies a bandwidth cap.
 pub fn effective(settings: &StreamSettings) -> StreamSettings {
+    effective_for(settings, settings.fps)
+}
+
+/// Recommended starting quality taking into account the local display's refresh rate (Hz).
+pub fn effective_for(settings: &StreamSettings, display_hz: u32) -> StreamSettings {
     let mut s = settings.clone();
     if s.quality == Quality::Auto {
         s.resolution = Resolution::Native;
         s.bitrate_kbps = 50_000;
+        let hz = if display_hz > 0 { display_hz } else { 60 };
+        s.fps = hz.clamp(30, 240);
     }
     s
 }
@@ -303,6 +310,19 @@ mod tests {
             ..auto
         };
         assert_eq!(effective(&custom), custom);
+    }
+
+    #[test]
+    fn effective_quality_uses_display_refresh_rate() {
+        let default_settings = StreamSettings::default();
+        // 120 Hz display capability (e.g. ProMotion)
+        let s120 = effective_for(&default_settings, 120);
+        assert_eq!(s120.fps, 120);
+        assert_eq!(s120.resolution, Resolution::Native);
+
+        // Clamping to max 240 fps and min 30 fps
+        assert_eq!(effective_for(&default_settings, 360).fps, 240);
+        assert_eq!(effective_for(&default_settings, 15).fps, 30);
     }
 
     #[test]

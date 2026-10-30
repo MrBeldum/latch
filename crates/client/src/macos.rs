@@ -87,6 +87,17 @@ mod imp {
         let flags = unsafe { NSEvent::modifierFlags_class() };
         Some(flags.contains(NSEventModifierFlags::NSEventModifierFlagCapsLock))
     }
+
+    pub fn display_hz() -> Option<u32> {
+        let mtm = MainThreadMarker::new()?;
+        let screen = objc2_app_kit::NSScreen::mainScreen(mtm)?;
+        let fps = unsafe { screen.maximumFramesPerSecond() };
+        if fps > 0 {
+            Some(fps as u32)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -98,6 +109,10 @@ mod imp {
     }
 
     pub fn caps_lock() -> Option<bool> {
+        None
+    }
+
+    pub fn display_hz() -> Option<u32> {
         None
     }
 }
@@ -112,6 +127,11 @@ pub fn stream_owns_keys(owned: bool) {
 /// None where there is no such count.
 pub fn pasteboard_changes() -> Option<isize> {
     imp::pasteboard_changes()
+}
+
+/// The main display's maximum frame rate (e.g. 120 Hz on ProMotion), or None.
+pub fn display_hz() -> Option<u32> {
+    imp::display_hz()
 }
 
 /// Whether Caps Lock is on on this Mac. None where that is not known.

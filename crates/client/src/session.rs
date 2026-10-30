@@ -694,7 +694,18 @@ pub fn request_for(
     capture_size: Option<[u32; 2]>,
     max_fps: u32,
 ) -> (u32, u32, u32) {
-    let s = path::effective(settings);
+    let hz = crate::macos::display_hz().unwrap_or(60);
+    request_for_hz(settings, native, hz, capture_size, max_fps)
+}
+
+pub fn request_for_hz(
+    settings: &StreamSettings,
+    native: (u32, u32),
+    display_hz: u32,
+    capture_size: Option<[u32; 2]>,
+    max_fps: u32,
+) -> (u32, u32, u32) {
+    let s = path::effective_for(settings, display_hz);
     fit_to_host(s.resolution.pixels(native), s.fps, capture_size, max_fps)
 }
 
@@ -1498,5 +1509,12 @@ mod tests {
         assert_eq!(p.since, since);
         p.set(Step::Ended { error: None }, "");
         assert!(!p.active());
+    }
+
+    #[test]
+    fn request_for_hz_respects_high_refresh_rate() {
+        let settings = StreamSettings::default();
+        let (w, h, fps) = request_for_hz(&settings, (1920, 1080), 120, None, 144);
+        assert_eq!((w, h, fps), (1920, 1080, 120));
     }
 }
