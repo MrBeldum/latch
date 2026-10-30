@@ -453,7 +453,22 @@ fn timed_port_open(ip: Ipv4Addr, port: u16, timeout: Duration) -> (bool, Option<
 /// A fresh look at the path to `ip` right before connecting: direct or
 /// relayed from Tailscale's own view of the peer, latency from the best of
 /// a few connects.
-fn measure_path(node_id: &str, ip: Ipv4Addr, prior: &Path) -> Path {
+fn measure_path(
+    node_id: &str,
+    ip: Ipv4Addr,
+    prior: &Path,
+    stale: impl FnMut() -> bool,
+) -> Path {
+    measure_path_on(node_id, ip, CONTROL_PORT, prior, stale)
+}
+
+fn measure_path_on(
+    node_id: &str,
+    ip: Ipv4Addr,
+    port: u16,
+    prior: &Path,
+    mut stale: impl FnMut() -> bool,
+) -> Path {
     let mut p = prior.clone();
     if let Ok(st) = tailscale::status() {
         if let Some(n) = st.peer.values().find(|n| n.id == node_id) {
@@ -466,8 +481,14 @@ fn measure_path(node_id: &str, ip: Ipv4Addr, prior: &Path) -> Path {
     }
     let mut best: Option<u32> = prior.rtt_ms;
     for _ in 0..3 {
-        if let (true, Some(ms)) = timed_port_open(ip, CONTROL_PORT, Duration::from_millis(1500)) {
-            best = Some(best.map_or(ms, |b| b.min(ms)));
+        if stale() {
+            break;
+        }
+        match timed_port_open(ip, port, Duration::from_millis(1500)) {
+            (true, Some(ms)) => {
+                best = Some(best.map_or(ms, |b| b.min(ms)));
+            }
+            _ => break,
         }
     }
     p.rtt_ms = best;
@@ -840,7 +861,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     }
 
     report(Step::Launching, "Measuring the path…".into());
-    let path = measure_path(&t.node_id, t.ip, &t.path);
+    let path = measure_path(&t.node_id, t.ip, &t.path, || stale(&c.progress, generation));
     let mut settings = path::effective(&c.settings);
     let wanted = settings.resolution.pixels(c.native);
     let (w, h, fps) = request_for(
@@ -1177,6 +1198,52 @@ mod tests {
             fit_to_host((1920, 1200), 60, ultrawide.0, ultrawide.1),
             (1920, 1080, 60)
         );
+    }
+
+    #[test]
+    fn measure_path_stops_immediately_when_cancelled_or_unreachable() {
+        // If cancelled before start, it must not attempt port opens.
+        let mut checks = 0;
+        let path = measure_path(
+            "test-node",
+            "127.0.0.1".parse().unwrap(),
+            &Path::default(),
+            || {
+                checks += 1;
+                true
+            },
+        );
+        assert_eq!(checks, 1);
+        assert_eq!(path.rtt_ms, None);
+
+        // If port is closed/unreachable, it must break after the first attempt instead of
+        // repeating 3 times.
+        let mut checks = 0;
+        let path = measure_path_on(
+            "test-node",
+            "127.0.0.1".parse().unwrap(),
+            47851,
+            &Path::default(),
+            || {
+                checks += 1;
+                false
+            },
+        );
+        assert_eq!(checks, 1);
+        assert_eq!(path.rtt_ms, None);
+
+        // If cancelled after first attempt, it stops on iteration 2 instead of continuing.
+        let mut checks = 0;
+        let _ = measure_path(
+            "test-node",
+            "127.0.0.1".parse().unwrap(),
+            &Path::default(),
+            || {
+                checks += 1;
+                checks > 1
+            },
+        );
+        assert_eq!(checks, 2);
     }
 
     #[test]
