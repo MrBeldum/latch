@@ -169,7 +169,6 @@ impl Node {
             "Other"
         }
     }
-    /// True only for `tag:relay`. Other tags leave a stream PC in the list.
     /// Display name for the peer: the first label of its MagicDNS name
     /// (e.g. `"iphone.taile55421.ts.net."` → `"iphone"`), matching
     /// `tailscale status` and the admin console.
@@ -185,6 +184,7 @@ impl Node {
             _ => self.host_name.as_str(),
         }
     }
+    /// True only for `tag:relay`. Other tags leave a stream PC in the list.
     pub fn is_relay(&self) -> bool {
         self.tags.iter().any(|t| t == RELAY_TAG)
     }
@@ -264,13 +264,13 @@ impl Status {
     /// exit nodes). Sorted by machine name.
     pub fn machine_peers(&self) -> Vec<&Node> {
         let mut v: Vec<&Node> = self.listed_peers().filter(|n| !n.is_relay()).collect();
-        v.sort_by(|a, b| a.name().cmp(b.name()));
+        v.sort_by_cached_key(|n| n.name().to_lowercase());
         v
     }
     /// Nodes tagged `tag:relay`, any OS. Sorted by machine name like the PC list.
     pub fn relay_peers(&self) -> Vec<&Node> {
         let mut v: Vec<&Node> = self.listed_peers().filter(|n| n.is_relay()).collect();
-        v.sort_by(|a, b| a.name().cmp(b.name()));
+        v.sort_by_cached_key(|n| n.name().to_lowercase());
         v
     }
     /// The peers `tailscale status` lists.
@@ -660,12 +660,12 @@ mod tests {
         let pcs = windows_peers(&st);
         assert_eq!(
             pcs.iter().map(|n| n.name()).collect::<Vec<_>>(),
-            ["Gaming-PC-2", "den", "office"]
+            ["den", "Gaming-PC-2", "office"]
         );
         let machines = st.machine_peers();
         assert_eq!(
             machines.iter().map(|n| n.name()).collect::<Vec<_>>(),
-            ["Gaming-PC-2", "den", "mac", "office"],
+            ["den", "Gaming-PC-2", "mac", "office"],
             "machine_peers includes every OS, not only Windows"
         );
         assert_eq!(st.peer["nodekey:a"].os_label(), "macOS");
@@ -677,16 +677,16 @@ mod tests {
         );
         assert!(pcs[2].online);
         assert_eq!(pcs[2].public_ipv4(), Some("203.0.113.5".parse().unwrap()));
-        assert_eq!(pcs[1].public_ipv4(), None);
+        assert_eq!(pcs[0].public_ipv4(), None);
         // Office's key expires far off; Den has no expiry (a zero time).
         assert!(pcs[2].key_expiry_days().unwrap() > 300_000);
-        assert_eq!(pcs[1].key_expiry_days(), None);
+        assert_eq!(pcs[0].key_expiry_days(), None);
         // Office is reached directly; Gaming-PC-2 only through the Tokyo relay;
         // Den has not been talked to, so nobody knows, home relay or not.
         assert_eq!(pcs[2].direct(), Some(true));
-        assert_eq!(pcs[0].direct(), Some(false));
-        assert_eq!(pcs[0].relay, "tok");
-        assert_eq!(pcs[1].direct(), None);
+        assert_eq!(pcs[1].direct(), Some(false));
+        assert_eq!(pcs[1].relay, "tok");
+        assert_eq!(pcs[0].direct(), None);
     }
 
     #[test]
