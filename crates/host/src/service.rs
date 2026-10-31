@@ -724,10 +724,12 @@ impl Service {
             ("GET", "/v1/display") => Response::json(200, &self.display()),
             ("POST", "/v1/display") => self.set_display(peer.ip(), req),
             ("POST", p) if p == control::PATH => {
-                if local {
+                // Connecting to our own tailnet address does not establish
+                // which OS account is asking to control this desktop.
+                if local || self.own_address(peer.ip()) {
                     Response::json(
                         403,
-                        &Ack::err("streaming sessions may only be started by an authorized Tailscale peer"),
+                        &Ack::err("streaming sessions must come from another authorized Tailscale machine"),
                     )
                 } else {
                     self.stream(peer, req)
@@ -1716,17 +1718,18 @@ mod tests {
     }
 
     #[test]
-    fn another_account_on_this_machine_cannot_push_an_update_or_read_the_clipboard() {
+    fn local_accounts_cannot_access_remote_only_routes() {
         // Loopback, and this machine's own tailnet address, can be any OS
-        // user signed in here: an executable pushed from there would run as
-        // the account that owns this service.
+        // user signed in here. Updates, clipboard data and desktop control
+        // belong to the account that owns this service.
         let svc = Service::new();
         let mut st = tailscale::Status::default();
         st.self_node.tailscale_ips = vec!["100.64.0.5".into(), "fd7a:115c:a1e0::5".into()];
         *svc.tailscale.lock() = Ok(st);
         let own: SocketAddr = "100.64.0.5:5".parse().unwrap();
+        let own_v6: SocketAddr = "[fd7a:115c:a1e0::5]:5".parse().unwrap();
         let other: SocketAddr = "100.64.0.6:5".parse().unwrap();
-        for ip in [own.ip(), other.ip()] {
+        for ip in [own.ip(), own_v6.ip(), other.ip()] {
             svc.auth.lock().insert(ip, (Instant::now(), true));
         }
         let update = Request {
@@ -1749,12 +1752,19 @@ mod tests {
             headers: json_header(),
             body: b"not json".to_vec(),
         };
+        let stream = Request {
+            method: "POST".into(),
+            path: control::PATH.into(),
+            headers: json_header(),
+            body: b"{}".to_vec(),
+        };
         for from in [
             "127.0.0.1:5".parse().unwrap(),
             "[::1]:5".parse().unwrap(),
             own,
+            own_v6,
         ] {
-            for req in [&update, &read, &write] {
+            for req in [&update, &read, &write, &stream] {
                 let r = svc.handle(from, req);
                 assert_eq!(r.status, 403, "{} {} from {from}", req.method, req.path);
             }
@@ -1762,12 +1772,15 @@ mod tests {
         // Another machine on the account still gets through to the route.
         assert_ne!(svc.handle(other, &update).status, 403);
         assert_eq!(svc.handle(other, &write).status, 400);
+        assert_eq!(svc.handle(other, &stream).status, 400);
         // A cached admission must not bypass the local-address check when
         // the next Tailscale status probe fails.
         *svc.tailscale.lock() = Err("status unavailable".into());
-        for req in [&update, &read, &write] {
+        for req in [&update, &read, &write, &stream] {
             assert_eq!(svc.handle(own, req).status, 403);
         }
+        *svc.tailscale.lock() = Ok(tailscale::Status::default());
+        assert_eq!(svc.handle(own, &stream).status, 403);
     }
 
     const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -1931,8 +1944,11 @@ mod tests {
     }
 
     #[test]
-    fn stream_route_refuses_plain_local_and_admits_tailnet_or_userspace_peer() {
+    fn stream_route_refuses_plain_local_and_admits_another_tailnet_peer() {
         let svc = Service::new();
+        let mut status = tailscale::Status::default();
+        status.self_node.tailscale_ips = vec!["100.64.0.99".into()];
+        *svc.tailscale.lock() = Ok(status);
         let local: SocketAddr = "127.0.0.1:5".parse().unwrap();
         let req = Request {
             method: "POST".into(),
