@@ -79,9 +79,13 @@ impl Packetizer {
         self.fec_percent
     }
 
-    /// Calls `emit` with every datagram of `frame`, in sending order (each
-    /// block's data shards, then its parity shards). Returns the frame's
-    /// number. An empty frame is sent as one zero-length data shard.
+    /// Calls `emit` with every datagram of `frame`, in sending order: the
+    /// data shards of every block first, then each block's parity. A frame
+    /// that loses nothing is complete as soon as its data has arrived, and
+    /// its data never waits for parity to be computed; a burst that takes
+    /// out data is less likely to take out the parity sent after it.
+    /// Returns the frame's number. An empty frame is sent as one
+    /// zero-length data shard.
     pub fn packetize(&mut self, frame: &OutFrame<'_>, emit: impl FnMut(&[u8])) -> u32 {
         let number = self.next_frame;
         self.next_frame = self.next_frame.wrapping_add(1);
@@ -92,77 +96,78 @@ impl Packetizer {
             return number;
         }
         let mut emit = emit;
-        let mut offset = 0;
         let mut buf = Vec::with_capacity(32 + len);
-
-        for block in 0..blocks {
-            let data = total / blocks + usize::from(block < total % blocks);
-            let parity = (data * self.fec_percent as usize)
-                .div_ceil(100)
-                .clamp(1, 255 - data);
-
-            let mut refs: Vec<&[u8]> = Vec::with_capacity(data);
-            let mut padded = None;
-            for _ in 0..data {
-                let remaining = frame.data.len().saturating_sub(offset);
-                if remaining >= len {
-                    refs.push(&frame.data[offset..offset + len]);
-                    offset += len;
-                } else {
-                    let mut pad = vec![0u8; len];
-                    if remaining > 0 {
-                        pad[..remaining].copy_from_slice(&frame.data[offset..offset + remaining]);
-                        offset += remaining;
-                    }
-                    padded = Some(pad);
-                }
-            }
-            if let Some(ref pad) = padded {
-                refs.push(pad);
-            }
-
-            let mut parity_flat = vec![0u8; parity * len];
-            let mut out: Vec<&mut [u8]> = parity_flat.chunks_exact_mut(len).collect();
-
-            if let Ok(coder) = crate::fec::ReedSolomon::cached(data, parity) {
-                if coder.encode(&refs, &mut out).is_err() {
-                    return number;
-                }
+        // The last shard, zero-padded to the shard length.
+        let tail = {
+            let full = frame.data.len() / len * len;
+            (full < frame.data.len() || frame.data.is_empty()).then(|| {
+                let mut pad = vec![0u8; len];
+                pad[..frame.data.len() - full].copy_from_slice(&frame.data[full..]);
+                pad
+            })
+        };
+        let shard_bytes = |index: usize| -> &[u8] {
+            let at = index * len;
+            if at + len <= frame.data.len() {
+                &frame.data[at..at + len]
             } else {
-                return number;
+                tail.as_deref().unwrap_or(&[])
             }
+        };
+        let layout: Vec<(usize, usize, usize)> = (0..blocks)
+            .scan(0, |first, block| {
+                let data = total / blocks + usize::from(block < total % blocks);
+                let parity = (data * self.fec_percent as usize)
+                    .div_ceil(100)
+                    .clamp(1, 255 - data);
+                let start = *first;
+                *first += data;
+                Some((start, data, parity))
+            })
+            .collect();
+        let header = |block: usize, data: usize, parity: usize| VideoShard {
+            keyframe: frame.keyframe,
+            host_delay: frame.host_delay,
+            frame: number,
+            frame_len: frame.data.len() as u32,
+            shard: 0,
+            block: block as u8,
+            blocks: blocks as u8,
+            data: data as u16,
+            parity: parity as u16,
+            shard_len: len as u16,
+            bytes: &[],
+        };
 
-            for (index, &bytes) in refs.iter().enumerate() {
+        for (block, &(first, data, parity)) in layout.iter().enumerate() {
+            for index in 0..data {
                 let shard = VideoShard {
-                    keyframe: frame.keyframe,
-                    host_delay: frame.host_delay,
-                    frame: number,
-                    frame_len: frame.data.len() as u32,
                     shard: index as u16,
-                    block: block as u8,
-                    blocks: blocks as u8,
-                    data: data as u16,
-                    parity: parity as u16,
-                    shard_len: len as u16,
-                    bytes,
+                    bytes: shard_bytes(first + index),
+                    ..header(block, data, parity)
                 };
                 crate::wire::write_video(&mut buf, self.session, &shard);
                 emit(&buf);
             }
+        }
 
+        let mut parity_flat = Vec::new();
+        for (block, &(first, data, parity)) in layout.iter().enumerate() {
+            let refs: Vec<&[u8]> = (first..first + data).map(shard_bytes).collect();
+            parity_flat.clear();
+            parity_flat.resize(parity * len, 0);
+            let mut out: Vec<&mut [u8]> = parity_flat.chunks_exact_mut(len).collect();
+            let Ok(coder) = crate::fec::ReedSolomon::cached(data, parity) else {
+                return number;
+            };
+            if coder.encode(&refs, &mut out).is_err() {
+                return number;
+            }
             for (index, bytes) in parity_flat.chunks_exact(len).enumerate() {
                 let shard = VideoShard {
-                    keyframe: frame.keyframe,
-                    host_delay: frame.host_delay,
-                    frame: number,
-                    frame_len: frame.data.len() as u32,
                     shard: (data + index) as u16,
-                    block: block as u8,
-                    blocks: blocks as u8,
-                    data: data as u16,
-                    parity: parity as u16,
-                    shard_len: len as u16,
                     bytes,
+                    ..header(block, data, parity)
                 };
                 crate::wire::write_video(&mut buf, self.session, &shard);
                 emit(&buf);
@@ -461,4 +466,43 @@ impl Default for KeyframeRequests {
 /// Wrapping comparison of frame numbers: `a` comes before `b`.
 pub fn before(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) < 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_data_shard_goes_out_before_any_parity() {
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i * 7) as u8).collect();
+        let mut packetizer = Packetizer::new(9);
+        let mut kinds = Vec::new();
+        let mut reassembler = Reassembler::new(9);
+        let now = Instant::now();
+        packetizer.packetize(
+            &OutFrame {
+                data: &data,
+                keyframe: true,
+                host_delay: 0,
+            },
+            |datagram| {
+                let Ok(crate::wire::Datagram::Video { shard, .. }) = crate::wire::parse(datagram)
+                else {
+                    panic!("not a video datagram");
+                };
+                kinds.push(shard.shard >= shard.data);
+                // Only the data reaches the viewer: it is enough.
+                if shard.shard < shard.data {
+                    reassembler.push(&shard, now);
+                }
+            },
+        );
+        assert!(kinds.iter().filter(|&&parity| !parity).count() > 64);
+        let first_parity = kinds.iter().position(|&parity| parity).unwrap();
+        assert!(kinds[first_parity..].iter().all(|&parity| parity));
+        let Some(Reassembled::Frame(frame)) = reassembler.poll(now) else {
+            panic!("the data alone did not make the frame");
+        };
+        assert_eq!(frame.data, data);
+    }
 }
