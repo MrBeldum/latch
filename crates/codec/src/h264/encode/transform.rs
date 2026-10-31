@@ -208,12 +208,7 @@ pub(super) fn block(
     pred: &[u8; 16],
     quantizer: &Quantizer,
 ) -> ([i32; 16], [u8; 16]) {
-    let mut input = [0; 16];
-    for y in 0..4 {
-        for x in 0..4 {
-            input[y * 4 + x] = src[offset + y * stride + x] as i32 - pred[y * 4 + x] as i32;
-        }
-    }
+    let input = residual(src, stride, offset, pred);
     if input == [0; 16] {
         return ([0; 16], *pred);
     }
@@ -223,22 +218,83 @@ pub(super) fn block(
         return (q, *pred);
     }
     let residual = inverse(dq);
-    let mut rec = [0; 16];
-    let mut scan = [0; 16];
-    for i in 0..16 {
-        rec[i] = (pred[i] as i32 + residual[i]).clamp(0, 255) as u8;
-        scan[i] = q[SCAN[i]];
-    }
+    let rec = reconstruct(pred, residual);
+    let scan = std::array::from_fn(|i| q[SCAN[i]]);
     (scan, rec)
 }
-pub(super) fn satd(a: &[u8], stride: usize, offset: usize, pred: &[u8; 16]) -> u32 {
-    let mut v = [0i32; 16];
+
+/// Load four short rows without reading past the last visible sample.
+#[inline]
+pub(super) fn pixels(src: &[u8], stride: usize, offset: usize) -> [u8; 16] {
+    let mut out = [0; 16];
     for y in 0..4 {
-        for x in 0..4 {
-            v[4 * y + x] = a[offset + y * stride + x] as i32 - pred[4 * y + x] as i32;
-        }
+        out[y * 4..y * 4 + 4].copy_from_slice(&src[offset + y * stride..offset + y * stride + 4]);
     }
-    hadamard(v)
+    out
+}
+
+#[inline]
+pub(super) fn residual(src: &[u8], stride: usize, offset: usize, pred: &[u8; 16]) -> [i32; 16] {
+    let samples = pixels(src, stride, offset);
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let a = vld1q_u8(samples.as_ptr());
+        let b = vld1q_u8(pred.as_ptr());
+        let lo = vreinterpretq_s16_u16(vsubl_u8(vget_low_u8(a), vget_low_u8(b)));
+        let hi = vreinterpretq_s16_u16(vsubl_high_u8(a, b));
+        let mut out = [0; 16];
+        for (i, row) in [
+            vmovl_s16(vget_low_s16(lo)),
+            vmovl_high_s16(lo),
+            vmovl_s16(vget_low_s16(hi)),
+            vmovl_high_s16(hi),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            vst1q_s32(out.as_mut_ptr().add(i * 4), row);
+        }
+        out
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    std::array::from_fn(|i| samples[i] as i32 - pred[i] as i32)
+}
+
+#[inline]
+pub(super) fn reconstruct(pred: &[u8; 16], residual: [i32; 16]) -> [u8; 16] {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let p = vld1q_u8(pred.as_ptr());
+        let lo = vmovl_u8(vget_low_u8(p));
+        let hi = vmovl_high_u8(p);
+        let rows = [
+            vmovl_u16(vget_low_u16(lo)),
+            vmovl_high_u16(lo),
+            vmovl_u16(vget_low_u16(hi)),
+            vmovl_high_u16(hi),
+        ];
+        let rows: [_; 4] = std::array::from_fn(|i| {
+            vqmovun_s32(vaddq_s32(
+                vreinterpretq_s32_u32(rows[i]),
+                vld1q_s32(residual.as_ptr().add(i * 4)),
+            ))
+        });
+        let result = vcombine_u8(
+            vqmovn_u16(vcombine_u16(rows[0], rows[1])),
+            vqmovn_u16(vcombine_u16(rows[2], rows[3])),
+        );
+        let mut out = [0; 16];
+        vst1q_u8(out.as_mut_ptr(), result);
+        out
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    std::array::from_fn(|i| (pred[i] as i32 + residual[i]).clamp(0, 255) as u8)
+}
+
+pub(super) fn satd(a: &[u8], stride: usize, offset: usize, pred: &[u8; 16]) -> u32 {
+    hadamard(residual(a, stride, offset, pred))
         .iter()
         .map(|x| x.unsigned_abs())
         .sum::<u32>()
@@ -427,6 +483,19 @@ mod tests {
                 seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
                 (seed >> 16) as i32 % 511 - 255
             });
+            let pixels = residual.map(|v| v as u8);
+            let prediction = pixels.map(|v| 255 - v);
+            let differences = super::residual(&pixels, 4, 0, &prediction);
+            assert_eq!(
+                differences,
+                std::array::from_fn(|i| pixels[i] as i32 - prediction[i] as i32)
+            );
+            assert_eq!(
+                reconstruct(&prediction, residual.map(|v| v * 4096)),
+                std::array::from_fn(
+                    |i| (prediction[i] as i32 + residual[i] * 4096).clamp(0, 255) as u8
+                )
+            );
             assert_eq!(forward(residual), forward_scalar(residual));
             assert_eq!(hadamard(residual), hadamard_scalar(residual));
             let coefficients = residual.map(|v| v * 4096);

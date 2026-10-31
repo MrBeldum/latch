@@ -304,6 +304,7 @@ fn motion_cost(
     mv: (i32, i32),
     pred: (i32, i32),
     lambda: u32,
+    limit: u32,
 ) -> u32 {
     let mut cost = lambda * (signed_bits(mv.0 - pred.0) + signed_bits(mv.1 - pred.1));
     let pw = r.padded_width() as i32;
@@ -314,15 +315,18 @@ fn motion_cost(
         if rx >= 0 && ry >= 0 && rx + 16 <= pw && ry + 16 <= ph {
             let so = y * src.y_stride + x;
             let ro = ry as usize * r.y_stride + rx as usize;
-            cost += predict::sad16x8(&src.y, src.y_stride, so, &r.y, r.y_stride, ro)
-                + predict::sad16x8(
-                    &src.y,
-                    src.y_stride,
-                    so + src.y_stride,
-                    &r.y,
-                    r.y_stride,
-                    ro + r.y_stride,
-                );
+            cost += predict::sad16x8(&src.y, src.y_stride, so, &r.y, r.y_stride, ro);
+            if cost >= limit {
+                return cost;
+            }
+            cost += predict::sad16x8(
+                &src.y,
+                src.y_stride,
+                so + src.y_stride,
+                &r.y,
+                r.y_stride,
+                ro + r.y_stride,
+            );
             return cost;
         }
         for yy in 0..16 {
@@ -364,7 +368,11 @@ fn motion_cost(
                     r.y_stride,
                     ro1,
                     ro2,
-                ) + predict::sad16x8_avg(
+                );
+                if cost >= limit {
+                    return cost;
+                }
+                cost += predict::sad16x8_avg(
                     &src.y,
                     src.y_stride,
                     so + src.y_stride,
@@ -375,15 +383,18 @@ fn motion_cost(
                     ro2 + r.y_stride,
                 );
             } else {
-                cost += predict::sad16x8(&src.y, src.y_stride, so, plane1, r.y_stride, ro1)
-                    + predict::sad16x8(
-                        &src.y,
-                        src.y_stride,
-                        so + src.y_stride,
-                        plane1,
-                        r.y_stride,
-                        ro1 + r.y_stride,
-                    );
+                cost += predict::sad16x8(&src.y, src.y_stride, so, plane1, r.y_stride, ro1);
+                if cost >= limit {
+                    return cost;
+                }
+                cost += predict::sad16x8(
+                    &src.y,
+                    src.y_stride,
+                    so + src.y_stride,
+                    plane1,
+                    r.y_stride,
+                    ro1 + r.y_stride,
+                );
             }
             return cost;
         }
@@ -499,7 +510,7 @@ fn motion(
         }
     }
     let round = |v: (i32, i32)| ((v.0 / 4) * 4, (v.1 / 4) * 4);
-    let cost = |mv| {
+    let cost = |mv, limit| {
         motion_cost(
             &job.source,
             &job.reference,
@@ -509,6 +520,7 @@ fn motion(
             mv,
             pred,
             lambda,
+            limit,
         )
     };
     let mut best = (0, 0);
@@ -518,7 +530,7 @@ fn motion(
         if candidates[..i].iter().any(|&p| round(p) == v) {
             continue;
         }
-        let s = cost(v);
+        let s = cost(v, score);
         if s < score {
             score = s;
             best = v;
@@ -550,7 +562,7 @@ fn motion(
                 if (v.0 - centre.0).abs() > 64 || (v.1 - centre.1).abs() > 64 {
                     continue;
                 }
-                let s = cost(v);
+                let s = cost(v, score);
                 if s < score {
                     score = s;
                     next = v;
@@ -579,7 +591,7 @@ fn motion(
                         continue;
                     }
                     let v = (centre.0 + dx, centre.1 + dy);
-                    let s = cost(v);
+                    let s = cost(v, score);
                     if s < score {
                         score = s;
                         best = v;
@@ -940,18 +952,21 @@ pub(super) fn encode(job: Job) -> Band {
                 let bx = (i % 2) * 4;
                 let by = (i / 2) * 4;
                 let off = (y / 2 + by) * rec.c_stride + x / 2 + bx;
-                let mut input = [0; 16];
-                for yy in 0..4 {
-                    for xx in 0..4 {
-                        let j = yy * 4 + xx;
-                        let p = dp[off + yy * rec.c_stride + xx];
-                        predictions[i][j] = p;
-                        input[j] = sp[(gy / 2 + by + yy) * job.source.c_stride + x / 2 + bx + xx]
-                            as i32
-                            - p as i32;
-                    }
-                }
-                transformed[i] = transform::forward(input);
+                predictions[i] = transform::pixels(dp, rec.c_stride, off);
+                let input = transform::residual(
+                    sp,
+                    job.source.c_stride,
+                    (gy / 2 + by) * job.source.c_stride + x / 2 + bx,
+                    &predictions[i],
+                );
+                // Constant chroma residuals have only DC; avoid both 4x4 passes.
+                transformed[i] = if input.iter().all(|&v| v == input[0]) {
+                    let mut dc = [0; 16];
+                    dc[0] = input[0] * 16;
+                    dc
+                } else {
+                    transform::forward(input)
+                };
             }
             dc[plane] = transform::chroma_dc(transformed.map(|c| c[0])).map(|v| {
                 transform::suppress(transform::quant(v, cqp, 0, intra, 1), job.suppression)
@@ -961,23 +976,25 @@ pub(super) fn encode(job: Job) -> Band {
             }
             let dci = transform::chroma_dc_inverse(dc[plane], cqp);
             for i in 0..4 {
-                let (q, mut dq) = chroma_quantizer.apply(transformed[i]);
+                let mut dq = [0; 16];
+                if transformed[i][1..].iter().any(|&v| v != 0) {
+                    let (q, dequantized) = chroma_quantizer.apply(transformed[i]);
+                    dq = dequantized;
+                    for (j, &s) in SCAN.iter().enumerate().skip(1) {
+                        cc[plane][i][j] = q[s];
+                    }
+                    if cc[plane][i][1..].iter().any(|&v| v != 0) {
+                        chroma_cbp = 2;
+                    }
+                }
                 dq[0] = dci[i];
-                for (j, &s) in SCAN.iter().enumerate().skip(1) {
-                    cc[plane][i][j] = q[s];
-                }
-                if cc[plane][i][1..].iter().any(|&v| v != 0) {
-                    chroma_cbp = 2;
-                }
                 let r = transform::inverse(dq);
                 let bx = (i % 2) * 4;
                 let by = (i / 2) * 4;
+                let pixels = transform::reconstruct(&predictions[i], r);
                 for yy in 0..4 {
-                    for xx in 0..4 {
-                        let j = yy * 4 + xx;
-                        dp[(y / 2 + by + yy) * rec.c_stride + x / 2 + bx + xx] =
-                            (predictions[i][j] as i32 + r[j]).clamp(0, 255) as u8;
-                    }
+                    let off = (y / 2 + by + yy) * rec.c_stride + x / 2 + bx;
+                    dp[off..off + 4].copy_from_slice(&pixels[yy * 4..yy * 4 + 4]);
                 }
             }
         }
@@ -1081,6 +1098,56 @@ pub(super) fn encode(job: Job) -> Band {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bounded_motion_cost_preserves_candidate_ordering() {
+        let mut seed = 27u32;
+        let mut src = Yuv420::new(64, 64);
+        let mut reference = src.clone();
+        for v in src.y.iter_mut().chain(reference.y.iter_mut()) {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            *v = (seed >> 16) as u8;
+        }
+        let hp = predict::compute_half_pel(&reference.y, 64, 64, 64);
+        for x in [0, 16, 48] {
+            for y in [0, 16, 48] {
+                for mv in [
+                    (0, 0),
+                    (-16, 12),
+                    (16, -12),
+                    (-1, -1),
+                    (1, 2),
+                    (2, 2),
+                    (3, 1),
+                ] {
+                    let expected = 7 * (signed_bits(mv.0 - 4) + signed_bits(mv.1 + 4))
+                        + (0..16)
+                            .flat_map(|yy| (0..16).map(move |xx| (xx, yy)))
+                            .map(|(xx, yy)| {
+                                src.y[(y + yy) * 64 + x + xx].abs_diff(predict::luma_mc(
+                                    &reference.y,
+                                    64,
+                                    64,
+                                    64,
+                                    (x + xx) as i32,
+                                    (y + yy) as i32,
+                                    mv,
+                                )) as u32
+                            })
+                            .sum::<u32>();
+                    for limit in [0, expected / 2, expected, expected + 1, u32::MAX] {
+                        let cost =
+                            motion_cost(&src, &reference, Some(&hp), x, y, mv, (4, -4), 7, limit);
+                        if expected < limit {
+                            assert_eq!(cost, expected);
+                        } else {
+                            assert!(cost >= limit && cost <= expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn unrelated_motion_is_not_a_scroll() {
         let mut a = Yuv420::new(640, 368);
