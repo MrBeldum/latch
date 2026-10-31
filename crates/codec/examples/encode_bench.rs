@@ -58,6 +58,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     e.set_subpixel_refinement(get("--subpel", "yes") != "no");
     let metrics = get("--metrics", "yes") != "no";
+    let timings = get("--timings", "no") == "yes";
+    if timings {
+        eprintln!("frame,ms,bytes,qp,skipped_mbs");
+    }
     let mut millis = 0.;
     let mut bytes = 0usize;
     let mut max_frame = 0usize;
@@ -77,7 +81,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut data = Vec::new();
         let start = Instant::now();
         let info = e.encode(&p, false, &mut data)?;
-        millis += start.elapsed().as_secs_f64() * 1000.;
+        let elapsed = start.elapsed().as_secs_f64() * 1000.;
+        millis += elapsed;
+        if timings {
+            eprintln!(
+                "{i},{elapsed:.3},{},{},{}",
+                info.bytes, info.qp, info.skipped_mbs
+            );
+        }
         bytes += data.len();
         max_frame = max_frame.max(data.len());
         skips += info.skipped_mbs as u64;

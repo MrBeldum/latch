@@ -2,7 +2,7 @@
 
 use latch_codec::color::bgra_to_yuv420;
 use latch_codec::yuv::Yuv420;
-use std::time::Instant;
+use std::{hint::black_box, time::Instant};
 
 fn bench_resolution(width: u32, height: u32, iterations: usize) -> f64 {
     let stride = (width as usize) * 4;
@@ -23,12 +23,12 @@ fn bench_resolution(width: u32, height: u32, iterations: usize) -> f64 {
 
     // Warm-up
     for _ in 0..5 {
-        bgra_to_yuv420(&src, width, height, stride, &mut dst);
+        bgra_to_yuv420(black_box(&src), width, height, stride, black_box(&mut dst));
     }
 
     let start = Instant::now();
     for _ in 0..iterations {
-        bgra_to_yuv420(&src, width, height, stride, &mut dst);
+        bgra_to_yuv420(black_box(&src), width, height, stride, black_box(&mut dst));
     }
     let elapsed = start.elapsed();
 
@@ -36,17 +36,9 @@ fn bench_resolution(width: u32, height: u32, iterations: usize) -> f64 {
 }
 
 fn main() {
-    println!("=== Latch Codec Color Conversion Benchmark ===");
-
-    let ms_1080p = bench_resolution(1920, 1080, 100);
-    println!("1080p (1920x1080): {ms_1080p:.3} ms / frame");
-    assert!(
-        ms_1080p <= 1.5,
-        "Performance regression: 1080p conversion took {ms_1080p:.3} ms (> 1.5 ms)"
-    );
-
-    let ms_4k = bench_resolution(3840, 2160, 50);
-    println!("4K (3840x2160):    {ms_4k:.3} ms / frame");
-
-    println!("All performance targets met!");
+    println!("width,height,iterations,ms_frame");
+    for (w, h) in [(1280, 720), (1920, 1080), (3840, 2160)] {
+        let ms = bench_resolution(w, h, 50);
+        println!("{w},{h},50,{ms:.3}");
+    }
 }

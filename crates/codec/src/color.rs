@@ -83,6 +83,17 @@ pub fn bgra_to_yuv420_rows(
     rows: std::ops::Range<u32>,
     dst: &mut Yuv420,
 ) {
+    bgra_to_yuv420_rows_impl::<true>(src, width, height, stride, rows, dst);
+}
+
+fn bgra_to_yuv420_rows_impl<const SIMD: bool>(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    stride: usize,
+    rows: std::ops::Range<u32>,
+    dst: &mut Yuv420,
+) {
     let w = width as usize;
     let h = height as usize;
     if w == 0 || h == 0 {
@@ -113,24 +124,30 @@ pub fn bgra_to_yuv420_rows(
             row0
         };
 
-        let y_dst_row0 = &mut dst.y[y * dst.y_stride..y * dst.y_stride + w];
-        convert_y_row(row0, y_dst_row0);
-
-        if has_row1 {
-            let y_dst_row1 = &mut dst.y[(y + 1) * dst.y_stride..(y + 1) * dst.y_stride + w];
-            convert_y_row(row1, y_dst_row1);
-        }
-
+        let (top, bottom) = dst.y.split_at_mut((y + 1) * dst.y_stride);
+        let y0 = &mut top[y * dst.y_stride..y * dst.y_stride + w];
+        let y1 = if has_row1 { &mut bottom[..w] } else { &mut [] };
         let chroma_w = w.div_ceil(2);
         let chroma_y = y / 2;
         let u_dst = &mut dst.u[chroma_y * dst.c_stride..chroma_y * dst.c_stride + chroma_w];
         let v_dst = &mut dst.v[chroma_y * dst.c_stride..chroma_y * dst.c_stride + chroma_w];
+        #[allow(unused_mut)]
+        let mut done = 0;
+        #[cfg(target_arch = "aarch64")]
+        if SIMD {
+            // All input/output slices are checked above; the kernel handles whole 8-pixel groups.
+            done = unsafe { neon::rows(row0, row1, y0, y1, u_dst, v_dst) };
+        }
+        convert_y_row(&row0[done * 4..], &mut y0[done..]);
+        if has_row1 {
+            convert_y_row(&row1[done * 4..], &mut y1[done..]);
+        }
 
         let pairs = w / 2;
-        let mut row0_chunks = row0.chunks_exact(8);
-        let mut row1_chunks = row1.chunks_exact(8);
+        let mut row0_chunks = row0[done * 4..].chunks_exact(8);
+        let mut row1_chunks = row1[done * 4..].chunks_exact(8);
 
-        for cx in 0..pairs {
+        for cx in done / 2..pairs {
             if let (Some(c0), Some(c1)) = (row0_chunks.next(), row1_chunks.next()) {
                 let b00 = c0[0] as i32;
                 let g00 = c0[1] as i32;
@@ -334,4 +351,119 @@ pub fn nv12_to_yuv420(
     }
 
     dst.pad_edges();
+}
+
+// AArch64's baseline NEON processes both luma rows and their shared chroma in one read.
+#[cfg(target_arch = "aarch64")]
+mod neon {
+    use super::*;
+    use std::arch::aarch64::*;
+
+    #[inline]
+    unsafe fn matrix(
+        r: int32x4_t,
+        g: int32x4_t,
+        b: int32x4_t,
+        c: [i32; 3],
+        offset: i32,
+    ) -> int32x4_t {
+        let sum = vmlaq_n_s32(vmlaq_n_s32(vmulq_n_s32(r, c[0]), g, c[1]), b, c[2]);
+        vaddq_s32(vrshrq_n_s32::<16>(sum), vdupq_n_s32(offset))
+    }
+
+    #[inline]
+    unsafe fn luma(p: uint8x8x4_t) -> uint8x8_t {
+        let r = vreinterpretq_s16_u16(vmovl_u8(p.2));
+        let g = vreinterpretq_s16_u16(vmovl_u8(p.1));
+        let b = vreinterpretq_s16_u16(vmovl_u8(p.0));
+        let lo = matrix(
+            vmovl_s16(vget_low_s16(r)),
+            vmovl_s16(vget_low_s16(g)),
+            vmovl_s16(vget_low_s16(b)),
+            [Y_R, Y_G, Y_B],
+            16,
+        );
+        let hi = matrix(
+            vmovl_s16(vget_high_s16(r)),
+            vmovl_s16(vget_high_s16(g)),
+            vmovl_s16(vget_high_s16(b)),
+            [Y_R, Y_G, Y_B],
+            16,
+        );
+        vqmovn_u16(vcombine_u16(vqmovun_s32(lo), vqmovun_s32(hi)))
+    }
+
+    #[inline]
+    unsafe fn average(a: uint8x8_t, b: uint8x8_t) -> int32x4_t {
+        let sum = vaddl_u8(a, b);
+        let pairs = vpadd_u16(vget_low_u16(sum), vget_high_u16(sum));
+        vreinterpretq_s32_u32(vmovl_u16(vrshr_n_u16::<2>(pairs)))
+    }
+
+    pub(super) unsafe fn rows(
+        row0: &[u8],
+        row1: &[u8],
+        y0: &mut [u8],
+        y1: &mut [u8],
+        u: &mut [u8],
+        v: &mut [u8],
+    ) -> usize {
+        let mut x = 0;
+        while x + 8 <= y0.len() {
+            let a = vld4_u8(row0.as_ptr().add(x * 4));
+            let b = vld4_u8(row1.as_ptr().add(x * 4));
+            vst1_u8(y0.as_mut_ptr().add(x), luma(a));
+            if !y1.is_empty() {
+                vst1_u8(y1.as_mut_ptr().add(x), luma(b));
+            }
+            let r = average(a.2, b.2);
+            let g = average(a.1, b.1);
+            let blue = average(a.0, b.0);
+            let cb = matrix(r, g, blue, [CB_R, CB_G, CB_B], 128);
+            let cr = matrix(r, g, blue, [CR_R, CR_G, CR_B], 128);
+            let cbcr = vqmovn_u16(vcombine_u16(vqmovun_s32(cb), vqmovun_s32(cr)));
+            let bytes = vget_lane_u64::<0>(vreinterpret_u64_u8(cbcr)).to_le_bytes();
+            u[x / 2..x / 2 + 4].copy_from_slice(&bytes[..4]);
+            v[x / 2..x / 2 + 4].copy_from_slice(&bytes[4..]);
+            x += 8;
+        }
+        x
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simd_matches_scalar_with_tails_strides_and_missing_rows() {
+        let mut seed = 93u32;
+        for w in [1, 2, 7, 8, 9, 15, 16, 17, 34, 130] {
+            for h in [1, 2, 3, 18] {
+                let stride = w as usize * 4 + 7;
+                let src: Vec<_> = (0..stride * h as usize)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                        (seed >> 16) as u8
+                    })
+                    .collect();
+                for len in [src.len(), src.len() - stride + w as usize * 4 - 1] {
+                    for rows in [0..h, 1..h, 0..1] {
+                        let mut a = Yuv420::new(w, h);
+                        let mut b = a.clone();
+                        bgra_to_yuv420_rows_impl::<true>(
+                            &src[..len],
+                            w,
+                            h,
+                            stride,
+                            rows.clone(),
+                            &mut a,
+                        );
+                        bgra_to_yuv420_rows_impl::<false>(&src[..len], w, h, stride, rows, &mut b);
+                        assert_eq!(a, b, "{w}x{h}, input bytes {len}");
+                    }
+                }
+            }
+        }
+    }
 }

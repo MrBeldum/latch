@@ -179,6 +179,39 @@ pub(super) fn intra_plane(
         (false, true) => (t[1..=n].iter().sum::<i32>() + (n / 2) as i32) / n as i32,
         _ => 128,
     };
+    // Only plane prediction needs the gradients. DC/vertical/horizontal are
+    // short row fills, rather than a mode branch and repeated sums per pixel.
+    let mut p = [0; 256];
+    if mode != 3 {
+        for yy in 0..n {
+            let row = &mut p[yy * n..(yy + 1) * n];
+            if mode == 1 {
+                row.fill(l[yy + 1] as u8);
+            } else if (!chroma && mode == 0) || (chroma && mode == 2) {
+                for xx in 0..n {
+                    row[xx] = t[xx + 1] as u8;
+                }
+            } else if !chroma {
+                row.fill(dc as u8);
+            } else {
+                let by = yy / 4;
+                let ls = l[by * 4 + 1..by * 4 + 5].iter().sum::<i32>();
+                for (bx, group) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    let ts = t[bx * 4 + 1..bx * 4 + 5].iter().sum::<i32>();
+                    let value = match (x > 0, y > 0) {
+                        (true, true) if bx == by => (ts + ls + 4) >> 3,
+                        (true, true) if by == 0 => (ts + 2) >> 2,
+                        (true, true) => (ls + 2) >> 2,
+                        (true, false) => (ls + 2) >> 2,
+                        (false, true) => (ts + 2) >> 2,
+                        _ => 128,
+                    };
+                    group.fill(value as u8);
+                }
+            }
+        }
+        return p;
+    }
     let mut h = 0;
     let mut v = 0;
     for i in 1..=n / 2 {
@@ -196,36 +229,13 @@ pub(super) fn intra_plane(
         (17 * v + 16) >> 5
     };
     let a = 16 * (t[n] + l[n]);
-    let mut p = [0; 256];
     for yy in 0..n {
         for xx in 0..n {
-            let val = match mode {
-                0 if !chroma => t[xx + 1],
-                1 if !chroma => l[yy + 1],
-                1 if chroma => l[yy + 1],
-                2 if chroma => t[xx + 1],
-                3 => {
-                    (a + b * (xx as i32 - (n / 2 - 1) as i32)
-                        + c * (yy as i32 - (n / 2 - 1) as i32)
-                        + 16)
-                        >> 5
-                }
-                _ if chroma => {
-                    let bx = xx / 4;
-                    let by = yy / 4;
-                    let ts = t[bx * 4 + 1..bx * 4 + 5].iter().sum::<i32>();
-                    let ls = l[by * 4 + 1..by * 4 + 5].iter().sum::<i32>();
-                    match (x > 0, y > 0) {
-                        (true, true) if bx == by => (ts + ls + 4) >> 3,
-                        (true, true) if by == 0 => (ts + 2) >> 2,
-                        (true, true) => (ls + 2) >> 2,
-                        (true, false) => (ls + 2) >> 2,
-                        (false, true) => (ts + 2) >> 2,
-                        _ => 128,
-                    }
-                }
-                _ => dc,
-            };
+            let val = (a
+                + b * (xx as i32 - (n / 2 - 1) as i32)
+                + c * (yy as i32 - (n / 2 - 1) as i32)
+                + 16)
+                >> 5;
             p[yy * n + xx] = val.clamp(0, 255) as u8;
         }
     }
@@ -391,9 +401,7 @@ pub(super) fn sad16x8(
                 let ro = ref_offset + (i * 2) * ref_stride;
                 let va = vld1q_u8(src.as_ptr().add(so));
                 let vb = vld1q_u8(ref_plane.as_ptr().add(ro));
-                let diff_l = vabdl_u8(vget_low_u8(va), vget_low_u8(vb));
-                let diff_h = vabdl_high_u8(va, vb);
-                acc = vaddq_u16(acc, vaddq_u16(diff_l, diff_h));
+                acc = vpadalq_u8(acc, vabdq_u8(va, vb));
             }
             vaddlvq_u16(acc) as u32
         }
@@ -683,9 +691,7 @@ pub(super) fn sad16x8_avg(
                 let vb = vld1q_u8(p2.as_ptr().add(o2));
                 let avg = vrhaddq_u8(va, vb);
                 let vsrc = vld1q_u8(src.as_ptr().add(so));
-                let diff_l = vabdl_u8(vget_low_u8(vsrc), vget_low_u8(avg));
-                let diff_h = vabdl_high_u8(vsrc, avg);
-                acc = vaddq_u16(acc, vaddq_u16(diff_l, diff_h));
+                acc = vpadalq_u8(acc, vabdq_u8(vsrc, avg));
             }
             vaddlvq_u16(acc) as u32
         }
@@ -821,6 +827,43 @@ mod tests {
             let sim = sad16x8(&a, 16, 0, &b, 16, 0);
             let sca = sad16x8_scalar(&a, 16, 0, &b, 16, 0);
             assert_eq!(sim, sca);
+        }
+    }
+
+    #[test]
+    fn averaged_sad_and_copy_match_scalar_with_strides() {
+        let mut seed = 71u32;
+        for stride in [17, 32, 47] {
+            for _ in 0..100 {
+                let mut random = || {
+                    (0..stride * 20)
+                        .map(|_| {
+                            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                            (seed >> 16) as u8
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let (a, b, c) = (random(), random(), random());
+                assert_eq!(
+                    sad16x8(&a, stride, 1, &b, stride, stride + 1),
+                    sad16x8_scalar(&a, stride, 1, &b, stride, stride + 1)
+                );
+                assert_eq!(
+                    sad16x8_avg(&a, stride, 1, &b, &c, stride, stride + 1, 0),
+                    sad16x8_avg_scalar(&a, stride, 1, &b, &c, stride, stride + 1, 0)
+                );
+                let mut dst = vec![0; stride * 20];
+                copy_subpel_16x16(&mut dst, stride, 1, &b, Some(&c), stride, stride + 1, 0);
+                for y in 0..16 {
+                    for x in 0..16 {
+                        assert_eq!(
+                            dst[1 + y * stride + x],
+                            ((b[stride + 1 + y * stride + x] as u16 + c[y * stride + x] as u16 + 1)
+                                >> 1) as u8
+                        );
+                    }
+                }
+            }
         }
     }
 
