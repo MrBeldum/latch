@@ -196,7 +196,7 @@ pub(super) fn intra_plane(
             } else {
                 let by = yy / 4;
                 let ls = l[by * 4 + 1..by * 4 + 5].iter().sum::<i32>();
-                for (bx, group) in row.chunks_exact_mut(4).enumerate() {
+                for (bx, group) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                     let ts = t[bx * 4 + 1..bx * 4 + 5].iter().sum::<i32>();
                     let value = match (x > 0, y > 0) {
                         (true, true) if bx == by => (ts + ls + 4) >> 3,
