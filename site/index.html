@@ -1,0 +1,1028 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Latch — Remote desktop over Tailscale</title>
+    <meta
+      name="description"
+      content="Latch streams a whole desktop, full screen, over your own Tailscale network. One app for macOS, Windows, Linux and Docker. Free software, written in Rust."
+    />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#000000" />
+    <link rel="canonical" href="https://mrbeldum.github.io/latch/" />
+    <meta property="og:site_name" content="Latch" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://mrbeldum.github.io/latch/" />
+    <meta
+      property="og:title"
+      content="Latch — Remote desktop over Tailscale"
+    />
+    <meta
+      property="og:description"
+      content="Your machines, on any of your machines. A whole desktop, full screen, over your own Tailscale network. Free software, written in Rust."
+    />
+    <meta
+      property="og:image"
+      content="https://mrbeldum.github.io/latch/img/og.png?v=20261031"
+    />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="The Latch mark and the Latch machine list, beside the words: Your machines, on any of your machines."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="Latch — Remote desktop over Tailscale"
+    />
+    <meta
+      name="twitter:description"
+      content="A whole desktop, full screen, over your own Tailscale network. Free software, written in Rust."
+    />
+    <meta
+      name="twitter:image"
+      content="https://mrbeldum.github.io/latch/img/og.png?v=20261031"
+    />
+    <link rel="icon" href="favicon.ico?v=20261031" sizes="48x48" />
+    <link rel="icon" href="favicon.svg?v=20261031" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png?v=20261031" />
+    <link
+      rel="preload"
+      href="fonts/geist-var.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link rel="stylesheet" href="styles.css?v=20261031" />
+    <script src="site.js?v=20261031" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="top">
+      <div class="wrap top-bar">
+        <div class="brand-lockup">
+          <a class="brand" href="./" aria-label="Latch, top of page">
+            <img src="img/mark.svg?v=20261031" width="28" height="28" alt="" />
+            <span>Latch</span>
+          </a>
+        </div>
+        <nav class="top-nav" aria-label="Main">
+          <a href="#session">Session</a>
+          <a href="#network">Network</a>
+          <a href="#specs">Specs</a>
+          <a href="#platforms">Platforms</a>
+          <a href="https://github.com/MrBeldum/latch"
+            >GitHub <span class="arr" aria-hidden="true">↗</span></a
+          >
+        </nav>
+        <a class="btn btn-primary btn-small" href="#download"
+          >Download <span class="arr" aria-hidden="true">↓</span></a
+        >
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="wrap">
+          <p class="hero-meta">
+            <span>Latch 5.0.1</span>
+            <span class="hero-meta-kind">Remote desktop over Tailscale</span>
+            <a href="https://github.com/MrBeldum/latch/releases/tag/v5.0.1"
+              >Release notes <span class="arr" aria-hidden="true">↗</span></a
+            >
+          </p>
+          <h1 id="hero-title">Your machines,<br /> on any of your&nbsp;machines.</h1>
+          <div class="hero-foot">
+            <p class="lede">
+              Latch streams a whole desktop, full screen, over your own
+              Tailscale network. Mac, Windows, Linux and a VPS container run the
+              same app: each one lists the others, and each one can share its
+              own desktop.
+            </p>
+            <div class="actions">
+              <a class="btn btn-primary" href="#download"
+                >Download 5.0.1 <span class="arr" aria-hidden="true">↓</span></a
+              >
+              <a class="btn btn-ghost" href="https://github.com/MrBeldum/latch"
+                >Source on GitHub <span class="arr" aria-hidden="true">↗</span></a
+              >
+            </div>
+          </div>
+        </div>
+        <figure class="wrap hero-shot">
+          <div class="window">
+            <picture>
+              <source
+                media="(max-width: 599px)"
+                type="image/webp"
+                srcset="
+                  img/lobby-narrow-640.webp?v=20261031   640w,
+                  img/lobby-narrow-960.webp?v=20261031   960w,
+                  img/lobby-narrow-1280.webp?v=20261031 1280w
+                "
+                sizes="94vw"
+                width="640"
+                height="401"
+              />
+              <source
+                type="image/webp"
+                srcset="
+                  img/lobby-960.webp?v=20261031   960w,
+                  img/lobby-1280.webp?v=20261031 1280w,
+                  img/lobby-1920.webp?v=20261031 1920w,
+                  img/lobby-2560.webp?v=20261031 2560w
+                "
+                sizes="(min-width: 1328px) 1232px, 94vw"
+              />
+              <img
+                src="img/lobby-1280.png?v=20261031"
+                width="1280"
+                height="527"
+                alt="The Latch window on its Machines tab, listing four machines: MacBook-Pro, this Mac, shared; Gaming-PC, a Windows PC, relayed via Tokyo at 210 ms; Office, a Windows PC that is asleep, with a Wake and connect button; and Den, a Linux machine. Below, the next stream: 1280 × 800, 60 fps, 50 Mbps."
+                fetchpriority="high"
+              />
+            </picture>
+          </div>
+          <figcaption class="caption">
+            <span class="caption-no">Fig. 1</span>
+            <span
+              >The machine list. Every machine on your Tailscale account, and
+              what it can do right now.</span
+            >
+          </figcaption>
+        </figure>
+      </section>
+
+      <section id="session" class="section" aria-labelledby="session-title">
+        <div class="wrap">
+          <header class="section-head">
+            <p class="label"><span class="label-no">01</span>Session</p>
+            <div class="section-title">
+              <h2 id="session-title">
+                <span class="phrase">Open Latch.</span>
+                <span class="phrase">Click Connect.</span>
+                <span class="phrase">The desktop appears.</span>
+              </h2>
+              <p class="intro">
+                Every install lists every other machine on your Tailscale
+                account and can open its desktop. There is no host or client
+                role to choose.
+              </p>
+            </div>
+          </header>
+
+          <ol class="steps">
+            <li class="step">
+              <div class="step-copy">
+                <p class="step-no">Step 1</p>
+                <h3>Set up sharing.</h3>
+                <p>
+                  On the computer you want to reach, open the <b>Sharing</b>
+                  tab. On Windows, <b>Set up as administrator</b> takes one
+                  administrator prompt: it opens Latch’s port to your tailnet
+                  only, turns Fast Startup off and arms the network card for
+                  <span class="keys">Wake-on-LAN</span>. A Mac asks for Screen
+                  Recording and Accessibility once. The streaming engine is
+                  part of Latch; there is nothing else to install.
+                </p>
+              </div>
+              <figure class="step-shot step-shot-tall">
+                <div class="window">
+                  <picture>
+                    <source
+                      type="image/webp"
+                      srcset="
+                        img/host-768.webp?v=20261031   768w,
+                        img/host-1152.webp?v=20261031 1152w,
+                        img/host-1536.webp?v=20261031 1536w
+                      "
+                      sizes="(min-width: 1328px) 610px, (min-width: 1024px) 46vw, (min-width: 600px) 560px, 94vw"
+                    />
+                    <img
+                      src="img/host-768.png?v=20261031"
+                      width="768"
+                      height="679"
+                      alt="The Sharing tab of Latch on a Windows PC named GAMING-PC, marked Shared. It lists the PC's Tailscale address, the streaming engine running on an NVIDIA encoder, a hard NAT note, Wake-on-LAN ready over Ethernet and the PC's LAN address. Below are options: letting other machines sleep, restart or shut the PC down, keeping it awake, installing updates other machines send, and starting Latch at log-in."
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  </picture>
+                </div>
+                <figcaption class="caption">
+                  <span class="caption-no">Fig. 2</span>
+                  <span>A Windows PC, shared and ready.</span>
+                </figcaption>
+              </figure>
+            </li>
+
+            <li class="step">
+              <div class="step-copy">
+                <p class="step-no">Step 2</p>
+                <h3>Connect. Nothing to&nbsp;pair.</h3>
+                <p>
+                  Tailscale already knows who you are. The other machine checks
+                  your identity with <code>tailscale whois</code>, so there is no
+                  PIN to type and no certificate to accept. If a Windows PC is
+                  asleep, Latch wakes it and waits.
+                </p>
+              </div>
+              <figure class="step-shot">
+                <div class="window">
+                  <picture>
+                    <source
+                      type="image/webp"
+                      srcset="
+                        img/connecting-640.webp?v=20261031   640w,
+                        img/connecting-960.webp?v=20261031   960w,
+                        img/connecting-1280.webp?v=20261031 1280w
+                      "
+                      sizes="(min-width: 1328px) 610px, (min-width: 1024px) 46vw, (min-width: 600px) 560px, 94vw"
+                    />
+                    <img
+                      src="img/connecting-640.png?v=20261031"
+                      width="640"
+                      height="284"
+                      alt="Latch while connecting. A card reads Connecting to Gaming-PC, Measuring the path, with a Cancel button. There is no PIN."
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  </picture>
+                </div>
+                <figcaption class="caption">
+                  <span class="caption-no">Fig. 3</span>
+                  <span>Connecting. Nothing to type.</span>
+                </figcaption>
+              </figure>
+            </li>
+
+            <li class="step step-wide">
+              <div class="step-copy">
+                <p class="step-no">Step 3</p>
+                <h3>The desktop, and nothing&nbsp;else.</h3>
+                <p>
+                  Full screen by default. Click the picture and the mouse is
+                  captured, as in a game, so games that read raw mouse movement
+                  work. <span class="keys"><kbd>Ctrl</kbd>+<kbd>Alt</kbd></span>
+                  (<span class="keys"><kbd>Control</kbd>-<kbd>Option</kbd></span>
+                  on a Mac) is the host key, as in a hypervisor: it frees the
+                  mouse and drops this toolbar over the picture. The text
+                  clipboard follows you both ways.
+                </p>
+              </div>
+              <figure class="toolbar">
+                <div
+                  class="toolbar-scroll"
+                  tabindex="0"
+                  role="region"
+                  aria-label="The stream toolbar, scrollable"
+                >
+                  <div class="toolbar-track">
+                    <picture>
+                      <source
+                        type="image/webp"
+                        srcset="
+                          img/toolbar-1560.webp?v=20261031 1560w,
+                          img/toolbar-3120.webp?v=20261031 3120w
+                        "
+                        sizes="(min-width: 1328px) 1232px, 1120px"
+                      />
+                      <img
+                        src="img/toolbar-1560.png?v=20261031"
+                        width="1560"
+                        height="44"
+                        alt="The stream toolbar: Gaming-PC, 1920×1080, 60 fps, HEVC; Relayed via Tokyo, 210 ms; the keys control and option hide this bar; then Mouse, Keys, Stats, Full screen, PC, Stream settings and Disconnect."
+                        loading="lazy"
+                        decoding="async"
+                      />
+                    </picture>
+                    <ol class="marks" aria-hidden="true">
+                      <li class="mark-1">1</li>
+                      <li class="mark-2">2</li>
+                      <li class="mark-3">3</li>
+                      <li class="mark-4">4</li>
+                      <li class="mark-5">5</li>
+                      <li class="mark-6">6</li>
+                      <li class="mark-7">7</li>
+                      <li class="mark-8">8</li>
+                    </ol>
+                  </div>
+                </div>
+                <figcaption class="caption">
+                  <span class="caption-no">Fig. 4</span>
+                  <span>The stream toolbar on a Mac, as <span class="keys"><kbd>Control</kbd>-<kbd>Option</kbd></span> drops it.</span>
+                </figcaption>
+                <ol class="legend">
+                  <li>
+                    <b>Stream</b> Machine, size, frame rate and codec as
+                    negotiated. The dot is blue while connecting, green while
+                    the stream is healthy and amber when the connection is
+                    poor.
+                  </li>
+                  <li>
+                    <b>Path</b> Direct, through your own relay or through
+                    Tailscale’s, with the round trip. Amber when Tailscale’s
+                    shared relays carry it.
+                  </li>
+                  <li>
+                    <b>Host key</b> Control-Option on a Mac, Ctrl+Alt
+                    elsewhere. Press it to free the mouse and show or hide this
+                    bar.
+                  </li>
+                  <li>
+                    <b>Mouse</b> Captured for raw movement, or free, where the
+                    cursor’s position is sent 1:1.
+                  </li>
+                  <li>
+                    <b>Keys</b> Ctrl+Alt+Del, Windows key, Alt+Tab, Esc, Print
+                    Screen, and what <kbd>⌘</kbd> does.
+                  </li>
+                  <li>
+                    <b>Stats</b> Bitrate and frame rate against what was asked
+                    for, round trip, packet loss and decode times.
+                  </li>
+                  <li>
+                    <b>PC</b> Sleep, restart and shut down, when the PC allows
+                    it.
+                  </li>
+                  <li>
+                    <b>Stream settings</b> Change resolution, frame rate,
+                    bitrate or codec; applying reconnects in a second or two.
+                  </li>
+                </ol>
+              </figure>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section id="network" class="section" aria-labelledby="network-title">
+        <div class="wrap">
+          <header class="section-head">
+            <p class="label"><span class="label-no">02</span>Network</p>
+            <div class="section-title">
+              <h2 id="network-title">
+                Tailscale is the path and the identity&nbsp;check.
+              </h2>
+              <p class="intro">
+                A machine answers only peers signed in to the same Tailscale
+                account. There is no Latch account or password, and the control
+                port is open to your tailnet only.
+              </p>
+            </div>
+          </header>
+
+          <figure class="routes">
+            <div class="routes-diagram">
+              <p class="node node-from">
+                <span class="node-kind">From</span>This machine
+              </p>
+              <ol class="lanes">
+                <li>
+                  <span class="lane-line"
+                    ><span class="lane-no">1</span
+                    ><span class="lane-name">Direct</span></span
+                  >
+                  <span class="lane-note"
+                    >WireGuard, peer to peer, when Tailscale can get through
+                    both routers</span
+                  >
+                </li>
+                <li>
+                  <span class="lane-line"
+                    ><span class="lane-no">2</span
+                    ><span class="lane-name">Your peer relay</span></span
+                  >
+                  <span class="lane-note"
+                    >A VPS you run with the relay kit. Needs Tailscale 1.86 or
+                    later</span
+                  >
+                </li>
+                <li>
+                  <span class="lane-line"
+                    ><span class="lane-no">3</span
+                    ><span class="lane-name">DERP</span></span
+                  >
+                  <span class="lane-note"
+                    >Tailscale’s shared relays, the last resort</span
+                  >
+                </li>
+              </ol>
+              <p class="node node-to">
+                <span class="node-kind">To</span>Your other machine
+              </p>
+            </div>
+            <figcaption class="caption">
+              <span class="caption-no">Fig. 5</span>
+              <span
+                >Tailscale picks the path in this order. Latch asks for the same
+                picture on every path: a relay adds delay, not blur.</span
+              >
+            </figcaption>
+          </figure>
+
+          <dl class="facts">
+            <div>
+              <dt>Control port</dt>
+              <dd>
+                TCP and UDP 47850. It answers loopback and Tailscale addresses
+                that <code>tailscale whois</code> puts on your account. Everyone
+                else gets a 403.
+              </dd>
+            </div>
+            <div>
+              <dt>Stream</dt>
+              <dd>
+                Latch’s own stream protocol over UDP, inside WireGuard, with
+                Reed-Solomon forward error correction. A lost packet is rebuilt,
+                not waited for.
+              </dd>
+            </div>
+            <div>
+              <dt>Firewall</dt>
+              <dd>
+                Windows setup opens port 47850, TCP and UDP, to
+                <code>100.64.0.0/10</code>, Tailscale’s address range, and
+                nothing else.
+              </dd>
+            </div>
+            <div>
+              <dt>Accounts</dt>
+              <dd>
+                None. No Latch account, no password, no pairing. Your
+                Tailscale sign-in is the only one.
+              </dd>
+            </div>
+            <div>
+              <dt>Wake</dt>
+              <dd>
+                <span class="keys">Wake-on-LAN</span> from the PC’s own network, or from anywhere if its
+                router forwards UDP 9. <b>Test wake</b> tells you which applies.
+              </dd>
+            </div>
+            <div>
+              <dt>Power</dt>
+              <dd>
+                Sleep, restart and shut down from another machine. The PC can
+                switch remote power actions off.
+              </dd>
+            </div>
+          </dl>
+          <p class="section-link">
+            <a
+              class="link"
+              href="https://github.com/MrBeldum/latch/blob/main/deploy/relay/RELAY.md"
+              >Run your own peer relay <span class="arr" aria-hidden="true">↗</span></a
+            >
+          </p>
+        </div>
+      </section>
+
+      <section id="specs" class="section" aria-labelledby="specs-title">
+        <div class="wrap">
+          <header class="section-head">
+            <p class="label"><span class="label-no">03</span>Specifications</p>
+            <div class="section-title">
+              <h2 id="specs-title">What Latch asks the other machine&nbsp;for.</h2>
+              <p class="intro">
+                These are the settings Latch 5.0.1 offers, not benchmarks. What
+                you get depends on both machines and the path between them.
+              </p>
+            </div>
+          </header>
+
+          <div class="specs">
+            <figure class="specs-shot">
+              <div class="window">
+                <picture>
+                  <source
+                    type="image/webp"
+                    srcset="
+                      img/settings-640.webp?v=20261031   640w,
+                      img/settings-960.webp?v=20261031   960w,
+                      img/settings-1280.webp?v=20261031 1280w
+                    "
+                    sizes="(min-width: 1024px) 440px, 94vw"
+                  />
+                  <img
+                    src="img/settings-640.png?v=20261031"
+                    width="640"
+                    height="760"
+                    alt="Latch stream settings. Quality: Recommended, selected, Smooth, Balanced, Sharp or Custom. Resolution: Match screen, 2560 × 1600. Frame rate: 60 fps. Bitrate: a slider at 50 Mbps. Codec: Auto, HEVC or H.264. Below, the next stream, 2560 × 1600, 60 fps, 50 Mbps, and an Apply and reconnect button."
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </picture>
+              </div>
+              <figcaption class="caption">
+                <span class="caption-no">Fig. 6</span>
+                <span>Stream settings, as the toolbar opens them. Settings has the same controls.</span>
+              </figcaption>
+            </figure>
+
+            <dl class="spec-list">
+              <div>
+                <dt>Resolution</dt>
+                <dd>
+                  <p>
+                    <b>Match screen</b>, this display’s own pixel size, by
+                    default.
+                  </p>
+                  <ul class="values">
+                    <li><b>540p</b> 960 × 540</li>
+                    <li><b>720p</b> 1280 × 720</li>
+                    <li><b>900p</b> 1600 × 900</li>
+                    <li><b>1080p</b> 1920 × 1080</li>
+                    <li><b>1440p</b> 2560 × 1440</li>
+                    <li><b>4K</b> 3840 × 2160</li>
+                  </ul>
+                  <p class="sub">
+                    The sharing machine’s desktop follows the size asked for, and
+                    goes back when you disconnect.
+                  </p>
+                </dd>
+              </div>
+              <div>
+                <dt>Frame rate</dt>
+                <dd>
+                  <p>30, 60, 90, 120, 144, 165 or 240 fps. 60 by default.</p>
+                  <p class="sub">
+                    Above 60 needs a display on the sharing machine that runs
+                    that fast.
+                  </p>
+                </dd>
+              </div>
+              <div>
+                <dt>Bitrate</dt>
+                <dd>
+                  <p>
+                    2 to 150 Mbps. The encoder aims at it while the picture
+                    moves; a still screen uses less.
+                  </p>
+                  <p class="sub">50 Mbps by default, on every path.</p>
+                </dd>
+              </div>
+              <div>
+                <dt>Quality</dt>
+                <dd>
+                  <ul class="values">
+                    <li><b>Recommended</b> <span>Match&nbsp;screen&nbsp;· 50&nbsp;Mbps</span></li>
+                    <li><b>Smooth</b> <span>1080p&nbsp;· 60&nbsp;fps&nbsp;· 20&nbsp;Mbps</span></li>
+                    <li><b>Balanced</b> <span>Match&nbsp;screen&nbsp;· 60&nbsp;fps&nbsp;· 50&nbsp;Mbps</span></li>
+                    <li><b>Sharp</b> <span>Match&nbsp;screen&nbsp;· 60&nbsp;fps&nbsp;· 100&nbsp;Mbps</span></li>
+                  </ul>
+                  <p class="sub">Custom sets all three yourself.</p>
+                </dd>
+              </div>
+              <div>
+                <dt>Codec</dt>
+                <dd>
+                  <p>
+                    HEVC between two Macs, H.264 everywhere else. Either can be
+                    forced.
+                  </p>
+                </dd>
+              </div>
+              <div>
+                <dt>Decoding</dt>
+                <dd>
+                  <ul class="values">
+                    <li><b>macOS</b> VideoToolbox, hardware, HEVC and H.264</li>
+                    <li><b>Windows</b> Media Foundation, hardware when the GPU has it, H.264</li>
+                    <li><b>Linux</b> Latch’s own decoder, software, H.264</li>
+                  </ul>
+                </dd>
+              </div>
+              <div>
+                <dt>Encoding</dt>
+                <dd>
+                  <p>
+                    Built into Latch on the sharing machine: VideoToolbox on a
+                    Mac, the GPU’s encoder through Media Foundation on Windows,
+                    Latch’s own H.264 encoder on Linux and a VPS with no GPU.
+                  </p>
+                </dd>
+              </div>
+              <div>
+                <dt>Audio</dt>
+                <dd><p>Lossless, 48 kHz stereo, played on this machine’s default output.</p></dd>
+              </div>
+              <div>
+                <dt>Input</dt>
+                <dd>
+                  <p>
+                    Captured mouse with raw movement, or free. <kbd>⌘</kbd> acts
+                    as Ctrl on a PC by default.
+                  </p>
+                </dd>
+              </div>
+              <div>
+                <dt>Clipboard</dt>
+                <dd><p>Text, both ways, up to 32 KB.</p></dd>
+              </div>
+              <div>
+                <dt>Transport</dt>
+                <dd>
+                  <p>
+                    Tailscale (WireGuard): direct, your own peer relay, or DERP.
+                  </p>
+                  <p class="sub">
+                    1200-byte datagrams, sized for the tunnel’s 1280-byte MTU.
+                  </p>
+                </dd>
+              </div>
+              <div>
+                <dt>Updates</dt>
+                <dd>
+                  <p>
+                    The Mac app checks GitHub about every six hours, verifies the
+                    SHA-256 and code signature, and installs when no stream is
+                    running.
+                  </p>
+                  <p class="sub">
+                    It sends new Latch Host builds to Windows PCs over
+                    port 47850.
+                  </p>
+                </dd>
+              </div>
+              <div>
+                <dt>Built with</dt>
+                <dd>
+                  <p>
+                    Rust, top to bottom: the streaming engine, the protocol and
+                    the H.264 codec are Latch’s own. No C or C++.
+                  </p>
+                  <p class="sub">GPL-3.0-or-later.</p>
+                </dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <section id="platforms" class="section" aria-labelledby="platforms-title">
+        <div class="wrap">
+          <header class="section-head">
+            <p class="label"><span class="label-no">04</span>Platforms</p>
+            <div class="section-title">
+              <h2 id="platforms-title">One app on every&nbsp;machine.</h2>
+              <p class="intro">
+                Each install lists the others and can connect to them. Every
+                machine needs Tailscale, signed in to the same account.
+              </p>
+            </div>
+          </header>
+
+          <div class="platforms">
+            <article class="platform">
+              <h3>macOS</h3>
+              <dl>
+                <div>
+                  <dt>Requires</dt>
+                  <dd>macOS 13 or later on Apple Silicon</dd>
+                </div>
+                <div>
+                  <dt>Get it</dt>
+                  <dd>Prebuilt app, or one command in Terminal</dd>
+                </div>
+                <div>
+                  <dt>Connect</dt>
+                  <dd>Yes. Hardware HEVC and H.264 decoding</dd>
+                </div>
+                <div>
+                  <dt>Share</dt>
+                  <dd>
+                    Yes. Grant Screen Recording and Accessibility once
+                  </dd>
+                </div>
+              </dl>
+              <a
+                class="link"
+                href="https://github.com/MrBeldum/latch/blob/main/docs/MACOS.md"
+                >Mac guide <span class="arr" aria-hidden="true">↗</span></a
+              >
+            </article>
+            <article class="platform">
+              <h3>Windows</h3>
+              <dl>
+                <div>
+                  <dt>Requires</dt>
+                  <dd>
+                    Windows 10 1809 or later, or Windows 11, 64-bit
+                  </dd>
+                </div>
+                <div>
+                  <dt>Get it</dt>
+                  <dd>Prebuilt zip</dd>
+                </div>
+                <div>
+                  <dt>Connect</dt>
+                  <dd>Yes. Media Foundation H.264 decoding</dd>
+                </div>
+                <div>
+                  <dt>Share</dt>
+                  <dd>
+                    Yes. Latch runs as a service, so the sign-in screen
+                    streams after a restart
+                  </dd>
+                </div>
+              </dl>
+              <a
+                class="link"
+                href="https://github.com/MrBeldum/latch/blob/main/docs/WINDOWS.md"
+                >Windows guide <span class="arr" aria-hidden="true">↗</span></a
+              >
+            </article>
+            <article class="platform">
+              <h3>Linux</h3>
+              <dl>
+                <div>
+                  <dt>Requires</dt>
+                  <dd>x64 or arm64, glibc 2.39 or later (Ubuntu 24.04), an X11 desktop</dd>
+                </div>
+                <div>
+                  <dt>Get it</dt>
+                  <dd>Prebuilt <code>latch-host</code>, or build from source</dd>
+                </div>
+                <div>
+                  <dt>Connect</dt>
+                  <dd>Yes. Software H.264 decoding</dd>
+                </div>
+                <div>
+                  <dt>Share</dt>
+                  <dd>Yes, under systemd</dd>
+                </div>
+              </dl>
+              <a
+                class="link"
+                href="https://github.com/MrBeldum/latch/blob/main/deploy/native/README.md"
+                >Linux guide <span class="arr" aria-hidden="true">↗</span></a
+              >
+            </article>
+            <article class="platform">
+              <h3>Docker</h3>
+              <dl>
+                <div>
+                  <dt>Requires</dt>
+                  <dd>Docker with Compose and a Tailscale auth key</dd>
+                </div>
+                <div>
+                  <dt>Get it</dt>
+                  <dd>Compose kit in the repository, arm64 or amd64</dd>
+                </div>
+                <div>
+                  <dt>Connect</dt>
+                  <dd>No. It is a headless machine to connect to</dd>
+                </div>
+                <div>
+                  <dt>Share</dt>
+                  <dd>
+                    A virtual 1920 × 1080 desktop with its own Tailscale
+                    identity. Several containers are several machines
+                  </dd>
+                </div>
+              </dl>
+              <a
+                class="link"
+                href="https://github.com/MrBeldum/latch/blob/main/deploy/node/NODE.md"
+                >Container guide <span class="arr" aria-hidden="true">↗</span></a
+              >
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="download" class="section" aria-labelledby="download-title">
+        <div class="wrap">
+          <header class="section-head">
+            <p class="label"><span class="label-no">05</span>Download</p>
+            <div class="section-title">
+              <h2 id="download-title">Latch 5.0.1</h2>
+              <p class="intro">
+                Released 29 October 2026. First install
+                <a class="link-inline" href="https://tailscale.com/download"
+                  >Tailscale</a
+                >
+                on each machine and sign in with the same account. A copy that is
+                already installed updates itself and keeps its settings.
+              </p>
+              <p class="head-links">
+                <a
+                  class="link"
+                  href="https://github.com/MrBeldum/latch/releases/tag/v5.0.1"
+                  >Release notes <span class="arr" aria-hidden="true">↗</span></a
+                >
+                <a
+                  class="link"
+                  href="https://github.com/MrBeldum/latch/releases/latest"
+                  >Latest release <span class="arr" aria-hidden="true">↗</span></a
+                >
+                <a
+                  class="link"
+                  href="https://github.com/MrBeldum/latch/releases"
+                  >All releases <span class="arr" aria-hidden="true">↗</span></a
+                >
+              </p>
+            </div>
+          </header>
+
+          <div class="downloads">
+            <article class="dl" aria-labelledby="dl-mac">
+              <div class="dl-name">
+                <h3 id="dl-mac">macOS</h3>
+                <p class="dl-meta">Apple Silicon · macOS 13+</p>
+              </div>
+              <div class="dl-body">
+                <p>
+                  In Terminal. Downloads the latest release, checks its SHA-256
+                  and signature, installs it in Applications and opens it.
+                </p>
+                <div class="code">
+                  <div class="code-bar">
+                    <span>Terminal</span>
+                    <button
+                      class="copy"
+                      type="button"
+                      data-copy="cmd-mac"
+                      aria-describedby="status-mac"
+                      hidden
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <pre><code id="cmd-mac"><span class="cmd">curl -fsSL https://raw.githubusercontent.com/<wbr>MrBeldum/<wbr>latch/<wbr>main/<wbr>scripts/<wbr>install-macos-release.sh | bash</span></code></pre>
+                </div>
+                <p class="copy-status" id="status-mac" role="status"></p>
+                <p class="note">
+                  Downloaded the archive in a browser instead? The app is ad-hoc
+                  signed, so unpack it and clear the quarantine flag first:
+                  <code class="note-cmd">xattr -dr com.apple.quarantine Latch.app</code>
+                </p>
+              </div>
+              <div class="dl-action">
+                <a
+                  class="btn-file"
+                  href="https://github.com/MrBeldum/latch/releases/latest/download/latch-macos-arm64.tar.gz"
+                >
+                  <span class="file-label">Download<span class="file-for"> for macOS</span></span>
+                  <span class="arr" aria-hidden="true">↓</span>
+                  <span class="file-meta">latch-macos-arm64.tar.gz</span>
+                </a>
+              </div>
+            </article>
+
+            <article class="dl" aria-labelledby="dl-win">
+              <div class="dl-name">
+                <h3 id="dl-win">Windows</h3>
+                <p class="dl-meta">x64 · Windows 10 1809+</p>
+              </div>
+              <div class="dl-body">
+                <ol class="dl-steps">
+                  <li>
+                    Unzip, then run <code>latch-host.exe</code>, or
+                    <code>install-host.ps1</code> for shortcuts and start at
+                    logon.
+                  </li>
+                  <li>
+                    Open the <b>Sharing</b> tab and click
+                    <b>Set up as administrator</b>. One administrator prompt
+                    opens the port to your tailnet and readies Wake-on-LAN.
+                  </li>
+                </ol>
+              </div>
+              <div class="dl-action">
+                <a
+                  class="btn-file"
+                  href="https://github.com/MrBeldum/latch/releases/latest/download/latch-windows-x64.zip"
+                >
+                  <span class="file-label">Download<span class="file-for"> for Windows</span></span>
+                  <span class="arr" aria-hidden="true">↓</span>
+                  <span class="file-meta">latch-windows-x64.zip</span>
+                </a>
+              </div>
+            </article>
+
+            <article class="dl" aria-labelledby="dl-docker">
+              <div class="dl-name">
+                <h3 id="dl-docker">Docker</h3>
+                <p class="dl-meta">Linux VPS · arm64, amd64</p>
+              </div>
+              <div class="dl-body">
+                <p>
+                  Put a Tailscale auth key and a hostname in <code>.env</code>,
+                  then start the container.
+                </p>
+                <div class="code">
+                  <div class="code-bar">
+                    <span>Shell</span>
+                    <button
+                      class="copy"
+                      type="button"
+                      data-copy="cmd-docker"
+                      aria-describedby="status-docker"
+                      hidden
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <pre><code id="cmd-docker"><span class="cmd">git clone https://github.com/<wbr>MrBeldum/<wbr>latch
+</span><span class="cmd">cd latch
+</span><span class="cmd">cp deploy/<wbr>node/<wbr>env.example deploy/<wbr>node/<wbr>.env
+</span><span class="cmd-note"># paste a Tailscale auth key, pick TS_HOSTNAME
+</span><span class="cmd">docker compose -f deploy/<wbr>node/<wbr>docker-compose.yml up -d --build</span></code></pre>
+                </div>
+                <p class="copy-status" id="status-docker" role="status"></p>
+              </div>
+              <div class="dl-action">
+                <a
+                  class="btn btn-ghost btn-block"
+                  href="https://github.com/MrBeldum/latch/blob/main/deploy/node/NODE.md"
+                  >Container guide <span class="arr" aria-hidden="true">↗</span></a
+                >
+              </div>
+            </article>
+
+            <article class="dl" aria-labelledby="dl-src">
+              <div class="dl-name">
+                <h3 id="dl-src">Linux</h3>
+                <p class="dl-meta">x64, arm64 · glibc 2.39+</p>
+              </div>
+              <div class="dl-body">
+                <p>
+                  <code>latch-host</code> for an X11 desktop, run under systemd,
+                  with a <code>.sha256</code> beside each archive. Or build it
+                  from source: Latch needs nothing but Rust.
+                </p>
+              </div>
+              <div class="dl-action">
+                <a
+                  class="btn btn-ghost btn-block"
+                  href="https://github.com/MrBeldum/latch/blob/main/deploy/native/README.md"
+                  >Linux guide <span class="arr" aria-hidden="true">↗</span></a
+                >
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <div class="wrap foot-grid">
+        <div class="foot-brand">
+          <a class="brand" href="./" aria-label="Latch, top of page">
+            <img src="img/mark.svg?v=20261031" width="28" height="28" alt="" />
+            <span>Latch</span>
+          </a>
+          <p>
+            Free software, GPL-3.0-or-later. Your machines, on any of your
+            machines.
+          </p>
+        </div>
+        <nav class="foot-nav" aria-label="Project">
+          <p class="foot-head">Project</p>
+          <a href="https://github.com/MrBeldum/latch">Source</a>
+          <a href="https://github.com/MrBeldum/latch/releases">Releases</a>
+          <a href="https://github.com/MrBeldum/latch/blob/main/CHANGELOG.md"
+            >Changelog</a
+          >
+          <a href="https://github.com/MrBeldum/latch/blob/main/LICENSE"
+            >License</a
+          >
+        </nav>
+        <nav class="foot-nav" aria-label="Guides">
+          <p class="foot-head">Guides</p>
+          <a href="https://github.com/MrBeldum/latch/blob/main/docs/MACOS.md"
+            >macOS</a
+          >
+          <a href="https://github.com/MrBeldum/latch/blob/main/docs/WINDOWS.md"
+            >Windows</a
+          >
+          <a
+            href="https://github.com/MrBeldum/latch/blob/main/deploy/node/NODE.md"
+            >Docker node</a
+          >
+          <a
+            href="https://github.com/MrBeldum/latch/blob/main/deploy/relay/RELAY.md"
+            >Peer relay</a
+          >
+        </nav>
+        <nav class="foot-nav" aria-label="Help">
+          <p class="foot-head">Help</p>
+          <a href="https://github.com/MrBeldum/latch/issues">Report an issue</a>
+          <a href="https://github.com/MrBeldum/latch/blob/main/CONTRIBUTING.md"
+            >Contributing</a
+          >
+        </nav>
+      </div>
+      <div class="wrap foot-base">
+        <span>Latch 5.0.1</span>
+        <a href="https://github.com/MrBeldum/latch"
+          >Source on GitHub
+          <span class="arr" aria-hidden="true">↗</span></a
+        >
+      </div>
+    </footer>
+  </body>
+</html>

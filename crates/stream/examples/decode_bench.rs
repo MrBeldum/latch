@@ -179,9 +179,10 @@ fn run_bench(
 
     // Warmup iterations (discarded from measured timings)
     for _ in 0..cfg.warmup {
-        let f = decoder
+        let mut f = decoder
             .decode(fixture, true, spare.take())?
             .context("warmup decode failed")?;
+        f.ensure_cpu_planes();
         validate_frame_planes(&f)?;
         check_backend(decoder)?;
         spare = Some(f);
@@ -192,9 +193,10 @@ fn run_bench(
     let wall_start = Instant::now();
     for _ in 0..cfg.iterations {
         let t0 = Instant::now();
-        let f = decoder
+        let mut f = decoder
             .decode(fixture, true, spare.take())?
             .context("decode failed")?;
+        f.ensure_cpu_planes();
         samples.push(t0.elapsed());
         validate_frame_planes(&f)?;
         check_backend(decoder)?;
@@ -319,6 +321,8 @@ mod tests {
     }
 
     #[test]
+    // `native` exists only on macOS.
+    #[allow(clippy::needless_update)]
     fn test_pixel_oracle_validation() {
         let mut f = Frame {
             width: 64,
@@ -328,6 +332,7 @@ mod tests {
             y: vec![16; 4096],
             uv: vec![128; 2048],
             full_range: false,
+            ..Default::default()
         };
         f.y[16 * 64 + 32] = 235;
         f.y[48 * 64 + 32] = 16;

@@ -1,0 +1,8 @@
+    Checking latch-codec v5.0.1 (/Users/daniel/.t3/worktrees/latch/t3-ada53532/crates/codec)
+    Checking latch-stream v5.0.1 (/Users/daniel/.t3/worktrees/latch/t3-ada53532/crates/stream)
+    Checking latch-engine v5.0.1 (/Users/daniel/.t3/worktrees/latch/t3-ada53532/crates/engine)
+    Checking latch-client v5.0.1 (/Users/daniel/.t3/worktrees/latch/t3-ada53532/crates/client)
+    Checking latch-host v5.0.1 (/Users/daniel/.t3/worktrees/latch/t3-ada53532/crates/host)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 1.61s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

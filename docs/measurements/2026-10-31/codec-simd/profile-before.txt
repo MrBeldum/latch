@@ -1,0 +1,29 @@
+macOS sample: 1080p motion, 4 threads, 300 frames, metrics=no; 3 seconds at 1 ms.
+Release with strip=false and debug=1; encoder source was baseline 5afca2d.
+Wait samples include idle worker time, not CPU utilisation.
+
+Sort by top of stack, same collapsed (when >= 5):
+        semaphore_wait_trap  (in libsystem_kernel.dylib)        6395
+        _RNvNtNtNtCs2rRLACHA8Rd_11latch_codec4h2646encode6worker6encode  (in encode_bench)        1887
+        _RNCNvNtNtNtCs2rRLACHA8Rd_11latch_codec4h2646encode6worker6motions_0B9_  (in encode_bench)        725
+        _RNvNtNtNtCs2rRLACHA8Rd_11latch_codec4h2646encode7deblock5pixel  (in encode_bench)        490
+        _RNvNtCseaifZ1f6azj_12encode_bench7content5frame  (in encode_bench)        485
+        _RNvMs_NtNtCs2rRLACHA8Rd_11latch_codec4h2646encodeNtB4_7Encoder6encode  (in encode_bench)        196
+        _RNvNtNtNtCs2rRLACHA8Rd_11latch_codec4h2646encode7deblock6filter  (in encode_bench)        142
+        _RNvNtNtNtCs2rRLACHA8Rd_11latch_codec4h2646encode7predict11intra_plane  (in encode_bench)        142
+        _platform_memset  (in libsystem_platform.dylib)        99
+        _RNvNtNtNtCs2rRLACHA8Rd_11latch_codec4h2646encode9transform4satd  (in encode_bench)        81
+        _RNvNtNtNtCs2rRLACHA8Rd_11latch_codec4h2646encode5cavlc5write  (in encode_bench)        72
+        _RNvNtNtNtCs2rRLACHA8Rd_11latch_codec4h2646encode6worker10mv_predict  (in encode_bench)        63
+        _dyld_start  (in dyld)        60
+        _RINvNtNtNtNtCsjIpoRzUjyHQ_4core5slice4sort6shared9smallsort25insertion_sort_shift_leftTmhAhj10_mENCINvMB8_SB1m_20sort_unstable_by_keymNCNvNtNtNtCs2rRLACHA8Rd_11latch_codec4h2646encode7predict6intra4s1_0E0EB2i_  (in encode_bench)        57
+        _RNvNtNtNtCs2rRLACHA8Rd_11latch_codec4h2646encode6worker7copy_mc  (in encode_bench)        40
+        _RNvMNtNtNtCs2rRLACHA8Rd_11latch_codec4h2646encode4bitsNtB2_4Bits2ue  (in encode_bench)        37
+        DYLD-STUB$$memset  (in encode_bench)        24
+        _platform_memmove  (in libsystem_platform.dylib)        21
+        _RNvNtNtNtCs2rRLACHA8Rd_11latch_codec4h2646encode6worker7context  (in encode_bench)        14
+        _RNvNtNtNtCs2rRLACHA8Rd_11latch_codec4h2646encode7predict7luma_mc  (in encode_bench)        13
+        _platform_memset_pattern16  (in libsystem_platform.dylib)        11
+        _RNvMNtNtNtCs2rRLACHA8Rd_11latch_codec4h2646encode4bitsNtB2_4Bits3nal  (in encode_bench)        7
+        _RNvNtNtNtCs2rRLACHA8Rd_11latch_codec4h2646encode6worker10neighbours  (in encode_bench)        7
+

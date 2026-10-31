@@ -13,6 +13,53 @@ mod software;
 #[cfg(target_os = "macos")]
 mod videotoolbox;
 
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+pub struct NativeFrame {
+    pixel_buffer: *const std::ffi::c_void,
+}
+
+#[cfg(target_os = "macos")]
+unsafe impl Send for NativeFrame {}
+#[cfg(target_os = "macos")]
+unsafe impl Sync for NativeFrame {}
+
+#[cfg(target_os = "macos")]
+impl Drop for NativeFrame {
+    fn drop(&mut self) {
+        if !self.pixel_buffer.is_null() {
+            unsafe {
+                videotoolbox::cf_release(self.pixel_buffer);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Clone for NativeFrame {
+    fn clone(&self) -> Self {
+        if !self.pixel_buffer.is_null() {
+            unsafe {
+                videotoolbox::cf_retain(self.pixel_buffer);
+            }
+        }
+        Self {
+            pixel_buffer: self.pixel_buffer,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl NativeFrame {
+    pub fn new(pixel_buffer: *const std::ffi::c_void) -> Self {
+        Self { pixel_buffer }
+    }
+
+    pub fn pixel_buffer(&self) -> *const std::ffi::c_void {
+        self.pixel_buffer
+    }
+}
+
 #[derive(Default)]
 pub struct Frame {
     pub width: u32,
@@ -22,6 +69,8 @@ pub struct Frame {
     pub uv: Vec<u8>,
     pub uv_stride: usize,
     pub full_range: bool,
+    #[cfg(target_os = "macos")]
+    pub native: Option<NativeFrame>,
 }
 
 /// Drawn frames whose buffers are kept for the decoder to fill again.
@@ -49,43 +98,129 @@ impl Frame {
         self.y.extend_from_slice(y);
         self.uv.clear();
         self.uv.extend_from_slice(uv);
+        #[cfg(target_os = "macos")]
+        {
+            self.native = None;
+        }
+    }
+
+    /// Run a closure with the Y and UV plane byte slices and strides.
+    /// If this frame holds a native CVPixelBuffer, locks it read-only for the
+    /// duration of the closure. Otherwise uses the CPU vectors.
+    pub fn with_planes<R>(&self, f: impl FnOnce(&[u8], usize, &[u8], usize) -> R) -> R {
+        #[cfg(target_os = "macos")]
+        if let Some(native) = &self.native {
+            let pb = native.pixel_buffer();
+            if !pb.is_null()
+                && unsafe {
+                    videotoolbox::cv_pixel_buffer_lock_base_address(
+                        pb,
+                        videotoolbox::K_CV_LOCK_READ_ONLY,
+                    )
+                } == 0
+            {
+                let h = unsafe { videotoolbox::cv_pixel_buffer_get_height_of_plane(pb, 0) };
+                let ys = unsafe { videotoolbox::cv_pixel_buffer_get_bytes_per_row_of_plane(pb, 0) };
+                let uvh = unsafe { videotoolbox::cv_pixel_buffer_get_height_of_plane(pb, 1) };
+                let uvs =
+                    unsafe { videotoolbox::cv_pixel_buffer_get_bytes_per_row_of_plane(pb, 1) };
+                let yp = unsafe { videotoolbox::cv_pixel_buffer_get_base_address_of_plane(pb, 0) };
+                let uvp = unsafe { videotoolbox::cv_pixel_buffer_get_base_address_of_plane(pb, 1) };
+                let res = if !yp.is_null() && !uvp.is_null() {
+                    let y_slice = unsafe { std::slice::from_raw_parts(yp, ys * h) };
+                    let uv_slice = unsafe { std::slice::from_raw_parts(uvp, uvs * uvh) };
+                    f(y_slice, ys, uv_slice, uvs)
+                } else {
+                    f(&self.y, self.y_stride, &self.uv, self.uv_stride)
+                };
+                unsafe {
+                    videotoolbox::cv_pixel_buffer_unlock_base_address(
+                        pb,
+                        videotoolbox::K_CV_LOCK_READ_ONLY,
+                    )
+                };
+                return res;
+            }
+        }
+        f(&self.y, self.y_stride, &self.uv, self.uv_stride)
+    }
+
+    /// Populates CPU plane vectors from native storage if they are not already populated.
+    pub fn ensure_cpu_planes(&mut self) {
+        #[cfg(target_os = "macos")]
+        if self.y.is_empty() {
+            if let Some(native) = &self.native {
+                let pb = native.pixel_buffer();
+                if !pb.is_null()
+                    && unsafe {
+                        videotoolbox::cv_pixel_buffer_lock_base_address(
+                            pb,
+                            videotoolbox::K_CV_LOCK_READ_ONLY,
+                        )
+                    } == 0
+                {
+                    let h = unsafe { videotoolbox::cv_pixel_buffer_get_height_of_plane(pb, 0) };
+                    let ys =
+                        unsafe { videotoolbox::cv_pixel_buffer_get_bytes_per_row_of_plane(pb, 0) };
+                    let uvh = unsafe { videotoolbox::cv_pixel_buffer_get_height_of_plane(pb, 1) };
+                    let uvs =
+                        unsafe { videotoolbox::cv_pixel_buffer_get_bytes_per_row_of_plane(pb, 1) };
+                    let yp =
+                        unsafe { videotoolbox::cv_pixel_buffer_get_base_address_of_plane(pb, 0) };
+                    let uvp =
+                        unsafe { videotoolbox::cv_pixel_buffer_get_base_address_of_plane(pb, 1) };
+                    if !yp.is_null() && !uvp.is_null() {
+                        self.y.clear();
+                        self.y
+                            .extend_from_slice(unsafe { std::slice::from_raw_parts(yp, ys * h) });
+                        self.uv.clear();
+                        self.uv.extend_from_slice(unsafe {
+                            std::slice::from_raw_parts(uvp, uvs * uvh)
+                        });
+                    }
+                    unsafe {
+                        videotoolbox::cv_pixel_buffer_unlock_base_address(
+                            pb,
+                            videotoolbox::K_CV_LOCK_READ_ONLY,
+                        )
+                    };
+                }
+            }
+        }
     }
 
     /// Check visible NV12 pixels, excluding row padding. A completely black
     /// capture can still be a valid, successfully decoded video stream.
     pub fn is_black(&self) -> bool {
-        let width = self.width as usize;
-        let height = self.height as usize;
-        let chroma_width = width.div_ceil(2) * 2;
-        let chroma_height = height.div_ceil(2);
-        if width == 0
-            || height == 0
-            || self.y_stride < width
-            || self.uv_stride < chroma_width
-            || self.y.len() < self.y_stride.saturating_mul(height)
-            || self.uv.len() < self.uv_stride.saturating_mul(chroma_height)
-        {
-            return false;
-        }
-        let black = if self.full_range { 1 } else { 17 };
-        // Whole-row reductions rather than a short-circuiting `all`: the
-        // compiler turns a max or min over a row into vector instructions,
-        // and the scan still stops at the first row with a visible pixel.
-        // A black frame is every row, sixty times a second.
-        let max = |row: &[u8]| row.iter().fold(0, |m, &v| m.max(v));
-        let min = |row: &[u8]| row.iter().fold(u8::MAX, |m, &v| m.min(v));
-        self.y
-            .chunks(self.y_stride)
-            .take(height)
-            .all(|row| max(&row[..width]) <= black)
-            && self
-                .uv
-                .chunks(self.uv_stride)
-                .take(chroma_height)
-                .all(|row| {
+        self.with_planes(|y, y_stride, uv, uv_stride| {
+            let width = self.width as usize;
+            let height = self.height as usize;
+            let chroma_width = width.div_ceil(2) * 2;
+            let chroma_height = height.div_ceil(2);
+            if width == 0
+                || height == 0
+                || y_stride < width
+                || uv_stride < chroma_width
+                || y.len() < y_stride.saturating_mul(height)
+                || uv.len() < uv_stride.saturating_mul(chroma_height)
+            {
+                return false;
+            }
+            let black = if self.full_range { 1 } else { 17 };
+            // Whole-row reductions rather than a short-circuiting `all`: the
+            // compiler turns a max or min over a row into vector instructions,
+            // and the scan still stops at the first row with a visible pixel.
+            // A black frame is every row, sixty times a second.
+            let max = |row: &[u8]| row.iter().fold(0, |m, &v| m.max(v));
+            let min = |row: &[u8]| row.iter().fold(u8::MAX, |m, &v| m.min(v));
+            y.chunks(y_stride)
+                .take(height)
+                .all(|row| max(&row[..width]) <= black)
+                && uv.chunks(uv_stride).take(chroma_height).all(|row| {
                     let row = &row[..chroma_width];
                     min(row) >= 127 && max(row) <= 129
                 })
+        })
     }
 }
 
@@ -404,6 +539,8 @@ mod tests {
     }
 
     #[test]
+    // `native` exists only on macOS.
+    #[allow(clippy::needless_update)]
     fn black_detection_checks_visible_pixels_and_both_ranges() {
         let mut frame = Frame {
             width: 2,
@@ -413,6 +550,7 @@ mod tests {
             uv: vec![128, 128, 255, 255],
             uv_stride: 4,
             full_range: false,
+            ..Default::default()
         };
         assert!(frame.is_black(), "padding is not picture data");
         frame.y[4] = 235;
@@ -447,6 +585,8 @@ mod tests {
     }
 
     #[test]
+    // `native` exists only on macOS.
+    #[allow(clippy::needless_update)]
     fn slot_keeps_only_the_newest() {
         let slot = FrameSlot::default();
         let f = |w| Frame {
@@ -457,6 +597,7 @@ mod tests {
             uv: vec![],
             uv_stride: 0,
             full_range: false,
+            ..Default::default()
         };
         slot.publish(f(1));
         slot.publish(f(2));

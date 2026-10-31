@@ -19,6 +19,7 @@ use latch_proto::video::{InFrame, KeyframeRequests, Reassembled, Reassembler, Re
 use latch_proto::wire::{self, Datagram};
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
+use std::io::Write;
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -91,6 +92,14 @@ pub struct Settings {
     pub audio: bool,
     /// This machine's name, for the host's log.
     pub name: String,
+    /// Ask the host to stream cursor shapes and omit the pointer from video.
+    pub cursor: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CursorState {
+    pub visible: bool,
+    pub shape: Option<Arc<latch_proto::control::CursorShape>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -235,6 +244,9 @@ struct Inner {
     audio_gain: Arc<AtomicU32>,
     done: Mutex<bool>,
     done_cv: Condvar,
+    cursor_supported: AtomicBool,
+    cursor_state: Mutex<Option<CursorState>>,
+    control_writer: Mutex<Option<TcpStream>>,
 }
 
 #[derive(Default)]
@@ -379,6 +391,9 @@ impl Session {
             audio_gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             done: Mutex::new(false),
             done_cv: Condvar::new(),
+            cursor_supported: AtomicBool::new(false),
+            cursor_state: Mutex::new(None),
+            control_writer: Mutex::new(None),
         });
         let worker = inner.clone();
         let spawned = std::thread::Builder::new()
@@ -404,6 +419,30 @@ impl Session {
     /// The session has ended and let go of everything.
     pub fn finished(&self) -> bool {
         self.inner.finished.load(Ordering::Acquire)
+    }
+
+    /// Whether the host agreed to stream cursor shapes and omit the host pointer.
+    pub fn cursor_supported(&self) -> bool {
+        self.inner.cursor_supported.load(Ordering::Acquire)
+    }
+
+    /// The latest cursor shape and visibility received from the host, or None
+    /// if cursor shapes are not supported or none have arrived yet.
+    pub fn cursor(&self) -> Option<CursorState> {
+        if !self.inner.cursor_supported.load(Ordering::Acquire) {
+            return None;
+        }
+        self.inner.cursor_state.lock().clone()
+    }
+
+    /// Tell the host whether to draw the cursor into its video stream.
+    pub fn draw_cursor(&self, draw: bool) {
+        if let Some(w) = self.inner.control_writer.lock().as_mut() {
+            let _ = control::write_message(
+                w,
+                &Message::DrawCursor(latch_proto::control::DrawCursor { draw }),
+            );
+        }
     }
 
     /// Ends the session; returns at once. [`Session::finished`] says when
@@ -484,9 +523,9 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         Ok(u) => u,
         Err(e) => return fail("connecting", format!("no UDP socket for the picture: {e}")),
     };
-    match latch_proto::transport::configure_socket(&udp, 1024 * 1024, 4 * 1024 * 1024) {
+    match latch_proto::transport::configure_socket(&udp, 8 * 1024 * 1024, 8 * 1024 * 1024) {
         Ok(buffers) => {
-            tracing::info!(send_bytes = buffers.send, receive_bytes = buffers.receive, "viewer UDP buffers (requested 1048576/4194304; Linux may cap at net.core.wmem_max/rmem_max)");
+            tracing::info!(send_bytes = buffers.send, receive_bytes = buffers.receive, "viewer UDP buffers (requested 8388608/8388608; Linux may cap at net.core.wmem_max/rmem_max)");
             let mut stats = inner.stats.lock();
             stats.socket_send_bytes = buffers.send;
             stats.socket_receive_bytes = buffers.receive;
@@ -505,6 +544,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         udp_port,
         audio: settings.audio,
         name: settings.name.clone(),
+        cursor: settings.cursor,
     };
     let body = serde_json::to_vec(&request).unwrap_or_default();
     let host = SocketAddr::new(server.address, server.port);
@@ -540,6 +580,8 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     };
     let _ = tcp.set_nodelay(true);
     let _ = tcp.set_read_timeout(Some(START_TIMEOUT));
+    *inner.tcp.lock() = tcp.try_clone().ok();
+    *inner.control_writer.lock() = tcp.try_clone().ok();
     if inner.stopping() {
         let _ = tcp.shutdown(Shutdown::Both);
         return;
@@ -555,6 +597,9 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
             )
         }
     };
+    inner
+        .cursor_supported
+        .store(accept.cursor, Ordering::Release);
     let Some(token) = control::token_from_hex(&accept.token) else {
         return fail("starting", "the host sent a malformed session token".into());
     };
@@ -682,6 +727,12 @@ enum Outcome {
 
 /// The control connection: keepalives and reports out, notices and the end
 /// in; and the clock that gives up on a silent host.
+fn send_control(inner: &Inner, message: &Message) -> bool {
+    inner.control_writer.lock().as_mut().is_some_and(|writer| {
+        control::write_message(writer, message).is_ok() && writer.flush().is_ok()
+    })
+}
+
 fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Outcome {
     let (messages, inbox) = mpsc::channel();
     if let Ok(mut reader) = tcp.try_clone() {
@@ -704,13 +755,16 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
     let mut last_keepalive = Instant::now();
     loop {
         if inner.stopping() {
-            let _ = control::write_message(
-                tcp,
-                &Message::End(control::End {
-                    code: control::end::ENDED,
-                    message: String::new(),
-                }),
-            );
+            if let Some(w) = inner.control_writer.lock().as_mut() {
+                let _ = control::write_message(
+                    w,
+                    &Message::End(control::End {
+                        code: control::end::ENDED,
+                        message: String::new(),
+                    }),
+                );
+            }
+            *inner.control_writer.lock() = None;
             return Outcome::Stopped;
         }
         match inbox.recv_timeout(Duration::from_millis(25)) {
@@ -736,6 +790,17 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
                 stats.send_retries = report.send_retries;
                 stats.host_socket_send_bytes = report.socket_send_bytes;
                 stats.host_socket_receive_bytes = report.socket_receive_bytes;
+            }
+            Ok(Message::Cursor(c)) => {
+                inner.heard();
+                let mut state = inner.cursor_state.lock();
+                let prev_shape = state.as_ref().and_then(|s| s.shape.clone());
+                let shape = c.shape.map(Arc::new).or(prev_shape);
+                *state = Some(CursorState {
+                    visible: c.visible,
+                    shape,
+                });
+                (inner.wake)();
             }
             Ok(Message::Notice(n)) => {
                 inner.heard();
@@ -769,7 +834,7 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
         let now = Instant::now();
         if now - last_keepalive >= KEEPALIVE {
             last_keepalive = now;
-            if control::write_message(tcp, &Message::Keepalive).is_err() && !inner.stopping() {
+            if !send_control(inner, &Message::Keepalive) && !inner.stopping() {
                 return Outcome::Ended(-1, "The connection to the host broke.".into());
             }
         }
@@ -788,7 +853,7 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
                 window_ms: stats.window_ms,
                 ..Default::default()
             };
-            if control::write_message(tcp, &Message::Report(report)).is_err() && !inner.stopping() {
+            if !send_control(inner, &Message::Report(report)) && !inner.stopping() {
                 return Outcome::Ended(-1, "The connection to the host broke.".into());
             }
         }
@@ -824,6 +889,7 @@ fn receive(
     token: [u8; 16],
     mut player: Option<Player>,
 ) {
+    crate::priority::media_thread();
     let session = accept.session;
     // Readiness wakes immediately for datagrams on macOS, Linux and Windows;
     // socket receive timeouts round up to scheduler ticks on Windows.
@@ -863,7 +929,24 @@ fn receive(
     let mut window_base = reassembler.stats();
     let mut poor = false;
     let mut good_windows = 0u32;
+    // The socket ran dry on the last pass, after which everything that had
+    // arrived was handled: wait for the next datagram or timer.
+    let mut drained = false;
     while !inner.stopping() {
+        if drained {
+            let now = Instant::now();
+            let deadline = reassembler
+                .next_deadline()
+                .into_iter()
+                .chain(audio_rx.next_deadline())
+                .min()
+                .unwrap_or(now + Duration::from_millis(20));
+            let wait = deadline
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(20));
+            let _ = poll.poll(&mut events, Some(wait));
+            drained = false;
+        }
         let now = Instant::now();
         let hello_every = if media_seen { HELLO_SLOW } else { HELLO_FAST };
         if last_hello.is_none_or(|t| now - t >= hello_every) {
@@ -903,18 +986,10 @@ fn receive(
                     }
                 }
                 Ok(_) => {}
+                // Hand on what completed before waiting for more: a frame's
+                // last datagram must not wait for the next frame's first.
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    let now = Instant::now();
-                    let deadline = reassembler
-                        .next_deadline()
-                        .into_iter()
-                        .chain(audio_rx.next_deadline())
-                        .min()
-                        .unwrap_or(now + Duration::from_millis(20));
-                    let wait = deadline
-                        .saturating_duration_since(now)
-                        .min(Duration::from_millis(20));
-                    let _ = poll.poll(&mut events, Some(wait));
+                    drained = true;
                     break;
                 }
                 Err(_) => {}
@@ -1112,6 +1187,7 @@ fn handle(
 
 /// The decode thread: frames in order, newest picture out.
 fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
+    crate::priority::media_thread();
     // A decoder knows whether it runs on hardware only once it has a
     // session, after the first keyframe; the stats follow it.
     let mut named = decoder.name();
@@ -1296,6 +1372,7 @@ mod tests {
     #[test]
     fn hevc_is_offered_only_when_the_settings_allow_it() {
         let mut s = Settings {
+            cursor: false,
             width: 1920,
             height: 1080,
             fps: 60,
@@ -1323,6 +1400,7 @@ mod tests {
                 port,
             },
             Settings {
+                cursor: false,
                 width: 1920,
                 height: 1080,
                 fps: 60,
@@ -1387,6 +1465,9 @@ mod tests {
             stop: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             audio_gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            cursor_supported: AtomicBool::new(false),
+            cursor_state: Mutex::new(None),
+            control_writer: Mutex::new(None),
             done: Mutex::new(false),
             done_cv: Condvar::new(),
         });

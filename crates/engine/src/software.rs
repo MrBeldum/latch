@@ -2,7 +2,7 @@
 //! `latch-codec`. Linux always takes it; Windows falls back to it.
 
 use crate::input::DisplayRect;
-use crate::video::{Codec, EncodedVideo, VideoConfig, VideoInfo, VideoPipeline};
+use crate::video::{Codec, EncodedVideo, Pacer, VideoConfig, VideoInfo, VideoPipeline};
 use anyhow::ensure;
 use latch_codec::h264::{Encoder, EncoderConfig};
 use latch_codec::Yuv420;
@@ -31,6 +31,14 @@ pub trait CpuCapture: Send {
 
     /// For [`VideoInfo::encoder`]'s sake: "X11", "test pattern".
     fn name(&self) -> String;
+
+    fn set_cursor_drawn(&mut self, _drawn: bool) -> bool {
+        false
+    }
+
+    fn take_cursor(&mut self) -> Option<crate::video::CursorUpdate> {
+        None
+    }
 }
 
 /// Time spent in each stage of the last frame. Capture includes waiting
@@ -52,7 +60,7 @@ pub struct SoftwarePipeline<C: CpuCapture> {
     frame: Bgra,
     picture: Yuv420,
     encoder: Option<Encoder>,
-    cadence: crate::cadence::Cadence,
+    pacer: Pacer,
     last_sent: Option<Instant>,
     captured: Instant,
     timings: SoftwareTimings,
@@ -73,7 +81,7 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
             frame: Bgra::default(),
             picture: Yuv420::default(),
             encoder: None,
-            cadence: crate::cadence::Cadence::new(config.fps),
+            pacer: Pacer::new(config.fps),
             last_sent: None,
             captured: Instant::now(),
             timings: SoftwareTimings::default(),
@@ -85,8 +93,8 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
     }
 
     fn acquire(&mut self, keyframe: bool, idle: Duration) -> anyhow::Result<bool> {
-        let interval = Duration::from_secs_f64(1.0 / self.config.fps as f64);
-        self.cadence.wait();
+        let interval = self.pacer.interval();
+        self.pacer.wait();
         let deadline = self.last_sent.unwrap_or_else(Instant::now) + idle.max(interval);
         loop {
             let started = Instant::now();
@@ -95,6 +103,7 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
             if changed {
                 validate_frame(&self.frame)?;
                 self.captured = Instant::now();
+                self.pacer.taken(started);
                 return Ok(true);
             }
             let now = Instant::now();
@@ -103,6 +112,7 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
                     !self.frame.data.is_empty(),
                     "capture supplied no initial picture"
                 );
+                self.pacer.taken(now);
                 return Ok(false);
             }
             // Polling also lets a source without damage notifications honour the deadline.
@@ -112,6 +122,7 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
                 self.timings.capture = started.elapsed();
                 validate_frame(&self.frame)?;
                 self.captured = Instant::now();
+                self.pacer.taken(self.captured);
                 return Ok(true);
             }
             std::thread::sleep(wait.saturating_sub(started.elapsed()));
@@ -213,6 +224,14 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
         if let Some(encoder) = &mut self.encoder {
             encoder.set_bitrate(self.config.bitrate_kbps);
         }
+    }
+
+    fn set_cursor_drawn(&mut self, drawn: bool) -> bool {
+        self.capture.set_cursor_drawn(drawn)
+    }
+
+    fn take_cursor(&mut self) -> Option<crate::video::CursorUpdate> {
+        self.capture.take_cursor()
     }
 }
 

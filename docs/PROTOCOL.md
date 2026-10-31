@@ -47,6 +47,7 @@ Content-Length: <n>
 | `udp_port` | u16 | the viewer's media socket port |
 | `audio` | bool | send desktop audio |
 | `name` | string | the viewer's machine name, for the host's log |
+| `cursor` | bool | optional, default false; viewer can draw pointer locally and handle shape updates |
 
 The control service authorizes the caller exactly as for every other
 route. A refusal is an ordinary HTTP error with an `Ack` JSON body. On
@@ -71,7 +72,9 @@ type byte and the payload and is at most 65 536. Payloads are JSON objects.
 | 2 | `End` | either | `{"code": u32, "message": string}`; the sender closes after it |
 | 3 | `Keepalive` | either | `{}` |
 | 4 | `Notice` | host → viewer | `{"kind": "audio" \| "video" \| "input", "message": string}`; `message` empty clears it |
-| 5 | `Report` | viewer → host | `{"fps", "loss_pct", "decode_ms", "rtt_ms"}`, every 250 ms (legacy viewers: once a second), for bitrate and FEC feedback |
+| 5 | `Report` | either | `{"fps", "loss_pct", "decode_ms", "rtt_ms"}`, every 250 ms (legacy viewers: once a second), for bitrate and FEC feedback |
+| 6 | `Cursor` | host → viewer | `{"visible": bool, "shape": null \| {"serial": u32, "width": u32, "height": u32, "hot_x": u32, "hot_y": u32, "rgba": "<base64>"}}`; only after an `Accept` with `cursor` true; sent when visibility or shape changes (`shape` null: unchanged); straight-alpha RGBA, at most 96×96 |
+| 7 | `DrawCursor` | viewer → host | `{"draw": bool}`; tells host whether to composite pointer into video |
 
 `Accept`:
 
@@ -85,6 +88,7 @@ type byte and the payload and is at most 65 536. Payloads are JSON objects.
 | `encoder` | string | e.g. `"VideoToolbox HEVC"`, `"Media Foundation H.264 (NVIDIA)"`, `"Latch software H.264"` |
 | `audio` | object or null | `{"rate": 48000, "channels": 2, "frame_samples": 240, "codec": "lpcm-rice"}`; null when there is none |
 | `audio_problem` | string | why there is no audio, when `audio` is null |
+| `cursor` | bool | optional, default false; host supports omitting pointer from video and sending shape updates |
 
 Either side sends `Keepalive` when it has sent nothing for one second. A
 connection that has been silent for ten seconds is dead. The session ends
@@ -241,9 +245,11 @@ requesting another one, unless a frame is declared lost.
 ### Ping (7) and Pong (8)
 
 `Ping` carries `u64 time` at offset 8, the sender's clock. The receiver
-answers at once with a `Pong` carrying the same `time`. Each side pings
-twice a second and keeps a smoothed round trip and its variance. No clocks
-are compared across machines.
+answers at once with a `Pong` carrying the same `time`. The viewer pings
+twice a second, the host ten times a second (the lowest round trip between
+two viewer reports tells a filling queue from the path's base), and each
+keeps a smoothed round trip and its variance. No clocks are compared
+across machines.
 
 ## Versioning
 
@@ -277,3 +283,20 @@ Audio recovery derives PTS spacing from Accept's frame_samples/rate. The
 host's 240-sample packets therefore advance by 5000 us at 48 kHz. Rice
 encoding falls back to existing independent verbatim subframes when needed
 to enforce the 3 + 2*(1 + 2*n) byte bound; no new audio format is introduced.
+
+## Performance integration on the consumer branch
+
+Protocol 1 and every UDP layout remain unchanged. Cursor support is opt-in:
+`StreamRequest.cursor` and `Accept.cursor` default to false, so plain #32 and
+5.0.1 peers keep their host-drawn cursor. Unknown control message types remain
+ignored. Added report fields default on read; old JSON readers ignore them.
+
+`engine::congestion` is the only bitrate controller. Report windows are 250 ms
+(new viewers) or one second (legacy). Host ping samples at 10 Hz supply each
+window's lowest RTT; a standing rise above max(10 ms, base RTT / 4) is pressure.
+Budget cuts account for actual wire throughput. Parity uses raw loss with a
+base-RTT floor (15% at 40 ms, 20% at 100 ms), capped at 30%. Data shards for the
+whole frame precede parity computation and transmission. Clean paths bypass
+send pacing; loss/queue pressure enables the bounded wire-byte token bucket.
+See [ENGINE.md](ENGINE.md#decisions) for the retained consumer controller,
+transport telemetry, audio latency bounds and platform pipeline choices.

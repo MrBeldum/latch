@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 latch-core.workspace = true
+latch-proto.workspace = true
 latch-stream.workspace = true
 latch-ui.workspace = true
 anyhow.workspace = true
@@ -34,6 +35,7 @@ semver = "1"
 # take ⌘Q and ⌘H back from the app menu during a stream, and to read the
 # pasteboard's change count.
 [target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.31"
 objc2 = "0.5"
 objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSEvent", "NSMenu", "NSMenuItem", "NSPasteboard", "NSResponder", "NSScreen", "NSGraphics"] }
 objc2-foundation = { version = "0.2", features = ["NSString", "NSThread"] }

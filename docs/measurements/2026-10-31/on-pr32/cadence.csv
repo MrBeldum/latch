@@ -1,0 +1,5 @@
+scheduler,work_ms,fps,interval_sd_ms,interval_p99_ms
+cadence,3,59.991,3.254,23.278
+Pacer,3,60.472,3.055,23.131
+cadence,20,38.059,10.048,44.779
+Pacer,20,49.999,0.000,20.003

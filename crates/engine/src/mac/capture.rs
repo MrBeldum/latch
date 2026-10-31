@@ -7,7 +7,7 @@ use crate::{
 };
 use anyhow::{anyhow, bail, ensure, Result};
 use block2::RcBlock;
-use dispatch2::{DispatchQueue, DispatchRetained};
+use dispatch2::{DispatchQoS, DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::{
     define_class, msg_send, rc::Retained, runtime::ProtocolObject, AnyThread, DefinedClass,
 };
@@ -171,6 +171,10 @@ impl Capture {
             config.setWidth(width as usize);
             config.setHeight(height as usize);
             config.setMinimumFrameInterval(time(1, fps));
+            // Queue depth 3 is the minimum required by ScreenCaptureKit to prevent frame
+            // drops: 1 surface is rendered by WindowServer compositor, 1 is queued/in transit,
+            // and 1 is consumed by this application/encoder. Setting depth to 2 starves the
+            // buffer pool under load.
             config.setQueueDepth(3);
             config.setPixelFormat(NV12);
             config.setShowsCursor(true);
@@ -206,7 +210,8 @@ impl Capture {
                 &config,
                 Some(ProtocolObject::from_ref(&*output)),
             );
-            let queue = DispatchQueue::new("app.latch.capture", None);
+            let attr = DispatchQueueAttr::with_qos_class(None, DispatchQoS::UserInteractive, 0);
+            let queue = DispatchQueue::new("app.latch.capture", Some(&attr));
             let capture = Self {
                 stream,
                 output,

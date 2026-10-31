@@ -45,7 +45,7 @@ struct VTDecompressionOutputCallbackRecord {
 const K_CF_NUMBER_SINT32: isize = 3;
 const K_CV_PIXEL_FORMAT_420V: u32 = 0x3432_3076; // '420v', video range
 const K_CV_PIXEL_FORMAT_420F: u32 = 0x3432_3066; // '420f', full range
-const K_CV_LOCK_READ_ONLY: u64 = 1;
+pub(crate) const K_CV_LOCK_READ_ONLY: u64 = 1;
 
 #[link(name = "CoreMedia", kind = "framework")]
 extern "C" {}
@@ -58,6 +58,8 @@ extern "C" {
     static kCFTypeDictionaryKeyCallBacks: c_void;
     static kCFTypeDictionaryValueCallBacks: c_void;
     static kCVPixelBufferPixelFormatTypeKey: CFStringRef;
+    static kCVPixelBufferIOSurfacePropertiesKey: CFStringRef;
+    static kCVPixelBufferMetalCompatibilityKey: CFStringRef;
     static kCFBooleanTrue: CFTypeRef;
     static kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: CFStringRef;
     static kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder: CFStringRef;
@@ -71,6 +73,7 @@ extern "C" {
         out: *mut CFTypeRef,
     ) -> OSStatus;
 
+    fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
     fn CFRelease(cf: CFTypeRef);
     fn CFDictionaryCreate(
         allocator: CFAllocatorRef,
@@ -164,6 +167,40 @@ extern "C" {
     fn CVPixelBufferGetHeightOfPlane(pb: CVImageBufferRef, plane: usize) -> usize;
     fn CVPixelBufferGetPixelFormatType(pb: CVImageBufferRef) -> u32;
     fn CVPixelBufferGetPlaneCount(pb: CVImageBufferRef) -> usize;
+}
+
+pub(crate) unsafe fn cf_retain(cf: *const c_void) -> *const c_void {
+    CFRetain(cf as CFTypeRef)
+}
+
+pub(crate) unsafe fn cf_release(cf: *const c_void) {
+    CFRelease(cf as CFTypeRef);
+}
+
+pub(crate) unsafe fn cv_pixel_buffer_lock_base_address(pb: *const c_void, flags: u64) -> i32 {
+    CVPixelBufferLockBaseAddress(pb as CVImageBufferRef, flags)
+}
+
+pub(crate) unsafe fn cv_pixel_buffer_unlock_base_address(pb: *const c_void, flags: u64) -> i32 {
+    CVPixelBufferUnlockBaseAddress(pb as CVImageBufferRef, flags)
+}
+
+pub(crate) unsafe fn cv_pixel_buffer_get_height_of_plane(pb: *const c_void, plane: usize) -> usize {
+    CVPixelBufferGetHeightOfPlane(pb as CVImageBufferRef, plane)
+}
+
+pub(crate) unsafe fn cv_pixel_buffer_get_bytes_per_row_of_plane(
+    pb: *const c_void,
+    plane: usize,
+) -> usize {
+    CVPixelBufferGetBytesPerRowOfPlane(pb as CVImageBufferRef, plane)
+}
+
+pub(crate) unsafe fn cv_pixel_buffer_get_base_address_of_plane(
+    pb: *const c_void,
+    plane: usize,
+) -> *const u8 {
+    CVPixelBufferGetBaseAddressOfPlane(pb as CVImageBufferRef, plane)
 }
 
 pub struct VideoToolbox {
@@ -275,13 +312,25 @@ impl VideoToolbox {
                 K_CF_NUMBER_SINT32,
                 &pixel_format as *const i32 as *const c_void,
             );
-            let keys = [kCVPixelBufferPixelFormatTypeKey];
-            let values = [number];
+            let empty_dict = CFDictionaryCreate(
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0,
+                &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks,
+            );
+            let keys = [
+                kCVPixelBufferPixelFormatTypeKey,
+                kCVPixelBufferIOSurfacePropertiesKey,
+                kCVPixelBufferMetalCompatibilityKey,
+            ];
+            let values = [number, empty_dict, kCFBooleanTrue];
             let attrs = CFDictionaryCreate(
                 ptr::null(),
                 keys.as_ptr(),
                 values.as_ptr(),
-                1,
+                3,
                 &kCFTypeDictionaryKeyCallBacks,
                 &kCFTypeDictionaryValueCallBacks,
             );
@@ -308,6 +357,7 @@ impl VideoToolbox {
             );
             CFRelease(spec);
             CFRelease(attrs);
+            CFRelease(empty_dict);
             CFRelease(number);
             if status != 0 || session.is_null() {
                 bail!("VideoToolbox session failed ({status})");
@@ -396,30 +446,21 @@ unsafe extern "C" fn output(
         out.error = Some("VideoToolbox returned a non-NV12 picture");
         return;
     }
-    if CVPixelBufferLockBaseAddress(image, K_CV_LOCK_READ_ONLY) != 0 {
-        out.error = Some("VideoToolbox picture could not be read");
-        return;
-    }
     let w = CVPixelBufferGetWidthOfPlane(image, 0);
     let h = CVPixelBufferGetHeightOfPlane(image, 0);
     let ys = CVPixelBufferGetBytesPerRowOfPlane(image, 0);
-    let uvh = CVPixelBufferGetHeightOfPlane(image, 1);
     let uvs = CVPixelBufferGetBytesPerRowOfPlane(image, 1);
-    let yp = CVPixelBufferGetBaseAddressOfPlane(image, 0);
-    let uvp = CVPixelBufferGetBaseAddressOfPlane(image, 1);
-    if !yp.is_null() && !uvp.is_null() {
-        let mut frame = out.spare.take().unwrap_or_default();
-        frame.fill(
-            (w as u32, h as u32),
-            (std::slice::from_raw_parts(yp, ys * h), ys),
-            (std::slice::from_raw_parts(uvp, uvs * uvh), uvs),
-            format == K_CV_PIXEL_FORMAT_420F,
-        );
-        out.frame = Some(frame);
-    } else {
-        out.error = Some("VideoToolbox picture has no pixel data");
-    }
-    CVPixelBufferUnlockBaseAddress(image, K_CV_LOCK_READ_ONLY);
+    let mut frame = out.spare.take().unwrap_or_default();
+    frame.width = w as u32;
+    frame.height = h as u32;
+    frame.y_stride = ys;
+    frame.uv_stride = uvs;
+    frame.full_range = format == K_CV_PIXEL_FORMAT_420F;
+    frame.y.clear();
+    frame.uv.clear();
+    CFRetain(image);
+    frame.native = Some(super::NativeFrame::new(image));
+    out.frame = Some(frame);
 }
 
 impl Decoder for VideoToolbox {
@@ -547,16 +588,22 @@ mod tests {
             .expect("decoded picture");
         assert_eq!((frame.width, frame.height), (64, 64));
         assert!(!frame.is_black());
-        assert!(frame.y[16 * frame.y_stride + 32] >= 230);
-        assert!(frame.y[48 * frame.y_stride + 32] <= 20);
-        // Given the drawn frame back, the decoder fills its buffers again.
-        let y_ptr = frame.y.as_ptr();
+        assert!(frame.native.is_some(), "frame has native CVPixelBuffer");
+        frame.with_planes(|y, ys, _, _| {
+            assert!(y[16 * ys + 32] >= 230);
+            assert!(y[48 * ys + 32] <= 20);
+        });
         let again = decoder
             .decode(encoded, true, Some(frame))
             .unwrap()
             .expect("decoded picture");
-        assert_eq!(again.y.as_ptr(), y_ptr, "the spare's buffer was reused");
-        assert!(again.y[16 * again.y_stride + 32] >= 230);
+        assert!(
+            again.native.is_some(),
+            "second frame has native CVPixelBuffer"
+        );
+        again.with_planes(|y, ys, _, _| {
+            assert!(y[16 * ys + 32] >= 230);
+        });
     }
 
     #[test]

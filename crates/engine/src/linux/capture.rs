@@ -77,6 +77,10 @@ pub struct X11Capture {
     desktop: Bgra,
     cursor: Option<xfixes::GetCursorImageReply>,
     first: bool,
+    cursor_drawn: bool,
+    last_reported_serial: Option<u32>,
+    last_reported_visible: Option<bool>,
+    pending_cursor: Option<crate::video::CursorUpdate>,
 }
 
 impl X11Capture {
@@ -161,6 +165,10 @@ impl X11Capture {
             desktop: Bgra::default(),
             cursor: None,
             first: true,
+            cursor_drawn: true,
+            last_reported_serial: None,
+            last_reported_visible: None,
+            pending_cursor: None,
         };
         this.allocate();
         Ok(this)
@@ -330,8 +338,71 @@ impl CpuCapture for X11Capture {
             } else {
                 None
             };
+            if let Some(cursor) = &cursor {
+                let all_transparent = cursor.cursor_image.iter().all(|&pixel| (pixel >> 24) == 0);
+                let visible = !cursor.cursor_image.is_empty() && !all_transparent;
+                if visible {
+                    if self.last_reported_serial != Some(cursor.cursor_serial) {
+                        let mut rgba = Vec::with_capacity(cursor.cursor_image.len() * 4);
+                        for &pixel in &cursor.cursor_image {
+                            let a = (pixel >> 24) as u8;
+                            if a == 0 {
+                                rgba.extend_from_slice(&[0, 0, 0, 0]);
+                            } else {
+                                let r_pre = (pixel >> 16) & 0xff;
+                                let g_pre = (pixel >> 8) & 0xff;
+                                let b_pre = pixel & 0xff;
+                                let a_u32 = a as u32;
+                                let r = ((r_pre * 255 + a_u32 / 2) / a_u32).min(255) as u8;
+                                let g = ((g_pre * 255 + a_u32 / 2) / a_u32).min(255) as u8;
+                                let b = ((b_pre * 255 + a_u32 / 2) / a_u32).min(255) as u8;
+                                rgba.extend_from_slice(&[r, g, b, a]);
+                            }
+                        }
+                        let shape = latch_proto::control::CursorShape::new(
+                            cursor.cursor_serial,
+                            cursor.width.into(),
+                            cursor.height.into(),
+                            cursor.xhot.into(),
+                            cursor.yhot.into(),
+                            &rgba,
+                        );
+                        self.last_reported_serial = Some(cursor.cursor_serial);
+                        self.last_reported_visible = Some(true);
+                        self.pending_cursor = Some(crate::video::CursorUpdate {
+                            visible: true,
+                            shape: Some(shape),
+                        });
+                    } else if self.last_reported_visible != Some(true) {
+                        self.last_reported_visible = Some(true);
+                        self.pending_cursor = Some(crate::video::CursorUpdate {
+                            visible: true,
+                            shape: None,
+                        });
+                    }
+                } else if self.last_reported_visible != Some(false) {
+                    self.last_reported_visible = Some(false);
+                    self.pending_cursor = Some(crate::video::CursorUpdate {
+                        visible: false,
+                        shape: None,
+                    });
+                }
+            } else if self.last_reported_visible != Some(false) && self.fixes {
+                self.last_reported_visible = Some(false);
+                self.pending_cursor = Some(crate::video::CursorUpdate {
+                    visible: false,
+                    shape: None,
+                });
+            }
+
             let cursor_changed = match (&self.cursor, &cursor) {
-                (Some(a), Some(b)) => (a.x, a.y, a.cursor_serial) != (b.x, b.y, b.cursor_serial),
+                (Some(a), Some(b)) => {
+                    if self.cursor_drawn {
+                        (a.x, a.y, a.cursor_serial) != (b.x, b.y, b.cursor_serial)
+                    } else {
+                        a.cursor_serial != b.cursor_serial
+                    }
+                }
                 (None, None) => false,
                 _ => true,
             };
@@ -355,8 +426,10 @@ impl CpuCapture for X11Capture {
                 frame.height = self.desktop.height;
                 frame.stride = self.desktop.stride;
                 frame.data.clone_from(&self.desktop.data);
-                if let Some(cursor) = &self.cursor {
-                    composite(frame, cursor);
+                if self.cursor_drawn {
+                    if let Some(cursor) = &self.cursor {
+                        composite(frame, cursor);
+                    }
                 }
                 self.first = false;
                 return Ok(true);
@@ -372,6 +445,15 @@ impl CpuCapture for X11Capture {
                 remaining.min(Duration::from_millis(8)),
             )?;
         }
+    }
+
+    fn set_cursor_drawn(&mut self, drawn: bool) -> bool {
+        self.cursor_drawn = drawn;
+        true
+    }
+
+    fn take_cursor(&mut self) -> Option<crate::video::CursorUpdate> {
+        self.pending_cursor.take()
     }
 }
 
@@ -582,6 +664,10 @@ mod tests {
             desktop: Bgra::default(),
             cursor: None,
             first: true,
+            cursor_drawn: true,
+            last_reported_serial: None,
+            last_reported_visible: None,
+            pending_cursor: None,
         };
         capture.allocate();
         assert!(!capture.uses_shm());

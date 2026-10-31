@@ -56,7 +56,7 @@ KeyframeRequest on loss ──────────────────�
 | Host | Capture | Encode |
 | --- | --- | --- |
 | macOS | ScreenCaptureKit, NV12 IOSurface at the stream size, cursor included | VideoToolbox (HEVC, H.264 High, or Constrained Baseline), real time, no frame reordering |
-| Windows | DXGI Desktop Duplication, BGRA texture; cursor drawn in; Direct3D 11 video processor to NV12 at the stream size | Media Foundation H.264 encoder (the GPU's MFT, else Microsoft's); `latch-codec` if neither works |
+| Windows | DXGI Desktop Duplication, BGRA texture; cursor drawn in; Direct3D 11 video processor to NV12 at the stream size | Media Foundation H.264 encoder (the GPU's MFT, else Microsoft's), or HEVC from the GPU's MFT when `LATCH_WINDOWS_HEVC=1` ([WINDOWS.md](WINDOWS.md#the-video-pipeline)); `latch-codec` if neither works |
 | Linux (X11) | MIT-SHM `GetImage` through `x11rb`, cursor from XFixes | `latch-codec` software encoder, threads by slice |
 
 | Viewer | Decode |
@@ -83,7 +83,11 @@ source pixels did not change since the last frame costs a skip and no
 search; changed macroblocks get a small motion search seeded by their
 neighbours and a scroll detector, and intra prediction. Rate control is a
 per-frame QP from a one-frame VBV, so a frame never takes much longer than
-its interval on the wire.
+its interval on the wire. Its hot loops (colour conversion, SAD, residual
+reconstruction, deblocking) use NEON or SSE/AVX2 through `std::arch`, and
+a governor keeps each frame's encode under 65% of the frame interval by
+trading search effort, not frames, so a slow or busy host still sends
+every frame it was asked for.
 
 ### Audio
 
@@ -104,6 +108,34 @@ captured ones, which lets tests check audio bit for bit. Opus is gone.
 * **Newest frame wins** on the viewer (`FrameSlot`), every frame is decoded
   (P-frames depend on each other), and a lost frame stops decoding until a
   keyframe.
+* **Frames on a fixed grid.** Every pipeline takes frames on a grid 1%
+  faster than the asked-for rate (`video::Pacer`): capture and encode time
+  comes out of the interval instead of adding to it, a screen refreshing at
+  the stream's rate gives up every refresh, and a late frame moves the
+  grid rather than bursting.
+* **The bitrate follows the path** (`engine::congestion`). #32's wire-budget
+  controller owns adaptation, including the audio/FEC/header allowance.
+  Cuts use the lower of current budget and actual successful wire throughput;
+  a target above the encoder's output cannot relieve congestion. Host pings
+  run at 10 Hz; each report uses the lowest RTT in its window to distinguish
+  standing queues from transient jitter. Parity has a base-RTT floor of 15%
+  at 40 ms and 20% at 100 ms (30% cap).
+* **Send immediately on clean paths.** The bounded two-frame sender remains,
+  but its token bucket is disabled until loss or queue pressure arrives.
+  Congestion enables the existing 2.5×-budget, sixteen-datagram bucket; two
+  clean seconds release it. Raw loss of at least 1.5% also enables pacing,
+  including loss FEC repaired, without necessarily cutting bitrate.
+* **Data before parity.** A frame's data shards go out before any parity
+  is computed, so a frame that loses nothing never waits for FEC.
+* **Media threads at high priority** (user-interactive QoS on macOS,
+  highest priority on Windows) and media sockets with 8 MB buffers, so a
+  keyframe's burst is not dropped by the sender or the receiver.
+* **Sound stays bounded.** #32's viewer keeps its 40 ms preroll and existing
+  smoothed ±0.2% clock steering, with a 120 ms hard cap trimmed to 50 ms.
+  A 30-minute ±300 ppm simulation verifies no gaps or trims and 25–45 ms
+  mean queue depth. This already bounds latency; no second controller is added.
+* **A Mac viewer never copies a picture**: VideoToolbox decodes into an
+  IOSurface that the renderer samples as Metal textures.
 * **One viewer at a time.** A new authorized viewer takes the host over;
   the old one gets `End` code 1.
 * **Display sizing** stays where it was: a Linux desktop that follows its
@@ -144,31 +176,35 @@ What shows the engine is right, other than its authors:
 ## Cadence and transport budgets
 
 All host pipelines use the same start-to-start deadline scheduler. Work time
-is inside the interval; a deadline missed by a whole interval advances to a
-future slot, without catch-up trains. Idle repeats remain bounded at 100 ms.
+is inside the interval; a deadline missed by a whole interval resets the grid to the
+actual capture time, without catch-up trains (`video::Pacer`). Idle repeats remain bounded at 100 ms.
 Encoding feeds a two-frame bounded channel to a dedicated video sender;
 backpressure preserves encoded references. Cancellation may discard queued
 media. Audio, input acknowledgements and pings bypass the video queue.
 
-Video uses a wire-byte token bucket at 2.5 times the current wire budget,
+Under pressure video uses a wire-byte token bucket at 2.5 times the wire budget,
 with a sixteen-datagram burst. The encoder allowance subtracts audio and
 FEC/header overhead from that budget. A session controller cuts by 20% after
-two pressure reports, at most once per 500 ms, when unrecovered loss exceeds
-3%, a frame is lost, RTT rises above its session minimum by max(12 ms, 25%),
+two pressure reports, at most once per 500 ms, from the lower of actual wire
+throughput and budget, when unrecovered loss exceeds
+3%, a frame is lost, the lowest host RTT in the report window rises above its session minimum
+by max(10 ms, 25%),
 or sender age exceeds 50 ms. After two clean seconds it adds 5% of the
 requested ceiling per second, capped at that ceiling. The wire floor is
 max(1 Mbps, ceiling/10). Recovered random loss alone does not reduce rate;
 legacy viewers' raw loss is tolerated through 3%. Parity is capped at 30%.
 Rate setters run between frames when the target changes by at least 5%.
 
-Host UDP requests 2 MiB send/1 MiB receive; viewer requests 1 MiB send/4 MiB
-receive. Readback is logged once per session, including Linux sysctl caps;
+Host and viewer UDP request 8 MiB in both directions through the one
+`latch_proto::transport::configure_socket` helper. Readback is logged once per session, including Linux sysctl caps;
 macOS requests fall back by halves if the kernel refuses a large buffer.
 Status and viewer stats expose requested/applied bitrate, sender queue age,
 send errors/retries and effective socket buffers. Bytes count successful
 media sends only. ENOBUFS uses the platform constant (10055 on Windows).
 
-Viewer receive uses mio readiness and bounded 64-datagram batches. Video
+Viewer receive uses mio readiness and bounded 64-datagram batches. Completed
+frames are handed to decode before waiting for more readiness: waiting at the
+end of a receive batch held each complete picture until the next datagram. Video
 shard storage is reused with a 4096-buffer pool cap. Decode queues are
 bounded by eight frames and 50 ms of age; exceeding either restarts at an
 IDR rather than decoding an increasing backlog. A missing initial IDR

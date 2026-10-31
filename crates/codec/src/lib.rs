@@ -7,7 +7,11 @@
 //! * [`audio`]: `lpcm-rice`, a lossless code for 10 ms of 48 kHz stereo.
 //!
 //! No `unsafe` outside `std::arch` SIMD paths that have a portable twin
-//! the tests compare them against.
+//! the tests compare them against, apart from OS thread-priority calls.
+
+#[cfg(not(test))]
+#[path = "../../engine/src/priority.rs"]
+mod priority;
 
 pub mod audio;
 pub mod color;
