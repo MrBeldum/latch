@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use windows::{
     core::PCWSTR,
     Win32::{
-        Foundation::HWND,
+        Foundation::{HWND, RECT},
         Graphics::{Dxgi::*, Gdi::*},
     },
 };
@@ -110,14 +110,25 @@ fn outputs() -> Result<Vec<Output>> {
 }
 pub(super) fn select() -> Result<Output> {
     let mut outputs = outputs()?;
+    // Prefer the virtual display for both sizing and capture, even when
+    // Windows keeps an uncapturable physical monitor as the primary screen.
     let index = outputs
         .iter()
-        .position(|o| o.desc.DesktopCoordinates.left == 0 && o.desc.DesktopCoordinates.top == 0)
+        .enumerate()
+        .min_by_key(|(_, o)| output_rank(o.virtual_display, o.desc.DesktopCoordinates))
+        .map(|(i, _)| i)
         .unwrap_or(0);
     if outputs.is_empty() {
         bail!("no DXGI output attached to the desktop");
     }
     Ok(outputs.swap_remove(index))
+}
+
+fn output_rank(virtual_display: bool, coordinates: RECT) -> (bool, bool) {
+    (
+        !virtual_display,
+        coordinates.left != 0 || coordinates.top != 0,
+    )
 }
 
 fn current(output: &Output) -> Result<DEVMODEW> {
@@ -261,6 +272,31 @@ pub(super) fn restore(previous: &Previous) -> Result<()> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn virtual_secondary_is_preferred_to_physical_primary() {
+        use windows::Win32::Foundation::RECT;
+        let primary = RECT::default();
+        let secondary = RECT {
+            left: 2560,
+            ..Default::default()
+        };
+        let select = |outputs: &[(bool, RECT)]| {
+            outputs
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (virtual_display, rect))| {
+                    super::output_rank(*virtual_display, *rect)
+                })
+                .map(|(i, _)| i)
+        };
+        assert_eq!(select(&[(false, primary), (true, secondary)]), Some(1));
+        assert_eq!(select(&[(true, secondary), (false, primary)]), Some(0));
+        assert_eq!(select(&[(false, secondary), (false, primary)]), Some(1));
+        assert_eq!(select(&[(true, secondary), (true, primary)]), Some(1));
+        assert_eq!(select(&[(false, secondary)]), Some(0));
+        assert_eq!(select(&[]), None);
+    }
+
     #[test]
     fn refresh_falls_back_without_refusing_high_fps() {
         for (requested, expected) in [(30, 60), (60, 60), (90, 120), (144, 120), (240, 120)] {

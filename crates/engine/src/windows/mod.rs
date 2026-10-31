@@ -4,6 +4,7 @@ mod audio;
 mod capture;
 mod display;
 mod encode;
+mod gdi;
 mod input;
 mod mf;
 mod runtime;

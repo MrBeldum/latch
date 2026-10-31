@@ -1,6 +1,6 @@
 //! The cursor uses a pixel shader compiled by the system d3dcompiler_47.dll.
 //! This preserves XOR cursors without reading the desktop back to the CPU.
-use super::display;
+use super::{display, gdi::Gdi};
 use crate::{
     input::DisplayRect,
     software::{Bgra, CpuCapture},
@@ -379,6 +379,9 @@ pub(super) struct Capture {
     pub has_frame: bool,
     cpu_seeded: bool,
     retry: ReopenBackoff,
+    waiting_since: Option<Instant>,
+    output_name: [u16; 32],
+    gdi: Option<Gdi>,
 }
 struct ReopenBackoff {
     at: Instant,
@@ -434,15 +437,39 @@ fn duplicate(output: &display::Output, gpu: &Gpu) -> Result<IDXGIOutputDuplicati
 // SAFETY: D3D11/DXGI interfaces are free threaded and the immediate context has
 // multithread protection. Capture is used exclusively by its video worker; no
 // apartment-bound MF interfaces or COM initialization guard travel with it.
+// GDI DCs, when needed, are created, used and dropped on that same worker.
 unsafe impl Send for Capture {}
 impl Capture {
     pub fn new() -> Result<Self> {
         let _dpi = display::DpiAwareness::physical();
         let output = display::select()?;
         let gpu = Gpu::new(&output.adapter)?;
-        let duplication = duplicate(&output, &gpu)?;
+        let duplication = duplicate(&output, &gpu)
+            .map_err(|e| {
+                tracing::warn!("Desktop Duplication unavailable; using GDI capture: {e:#}")
+            })
+            .ok();
+        let gdi = if duplication.is_none() {
+            Some(Gdi::new(output.desc.DeviceName)?)
+        } else {
+            None
+        };
         // SAFETY: The duplication owns its descriptor.
-        let desc = unsafe { duplication.GetDesc() };
+        let desc = duplication
+            .as_ref()
+            .map(|d| unsafe { d.GetDesc() })
+            .unwrap_or_else(|| {
+                let display = gdi.as_ref().expect("capture backend").display;
+                DXGI_OUTDUPL_DESC {
+                    ModeDesc: DXGI_MODE_DESC {
+                        Width: display.width,
+                        Height: display.height,
+                        ..Default::default()
+                    },
+                    Rotation: DXGI_MODE_ROTATION_IDENTITY,
+                    ..Default::default()
+                }
+            });
         let display = desktop_rect(&desc, output.desc.DesktopCoordinates);
         let source = gpu.texture(
             desc.ModeDesc.Width,
@@ -461,7 +488,7 @@ impl Capture {
         let renderer = CursorRenderer::new(&gpu)?;
         Ok(Self {
             gpu,
-            duplication: Some(duplication),
+            duplication,
             source,
             frame,
             renderer,
@@ -472,6 +499,9 @@ impl Capture {
             has_frame: false,
             cpu_seeded: false,
             retry: ReopenBackoff::new(),
+            waiting_since: None,
+            output_name: output.desc.DeviceName,
+            gdi,
         })
     }
     fn reopen(&mut self) -> Result<()> {
@@ -523,9 +553,42 @@ impl Capture {
         self.cpu_seeded = false;
         self.duplication = Some(duplication);
         self.retry = ReopenBackoff::new();
+        self.waiting_since = None;
+        self.output_name = output.desc.DeviceName;
         Ok(())
     }
+    fn grab_gdi(&mut self) -> Result<bool> {
+        let capture = self.gdi.as_mut().context("missing GDI capture")?;
+        let (display, bytes) = capture.grab()?;
+        if self.display != display {
+            self.display = display;
+            self.frame = self.gpu.texture(
+                self.display.width,
+                self.display.height,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                D3D11_BIND_RENDER_TARGET.0 as u32,
+                false,
+            )?;
+        }
+        // SAFETY: The top-down bitmap covers every row of this BGRA texture;
+        // UpdateSubresource copies the pixels before the bitmap is reused.
+        unsafe {
+            self.gpu.context.UpdateSubresource(
+                &self.frame,
+                0,
+                None,
+                bytes.as_ptr().cast(),
+                self.display.width * 4,
+                0,
+            );
+        }
+        self.has_frame = true;
+        Ok(true)
+    }
     pub fn grab(&mut self, timeout: Duration) -> Result<bool> {
+        if self.gdi.is_some() {
+            return self.grab_gdi();
+        }
         if self.duplication.is_none() {
             if Instant::now() < self.retry.at {
                 return Ok(false);
@@ -551,7 +614,23 @@ impl Capture {
                 )
         };
         match acquired {
-            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
+            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                if !self.has_frame
+                    && self
+                        .waiting_since
+                        .get_or_insert_with(Instant::now)
+                        .elapsed()
+                        >= Duration::from_secs(1)
+                {
+                    tracing::warn!(
+                        "Desktop Duplication produced no initial frame; using GDI capture"
+                    );
+                    self.duplication = None;
+                    self.gdi = Some(Gdi::new(self.output_name)?);
+                    return self.grab_gdi();
+                }
+                return Ok(false);
+            }
             Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
                 // Release the old interface before DuplicateOutput: a process can
                 // own only one duplication per output. Retain the last safe copy
@@ -674,7 +753,11 @@ impl CpuCapture for Capture {
         self.display
     }
     fn name(&self) -> String {
-        "DXGI Desktop Duplication".into()
+        if self.gdi.is_some() {
+            "Windows GDI".into()
+        } else {
+            "DXGI Desktop Duplication".into()
+        }
     }
 }
 
