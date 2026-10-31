@@ -20,6 +20,9 @@ GitHub release notes, so each version gets a heading of the form
   Latch from `%ProgramFiles%\Latch\Input`, elevated, for streams to inject
   through; run setup again after updating. Without it, the log names the
   window that ignores input.
+- Display Tailscale peers by machine name (the first label of MagicDNS)
+  rather than OS hostname, so iOS/iPadOS clients no longer display as
+  "localhost".
 
 ## 5.0.1 (2026-10-29)
 

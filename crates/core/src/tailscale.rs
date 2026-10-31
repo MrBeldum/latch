@@ -170,6 +170,21 @@ impl Node {
         }
     }
     /// True only for `tag:relay`. Other tags leave a stream PC in the list.
+    /// Display name for the peer: the first label of its MagicDNS name
+    /// (e.g. `"iphone.taile55421.ts.net."` → `"iphone"`), matching
+    /// `tailscale status` and the admin console.
+    ///
+    /// iOS/iPadOS clients always report `HostName: "localhost"` because iOS
+    /// hides the device name from apps; MagicDNS uses the owner-chosen machine
+    /// name instead. Falls back to `host_name` when `dns_name` is empty or has
+    /// no label.
+    pub fn name(&self) -> &str {
+        let trimmed = self.dns_name.trim_end_matches('.');
+        match trimmed.split('.').next() {
+            Some(label) if !label.is_empty() => label,
+            _ => self.host_name.as_str(),
+        }
+    }
     pub fn is_relay(&self) -> bool {
         self.tags.iter().any(|t| t == RELAY_TAG)
     }
@@ -246,16 +261,16 @@ impl Status {
     /// Every tailnet peer that can share a desktop: any OS, minus `tag:relay`
     /// nodes that exist only to carry packets, and the nodes `tailscale
     /// status` itself hides (machines this one is shared out to, Mullvad's
-    /// exit nodes). Sorted by hostname.
+    /// exit nodes). Sorted by machine name.
     pub fn machine_peers(&self) -> Vec<&Node> {
         let mut v: Vec<&Node> = self.listed_peers().filter(|n| !n.is_relay()).collect();
-        v.sort_by(|a, b| a.host_name.cmp(&b.host_name));
+        v.sort_by(|a, b| a.name().cmp(b.name()));
         v
     }
-    /// Nodes tagged `tag:relay`, any OS. Sorted by hostname like the PC list.
+    /// Nodes tagged `tag:relay`, any OS. Sorted by machine name like the PC list.
     pub fn relay_peers(&self) -> Vec<&Node> {
         let mut v: Vec<&Node> = self.listed_peers().filter(|n| n.is_relay()).collect();
-        v.sort_by(|a, b| a.host_name.cmp(&b.host_name));
+        v.sort_by(|a, b| a.name().cmp(b.name()));
         v
     }
     /// The peers `tailscale status` lists.
@@ -645,16 +660,13 @@ mod tests {
         assert_eq!(st.self_login(), Some("user@example.com"));
         let pcs = windows_peers(&st);
         assert_eq!(
-            pcs.iter().map(|n| n.host_name.as_str()).collect::<Vec<_>>(),
-            ["Den", "Gaming-PC-2", "Office"]
+            pcs.iter().map(|n| n.name()).collect::<Vec<_>>(),
+            ["Gaming-PC-2", "den", "office"]
         );
         let machines = st.machine_peers();
         assert_eq!(
-            machines
-                .iter()
-                .map(|n| n.host_name.as_str())
-                .collect::<Vec<_>>(),
-            ["Den", "Example Mac", "Gaming-PC-2", "Office"],
+            machines.iter().map(|n| n.name()).collect::<Vec<_>>(),
+            ["Gaming-PC-2", "den", "mac", "office"],
             "machine_peers includes every OS, not only Windows"
         );
         assert_eq!(st.peer["nodekey:a"].os_label(), "macOS");
@@ -666,16 +678,16 @@ mod tests {
         );
         assert!(pcs[2].online);
         assert_eq!(pcs[2].public_ipv4(), Some("203.0.113.5".parse().unwrap()));
-        assert_eq!(pcs[0].public_ipv4(), None);
+        assert_eq!(pcs[1].public_ipv4(), None);
         // Office's key expires far off; Den has no expiry (a zero time).
         assert!(pcs[2].key_expiry_days().unwrap() > 300_000);
-        assert_eq!(pcs[0].key_expiry_days(), None);
+        assert_eq!(pcs[1].key_expiry_days(), None);
         // Office is reached directly; Gaming-PC-2 only through the Tokyo relay;
         // Den has not been talked to, so nobody knows, home relay or not.
         assert_eq!(pcs[2].direct(), Some(true));
-        assert_eq!(pcs[1].direct(), Some(false));
-        assert_eq!(pcs[1].relay, "tok");
-        assert_eq!(pcs[0].direct(), None);
+        assert_eq!(pcs[0].direct(), Some(false));
+        assert_eq!(pcs[0].relay, "tok");
+        assert_eq!(pcs[1].direct(), None);
     }
 
     #[test]
@@ -837,9 +849,9 @@ mod tests {
         assert_eq!(
             st.machine_peers()
                 .iter()
-                .map(|n| n.host_name.as_str())
+                .map(|n| n.name())
                 .collect::<Vec<_>>(),
-            ["Gaming-PC", "vps"],
+            ["gaming-pc", "vps"],
             "an exit node of the user's own stays"
         );
         assert!(st.relay_peers().is_empty());
@@ -905,14 +917,14 @@ mod tests {
 
         let pcs = windows_peers(&st);
         assert_eq!(
-            pcs.iter().map(|n| n.host_name.as_str()).collect::<Vec<_>>(),
+            pcs.iter().map(|n| n.name()).collect::<Vec<_>>(),
             ["Gaming-PC", "tagged-pc"],
             "a Windows node carrying tag:relay is excluded, but any other tag stays"
         );
         assert_eq!(
             st.machine_peers()
                 .iter()
-                .map(|n| n.host_name.as_str())
+                .map(|n| n.name())
                 .collect::<Vec<_>>(),
             ["Gaming-PC", "tagged-pc"],
             "machine_peers is every OS minus tag:relay"
@@ -920,10 +932,7 @@ mod tests {
 
         let relays = st.relay_peers();
         assert_eq!(
-            relays
-                .iter()
-                .map(|n| n.host_name.as_str())
-                .collect::<Vec<_>>(),
+            relays.iter().map(|n| n.name()).collect::<Vec<_>>(),
             ["relay-pc", "sj-instance"],
             "relay discovery sees every tag:relay node, any OS, sorted"
         );
@@ -1032,5 +1041,51 @@ mod tests {
         .unwrap();
         assert_eq!(w.user_profile.id, 42);
         assert_eq!(w.node.computed_name, "mac");
+    }
+
+    #[test]
+    fn peer_name_uses_magic_dns_first_label_and_falls_back_to_host_name() {
+        // iOS reports HostName "localhost"; name() must use the first label of DNSName.
+        let ios = Node {
+            host_name: "localhost".into(),
+            dns_name: "iphone.example.ts.net.".into(),
+            ..Default::default()
+        };
+        assert_eq!(ios.name(), "iphone");
+
+        // Empty DNSName falls back to HostName.
+        let empty_dns = Node {
+            host_name: "Gaming-PC".into(),
+            dns_name: "".into(),
+            ..Default::default()
+        };
+        assert_eq!(empty_dns.name(), "Gaming-PC");
+
+        // DNSName with only dots or empty labels falls back to HostName.
+        let dots = Node {
+            host_name: "fallback-pc".into(),
+            dns_name: "...".into(),
+            ..Default::default()
+        };
+        assert_eq!(dots.name(), "fallback-pc");
+
+        // Mullvad exit node is identified and filtered out.
+        let mullvad = Node {
+            host_name: "us-lax-wg-001".into(),
+            dns_name: "us-lax-wg-001.mullvad.ts.net.".into(),
+            ..Default::default()
+        };
+        assert!(mullvad.is_mullvad());
+
+        let st = parse_status(
+            r#"{"BackendState":"Running","Peer":{
+              "mullvad": {"HostName":"us-lax-wg-001","DNSName":"us-lax-wg-001.mullvad.ts.net.","OS":"linux","Online":true},
+              "iphone": {"HostName":"localhost","DNSName":"iphone.example.ts.net.","OS":"iOS","Online":true}
+            }}"#,
+        )
+        .unwrap();
+        let machines = st.machine_peers();
+        assert_eq!(machines.len(), 1);
+        assert_eq!(machines[0].name(), "iphone");
     }
 }
