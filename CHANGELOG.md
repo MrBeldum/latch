@@ -4,6 +4,12 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## Unreleased
+
+- Display Tailscale peers by machine name (the first label of MagicDNS)
+  rather than OS hostname, so iOS/iPadOS clients no longer display as
+  "localhost".
+
 ## 5.0.1 (2026-10-29)
 
 - Remove unrelated maker branding and retired-domain links from the app and

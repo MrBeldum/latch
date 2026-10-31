@@ -3473,7 +3473,7 @@ pub(crate) mod snapshots {
                 .into_iter()
                 .map(|n| Pc {
                     node_id: n.id.clone(),
-                    name: n.host_name.clone(),
+                    name: n.name().to_string(),
                     os: n.os.clone(),
                     ip: n.ipv4(),
                     online: n.online,
@@ -3485,7 +3485,7 @@ pub(crate) mod snapshots {
                 .relay_peers()
                 .into_iter()
                 .map(|n| Relay {
-                    name: n.host_name.clone(),
+                    name: n.name().to_string(),
                     ip: n.ipv4(),
                     online: n.online,
                 })
