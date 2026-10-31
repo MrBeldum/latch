@@ -354,7 +354,7 @@ pub fn scan(cfg: &ClientConfig) -> Discovery {
         .relay_peers()
         .into_iter()
         .map(|n| Relay {
-            name: n.host_name.clone(),
+            name: n.name().to_string(),
             ip: n.ipv4(),
             online: n.online,
         })
@@ -415,7 +415,7 @@ fn probe_peer(cfg: &ClientConfig, n: &tailscale::Node) -> Pc {
     }
     Pc {
         node_id: n.id.clone(),
-        name: n.host_name.clone(),
+        name: n.name().to_string(),
         os: n.os.clone(),
         ip,
         online: host.is_some(),
