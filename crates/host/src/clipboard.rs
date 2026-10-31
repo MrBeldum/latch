@@ -151,7 +151,10 @@ fn with_clipboard<T>(
                 0
             };
             #[cfg(target_os = "linux")]
-            if connection_is_dead(slot.failures, || x11rb::connect(None).is_ok()) {
+            // The recovery probe must not hang while the X server is down.
+            if connection_is_dead(slot.failures, || {
+                latch_engine::linux::capture_size().is_ok()
+            }) {
                 tracing::error!("clipboard: the X connection is gone ({e}); restarting");
                 std::process::exit(1);
             }
