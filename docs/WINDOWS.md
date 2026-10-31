@@ -98,6 +98,53 @@ sink that was unplugged). Install a virtual one (Steam's Streaming
 Speakers, or VB-CABLE), pick it as the PC's audio sink, and restart the
 engine service.
 
+## The video pipeline
+
+Desktop Duplication hands the engine each new picture of the desktop; the
+engine draws the cursor in, scales and converts it to NV12 on the GPU
+(Direct3D 11 video processor), and gives it to a Media Foundation encoder:
+the GPU's own (AMD, NVIDIA, Intel), else Microsoft's CPU encoder, else
+Latch's software encoder.
+
+- **Frame rate.** Frames are taken on a fixed grid 1% faster than the
+  stream's rate (`Pacer`, shared with macOS and Linux), so the time spent
+  capturing, converting and encoding a frame comes out of its interval
+  instead of adding to it. A static desktop is repeated every 100 ms.
+- **GPU work per frame.** The NV12 textures (a ring of four) and every view
+  of a texture are made once and reused, the cursor pass reuses its views,
+  and the Microsoft-encoder path reuses one CPU-readable staging texture
+  and copies the picture once, from the mapped surface into the encoder's
+  sample.
+- **Rate control.** Constant bit rate with the cap equal to the mean and a
+  buffer of 1.5 frames of bits (`bitrate / fps × 1.5`), so no frame runs
+  much past the average: a keyframe takes at most half a frame interval
+  more than a P-frame on a link that carries the bitrate, where the
+  drivers' default buffer (often about a second) lets keyframes and bursts
+  of motion run to many times it. When the host changes the bitrate the cap
+  and buffer move with it. No B-frames, an endless GOP, CABAC for H.264
+  High. Every property after the mean rate is best effort: a driver that
+  lacks it keeps its default (`RUST_LOG=latch_engine=debug` lists the ones
+  refused).
+- **Encoder events.** The GPU encoders are asynchronous; the engine polls
+  their events with 0.1 ms sleeps, never blocking in the driver.
+
+### HEVC (off by default)
+
+HEVC is offered only when the environment variable `LATCH_WINDOWS_HEVC=1`
+is set for `latch-host.exe` (for a service started at logon, set it as a
+user environment variable and restart Latch Host), and only after the
+GPU's HEVC encoder (Main profile, low latency, no B-frames, endless GOP,
+the same buffer rules) has encoded a keyframe in a trial when the first
+viewer connects. Every keyframe carries VPS, SPS and PPS in band before the
+slice, which is what the Mac's VideoToolbox decoder needs to start. The
+flag exists because this path has not run on every vendor's hardware; with
+it off nothing about H.264 changes.
+
+If the HEVC encoder fails (at the trial, when a stream opens, or while it
+runs) the engine stops offering HEVC until it restarts, and the next viewer
+gets H.264. The stream that was running ends rather than switching
+codecs mid-stream, as the viewer decodes only what it was told.
+
 ## What the service does
 
 `latch-host.exe --background` listens on TCP 47850 and answers these

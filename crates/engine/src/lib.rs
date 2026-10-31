@@ -7,6 +7,8 @@
 //! [`pattern`] a synthetic desktop for tests and measurements.
 
 pub mod audio;
+#[cfg(any(windows, test))]
+mod bitstream;
 pub mod display;
 pub mod input;
 pub mod pattern;
