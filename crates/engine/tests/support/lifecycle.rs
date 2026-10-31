@@ -56,6 +56,7 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         transport: TransportState::new(1000),
         keyframe_request: Mutex::new(None),
         audio_enabled: false,
+        cursor_supported: false,
         draw_cursor: AtomicBool::new(true),
         control_writer: Mutex::new(None),
     })

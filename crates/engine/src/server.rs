@@ -306,6 +306,7 @@ impl Server {
             transport: TransportState::new(config.bitrate_kbps),
             keyframe_request: Mutex::new(None),
             audio_enabled: prepared.audio.is_some(),
+            cursor_supported,
             draw_cursor: AtomicBool::new(!cursor_supported),
             control_writer: Mutex::new(None),
         });
@@ -490,7 +491,7 @@ impl Server {
                         e.message
                     }
                 }
-                Ok(Message::DrawCursor(d)) => {
+                Ok(Message::DrawCursor(d)) if session.cursor_supported => {
                     session.heard(self.now_us());
                     session.draw_cursor.store(d.draw, Ordering::Relaxed);
                 }
@@ -709,6 +710,7 @@ struct Session {
     transport: TransportState,
     keyframe_request: Mutex<Option<(u32, Instant)>>,
     audio_enabled: bool,
+    cursor_supported: bool,
     draw_cursor: AtomicBool,
     control_writer: Mutex<Option<TcpStream>>,
 }
@@ -975,7 +977,7 @@ fn encode_video(
                 continue;
             }
         };
-        if let Some(update) = pipeline.take_cursor() {
+        if let Some(update) = pipeline.take_cursor().filter(|_| session.cursor_supported) {
             session.send_control(&Message::Cursor(control::Cursor {
                 visible: update.visible,
                 shape: update.shape,

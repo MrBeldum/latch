@@ -72,7 +72,7 @@ type byte and the payload and is at most 65 536. Payloads are JSON objects.
 | 2 | `End` | either | `{"code": u32, "message": string}`; the sender closes after it |
 | 3 | `Keepalive` | either | `{}` |
 | 4 | `Notice` | host → viewer | `{"kind": "audio" \| "video" \| "input", "message": string}`; `message` empty clears it |
-| 5 | `Report` | viewer → host | `{"fps", "loss_pct", "decode_ms", "rtt_ms"}`, every 250 ms (legacy viewers: once a second), for bitrate and FEC feedback |
+| 5 | `Report` | either | `{"fps", "loss_pct", "decode_ms", "rtt_ms"}`, every 250 ms (legacy viewers: once a second), for bitrate and FEC feedback |
 | 6 | `Cursor` | host → viewer | `{"visible": bool, "shape": null \| {"serial": u32, "width": u32, "height": u32, "hot_x": u32, "hot_y": u32, "rgba": "<base64>"}}`; only after an `Accept` with `cursor` true; sent when visibility or shape changes (`shape` null: unchanged); straight-alpha RGBA, at most 96×96 |
 | 7 | `DrawCursor` | viewer → host | `{"draw": bool}`; tells host whether to composite pointer into video |
 

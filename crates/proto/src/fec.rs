@@ -370,6 +370,7 @@ pub(crate) unsafe fn addmul_avx2(dst: &mut [u8], src: &[u8], c: u8) {
 
 #[inline(always)]
 fn addmul(dst: &mut [u8], src: &[u8], c: u8) {
+    assert_eq!(dst.len(), src.len());
     if c == 0 {
         return;
     }

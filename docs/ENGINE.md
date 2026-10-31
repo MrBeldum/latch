@@ -202,7 +202,9 @@ Status and viewer stats expose requested/applied bitrate, sender queue age,
 send errors/retries and effective socket buffers. Bytes count successful
 media sends only. ENOBUFS uses the platform constant (10055 on Windows).
 
-Viewer receive uses mio readiness and bounded 64-datagram batches. Video
+Viewer receive uses mio readiness and bounded 64-datagram batches. Completed
+frames are handed to decode before waiting for more readiness: waiting at the
+end of a receive batch held each complete picture until the next datagram. Video
 shard storage is reused with a 4096-buffer pool cap. Decode queues are
 bounded by eight frames and 50 ms of age; exceeding either restarts at an
 IDR rather than decoding an increasing backlog. A missing initial IDR
