@@ -36,6 +36,15 @@ const GROWTH: f64 = 1.08;
 const BASE_WINDOW: Duration = Duration::from_secs(10);
 /// Never below a tenth of the asked-for rate, nor below this.
 const FLOOR_KBPS: u32 = 500;
+/// Loss at or above this many percent turns pacing on; this many reports
+/// in a row below [`PACE_CLEAN`] turn it off.
+const PACE_LOSS: f32 = 1.0;
+const PACE_CLEAN: f32 = 0.3;
+const PACE_CLEAN_REPORTS: u32 = 10;
+/// Paced datagrams leave at this multiple of the bitrate, and never slower
+/// than [`PACE_MIN_KBPS`]: an average frame takes a quarter of its interval.
+const PACE_FACTOR: u32 = 4;
+const PACE_MIN_KBPS: u32 = 40_000;
 
 #[derive(Debug, Clone)]
 pub struct RateControl {
@@ -45,6 +54,8 @@ pub struct RateControl {
     rtts: VecDeque<(Instant, Duration)>,
     hold_until: Option<Instant>,
     clean_since: Option<Instant>,
+    paced: bool,
+    clean_reports: u32,
 }
 
 impl RateControl {
@@ -58,7 +69,19 @@ impl RateControl {
             rtts: VecDeque::new(),
             hold_until: None,
             clean_since: None,
+            paced: false,
+            clean_reports: 0,
         }
+    }
+
+    /// How fast to send a frame's datagrams, when they should not leave as
+    /// one burst: a frame leaves the host at the speed of its network card,
+    /// and a slower link further on queues the burst and drops its tail.
+    /// Bursts are the lowest latency, so pacing is on only while the viewer
+    /// reports loss, and off again after ten clean reports.
+    pub fn pacing_kbps(&self) -> Option<u32> {
+        self.paced
+            .then(|| self.rate.saturating_mul(PACE_FACTOR).max(PACE_MIN_KBPS))
     }
 
     pub fn rate(&self) -> u32 {
@@ -75,6 +98,15 @@ impl RateControl {
     /// lowest sample, so one late pong is not taken for a queue). Returns
     /// the new rate when it changed.
     pub fn report(&mut self, now: Instant, loss_pct: f32, rtt: Option<Duration>) -> Option<u32> {
+        if loss_pct >= PACE_LOSS {
+            self.paced = true;
+            self.clean_reports = 0;
+        } else if loss_pct < PACE_CLEAN {
+            self.clean_reports += 1;
+            if self.clean_reports >= PACE_CLEAN_REPORTS {
+                self.paced = false;
+            }
+        }
         let queue = rtt.and_then(|rtt| {
             while self
                 .rtts
@@ -166,6 +198,23 @@ mod tests {
         assert_eq!(rc.report(t, 0.0, Some(180 * MS)), None);
         t += Duration::from_secs(1);
         assert_eq!(rc.report(t, 0.0, Some(200 * MS)), Some(25_500));
+    }
+
+    #[test]
+    fn loss_paces_sending_until_the_path_is_clean() {
+        let mut rc = RateControl::new(20_000);
+        let mut t = Instant::now();
+        run(&mut rc, &mut t, 3, 0.0, 13 * MS);
+        assert_eq!(rc.pacing_kbps(), None);
+        run(&mut rc, &mut t, 1, 2.0, 13 * MS);
+        assert_eq!(rc.pacing_kbps(), Some(80_000));
+        run(&mut rc, &mut t, 9, 0.0, 13 * MS);
+        assert!(rc.pacing_kbps().is_some());
+        run(&mut rc, &mut t, 1, 0.0, 13 * MS);
+        assert_eq!(rc.pacing_kbps(), None);
+        let mut slow = RateControl::new(4_000);
+        run(&mut slow, &mut t, 1, 2.0, 13 * MS);
+        assert_eq!(slow.pacing_kbps(), Some(40_000));
     }
 
     #[test]

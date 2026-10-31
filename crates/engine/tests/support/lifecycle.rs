@@ -50,6 +50,7 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         rtt_low: Mutex::new(None),
         rate: Mutex::new(RateControl::new(1_000)),
         bitrate: AtomicU32::new(1_000),
+        pace_kbps: AtomicU32::new(0),
         fec: AtomicU8::new(DEFAULT_FEC_PERCENT),
         heard_us: AtomicU64::new(0),
         frames: AtomicU64::new(0),

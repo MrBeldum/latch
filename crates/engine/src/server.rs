@@ -270,6 +270,7 @@ impl Server {
             rtt_low: Mutex::new(None),
             rate: Mutex::new(RateControl::new(config.bitrate_kbps)),
             bitrate: AtomicU32::new(config.bitrate_kbps),
+            pace_kbps: AtomicU32::new(0),
             fec: AtomicU8::new(DEFAULT_FEC_PERCENT),
             heard_us: AtomicU64::new(self.now_us()),
             frames: AtomicU64::new(0),
@@ -444,13 +445,15 @@ impl Server {
                 Ok(Message::Report(r)) => {
                     session.heard(self.now_us());
                     let rtt = session.rtt_low.lock().take();
-                    let (changed, base) = {
+                    let (changed, base, pace) = {
                         let mut rate = session.rate.lock();
-                        (
-                            rate.report(Instant::now(), r.loss_pct, rtt),
-                            rate.base_rtt(),
-                        )
+                        let changed = rate.report(Instant::now(), r.loss_pct, rtt);
+                        (changed, rate.base_rtt(), rate.pacing_kbps())
                     };
+                    let pace = pace.unwrap_or(0);
+                    if session.pace_kbps.swap(pace, Ordering::Relaxed) != pace {
+                        tracing::debug!("pacing frames at {pace} kb/s (0: off)");
+                    }
                     if let Some(kbps) = changed {
                         session.bitrate.store(kbps, Ordering::Relaxed);
                         tracing::debug!(
@@ -614,6 +617,8 @@ struct Session {
     rate: Mutex<RateControl>,
     /// What the encoder should be set to, in kb/s.
     bitrate: AtomicU32,
+    /// How fast to send a frame's datagrams; 0 sends each frame at once.
+    pace_kbps: AtomicU32,
     fec: AtomicU8,
     /// When the viewer was last heard from, on the server's clock.
     heard_us: AtomicU64,
@@ -834,7 +839,20 @@ fn send_video(
             keyframe: frame.keyframe,
             host_delay: delay,
         };
+        let pace = session.pace_kbps.load(Ordering::Relaxed);
+        let mut next = Instant::now();
         packetizer.packetize(&out, |datagram| {
+            if pace > 0 {
+                // Sleep only once a millisecond ahead: the datagrams go in
+                // short runs, each run on schedule.
+                if let Some(ahead) = next.checked_duration_since(Instant::now()) {
+                    if ahead >= Duration::from_millis(1) {
+                        std::thread::sleep(ahead);
+                    }
+                }
+                next = next.max(Instant::now())
+                    + Duration::from_nanos(datagram.len() as u64 * 8_000_000 / u64::from(pace));
+            }
             send(&server.udp, datagram, addr);
         });
         session.frames.fetch_add(1, Ordering::Relaxed);
