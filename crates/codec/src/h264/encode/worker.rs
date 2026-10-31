@@ -4,7 +4,7 @@ use super::{
     transform::{self, SCAN},
 };
 use crate::Yuv420;
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 #[derive(Clone, Default)]
 pub(super) struct Mb {
@@ -26,6 +26,7 @@ pub(super) struct Job {
     pub end: usize,
     pub qp: u8,
     pub suppression: u8,
+    pub effort: u8,
     pub subpixel: bool,
     pub is_motion: bool,
     pub global: (i32, i32),
@@ -37,6 +38,8 @@ pub(super) struct Job {
 }
 pub(super) struct Band {
     pub first: usize,
+    pub elapsed_ms: f64,
+    pub deblock_ms: f64,
     pub picture: Yuv420,
     pub mbs: Vec<Mb>,
     pub nal: Vec<u8>,
@@ -541,12 +544,23 @@ fn motion(
     } else {
         32 + lambda * 2
     };
-    if score < early_exit_cost {
+    let early_exit_cost = if job.effort >= 2 {
+        early_exit_cost.max(lambda * 64)
+    } else {
+        early_exit_cost
+    };
+    if job.effort >= 4 || score < early_exit_cost {
         return (best, score);
     }
-    let max_iter = if is_motion { 2 } else { 4 };
+    let max_iter = if job.effort >= 2 {
+        1
+    } else if is_motion {
+        2
+    } else {
+        4
+    };
     let centre = best;
-    let steps = if score < 1024 + lambda * 16 {
+    let steps = if job.effort >= 2 || score < 1024 + lambda * 16 {
         [2, 1, 0, 0]
     } else {
         [8, 4, 2, 1]
@@ -603,7 +617,14 @@ fn motion(
     (best, score)
 }
 
-pub(super) fn header(first: usize, idr: bool, frame_num: u32, idr_id: u32, qp: u8) -> Bits {
+pub(super) fn header(
+    first: usize,
+    idr: bool,
+    frame_num: u32,
+    idr_id: u32,
+    qp: u8,
+    slice_filter: bool,
+) -> Bits {
     let mut b = Bits::default();
     b.ue(first as u32);
     b.ue(if idr { 2 } else { 0 });
@@ -622,18 +643,27 @@ pub(super) fn header(first: usize, idr: bool, frame_num: u32, idr_id: u32, qp: u
         b.bit(false);
     }
     b.se(qp as i32 - 26);
-    b.ue(0);
+    // idc=2 retains deblocking inside slices and permits parallel filtering.
+    b.ue(if slice_filter { 2 } else { 0 });
     b.se(0);
     b.se(0);
     b
 }
 
 pub(super) fn encode(job: Job) -> Band {
+    let started = Instant::now();
     let w = job.source.padded_width() / 16;
     let rows = job.end - job.first;
     let mut rec = Yuv420::new(job.source.width, rows as u32 * 16);
     let mut mbs = vec![Mb::default(); w * rows];
-    let mut b = header(job.first * w, job.idr, job.frame_num, job.idr_id, job.qp);
+    let mut b = header(
+        job.first * w,
+        job.idr,
+        job.frame_num,
+        job.idr_id,
+        job.qp,
+        true,
+    );
     let mut skip_run = 0;
     let mut skipped = 0;
     let mut qpy = job.qp;
@@ -725,15 +755,25 @@ pub(super) fn encode(job: Job) -> Band {
             motion(&job, is_motion, &mbs, w, index, x, gy, pred, global, lambda)
         };
         // A single DC trial avoids evaluating every intra mode for an obvious temporal match.
-        let intra_trial = predict::intra_plane(&rec.y, rec.y_stride, x, y, 16, 2, false);
-        let mut intra_cost = 0;
-        for yy in 0..16 {
-            for xx in 0..16 {
-                intra_cost += job.source.y[(gy + yy) * job.source.y_stride + x + xx]
-                    .abs_diff(intra_trial[yy * 16 + xx]) as u32;
+        let try_intra = job.idr || job.effort < 2 || inter_cost > lambda * 128;
+        let intra_cost = if try_intra {
+            let intra_trial = predict::intra_plane(&rec.y, rec.y_stride, x, y, 16, 2, false);
+            let mut intra_cost = 0;
+            for yy in 0..16 {
+                if !job.idr && intra_cost + lambda * 24 >= inter_cost {
+                    break;
+                }
+                for xx in 0..16 {
+                    intra_cost += job.source.y[(gy + yy) * job.source.y_stride + x + xx]
+                        .abs_diff(intra_trial[yy * 16 + xx])
+                        as u32;
+                }
             }
-        }
-        let intra = job.idr || intra_cost + lambda * 24 < inter_cost;
+            intra_cost
+        } else {
+            u32::MAX
+        };
+        let intra = job.idr || (try_intra && intra_cost.saturating_add(lambda * 24) < inter_cost);
         mbs[index].intra = intra;
         mbs[index].mv = if intra { (0, 0) } else { mv };
         mbs[index].quality = if job.suppression == 0 { qp } else { 51 };
@@ -756,7 +796,8 @@ pub(super) fn encode(job: Job) -> Band {
         let mut best16 = (u32::MAX, 2u8, [0; 256]);
         if intra {
             for mode in 0..4 {
-                if (mode == 0 && y == 0)
+                if (job.effort >= 4 && mode != 2)
+                    || (mode == 0 && y == 0)
                     || (mode == 1 && x == 0)
                     || (mode == 3 && (x == 0 || y == 0))
                 {
@@ -787,7 +828,7 @@ pub(super) fn encode(job: Job) -> Band {
             }
         }
         let skip_intra4 = is_motion && (best16.0 <= lambda * 48 || inter_cost <= lambda * 48);
-        let fast16 = intra && (skip_intra4 || best16.0 <= lambda * 16);
+        let fast16 = intra && (job.effort >= 3 || skip_intra4 || best16.0 <= lambda * 16);
         for i in 0..if fast16 { 0 } else { 16 } {
             // All remaining intra4 costs are nonnegative; intra16 has already won.
             if intra && cost4 >= best16.0 {
@@ -1085,7 +1126,12 @@ pub(super) fn encode(job: Job) -> Band {
     }
     let mut nal = Vec::new();
     b.nal(if job.idr { 0x65 } else { 0x41 }, &mut nal);
+    let deblock_started = Instant::now();
+    super::deblock::filter(&mut rec, &mbs);
+    let deblock_ms = deblock_started.elapsed().as_secs_f64() * 1000.;
     Band {
+        deblock_ms,
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.,
         first: job.first,
         picture: rec,
         mbs,
@@ -1193,6 +1239,7 @@ mod tests {
                 end: 23,
                 qp: 30,
                 suppression: 0,
+                effort: 0,
                 subpixel: false,
                 is_motion: false,
                 global: (0, 0),
