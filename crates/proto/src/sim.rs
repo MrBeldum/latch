@@ -41,6 +41,8 @@ pub struct Link {
     bad: bool,
     flight: Vec<(Instant, Vec<u8>)>,
     counts: (u64, u64, u64),
+    bottleneck: Option<(u32, Duration)>,
+    serialized_until: Option<Instant>,
 }
 
 impl Link {
@@ -51,7 +53,15 @@ impl Link {
             bad: false,
             flight: Vec::new(),
             counts: (0, 0, 0),
+            bottleneck: None,
+            serialized_until: None,
         }
+    }
+
+    /// Set a FIFO wire bottleneck with a bounded queue. Zero removes it.
+    /// Queued packets retain their departure times when capacity changes.
+    pub fn set_bandwidth(&mut self, kbps: u32, queue: Duration) {
+        self.bottleneck = (kbps > 0).then_some((kbps, queue));
     }
 
     fn random(&mut self) -> f64 {
@@ -83,7 +93,20 @@ impl Link {
             self.counts.1 += 1;
             return;
         }
-        let at = self.arrival(now);
+        let mut departure = now;
+        if let Some((kbps, queue)) = self.bottleneck {
+            let start = self.serialized_until.unwrap_or(now).max(now);
+            let duration = Duration::from_secs_f64(
+                (datagram.len() + 80) as f64 * 8.0 / (f64::from(kbps) * 1000.0),
+            );
+            if start + duration > now + queue {
+                self.counts.1 += 1;
+                return;
+            }
+            departure = start + duration;
+            self.serialized_until = Some(departure);
+        }
+        let at = self.arrival(departure);
         self.flight.push((at, datagram.to_vec()));
         if self.random() < self.impairment.duplicate {
             self.counts.2 += 1;

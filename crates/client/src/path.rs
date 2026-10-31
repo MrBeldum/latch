@@ -90,10 +90,17 @@ impl Path {
 /// Recommended starting quality. RTT measures delay, not throughput: neither
 /// a VPS relay nor a distant direct connection implies a bandwidth cap.
 pub fn effective(settings: &StreamSettings) -> StreamSettings {
+    effective_for(settings, settings.fps)
+}
+
+/// Recommended starting quality taking into account the local display's refresh rate (Hz).
+pub fn effective_for(settings: &StreamSettings, display_hz: u32) -> StreamSettings {
     let mut s = settings.clone();
     if s.quality == Quality::Auto {
         s.resolution = Resolution::Native;
         s.bitrate_kbps = 50_000;
+        let hz = if display_hz > 0 { display_hz } else { 60 };
+        s.fps = hz.clamp(30, 240);
     }
     s
 }
@@ -151,7 +158,7 @@ pub fn explain(
         }
         (None, Some(m)) => {
             let mut t = format!(
-                "Latch Host 3.1 on {pc} would report that side of the network and say which router is in the way."
+                "Latch Host on {pc} would report that side of the network and say which router is in the way."
             );
             if m.hard == Some(true) && !m.portmap {
                 t.push_str(" This Mac's network is a hard NAT with no UPnP, which is often enough on its own; another network here may connect directly.");
@@ -306,6 +313,19 @@ mod tests {
     }
 
     #[test]
+    fn effective_quality_uses_display_refresh_rate() {
+        let default_settings = StreamSettings::default();
+        // 120 Hz display capability (e.g. ProMotion)
+        let s120 = effective_for(&default_settings, 120);
+        assert_eq!(s120.fps, 120);
+        assert_eq!(s120.resolution, Resolution::Native);
+
+        // Clamping to max 240 fps and min 30 fps
+        assert_eq!(effective_for(&default_settings, 360).fps, 240);
+        assert_eq!(effective_for(&default_settings, 15).fps, 30);
+    }
+
+    #[test]
     fn a_direct_path_outranks_a_peer_relay_which_outranks_derp() {
         let direct = Path {
             direct: Some(true),
@@ -399,7 +419,8 @@ mod tests {
 
         // An old host reports nothing: say so, and what the Mac knows.
         let t = explain("Gaming-PC", &relayed, None, Some(&mac_hard)).unwrap();
-        assert!(t.contains("Latch Host 3.1"), "{t}");
+        assert!(t.contains("Latch Host on Gaming-PC"), "{t}");
+        assert!(!t.contains("3.1"), "{t}");
         assert!(t.contains("often enough on its own"), "{t}");
         let t = explain("Gaming-PC", &relayed, None, None).unwrap();
         assert!(t.contains("UPnP"), "{t}");

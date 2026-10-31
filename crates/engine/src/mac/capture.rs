@@ -7,7 +7,7 @@ use crate::{
 };
 use anyhow::{anyhow, bail, ensure, Result};
 use block2::RcBlock;
-use dispatch2::{DispatchQueue, DispatchRetained};
+use dispatch2::{DispatchQoS, DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::{
     define_class, msg_send, rc::Retained, runtime::ProtocolObject, AnyThread, DefinedClass,
 };
@@ -100,7 +100,9 @@ pub struct Capture {
     output: Retained<Output>,
     _queue: DispatchRetained<DispatchQueue>,
     pub shared: Arc<Shared>,
+    /// Where the captured display was, in global points, at the start.
     pub display: DisplayRect,
+    id: u32,
     audio: bool,
 }
 // SAFETY: SCStream supports background queues. This owner is exclusive, callback state is locked,
@@ -158,7 +160,8 @@ impl Capture {
         // SAFETY: NSObject initialization and the typed SCK setters use the documented value types.
         unsafe {
             let output: Retained<Output> = msg_send![super(output), init];
-            let rect = display.frame();
+            let id = display.displayID();
+            let rect = bounds(id);
             let filter = SCContentFilter::initWithDisplay_excludingWindows(
                 SCContentFilter::alloc(),
                 &display,
@@ -168,6 +171,10 @@ impl Capture {
             config.setWidth(width as usize);
             config.setHeight(height as usize);
             config.setMinimumFrameInterval(time(1, fps));
+            // Queue depth 3 is the minimum required by ScreenCaptureKit to prevent frame
+            // drops: 1 surface is rendered by WindowServer compositor, 1 is queued/in transit,
+            // and 1 is consumed by this application/encoder. Setting depth to 2 starves the
+            // buffer pool under load.
             config.setQueueDepth(3);
             config.setPixelFormat(NV12);
             config.setShowsCursor(true);
@@ -178,8 +185,8 @@ impl Capture {
             let black = CGColorGetConstantColor(kCGColorBlack);
             let _: () = msg_send![&config, setBackgroundColor: black];
             let fitted = DisplayRect {
-                width: rect.size.width as u32,
-                height: rect.size.height as u32,
+                width: rect.width,
+                height: rect.height,
                 ..Default::default()
             }
             .fitted(width, height);
@@ -203,18 +210,15 @@ impl Capture {
                 &config,
                 Some(ProtocolObject::from_ref(&*output)),
             );
-            let queue = DispatchQueue::new("app.latch.capture", None);
+            let attr = DispatchQueueAttr::with_qos_class(None, DispatchQoS::UserInteractive, 0);
+            let queue = DispatchQueue::new("app.latch.capture", Some(&attr));
             let capture = Self {
                 stream,
                 output,
                 _queue: queue,
                 shared,
-                display: DisplayRect {
-                    x: rect.origin.x as i32,
-                    y: rect.origin.y as i32,
-                    width: rect.size.width as u32,
-                    height: rect.size.height as u32,
-                },
+                display: rect,
+                id,
                 audio,
             };
             capture
@@ -241,6 +245,29 @@ impl Capture {
             }
             Ok(capture)
         }
+    }
+}
+impl Capture {
+    /// Whether the display changed size or place since capture started.
+    /// SCK can keep running across a mode or arrangement change, scaled to
+    /// the old fit, while input would still map to the old geometry.
+    pub fn moved(&self) -> bool {
+        moved(self.id, self.display)
+    }
+}
+fn moved(id: u32, display: DisplayRect) -> bool {
+    bounds(id) != display
+}
+/// A display's frame in global points, as CGEvent positions use it; zero
+/// when the display is gone.
+fn bounds(id: u32) -> DisplayRect {
+    // SAFETY: CGDisplayBounds only reads the window server's display configuration.
+    let rect = unsafe { CGDisplayBounds(id) };
+    DisplayRect {
+        x: rect.origin.x as i32,
+        y: rect.origin.y as i32,
+        width: rect.size.width as u32,
+        height: rect.size.height as u32,
     }
 }
 impl Drop for Capture {
@@ -394,5 +421,32 @@ unsafe fn audio_sample(sample: Ref, state: &mut State) -> Result<()> {
             state.frames.push_back(frame);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn display_bounds_are_stable_until_the_display_changes() {
+        // SAFETY: reads the main display's ID only.
+        let id = unsafe { CGMainDisplayID() };
+        let now = bounds(id);
+        assert!(!moved(id, now));
+        // What a capture started before a mode or arrangement change saw.
+        assert!(moved(
+            id,
+            DisplayRect {
+                width: now.width + 640,
+                ..now
+            }
+        ));
+        assert!(moved(
+            id,
+            DisplayRect {
+                x: now.x - 1,
+                ..now
+            }
+        ));
     }
 }

@@ -2,16 +2,17 @@
 //! them safe to read. Damage bounds limit copies; the cursor never dirties
 //! the saved desktop, so moving it restores the old pixels automatically.
 
+use super::X11;
 use crate::input::DisplayRect;
 use crate::software::{Bgra, CpuCapture};
 use anyhow::{ensure, Context};
 use std::os::fd::AsRawFd;
 use std::ptr::NonNull;
 use std::time::{Duration, Instant};
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection as _};
+use x11rb::errors::ReplyError;
 use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::protocol::{damage, randr, shm, xfixes, xproto, Event};
-use x11rb::rust_connection::RustConnection;
 
 struct Segment {
     id: shm::Seg,
@@ -24,7 +25,7 @@ struct Segment {
 unsafe impl Send for Segment {}
 
 impl Segment {
-    fn new(conn: &RustConnection, len: usize) -> anyhow::Result<Self> {
+    fn new(conn: &X11, len: usize) -> anyhow::Result<Self> {
         let id = conn.generate_id()?;
         let reply = shm::create_segment(conn, id, u32::try_from(len)?, false)?.reply()?;
         // SAFETY: the server supplied an fd for a segment of exactly `len` bytes.
@@ -64,8 +65,9 @@ impl Drop for Segment {
 }
 
 /// Root-window capture on `$DISPLAY`, authenticated by x11rb using `$XAUTHORITY`.
+/// Every round trip fails after [`super::X11_SILENCE`] without an answer.
 pub struct X11Capture {
-    conn: RustConnection,
+    conn: X11,
     root: u32,
     width: u16,
     height: u16,
@@ -75,14 +77,33 @@ pub struct X11Capture {
     desktop: Bgra,
     cursor: Option<xfixes::GetCursorImageReply>,
     first: bool,
+    cursor_drawn: bool,
+    last_reported_serial: Option<u32>,
+    last_reported_visible: Option<bool>,
+    pending_cursor: Option<crate::video::CursorUpdate>,
 }
 
 impl X11Capture {
     pub fn new() -> anyhow::Result<Self> {
-        let (conn, screen) = x11rb::connect(None).context("connect to X11 DISPLAY")?;
+        let (conn, screen) = super::connect(super::X11_SILENCE).map_err(|e| {
+            let wayland = super::wayland_session(
+                std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+                std::env::var_os("XDG_SESSION_TYPE").as_deref(),
+            );
+            e.context(if wayland {
+                super::WAYLAND
+            } else {
+                "connect to X11 DISPLAY"
+            })
+        })?;
         let setup = conn.setup();
         let screen = &setup.roots[screen];
         let root = screen.root;
+        let randr = randr::query_version(&conn, 1, 3)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .is_some();
+        ensure!(!xwayland(&conn, root, randr)?, super::WAYLAND);
         let format = setup
             .pixmap_formats
             .iter()
@@ -119,11 +140,7 @@ impl X11Capture {
         } else {
             None
         };
-        if randr::query_version(&conn, 1, 2)
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .is_some()
-        {
+        if randr {
             randr::select_input(
                 &conn,
                 root,
@@ -148,6 +165,10 @@ impl X11Capture {
             desktop: Bgra::default(),
             cursor: None,
             first: true,
+            cursor_drawn: true,
+            last_reported_serial: None,
+            last_reported_visible: None,
+            pending_cursor: None,
         };
         this.allocate();
         Ok(this)
@@ -181,7 +202,21 @@ impl X11Capture {
         self.first = true;
     }
 
-    fn pixels(&mut self, area: xproto::Rectangle) -> anyhow::Result<()> {
+    /// Re-reads the root's size. True, with a fresh image to come, when it changed.
+    fn resize(&mut self) -> anyhow::Result<bool> {
+        let geometry = self.conn.get_geometry(self.root)?.reply()?;
+        if (self.width, self.height) == (geometry.width, geometry.height) {
+            return Ok(false);
+        }
+        self.width = geometry.width;
+        self.height = geometry.height;
+        self.allocate();
+        Ok(true)
+    }
+
+    /// Reads `area` into the saved desktop. False when every pixel was
+    /// already there: damage also follows repaints of identical content.
+    fn pixels(&mut self, area: xproto::Rectangle) -> anyhow::Result<bool> {
         let stride = area.width as usize * 4;
         let len = stride * area.height as usize;
         let owned;
@@ -204,7 +239,9 @@ impl X11Capture {
                     ensure!(reply.size as usize >= len, "short MIT-SHM image");
                     segment.bytes(len)?
                 }
-                Err(_) => {
+                // A silent server is not a reason to try again without SHM.
+                Err(ReplyError::ConnectionError(e)) => return Err(e.into()),
+                Err(ReplyError::X11Error(_)) => {
                     // Remote X and some nested servers advertise SHM but reject GetImage.
                     owned = self
                         .conn
@@ -239,12 +276,17 @@ impl X11Capture {
             &owned
         };
         ensure!(bytes.len() >= len, "short X11 image");
+        let mut changed = false;
         for row in 0..area.height as usize {
             let dst = (area.y as usize + row) * self.desktop.stride + area.x as usize * 4;
-            self.desktop.data[dst..dst + stride]
-                .copy_from_slice(&bytes[row * stride..(row + 1) * stride]);
+            let dst = &mut self.desktop.data[dst..dst + stride];
+            let src = &bytes[row * stride..(row + 1) * stride];
+            if dst != src {
+                dst.copy_from_slice(src);
+                changed = true;
+            }
         }
-        Ok(())
+        Ok(changed)
     }
 }
 
@@ -281,12 +323,7 @@ impl CpuCapture for X11Capture {
                 }
             }
             if resized {
-                let geometry = self.conn.get_geometry(self.root)?.reply()?;
-                if (self.width, self.height) != (geometry.width, geometry.height) {
-                    self.width = geometry.width;
-                    self.height = geometry.height;
-                    self.allocate();
-                }
+                self.resize()?;
             }
             if self.first || self.damage.is_none() {
                 dirty = Some(xproto::Rectangle {
@@ -301,38 +338,122 @@ impl CpuCapture for X11Capture {
             } else {
                 None
             };
+            if let Some(cursor) = &cursor {
+                let all_transparent = cursor.cursor_image.iter().all(|&pixel| (pixel >> 24) == 0);
+                let visible = !cursor.cursor_image.is_empty() && !all_transparent;
+                if visible {
+                    if self.last_reported_serial != Some(cursor.cursor_serial) {
+                        let mut rgba = Vec::with_capacity(cursor.cursor_image.len() * 4);
+                        for &pixel in &cursor.cursor_image {
+                            let a = (pixel >> 24) as u8;
+                            if a == 0 {
+                                rgba.extend_from_slice(&[0, 0, 0, 0]);
+                            } else {
+                                let r_pre = (pixel >> 16) & 0xff;
+                                let g_pre = (pixel >> 8) & 0xff;
+                                let b_pre = pixel & 0xff;
+                                let a_u32 = a as u32;
+                                let r = ((r_pre * 255 + a_u32 / 2) / a_u32).min(255) as u8;
+                                let g = ((g_pre * 255 + a_u32 / 2) / a_u32).min(255) as u8;
+                                let b = ((b_pre * 255 + a_u32 / 2) / a_u32).min(255) as u8;
+                                rgba.extend_from_slice(&[r, g, b, a]);
+                            }
+                        }
+                        let shape = latch_proto::control::CursorShape::new(
+                            cursor.cursor_serial,
+                            cursor.width.into(),
+                            cursor.height.into(),
+                            cursor.xhot.into(),
+                            cursor.yhot.into(),
+                            &rgba,
+                        );
+                        self.last_reported_serial = Some(cursor.cursor_serial);
+                        self.last_reported_visible = Some(true);
+                        self.pending_cursor = Some(crate::video::CursorUpdate {
+                            visible: true,
+                            shape: Some(shape),
+                        });
+                    } else if self.last_reported_visible != Some(true) {
+                        self.last_reported_visible = Some(true);
+                        self.pending_cursor = Some(crate::video::CursorUpdate {
+                            visible: true,
+                            shape: None,
+                        });
+                    }
+                } else if self.last_reported_visible != Some(false) {
+                    self.last_reported_visible = Some(false);
+                    self.pending_cursor = Some(crate::video::CursorUpdate {
+                        visible: false,
+                        shape: None,
+                    });
+                }
+            } else if self.last_reported_visible != Some(false) && self.fixes {
+                self.last_reported_visible = Some(false);
+                self.pending_cursor = Some(crate::video::CursorUpdate {
+                    visible: false,
+                    shape: None,
+                });
+            }
+
             let cursor_changed = match (&self.cursor, &cursor) {
-                (Some(a), Some(b)) => (a.x, a.y, a.cursor_serial) != (b.x, b.y, b.cursor_serial),
+                (Some(a), Some(b)) => {
+                    if self.cursor_drawn {
+                        (a.x, a.y, a.cursor_serial) != (b.x, b.y, b.cursor_serial)
+                    } else {
+                        a.cursor_serial != b.cursor_serial
+                    }
+                }
                 (None, None) => false,
                 _ => true,
             };
+            let mut changed = false;
             if let Some(area) = dirty {
                 if let Some(id) = self.damage {
                     damage::subtract(&self.conn, id, x11rb::NONE, x11rb::NONE)?.check()?;
                 }
-                self.pixels(area)?;
+                match self.pixels(area) {
+                    Ok(pixels) => changed = pixels,
+                    // The root can shrink between the event poll and GetImage
+                    // (BadMatch). That is a new size to capture, not a failure.
+                    Err(_) if self.resize()? => continue,
+                    Err(error) => return Err(error),
+                }
             }
             self.cursor = cursor;
-            if dirty.is_some() || cursor_changed || self.first {
+            // An unchanged picture costs the caller no conversion or encode.
+            if changed || cursor_changed || self.first {
                 frame.width = self.desktop.width;
                 frame.height = self.desktop.height;
                 frame.stride = self.desktop.stride;
                 frame.data.clone_from(&self.desktop.data);
-                if let Some(cursor) = &self.cursor {
-                    composite(frame, cursor);
+                if self.cursor_drawn {
+                    if let Some(cursor) = &self.cursor {
+                        composite(frame, cursor);
+                    }
                 }
                 self.first = false;
                 return Ok(true);
             }
             let remaining = timeout.saturating_sub(start.elapsed());
-            if remaining.is_zero() {
+            // Without Damage each pass reads the whole root: one per call.
+            if remaining.is_zero() || self.damage.is_none() {
                 return Ok(false);
             }
             super::wait_fd(
                 self.conn.stream().as_raw_fd(),
+                libc::POLLIN,
                 remaining.min(Duration::from_millis(8)),
             )?;
         }
+    }
+
+    fn set_cursor_drawn(&mut self, drawn: bool) -> bool {
+        self.cursor_drawn = drawn;
+        true
+    }
+
+    fn take_cursor(&mut self) -> Option<crate::video::CursorUpdate> {
+        self.pending_cursor.take()
     }
 }
 
@@ -346,6 +467,30 @@ impl Drop for X11Capture {
         }
         let _ = self.conn.flush();
     }
+}
+
+/// Rootless Xwayland: a Wayland session's X server, whose root window holds
+/// no desktop. Xwayland 23.1 and later announce themselves; all name their
+/// RandR outputs XWAYLAND0, XWAYLAND1, …
+fn xwayland(conn: &X11, root: u32, randr: bool) -> anyhow::Result<bool> {
+    if conn.extension_information("XWAYLAND")?.is_some() {
+        return Ok(true);
+    }
+    if !randr {
+        return Ok(false);
+    }
+    let Ok(resources) = randr::get_screen_resources_current(conn, root)?.reply() else {
+        return Ok(false);
+    };
+    let mut names = Vec::new();
+    for &output in &resources.outputs {
+        // An output that vanished meanwhile is no reason to refuse Xorg.
+        if let Ok(info) = randr::get_output_info(conn, output, resources.config_timestamp)?.reply()
+        {
+            names.push(info.name);
+        }
+    }
+    Ok(super::xwayland_outputs(names.iter().map(Vec::as_slice)))
 }
 
 fn union(
@@ -434,5 +579,198 @@ mod tests {
         composite(&mut frame, &cursor);
         assert_eq!(&frame.data[..4], &[66, 82, 114, 255]);
         assert_eq!(&frame.data[4..8], &[100; 4]);
+    }
+
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use x11rb::rust_connection::{DefaultStream, RustConnection};
+    use x11rb::x11_utils::Serialize;
+
+    /// A client connected to a scripted X server. `answer` gets each
+    /// request's opcode and sequence number and returns the bytes to send
+    /// back; nothing leaves that request unanswered.
+    fn fake_x(
+        silence: Duration,
+        mut answer: impl FnMut(u8, u16) -> Vec<u8> + Send + 'static,
+    ) -> X11 {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || {
+            // An unauthenticated setup request is exactly 12 bytes.
+            let mut request = [0; 12];
+            server.read_exact(&mut request).unwrap();
+            let mut setup = xproto::Setup {
+                status: 1,
+                protocol_major_version: 11,
+                resource_id_mask: 0xffff,
+                roots: vec![xproto::Screen::default()],
+                ..Default::default()
+            };
+            setup.length = ((setup.serialize().len() - 8) / 4) as u16;
+            server.write_all(&setup.serialize()).unwrap();
+            let mut sequence = 0u16;
+            loop {
+                let mut header = [0; 4];
+                if server.read_exact(&mut header).is_err() {
+                    return;
+                }
+                let length = usize::from(u16::from_ne_bytes([header[2], header[3]])) * 4;
+                let mut body = vec![0; length.saturating_sub(4)];
+                if server.read_exact(&mut body).is_err() {
+                    return;
+                }
+                sequence = sequence.wrapping_add(1);
+                if server.write_all(&answer(header[0], sequence)).is_err() {
+                    return;
+                }
+            }
+        });
+        let (stream, _) = DefaultStream::from_unix_stream(client).unwrap();
+        RustConnection::connect_to_stream(
+            super::super::Bounded {
+                stream,
+                silence,
+                deadline: std::sync::Mutex::new(None),
+            },
+            0,
+        )
+        .unwrap()
+    }
+    /// x11rb serializes a reply's fields; the wire pads it to 32 bytes.
+    fn reply(fields: &[u8]) -> Vec<u8> {
+        let mut bytes = fields.to_vec();
+        bytes.resize(bytes.len().max(32), 0);
+        bytes
+    }
+    /// The QueryExtension answer for MIT-SHM and anything else asked about.
+    fn absent(sequence: u16) -> Vec<u8> {
+        reply(
+            &xproto::QueryExtensionReply {
+                sequence,
+                present: false,
+                ..Default::default()
+            }
+            .serialize(),
+        )
+    }
+    fn fake_capture(conn: X11, width: u16, height: u16) -> X11Capture {
+        let mut capture = X11Capture {
+            conn,
+            root: 1,
+            width,
+            height,
+            segment: None,
+            damage: None,
+            fixes: false,
+            desktop: Bgra::default(),
+            cursor: None,
+            first: true,
+            cursor_drawn: true,
+            last_reported_serial: None,
+            last_reported_visible: None,
+            pending_cursor: None,
+        };
+        capture.allocate();
+        assert!(!capture.uses_shm());
+        capture
+    }
+
+    #[test]
+    fn a_silent_x_server_fails_the_grab_instead_of_holding_it() {
+        let conn = fake_x(Duration::from_millis(100), |opcode, sequence| {
+            if opcode == xproto::GET_IMAGE_REQUEST {
+                Vec::new()
+            } else {
+                absent(sequence)
+            }
+        });
+        let mut capture = fake_capture(conn, 4, 4);
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut frame = Bgra::default();
+            let result = capture.grab(&mut frame, Duration::ZERO);
+            let _ = done.send(result.map_err(|e| format!("{e:#}")));
+        });
+        let error = result
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the grab is still waiting for a silent X server")
+            .unwrap_err();
+        assert!(error.contains("did not answer"), "{error}");
+    }
+
+    #[test]
+    fn a_resize_just_before_get_image_is_a_new_size_not_a_failure() {
+        let mut shrunk = false;
+        let conn = fake_x(
+            Duration::from_secs(10),
+            move |opcode, sequence| match opcode {
+                xproto::GET_IMAGE_REQUEST if !shrunk => {
+                    // The root became 2x2 after the event poll: BadMatch.
+                    shrunk = true;
+                    let mut error = vec![0; 32];
+                    error[1] = xproto::MATCH_ERROR;
+                    error[2..4].copy_from_slice(&sequence.to_ne_bytes());
+                    error[10] = xproto::GET_IMAGE_REQUEST;
+                    error
+                }
+                xproto::GET_IMAGE_REQUEST => reply(
+                    &xproto::GetImageReply {
+                        depth: 24,
+                        sequence,
+                        visual: 0,
+                        data: vec![7; 16],
+                    }
+                    .serialize(),
+                ),
+                xproto::GET_GEOMETRY_REQUEST => reply(
+                    &xproto::GetGeometryReply {
+                        depth: 24,
+                        sequence,
+                        root: 1,
+                        width: 2,
+                        height: 2,
+                        ..Default::default()
+                    }
+                    .serialize(),
+                ),
+                _ => absent(sequence),
+            },
+        );
+        let mut capture = fake_capture(conn, 4, 4);
+        let mut frame = Bgra::default();
+        assert!(capture.grab(&mut frame, Duration::ZERO).unwrap());
+        assert_eq!((frame.width, frame.height, frame.stride), (2, 2, 8));
+        assert_eq!(frame.data, [7; 16]);
+        assert_eq!(capture.size(), (2, 2));
+    }
+
+    #[test]
+    fn a_repaint_with_the_same_pixels_is_not_a_change() {
+        // Without Damage every grab reads the whole root; with it, a
+        // client repainting identical pixels still reports damage.
+        let mut images = 0;
+        let conn = fake_x(Duration::from_secs(10), move |opcode, sequence| {
+            if opcode != xproto::GET_IMAGE_REQUEST {
+                return absent(sequence);
+            }
+            images += 1;
+            let mut data = vec![7; 16];
+            data[5] = if images < 3 { 7 } else { 9 };
+            reply(
+                &xproto::GetImageReply {
+                    depth: 24,
+                    sequence,
+                    visual: 0,
+                    data,
+                }
+                .serialize(),
+            )
+        });
+        let mut capture = fake_capture(conn, 2, 2);
+        let mut frame = Bgra::default();
+        assert!(capture.grab(&mut frame, Duration::ZERO).unwrap());
+        assert!(!capture.grab(&mut frame, Duration::ZERO).unwrap());
+        assert_eq!(frame.data, [7; 16]);
+        assert!(capture.grab(&mut frame, Duration::ZERO).unwrap());
+        assert_eq!(frame.data[5], 9);
     }
 }

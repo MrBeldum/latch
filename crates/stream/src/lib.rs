@@ -5,6 +5,8 @@
 
 pub mod audio;
 pub mod input;
+#[path = "../../engine/src/priority.rs"]
+mod priority;
 pub mod session;
 pub mod video;
 

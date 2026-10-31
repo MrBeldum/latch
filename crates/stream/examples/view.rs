@@ -5,7 +5,7 @@
 //! own clock.
 //!
 //!     view HOST [--port 47860] [--width 1280] [--height 720] [--fps 60]
-//!          [--kbps 10000] [--seconds 30] [--keys 0] [--hevc] [--audio]
+//!          [--kbps 10000] [--seconds 30] [--sample-ms 1000] [--keys 0] [--hevc] [--audio]
 //!          [--point X,Y]   (one absolute pointer position, in picture pixels)
 
 use latch_stream::{Event, Frame, FrameSlot, Session, Settings};
@@ -43,13 +43,18 @@ fn rss_mb() -> f64 {
 }
 
 fn square_is_white(f: &Frame) -> bool {
-    let mut sum = 0u64;
-    for y in 16..48 {
-        for x in 16..48 {
-            sum += f.y[y * f.y_stride + x] as u64;
+    f.with_planes(|y, y_stride, _, _| {
+        let mut sum = 0u64;
+        for y_pos in 16..48 {
+            for x_pos in 16..48 {
+                let idx = y_pos * y_stride + x_pos;
+                if idx < y.len() {
+                    sum += y[idx] as u64;
+                }
+            }
         }
-    }
-    sum / (32 * 32) > 128
+        sum / (32 * 32) > 128
+    })
 }
 
 fn main() -> anyhow::Result<()> {
@@ -71,6 +76,11 @@ fn main() -> anyhow::Result<()> {
     let fps: u32 = arg("--fps", "60").parse()?;
     let kbps: u32 = arg("--kbps", "10000").parse()?;
     let seconds: u64 = arg("--seconds", "30").parse()?;
+    let sample_ms: u64 = arg("--sample-ms", "1000").parse()?;
+    anyhow::ensure!(
+        sample_ms > 0 && sample_ms <= 1000,
+        "sample-ms must be 1..=1000"
+    );
     let keys: usize = arg("--keys", "0").parse()?;
 
     let frames = Arc::new(FrameSlot::default());
@@ -88,6 +98,7 @@ fn main() -> anyhow::Result<()> {
             hevc: flag("--hevc"),
             audio: flag("--audio"),
             name: "view example".into(),
+            cursor: false,
         },
         frames.clone(),
         tx,
@@ -105,6 +116,26 @@ fn main() -> anyhow::Result<()> {
     eprintln!("connected in {:?}", asked.elapsed());
     let cpu0 = cpu_seconds();
     let t0 = Instant::now();
+
+    // Smoothness: when each decoded frame appears, polled every 250 µs.
+    let timing_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let arrivals = {
+        let done = timing_done.clone();
+        let frames = frames.clone();
+        std::thread::spawn(move || {
+            let mut times = Vec::new();
+            let mut seq = frames.seq();
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                let now = frames.seq();
+                if now != seq {
+                    seq = now;
+                    times.push(Instant::now());
+                }
+                std::thread::sleep(Duration::from_micros(250));
+            }
+            times
+        })
+    };
 
     if let Some((x, y)) = arg("--point", "")
         .split_once(',')
@@ -160,14 +191,16 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut lines = Vec::new();
-    for second in 1..=seconds {
-        std::thread::sleep(Duration::from_secs(1));
+    let sample_start = Instant::now();
+    while sample_start.elapsed() < Duration::from_secs(seconds) {
+        std::thread::sleep(Duration::from_millis(sample_ms));
+        let second = t0.elapsed().as_secs_f64();
         while let Ok(e) = rx.try_recv() {
-            eprintln!("{e:?}");
+            eprintln!("elapsed_ms={} {e:?}", t0.elapsed().as_millis());
         }
         let s = session.stats();
         eprintln!(
-            "{second:>3}s {:5.1} fps {:6.2} Mbps rtt {:3} ms decode {:5.2} ms host {:5.2} ms assembly {:5.2} ms queue {:5.2} ms loss {:4.1}% fec {:3} {}x{} {} | {}",
+            "{second:>6.2}s {:5.1} fps {:6.2} Mbps rtt {:3} ms decode {:5.2} ms host {:5.2} ms assembly {:5.2} ms queue {:5.2} ms loss {:4.1}% fec {:3} {}x{} {} | {}",
             s.fps, s.mbps, s.rtt_ms, s.decode_ms, s.host_ms, s.assembly_ms, s.queue_ms, s.loss_pct,
             s.fec_recovered, s.width, s.height, s.decoder, s.audio
         );
@@ -175,12 +208,49 @@ fn main() -> anyhow::Result<()> {
             "fps": s.fps, "mbps": s.mbps, "rtt_ms": s.rtt_ms, "decode_ms": s.decode_ms,
             "host_ms": s.host_ms, "assembly_ms": s.assembly_ms, "queue_ms": s.queue_ms,
             "loss_pct": s.loss_pct, "fec_recovered": s.fec_recovered,
+            "elapsed_ms": t0.elapsed().as_millis(), "window_ms": s.window_ms,
+            "width": s.width, "height": s.height, "decoded_seq": frames.seq(),
+            "received_mbps": s.received_mbps, "frames_lost": s.frames_lost,
+            "video_problem": s.video_problem, "rtt_var_ms": s.rtt_var_ms,
+            "requested_bitrate_kbps": s.requested_bitrate_kbps,
+            "applied_bitrate_kbps": s.applied_bitrate_kbps, "pacing_queue_ms": s.pacing_queue_ms,
+            "send_errors": s.send_errors, "send_retries": s.send_retries,
+            "socket_send_bytes": s.socket_send_bytes, "socket_receive_bytes": s.socket_receive_bytes,
+            "host_socket_send_bytes": s.host_socket_send_bytes,
+            "host_socket_receive_bytes": s.host_socket_receive_bytes,
+            // Sparse luma samples confirm changing decoded content without saving pictures.
+            "luma_sample": frames.take().map(|f| {
+                let sample: Vec<u8> = f.with_planes(|y, stride, _, _| (0..16).map(|i| {
+                    y[(f.height as usize * (2 * i + 1) / 32) * stride + f.width as usize / 2]
+                }).collect());
+                frames.recycle(f);
+                sample
+            }),
         }));
     }
     let elapsed = t0.elapsed().as_secs_f64();
     let cpu = (cpu_seconds() - cpu0) / elapsed * 100.0;
     let stats = session.stats();
     presses.sort_by(f64::total_cmp);
+    timing_done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let times = arrivals.join().unwrap_or_default();
+    let mut gaps: Vec<f64> = times
+        .windows(2)
+        .map(|w| (w[1] - w[0]).as_secs_f64() * 1000.0)
+        .collect();
+    let mean_gap = gaps.iter().sum::<f64>() / gaps.len().max(1) as f64;
+    let stdev_gap = (gaps.iter().map(|g| (g - mean_gap).powi(2)).sum::<f64>()
+        / gaps.len().max(1) as f64)
+        .sqrt();
+    gaps.sort_by(f64::total_cmp);
+    let gap = |p: f64| {
+        gaps.get(((gaps.len() as f64 - 1.0) * p).round() as usize)
+            .copied()
+    };
+    let span = times
+        .last()
+        .zip(times.first())
+        .map_or(0.0, |(l, f)| (*l - *f).as_secs_f64());
     let pct = |p: f64| {
         presses
             .get(((presses.len() as f64 - 1.0) * p).round() as usize)
@@ -188,9 +258,11 @@ fn main() -> anyhow::Result<()> {
     };
     let summary = serde_json::json!({
         "host": host.to_string(), "asked": [width, height, fps, kbps],
+        "sample_ms": sample_ms,
         "decoder": stats.decoder, "encoder": stats.encoder, "codec": stats.codec,
         "viewer_cpu_pct_one_core": cpu, "viewer_rss_mb": rss_mb(),
         "key_to_picture_ms": { "n": presses.len(), "min": presses.first(), "p50": pct(0.5), "p95": pct(0.95), "max": presses.last() },
+        "frame_interval_ms": { "n": gaps.len(), "fps": if span > 0.0 { gaps.len() as f64 / span } else { 0.0 }, "mean": mean_gap, "stdev": stdev_gap, "p50": gap(0.5), "p95": gap(0.95), "p99": gap(0.99), "max": gaps.last() },
         "seconds": lines,
     });
     println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -199,5 +271,10 @@ fn main() -> anyhow::Result<()> {
     while !session.finished() && start.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(10));
     }
+    anyhow::ensure!(
+        session.finished(),
+        "stream did not stop within five seconds"
+    );
+    eprintln!("stream stopped in {:?}", start.elapsed());
     Ok(())
 }

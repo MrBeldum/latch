@@ -14,7 +14,8 @@ when retiring `latch-node` on 2026-09-21 UTC.
 - `/usr/local/bin/tailscale` is the CLI only. It uses the existing relay
   container's socket at `/var/run/tailscale/tailscaled.sock`; no second daemon
   or Tailscale identity is installed on the host.
-- `ubuntu` has systemd lingering enabled so the desktop starts without SSH login.
+- `ubuntu` has systemd lingering enabled so the desktop starts without SSH login
+  and keeps running after one ends; `migrate-legacy.sh` turns it on.
 - The host name is `relay`; cloud-init is configured to preserve it.
 
 ## Files and services

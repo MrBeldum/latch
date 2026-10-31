@@ -18,17 +18,12 @@ pub const MOD_META: u8 = 8;
 pub const MAX_TEXT: usize = 64;
 /// How often unacknowledged events are sent again.
 pub const RESEND: Duration = Duration::from_millis(20);
-/// Soft cap: once reached, incoming pointer motion updates the newest
-/// queued event of the same kind (relative deltas sum saturating; absolute
-/// positions replace). If there is no such event, only the new motion is
-/// dropped. Its sequence is unchanged: an already applied event is deduped
-/// by the host, so an update can lose motion but cannot apply input twice.
-/// Never discard an older unacknowledged event: it may be an unfilled gap.
+/// Backlog threshold retained for callers monitoring input congestion.
+/// Motion only merges with an adjacent, unsent event, regardless of backlog.
 pub const MAX_UNACKED: usize = 1024;
-/// Non-motion events may exceed the soft cap up to this limit, far beyond
-/// human typing during the session's ten-second silence timeout. At this
-/// hard cap only new events are refused, without assigning a sequence.
-/// The receiver uses the same window so it can retain the whole backlog.
+/// Receiver reorder window. The sender retains input until acknowledged,
+/// including backlogs larger than this window: it sends oldest first, so it
+/// never needs the receiver to buffer the entire backlog at once.
 pub const HARD_MAX_UNACKED: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,8 +209,7 @@ impl InputSender {
 
     /// Queues an event. Text longer than [`MAX_TEXT`] is split at character
     /// boundaries. A relative move right after another not yet sent is
-    /// merged into it if the sum fits; see [`MAX_UNACKED`] for the overflow
-    /// policy when the queue is full.
+    /// merged into it if the sum fits. Sent payloads remain immutable.
     pub fn push(&mut self, event: Event) {
         if let Event::Text(text) = &event {
             if text.is_empty() {
@@ -250,39 +244,6 @@ impl InputSender {
     }
 
     fn enqueue(&mut self, event: Event) {
-        if self.queue.len() >= MAX_UNACKED {
-            match event {
-                Event::MouseMove { dx, dy } => {
-                    if let Some((_, Event::MouseMove { dx: x, dy: y }, _)) = self
-                        .queue
-                        .iter_mut()
-                        .rev()
-                        .find(|(_, event, _)| matches!(event, Event::MouseMove { .. }))
-                    {
-                        *x = x.saturating_add(dx);
-                        *y = y.saturating_add(dy);
-                        self.changed = true;
-                    }
-                    return;
-                }
-                Event::MousePosition { .. } => {
-                    if let Some((_, queued, _)) = self
-                        .queue
-                        .iter_mut()
-                        .rev()
-                        .find(|(_, event, _)| matches!(event, Event::MousePosition { .. }))
-                    {
-                        *queued = event;
-                        self.changed = true;
-                    }
-                    return;
-                }
-                _ => {}
-            }
-        }
-        if self.queue.len() >= HARD_MAX_UNACKED {
-            return;
-        }
         self.queue.push_back((self.next, event, false));
         self.next = self.next.wrapping_add(1);
         self.changed = true;
@@ -371,6 +332,19 @@ impl InputReceiver {
         events: impl IntoIterator<Item = Event>,
         mut apply: impl FnMut(Event),
     ) -> u32 {
+        self.try_receive(first, events, |event| {
+            apply(event);
+            Ok::<_, ()>(())
+        })
+    }
+
+    /// Failed injection stays pending and is not acknowledged.
+    pub fn try_receive<E>(
+        &mut self,
+        first: u32,
+        events: impl IntoIterator<Item = Event>,
+        mut apply: impl FnMut(Event) -> Result<(), E>,
+    ) -> u32 {
         for (i, event) in events.into_iter().enumerate() {
             let seq = first.wrapping_add(i as u32);
             let offset = seq.wrapping_sub(self.next);
@@ -379,7 +353,10 @@ impl InputReceiver {
             }
         }
         while let Some(event) = self.pending.remove(&self.next) {
-            apply(event);
+            if apply(event.clone()).is_err() {
+                self.pending.insert(self.next, event);
+                break;
+            }
             self.next = self.next.wrapping_add(1);
         }
         self.next
@@ -393,5 +370,24 @@ impl InputReceiver {
 impl Default for InputReceiver {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod fallible_tests {
+    use super::*;
+    #[test]
+    fn failed_release_is_retried_before_acknowledging() {
+        let mut receiver = InputReceiver::new();
+        assert_eq!(receiver.try_receive(0, [Event::ReleaseAll], |_| Err(())), 0);
+        let mut applied = 0;
+        assert_eq!(
+            receiver.try_receive(0, [Event::ReleaseAll], |_| {
+                applied += 1;
+                Ok::<_, ()>(())
+            }),
+            1
+        );
+        assert_eq!(applied, 1);
     }
 }

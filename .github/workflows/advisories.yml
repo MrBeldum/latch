@@ -1,0 +1,39 @@
+name: advisories
+
+# Known vulnerabilities in the locked dependencies (RustSec). It runs when
+# the dependencies change, and once a day, but not on every push: an
+# advisory published today is news about the lockfile, not about whatever
+# change was pushed next, so it must not fail unrelated work. A scheduled
+# failure is what reports it.
+on:
+  push:
+    branches: [main, master]
+    paths: [Cargo.lock, "**/Cargo.toml", .github/workflows/advisories.yml]
+  pull_request:
+    paths: [Cargo.lock, "**/Cargo.toml", .github/workflows/advisories.yml]
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  cargo-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # A prebuilt, pinned cargo-audit: nothing to compile, and the same
+      # tool every run.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+      # A vulnerability fails the job; unmaintained or yanked crates are
+      # printed as warnings. Every ignored advisory says why it does not
+      # apply:
+      # - RUSTSEC-2026-0194, RUSTSEC-2026-0195: quick-xml 0.30 under
+      #   zbus_xml, from accesskit's Linux screen-reader bridge. It parses
+      #   the D-Bus interface descriptions shipped in those crates; nothing
+      #   gives it untrusted XML. It goes with the next eframe upgrade.
+      - name: cargo audit
+        run: >-
+          cargo audit
+          --ignore RUSTSEC-2026-0194
+          --ignore RUSTSEC-2026-0195

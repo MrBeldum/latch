@@ -3,6 +3,10 @@
 
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if latch_engine::linux::run_helper() {
+        return Ok(());
+    }
     use latch_engine::linux::X11Capture;
     use latch_engine::software::{Bgra, CpuCapture, SoftwarePipeline};
     use latch_engine::video::{Codec, VideoConfig, VideoPipeline};

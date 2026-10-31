@@ -6,11 +6,50 @@
 use crate::audio::{AudioCapture, CHANNELS, FRAME, RATE};
 use anyhow::{ensure, Context};
 use futures::executor::block_on;
-use pulseaudio::{protocol, Client, RecordStream};
+use pulseaudio::{protocol, Client, ClientError, RecordStream};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
-use std::time::Duration;
+use std::task::Poll;
+use std::time::{Duration, Instant};
 
 const BYTES: usize = FRAME * CHANNELS * 2;
+
+/// How often a recording that sends nothing is asked whether it still exists.
+const PROBE_EVERY: Duration = Duration::from_secs(1);
+
+type Probe = Pin<Box<dyn Future<Output = Result<(), ClientError>> + Send>>;
+
+/// A suspended sink's monitor sends nothing, and a recording the server
+/// killed (`pactl kill-source-output`, a removed source) also sends nothing:
+/// this client ignores the kill message and keeps the stream's queue alive.
+/// While nothing arrives, a latency query tells the two apart, because the
+/// server answers it with an error for a stream it no longer has.
+#[derive(Default)]
+struct Health {
+    probe: Option<Probe>,
+    asked: Option<Instant>,
+}
+impl Health {
+    /// Never blocks: an unanswered probe is polled again on the next call.
+    fn check(&mut self, start: impl FnOnce() -> Probe) -> anyhow::Result<()> {
+        if self.probe.is_none() && self.asked.is_none_or(|t| t.elapsed() >= PROBE_EVERY) {
+            self.probe = Some(start());
+            self.asked = Some(Instant::now());
+        }
+        let Some(probe) = &mut self.probe else {
+            return Ok(());
+        };
+        let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        match probe.as_mut().poll(&mut context) {
+            Poll::Pending => Ok(()),
+            Poll::Ready(result) => {
+                self.probe = None;
+                result.context("PulseAudio ended the recording")
+            }
+        }
+    }
+}
 
 struct Frames {
     bytes: [u8; BYTES],
@@ -43,6 +82,7 @@ pub(super) struct PulseCapture {
     stream: RecordStream,
     _client: Client,
     description: String,
+    health: Health,
 }
 impl PulseCapture {
     pub(super) fn new() -> anyhow::Result<Self> {
@@ -101,6 +141,7 @@ impl PulseCapture {
             stream,
             _client: client,
             description,
+            health: Health::default(),
         })
     }
 }
@@ -115,7 +156,14 @@ impl AudioCapture for PulseCapture {
                 *out = samples;
                 Ok(true)
             }
-            Err(RecvTimeoutError::Timeout) => Ok(false),
+            Err(RecvTimeoutError::Timeout) => {
+                let stream = &self.stream;
+                self.health.check(|| {
+                    let stream = stream.clone();
+                    Box::pin(async move { stream.timing_info().await.map(drop) })
+                })?;
+                Ok(false)
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 anyhow::bail!("PulseAudio recording disconnected")
             }
@@ -156,5 +204,32 @@ mod tests {
         frames.push(&bytes);
         assert!(receiver.try_recv().is_ok());
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_silent_recording_the_server_killed_is_an_error() {
+        let alive = || -> Probe { Box::pin(std::future::ready(Ok(()))) };
+        let mut health = Health::default();
+        health.check(alive).unwrap();
+        health
+            .check(|| panic!("asked again within PROBE_EVERY"))
+            .unwrap();
+        // An unanswered probe is not an error, and is not asked twice.
+        let mut health = Health::default();
+        health.check(|| Box::pin(std::future::pending())).unwrap();
+        health.asked = Instant::now().checked_sub(PROBE_EVERY);
+        health
+            .check(|| panic!("asked again while unanswered"))
+            .unwrap();
+        // What the server says about a stream it killed.
+        let mut health = Health::default();
+        let error = health
+            .check(|| {
+                Box::pin(std::future::ready(Err(ClientError::ServerError(
+                    protocol::PulseError::NoEntity,
+                ))))
+            })
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("ended the recording"));
     }
 }

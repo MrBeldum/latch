@@ -16,67 +16,130 @@ built-in streaming engine that captures and streams the desktop.
 ## Install
 
 1. Unzip the release and run `latch-host.exe`, or run `install-host.ps1`
-   to copy it to `%LOCALAPPDATA%\Latch`, add shortcuts, and register
-   the background service to start at logon. The script stops a running
-   Latch Host to replace it and starts the service again; `-NoStart` only
-   keeps the window closed.
-2. Open the **Sharing** tab and click **Set up as administrator**. One UAC
-   prompt runs a script that:
-   - retires legacy Latch 4 and BroLink engine services (`LatchStream`,
-     `BroLinkStream`), tasks (`LatchEngineUser`, `BroLinkEngineUser`),
-     engine directories (`%ProgramFiles%\Latch\engine`), and old firewall
+   to copy it to `%LOCALAPPDATA%\Latch`, add shortcuts and an entry in
+   Settings > Apps, and register the background service to start at logon.
+   The script stops a running Latch to replace it and starts the service
+   again; `-NoStart` only keeps the window closed.
+2. Open the **Sharing** tab and click **Set up as administrator**. Windows
+   shows one UAC prompt, for Windows PowerShell: that is Latch's setup. It
+   copies `latch-host.exe` into `%ProgramFiles%\Latch\Setup` (a folder
+   only administrators can change), checks that the copy's SHA-256 is that
+   of the file the window was started from, and runs the copy as
+   administrator, so nothing elevated loads or runs from a folder a user
+   can write to. The copy runs a script that:
+   - retires Latch 4 and BroLink: the engine services (`LatchStream`,
+     `BroLinkStream`), the tasks (`LatchEngineUser`, `BroLinkEngineUser`,
+     `LatchCursorUser`, `BroLinkCursorUser`), the engine folders
+     (`%ProgramFiles%\Latch\engine`, `%ProgramFiles%\BroLink\engine`), a
+     `SunshineService` installed in one of them, and the old firewall
      rules;
+   - copies the checked `latch-host.exe` into `%ProgramFiles%\Latch\Input`
+     and registers the `LatchInput` task, which runs that copy with
+     `--input-helper` as the user who ran setup, elevated (see
+     [Windows that run as administrator](#windows-that-run-as-administrator));
    - adds firewall rules: TCP 47850 inbound and UDP 47850 inbound for
-     `latch-host.exe` from `100.64.0.0/10` only, and UDP 9 for the
-     wake-packet listener;
+     `latch-host.exe` from Tailscale's `100.64.0.0/10` and
+     `fd7a:115c:a1e0::/48` only, and UDP 9 for the wake-packet listener;
    - on a PC with the [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver),
      lists every screen size a Mac can ask for in its `vdd_settings.xml`
      (a minimal file when there is none; everything else in it is kept)
      and restarts the display, so the engine can switch the PC to the
      Mac's size;
-   - turns Fast Startup off (`HiberbootEnabled = 0`);
+   - records Fast Startup and the AC sleep and hibernate timeouts as they
+     were (once, under `HKLM\SOFTWARE\Latch\Setup`, for `--uninstall`),
+     then turns Fast Startup off (`HiberbootEnabled = 0`) and sets both
+     timeouts to never, so a PC on mains power stays reachable;
    - on the adapter that has the default route, enables wake on magic
      packet and writes the driver keywords `*WakeOnMagicPacket`,
      `*ModernStandbyWoLMagicPacket`, `S5WakeOnLan`, `*PMARPOffload` and
      `*PMNSOffload`, restarts the adapter if any changed, and lets the
      device wake the PC (`powercfg /deviceenablewake`).
 
-   The script's transcript is in `%LOCALAPPDATA%\Latch\setup.log` and is
-   shown on the Sharing tab if something fails. Every step is idempotent;
-   run setup again after fixing whatever it complained about.
+   The script's transcript is in `%ProgramFiles%\Latch\Setup\setup.log`
+   and is shown on the Sharing tab if something fails. Every step is
+   idempotent; run setup again after fixing whatever it complained about.
+   If the prompt is declined, the tab says an administrator's approval is
+   needed and offers **Try again**.
 
    Run setup at the PC, not through a stream. Windows shows the
    administrator prompt on its secure desktop, which a stream can neither
    show nor click, so a viewer would see a frozen picture until someone at
-   the PC answered it; setup also restarts the engine, which ends the
-   stream. While a viewer is connected the first click only says so, and a
-   second click within two minutes runs setup anyway.
+   the PC answered it; setup may also restart the network card and the
+   virtual display, which ends the stream. While a viewer is connected the
+   first click only says so, and a second click within two minutes runs
+   setup anyway.
 3. The Sharing tab says **Shared** with a green dot. Leave the window
    closed; the service keeps running.
 
-Advanced engine settings are not exposed anywhere in Latch: Latch
-configures the engine itself.
-
 ### Over SSH
 
-An SSH (or WinRM) session runs in session 0, which has no desktop: an
-engine or a Latch Host started there could not see the screen. Both steps
-account for it when run from an administrator's SSH session:
+An SSH (or WinRM) session runs in session 0, which has no desktop: a
+Latch started there could not see the screen. Both steps account for it
+when run from an administrator's SSH session:
 
 - `install-host.ps1` starts the background service in the signed-in
   user's session through a one-off scheduled task (`LatchHostStart`, no
-  trigger; it stays registered and does nothing on its own). If nobody is
-  signed in it says so, and the Run key starts the service at the next
-  sign-in.
-- `latch-host.exe --setup-elevated --local-app-data "%LOCALAPPDATA%"`
-  installs the `LatchEngineUser` logon task for that account, stops the
-  engine service, and has the task start the engine in the signed-in
-  user's session. With nobody signed in, the `LatchStream` service keeps
-  running the engine (as SYSTEM, which streams the console) until setup
-  next runs at the PC.
+  trigger; its registration is removed after the startup attempt without
+  stopping the running host). If nobody is signed in it says so, and the Run
+  key starts the service at the next sign-in.
+- `latch-host.exe --setup-elevated`, run from the installed copy, does
+  what the button does without a prompt (the session is already
+  elevated): it stages itself in `%ProgramFiles%\Latch\Setup` and runs
+  setup from there, with the firewall rules naming the file you ran.
+  `--local-app-data`, which 5.0.0 needed, is accepted and ignored.
 
-Check the result by streaming from the Mac: `/v1/status` saying the engine
-runs does not show which session it runs in (`/v1/display` does).
+The streaming engine is part of the background service, so it streams the
+desktop of the session the service runs in.
+
+## Windows that run as administrator
+
+Windows ignores input that a program sends while a window of a higher
+integrity level is in front (User Interface Privilege Isolation), and tells
+the program it was delivered. Latch runs unelevated in the signed-in
+session, so on its own it cannot move the pointer or type while an
+installer, Task Manager, an administrator's terminal or a game launcher that
+runs as administrator (HoYoPlay, for one) has focus: the viewer's pointer
+freezes until that window is closed at the PC.
+
+Each stream therefore starts the `LatchInput` task that setup registers. It
+runs the copy of Latch in `%ProgramFiles%\Latch\Input`, a folder only
+administrators can change, elevated, as the user who ran setup, with no
+prompt. The stream sends its input to that helper through a named pipe
+(`\\.\pipe\LatchInput-<session>`) that only that user's processes in the
+same session can open, and only after checking that the pipe's server is
+that very copy; until the helper answers, and if it ever goes away, Latch
+injects input itself. The helper lets go of every key and button its stream
+held when the stream ends, and exits a minute after the last stream.
+
+Updates replace only the copy in `%LOCALAPPDATA%`. The helper keeps
+serving newer versions until one changes how the two talk; then
+`service.log` says the helper did not answer, and running setup again
+brings it up to date. The Sharing tab asks for setup while the helper is
+missing, and `service.log` names any window that ignores the viewer's
+input because it runs as administrator.
+
+Any program running as that user can start the task, so it lets that user's
+unelevated programs send keyboard and mouse input to their own elevated
+windows, which Windows would otherwise refuse. Windows' secure desktop (UAC
+prompts, the sign-in and lock screens) still cannot be reached: it needs a
+SYSTEM service, which Latch 5 does not install.
+
+## Uninstalling
+
+**Uninstall** on Latch's entry in Settings > Apps (written by
+`install-host.ps1`), or `latch-host.exe --uninstall`, stops Latch and
+removes, for the signed-in user, the Run values, the `LatchHostStart` task,
+the shortcuts and the Apps entry; then, through one administrator prompt
+(none in an elevated session), the firewall rules, the start task, the
+`LatchInput` task and `%ProgramFiles%\Latch\Input`, every
+Latch 4 or BroLink registration setup retires, and `%ProgramFiles%\Latch\Setup`,
+and it puts back Fast Startup and the AC sleep and hibernate timeouts
+recorded by the first setup. The network card's wake settings and the
+virtual display's sizes stay, since they change nothing by themselves.
+The program, `host.toml` and the logs stay in `%LOCALAPPDATA%\Latch`;
+delete that folder to remove them. A message box says what was done.
+Running it again is harmless; if the prompt is declined, run it again to
+finish.
 
 ## Slow streams: the network, or the encoder
 
@@ -89,14 +152,61 @@ shows the same thing as **Relayed via …** next to the PC. Turn UPnP (or NAT-PM
 this PC, and Tailscale connects directly; IPv6 on both ends works too. The
 service logs the finding each time it changes.
 
-The **Streaming** line names the encoder the engine settled on, read from
-its log. "software" means no GPU encoder worked (a missing or broken
-driver): frames are slow to make whatever the network does. Fix the GPU
-driver, then restart the engine service. If it also says **no sound**, the
-engine found no audio device to capture (a PC with no speakers, or a
-sink that was unplugged). Install a virtual one (Steam's Streaming
-Speakers, or VB-CABLE), pick it as the PC's audio sink, and restart the
-engine service.
+The **Streaming** line names the encoder the engine settled on. "software"
+means no GPU encoder worked (a missing or broken driver): frames are slow
+to make whatever the network does. Fix the GPU driver, then restart Latch
+(sign out and in, or **Stop service** and then **Start it now** on the
+Sharing tab). If it also says **no sound**, the engine found no audio device to
+capture (a PC with no speakers, or a sink that was unplugged). Install a
+virtual one (Steam's Streaming Speakers, or VB-CABLE), pick it as the PC's
+audio sink, and restart Latch the same way.
+
+## The video pipeline
+
+Desktop Duplication hands the engine each new picture of the desktop; the
+engine draws the cursor in, scales and converts it to NV12 on the GPU
+(Direct3D 11 video processor), and gives it to a Media Foundation encoder:
+the GPU's own (AMD, NVIDIA, Intel), else Microsoft's CPU encoder, else
+Latch's software encoder.
+
+- **Frame rate.** Frames are taken on a fixed grid 1% faster than the
+  stream's rate (`Pacer`, shared with macOS and Linux), so the time spent
+  capturing, converting and encoding a frame comes out of its interval
+  instead of adding to it. A static desktop is repeated every 100 ms.
+- **GPU work per frame.** The NV12 textures (a ring of four) and every view
+  of a texture are made once and reused, the cursor pass reuses its views,
+  and the Microsoft-encoder path reuses one CPU-readable staging texture
+  and copies the picture once, from the mapped surface into the encoder's
+  sample.
+- **Rate control.** Constant bit rate with the cap equal to the mean and a
+  buffer of 1.5 frames of bits (`bitrate / fps × 1.5`), so no frame runs
+  much past the average: a keyframe takes at most half a frame interval
+  more than a P-frame on a link that carries the bitrate, where the
+  drivers' default buffer (often about a second) lets keyframes and bursts
+  of motion run to many times it. When the host changes the bitrate the cap
+  and buffer move with it. No B-frames, an endless GOP, CABAC for H.264
+  High. Every property after the mean rate is best effort: a driver that
+  lacks it keeps its default (`RUST_LOG=latch_engine=debug` lists the ones
+  refused).
+- **Encoder events.** The GPU encoders are asynchronous; the engine polls
+  their events with 0.1 ms sleeps, never blocking in the driver.
+
+### HEVC (off by default)
+
+HEVC is offered only when the environment variable `LATCH_WINDOWS_HEVC=1`
+is set for `latch-host.exe` (for a service started at logon, set it as a
+user environment variable and restart Latch Host), and only after the
+GPU's HEVC encoder (Main profile, low latency, no B-frames, endless GOP,
+the same buffer rules) has encoded a keyframe in a trial when the first
+viewer connects. Every keyframe carries VPS, SPS and PPS in band before the
+slice, which is what the Mac's VideoToolbox decoder needs to start. The
+flag exists because this path has not run on every vendor's hardware; with
+it off nothing about H.264 changes.
+
+If the HEVC encoder fails (at the trial, when a stream opens, or while it
+runs) the engine stops offering HEVC until it restarts, and the next viewer
+gets H.264. The stream that was running ends rather than switching
+codecs mid-stream, as the viewer decodes only what it was told.
 
 ## What the service does
 
@@ -105,25 +215,28 @@ requests, all JSON:
 
 | Request | Effect |
 |---------|--------|
-| `GET /v1/status` | Name, Tailscale login and IP, LAN IP and MAC, wake state, Fast Startup state, seconds since the last wake packet arrived, engine state and the encoder it uses, this PC's NAT report |
+| `GET /v1/status` | Name, Tailscale login and IP, LAN IP and MAC, wake state, Fast Startup state, seconds since the last wake packet arrived, the engine's state and the encoder it uses, this PC's NAT report |
 | `POST /v1/stream` | Initiates streaming session via HTTP Upgrade to `latch-stream/1` |
 | `POST /v1/power {"action"}` | `sleep`, `restart`, or `shutdown` (closes the running app first) |
 | `GET /v1/clipboard` | The clipboard as text, with Windows' clipboard sequence number |
 | `POST /v1/clipboard {"text"}` | Replaces the clipboard, so a ⌘V on the Mac pastes the Mac's text |
 | `POST /v1/update` | A new `latch-host.exe`; see Updates |
-| `GET /v1/display` | Why a capture may be black: monitors, the desktop's sampled brightness, HDR state, the engine's capture settings, which session each engine process runs in, and the engine's service under any name it has had |
+| `GET /v1/display` | Why a capture may be black: monitors, the desktop's sampled brightness, the session, HDR state |
 | `POST /v1/display {"advanced_color"}` | Turns the HDR (advanced colour) desktop off or on |
 
 A request is answered only if it comes from loopback or from a Tailscale
 address that `tailscale whois` attributes to the account this PC is signed
 in as; a machine shared in from another tailnet is refused too. Anything
-else gets a 403 before any action.
+else gets a 403 before any action. Loopback, and this PC's own Tailscale
+address, can be a process of any Windows user signed in here, so they may
+not start a stream, push an update or use the clipboard.
 
 The service also listens on UDP 9. A magic packet for this PC's MAC that
 arrives while it is awake is logged and reported in the status, which is
 what **Test wake** on the Mac reads.
 
-Logs: `%LOCALAPPDATA%\Latch\service.log` and `panel.log`.
+Logs: `%LOCALAPPDATA%\Latch\service.log` and `panel.log`; setup's own
+transcript is `%ProgramFiles%\Latch\Setup\setup.log`.
 
 ## Waking it from the Mac, and turning it off
 
@@ -147,64 +260,35 @@ works. Untick **Let a paired Mac sleep, restart, or shut down this PC**
 if you would rather the Mac could not. Remote power actions force-close
 programs, because nobody is there to answer a save prompt.
 
-After a **restart**, the engine is back before anyone logs in (it is a
-service), so the Mac can stream the login screen and sign in. Latch's
-service starts at logon, so sleep and shutdown from the Mac return once
-someone is signed in.
+After a **restart**, Latch starts when someone signs in: it runs in the
+signed-in session, so the Mac cannot stream the sign-in screen. On a PC
+nobody sits at, turn on Windows' automatic sign-in.
 
 ## Streaming with the monitor off or disconnected
 
 Windows needs an active display for capture. If the connection works but the picture
 is black, attach a monitor or an HDMI/DisplayPort dummy plug, or install the signed
 [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver/releases).
-It supplies a display even when the physical monitor is off and works with Latch's
-bundled engine. Setup lists every screen size a Mac can ask for in the driver's
-settings file, and the engine switches the virtual display to the Mac's size at
-each connect, so there is nothing to choose in Windows Display settings. If the
-driver was installed after setup, choose **Run setup again** on the Sharing
-tab; its setup list says when sizes are missing. Installing a display does not require pairing the
-Mac again.
+It supplies a display even when the physical monitor is off. Setup lists
+every screen size a Mac can ask for in the driver's settings file. If the
+driver was installed after setup, choose **Run setup again** on the
+Sharing tab; its setup list says when sizes are missing.
 
-With capture set to automatic, Latch prefers the Virtual Display Driver
-even while a physical monitor is connected. During a stream the virtual
-display is the only active display, so games follow its requested size;
-the engine restores the physical displays when the stream disconnects.
-A driver reinstalled under a new ID is followed. A capture display chosen
-in the engine's own settings is kept, and the display option Latch set for
-the virtual display goes back to setup's; after setup, Latch changes no
-other engine setting. Standard 1080p, 1440p and 4K streams are 16:9 and
-leave bars on a taller Mac screen; **Match screen** uses the Mac's aspect
-ratio.
+Latch captures the primary display (the one at the top-left of the
+desktop). When that is the Virtual Display Driver's, the engine switches
+it to the size the Mac asks for at each connect and back when the stream
+ends, so there is nothing to choose in Windows Display settings. A physical
+monitor is captured at its own size and the picture scaled. To stream at
+the Mac's own size on a PC that also has a monitor, make the virtual display
+the main display. Standard 1080p, 1440p and 4K streams are 16:9 and leave
+bars on a taller Mac screen; **Match screen** uses the Mac's aspect ratio.
 
-While a viewer is connected and the session uses a single display, Latch
-keeps a custom game cursor visible in the picture. A cursor whose visible
-pixels sit to the right of or below a transparent hotspot would otherwise
-disappear at the bottom or right edge; Latch stops it where its nearest
-visible pixel is still on screen. A cursor drawn at its hotspot, like every
-standard Windows pointer and most game cursors, still reaches the last
-pixel, so edge scrolling and controls at the edge keep working. The bounds
-follow changes in resolution and cursor shape, respect the game's own
-confinement, and release when the game hides its cursor for camera control
-or the viewer disconnects. The check runs as a windowless process beside
-Latch in the desktop session, without elevation; a Latch started over SSH
-runs it through a user task, `LatchCursorUser`.
-
-## Using an engine you installed yourself
-
-Latch streams through whichever compatible engine is already on the PC
-before it installs its own. [Apollo](https://github.com/ClassicOldSong/Apollo)
-is one: it has a built-in virtual display that can match the Mac's resolution
-for a pixel-for-pixel 16:10 desktop on a MacBook screen.
-Install it in `C:\Program Files\Apollo` from its releases
-page before running setup, and Latch uses it instead of installing its
-own engine; the API and config layout are the same.
-
-## Gamepads
-
-The engine no longer installs the virtual controller driver (ViGEmBus) by
-itself. The **This PC** section of the Sharing tab shows whether it is
-present and offers **Install controller driver**; a reboot afterwards is
-recommended.
+The pointer is drawn into the picture where Windows draws it. Latch 4 ran
+a separate cursor guard (`LatchCursorUser`) that kept a game's custom
+cursor from leaving the screen; Latch 5 does not have one, and setup
+removes the old task. A game cursor whose visible pixels sit to the right
+of or below its hotspot can therefore be cut off at the right or bottom
+edge.
 
 ## Troubleshooting
 
@@ -213,7 +297,7 @@ recommended.
   Driver, run setup again so that size is listed; a monitor only offers its
   own sizes, and the stream is scaled from the nearest.
 - **Amber "Needs setup" that will not clear**: open **Setup log** on the
-  Sharing tab, or read `setup.log`. The
+  Sharing tab, or read `%ProgramFiles%\Latch\Setup\setup.log`. The
   usual causes are the UAC prompt being dismissed, or a driver that refuses
   the wake keywords.
 - **Other machines list the PC as online, but "Latch isn't installed"**:
@@ -258,15 +342,15 @@ automatic.
 
 ## Staying reachable
 
-The background service starts with Windows by default and sets that again
-at every start, so a PC nobody can reach in person comes back after a
-restart; **Start Latch when you log in** on the Sharing tab is the only
-thing that turns it off. It also holds Windows awake while plugged in
-(**Keep this PC awake while plugged in**, same place), because
-a sleeping PC's Tailscale is asleep and a Mac on another network cannot
-wake it.
-The engine runs as a Windows service and streams the sign-in screen, so a
-Mac can still connect after a reboot before anyone logs in. Keep the PC's
-Tailscale key from expiring by disabling key expiry for it in the
+The background service starts when you sign in to Windows by default and
+sets that again at every start, so a PC nobody can reach in person comes
+back after a restart once someone (or Windows' automatic sign-in) signs
+in; **Start Latch when you log in** on the Sharing tab is the only thing
+that turns it off. It also holds Windows awake while plugged in (**Keep
+this PC awake while plugged in**, same place), because a sleeping PC's
+Tailscale is asleep and a Mac on another network cannot wake it. The
+streaming engine is part of that service and streams the signed-in
+desktop; it cannot show the sign-in screen. Keep the PC's Tailscale key
+from expiring by disabling key expiry for it in the
 [admin console](https://login.tailscale.com/admin/machines); the Mac warns
 about this for every PC it lists.

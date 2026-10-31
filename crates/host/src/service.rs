@@ -20,8 +20,8 @@ use crate::update;
 use crate::wake::{self, WakeInfo};
 use anyhow::{Context, Result};
 use latch_core::api::{
-    Ack, Clipboard, DisplayRequest, NatReport, PowerAction, PowerRequest, Status, Streamer,
-    CLIPBOARD_PATH, UPDATE_PATH,
+    Ack, Clipboard, DisplayRequest, NatReport, PowerRequest, Status, Streamer, CLIPBOARD_PATH,
+    UPDATE_PATH,
 };
 use latch_core::http::{self, Request, Response};
 use latch_core::tailscale::{self, is_tailnet_ip};
@@ -86,6 +86,8 @@ pub struct Service {
     nat: Mutex<Option<NatReport>>,
     nat_running: AtomicBool,
     update_running: Arc<AtomicBool>,
+    admission: Mutex<()>,
+    power_pending: Arc<AtomicBool>,
 }
 
 impl Service {
@@ -111,6 +113,8 @@ impl Service {
             nat: Mutex::new(None),
             nat_running: AtomicBool::new(false),
             update_running: Arc::new(AtomicBool::new(false)),
+            admission: Mutex::new(()),
+            power_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -119,16 +123,12 @@ impl Service {
     }
 
     fn someone_watching(&self) -> bool {
-        self.server
-            .lock()
-            .as_ref()
-            .is_some_and(|s| s.status().viewer.is_some())
+        self.server.lock().as_ref().is_some_and(|s| s.busy())
     }
 
-    fn stop_stream(&self) {
-        if let Some(server) = self.server.lock().as_ref() {
-            server.stop(end::HOST_STOPPING, "This host is stopping.");
-        }
+    fn stop_stream(&self) -> bool {
+        let server = self.server.lock().clone();
+        server.is_none_or(|server| server.stop(end::HOST_STOPPING, "This host is stopping."))
     }
 
     fn streaming_status(&self) -> Streamer {
@@ -148,6 +148,13 @@ impl Service {
             max_fps: streamer::max_fps(&encoder, cores),
             encoder,
             audio_problem: status.audio_problem,
+            requested_bitrate_kbps: status.requested_bitrate_kbps,
+            applied_bitrate_kbps: status.applied_bitrate_kbps,
+            pacing_queue_ms: status.pacing_queue_ms,
+            send_errors: status.send_errors,
+            send_retries: status.send_retries,
+            socket_send_bytes: status.socket_send_bytes,
+            socket_receive_bytes: status.socket_receive_bytes,
             capture_size: streamer::capture_size(),
             viewer: status.viewer.is_some(),
             protocol: latch_proto::PROTOCOL,
@@ -250,13 +257,7 @@ impl Service {
         http::serve_with_auth(
             listener,
             move |peer| authorizer.authorized(peer.ip()),
-            move |peer, path, _headers, _len| {
-                if path == UPDATE_PATH {
-                    body_authorizer.caller(peer).allowed()
-                } else {
-                    false
-                }
-            },
+            move |peer, _path, _headers, _len| body_authorizer.caller(peer).allowed(),
             move |peer, req| handler.handle(peer, req),
         );
         Ok(())
@@ -416,16 +417,10 @@ impl Service {
         }
         // Once: a new copy that cannot start is not retried every minute.
         self.reinstall_tried.store(true, Ordering::Release);
-        match update::hand_over(stamp.path(), update::STARTUP_GRACE) {
-            Ok(_) => {
-                self.stop_stream();
-                self.log("Latch was reinstalled; the new copy takes over the service");
-                std::process::exit(0);
-            }
-            Err(e) => self.log(format!(
-                "Latch was reinstalled, but the new copy did not start: {e:#}"
-            )),
-        }
+        self.log(format!(
+            "Latch was reinstalled at {}; restart it locally to use the new copy (no service supervisor is running)",
+            stamp.path().display()
+        ));
     }
 
     /// `tailscale netcheck` on its own thread, once at a time.
@@ -496,6 +491,12 @@ impl Service {
         if *self.virtual_display.lock() == Some(false) {
             setup.push(
                 "The virtual display does not list every screen size a viewer can ask for.".into(),
+            );
+        }
+        #[cfg(windows)]
+        if !latch_engine::windows::input_helper_exe().is_some_and(|exe| exe.is_file()) {
+            setup.push(
+                "Windows that run as administrator ignore a viewer's mouse and keyboard.".into(),
             );
         }
         Status {
@@ -592,6 +593,20 @@ impl Service {
                 }
             }
             found
+        })
+    }
+
+    /// One of this machine's own Tailscale addresses: a connection from it
+    /// is a process on this machine, as loopback is. Unknown or malformed
+    /// self-address data gets the same conservative refusal.
+    fn own_address(&self, ip: IpAddr) -> bool {
+        self.tailscale.lock().as_ref().map_or(true, |st| {
+            st.self_node.tailscale_ips.is_empty()
+                || st
+                    .self_node
+                    .tailscale_ips
+                    .iter()
+                    .any(|a| a.parse::<IpAddr>().map_or(true, |address| address == ip))
         })
     }
 
@@ -699,15 +714,29 @@ impl Service {
         }
         // The service log and /v1/quit are for this machine's own window.
         let local = caller == Caller::Local;
+        // Loopback, or this machine's own tailnet address, is any process
+        // here, signed in as any OS user. An executable pushed from there
+        // would run as the account that owns this service, and the
+        // clipboard is that account's: both are for the other machines.
+        if (req.path == UPDATE_PATH || req.path == CLIPBOARD_PATH)
+            && (local || self.own_address(peer.ip()))
+        {
+            return Response::json(
+                403,
+                &Ack::err("updates and the clipboard are for the other machines on this Tailscale account"),
+            );
+        }
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/v1/status") => Response::json(200, &self.status(local)),
             ("GET", "/v1/display") => Response::json(200, &self.display()),
             ("POST", "/v1/display") => self.set_display(peer.ip(), req),
             ("POST", p) if p == control::PATH => {
-                if local {
+                // Connecting to our own tailnet address does not establish
+                // which OS account is asking to control this desktop.
+                if local || self.own_address(peer.ip()) {
                     Response::json(
                         403,
-                        &Ack::err("streaming sessions may only be started by an authorized Tailscale peer"),
+                        &Ack::err("streaming sessions must come from another authorized Tailscale machine"),
                     )
                 } else {
                     self.stream(peer, req)
@@ -727,7 +756,9 @@ impl Service {
                 Err(_) => Response::json(400, &Ack::err("expected {\"text\"}")),
             },
             ("POST", "/v1/quit") if local => {
-                self.stop_stream();
+                if !self.stop_stream() {
+                    return Response::json(409, &Ack::err("stream cleanup is still running"));
+                }
                 self.log("control panel asked the service to stop");
                 std::thread::spawn(|| {
                     std::thread::sleep(Duration::from_millis(300));
@@ -764,6 +795,7 @@ impl Service {
                 ),
             );
         }
+        let _admission = self.admission.lock();
         if self.update_running.swap(true, Ordering::AcqRel) {
             return Response::json(409, &Ack::err("an update is already being installed"));
         }
@@ -828,6 +860,11 @@ impl Service {
     }
 
     fn stream(&self, peer: SocketAddr, req: &Request) -> Response {
+        let _admission = self.admission.lock();
+        if self.update_running.load(Ordering::Acquire) || self.power_pending.load(Ordering::Acquire)
+        {
+            return Response::json(409, &Ack::err("the host is updating or stopping"));
+        }
         if req.header("upgrade") != Some(control::UPGRADE) {
             return Response::json(400, &Ack::err("expected the Latch stream Upgrade header"));
         }
@@ -837,6 +874,11 @@ impl Service {
         };
         let Some(server) = self.server.lock().clone() else {
             return Response::json(503, &Ack::err("the stream server is not listening"));
+        };
+        let peer = if peer.ip().is_loopback() {
+            media_peer(peer, tailscale::whois_addr(peer).ok().flatten())
+        } else {
+            peer
         };
         match server.prepare(request, peer) {
             Ok(prepared) => {
@@ -906,26 +948,30 @@ impl Service {
             self.log(format!("{what} requested by {from}, refused: {why}"));
             return Response::json(200, &Ack::err(why));
         }
-        self.stop_stream();
-        self.log(format!("{what} requested by {from}"));
-        if cfg!(target_os = "macos") && action != PowerAction::Sleep {
-            // System Events answers at once, or not without someone at the
-            // Mac; either way the one who asked hears which.
-            return match crate::power::perform(action) {
-                Ok(()) => Response::json(200, &Ack::ok()),
-                Err(e) => {
-                    self.log(format!("{what} failed: {e:#}"));
-                    Response::json(200, &Ack::err(format!("{e:#}")))
-                }
-            };
+        let _admission = self.admission.lock();
+        if self.power_pending.swap(true, Ordering::AcqRel) {
+            return Response::json(409, &Ack::err("a power action is already pending"));
         }
-        // Reply first: sleep can suspend the machine before the bytes leave.
+        self.log(format!("{what} requested by {from}"));
+        let server = self.server.lock().clone();
         let log = self.log.clone();
+        let pending = self.power_pending.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(400));
+            if let Some(server) = server {
+                if !server.stop(end::HOST_STOPPING, "This host is stopping.") {
+                    push_log(
+                        &log,
+                        "power action cancelled: stream cleanup did not finish".into(),
+                    );
+                    pending.store(false, Ordering::Release);
+                    return;
+                }
+            }
             if let Err(e) = crate::power::perform(action) {
                 push_log(&log, format!("{what} failed: {e:#}"));
             }
+            pending.store(false, Ordering::Release);
         });
         Response::json(200, &Ack::ok())
     }
@@ -1000,6 +1046,16 @@ impl Caller {
             Caller::Peer { allowed } => allowed,
         }
     }
+}
+
+fn media_peer(peer: SocketAddr, who: Option<tailscale::WhoIs>) -> SocketAddr {
+    let ip = who.and_then(|w| {
+        w.node.addresses.into_iter().find_map(|s| {
+            let ip: IpAddr = s.split('/').next()?.parse().ok()?;
+            (ip.is_ipv4() && tailscale::is_tailnet_ip(ip)).then_some(ip)
+        })
+    });
+    ip.map_or(peer, |ip| SocketAddr::new(ip, peer.port()))
 }
 
 /// Who is behind a loopback connection. Only with userspace networking
@@ -1303,6 +1359,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn userspace_media_announcement_uses_the_whois_tailnet_address() {
+        let peer = "127.0.0.1:1234".parse().unwrap();
+        let who = serde_json::from_str(
+            r#"{"Node":{"Addresses":["fd7a:115c:a1e0::1/128","100.64.0.3/32"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            media_peer(peer, Some(who)),
+            "100.64.0.3:1234".parse().unwrap()
+        );
+        assert_eq!(media_peer(peer, None), peer);
+    }
+
+    #[test]
+    fn pending_update_and_power_refuse_streams_before_preparation() {
+        let svc = Service::new();
+        let req = Request::default();
+        let peer = "100.64.0.1:1234".parse().unwrap();
+        svc.update_running.store(true, Ordering::Release);
+        assert_eq!(svc.stream(peer, &req).status, 409);
+        svc.update_running.store(false, Ordering::Release);
+        svc.power_pending.store(true, Ordering::Release);
+        assert_eq!(svc.stream(peer, &req).status, 409);
+    }
+
+    #[test]
     fn only_a_mac_that_is_not_shared_opens_without_the_service() {
         let shared = HostConfig::default();
         let viewer = HostConfig {
@@ -1582,6 +1664,9 @@ mod tests {
     #[test]
     fn stream_and_power_validate_their_bodies() {
         let svc = Service::new();
+        let mut st = tailscale::Status::default();
+        st.self_node.tailscale_ips = vec!["100.64.0.99".into()];
+        *svc.tailscale.lock() = Ok(st);
         let local: SocketAddr = "127.0.0.1:5".parse().unwrap();
         let peer_addr: SocketAddr = "100.64.0.5:5".parse().unwrap();
         svc.auth
@@ -1616,10 +1701,10 @@ mod tests {
         );
         assert_eq!(svc.handle(local, &post("/v1/nope", "")).status, 404);
         // An update without its headers is refused before anything is written.
-        let r = svc.handle(local, &post(UPDATE_PATH, "MZ"));
+        let r = svc.handle(peer_addr, &post(UPDATE_PATH, "MZ"));
         assert_eq!(r.status, 400, "{}", r.body);
         let r = svc.handle(
-            local,
+            peer_addr,
             &Request {
                 method: "POST".into(),
                 path: UPDATE_PATH.into(),
@@ -1637,6 +1722,78 @@ mod tests {
             "{}",
             r.body
         );
+    }
+
+    #[test]
+    fn local_accounts_cannot_access_remote_only_routes() {
+        // Loopback, and this machine's own tailnet address, can be any OS
+        // user signed in here. Updates, clipboard data and desktop control
+        // belong to the account that owns this service.
+        let svc = Service::new();
+        let mut st = tailscale::Status::default();
+        st.self_node.tailscale_ips = vec!["100.64.0.5".into(), "fd7a:115c:a1e0::5".into()];
+        *svc.tailscale.lock() = Ok(st);
+        let own: SocketAddr = "100.64.0.5:5".parse().unwrap();
+        let own_v6: SocketAddr = "[fd7a:115c:a1e0::5]:5".parse().unwrap();
+        let other: SocketAddr = "100.64.0.6:5".parse().unwrap();
+        for ip in [own.ip(), own_v6.ip(), other.ip()] {
+            svc.auth.lock().insert(ip, (Instant::now(), true));
+        }
+        let update = Request {
+            method: "POST".into(),
+            path: UPDATE_PATH.into(),
+            headers: vec![
+                ("x-latch-version".into(), "99.0.0".into()),
+                ("content-type".into(), "application/octet-stream".into()),
+            ],
+            body: b"MZ".to_vec(),
+        };
+        let read = Request {
+            method: "GET".into(),
+            path: CLIPBOARD_PATH.into(),
+            ..Default::default()
+        };
+        let write = Request {
+            method: "POST".into(),
+            path: CLIPBOARD_PATH.into(),
+            headers: json_header(),
+            body: b"not json".to_vec(),
+        };
+        let stream = Request {
+            method: "POST".into(),
+            path: control::PATH.into(),
+            headers: json_header(),
+            body: b"{}".to_vec(),
+        };
+        for from in [
+            "127.0.0.1:5".parse().unwrap(),
+            "[::1]:5".parse().unwrap(),
+            own,
+            own_v6,
+        ] {
+            for req in [&update, &read, &write, &stream] {
+                let r = svc.handle(from, req);
+                assert_eq!(r.status, 403, "{} {} from {from}", req.method, req.path);
+            }
+        }
+        // Another machine on the account still gets through to the route.
+        assert_ne!(svc.handle(other, &update).status, 403);
+        assert_eq!(svc.handle(other, &write).status, 400);
+        assert_eq!(svc.handle(other, &stream).status, 400);
+        // A cached admission must not bypass the local-address check when
+        // the next Tailscale status probe fails.
+        *svc.tailscale.lock() = Err("status unavailable".into());
+        for req in [&update, &read, &write, &stream] {
+            assert_eq!(svc.handle(own, req).status, 403);
+        }
+        *svc.tailscale.lock() = Ok(tailscale::Status::default());
+        assert_eq!(svc.handle(own, &stream).status, 403);
+        let mut malformed = tailscale::Status::default();
+        malformed.self_node.tailscale_ips = vec!["not-an-address".into()];
+        *svc.tailscale.lock() = Ok(malformed);
+        for req in [&update, &write, &stream] {
+            assert_eq!(svc.handle(own, req).status, 403);
+        }
     }
 
     const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -1757,9 +1914,13 @@ mod tests {
         // The clipboard routes exist and answer JSON, whatever the platform
         // says about the clipboard itself.
         let svc = Service::new();
-        let local: SocketAddr = "127.0.0.1:5".parse().unwrap();
+        let mut st = tailscale::Status::default();
+        st.self_node.tailscale_ips = vec!["100.64.0.99".into()];
+        *svc.tailscale.lock() = Ok(st);
+        let peer: SocketAddr = "100.64.0.5:5".parse().unwrap();
+        svc.auth.lock().insert(peer.ip(), (Instant::now(), true));
         let r = svc.handle(
-            local,
+            peer,
             &Request {
                 method: "POST".into(),
                 path: CLIPBOARD_PATH.into(),
@@ -1769,7 +1930,7 @@ mod tests {
         );
         assert_eq!(r.status, 400, "{}", r.body);
         let r = svc.handle(
-            local,
+            peer,
             &Request {
                 method: "GET".into(),
                 path: CLIPBOARD_PATH.into(),
@@ -1796,8 +1957,11 @@ mod tests {
     }
 
     #[test]
-    fn stream_route_refuses_plain_local_and_admits_tailnet_or_userspace_peer() {
+    fn stream_route_refuses_plain_local_and_admits_another_tailnet_peer() {
         let svc = Service::new();
+        let mut status = tailscale::Status::default();
+        status.self_node.tailscale_ips = vec!["100.64.0.99".into()];
+        *svc.tailscale.lock() = Ok(status);
         let local: SocketAddr = "127.0.0.1:5".parse().unwrap();
         let req = Request {
             method: "POST".into(),

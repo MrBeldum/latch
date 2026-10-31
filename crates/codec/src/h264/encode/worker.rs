@@ -4,7 +4,7 @@ use super::{
     transform::{self, SCAN},
 };
 use crate::Yuv420;
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 #[derive(Clone, Default)]
 pub(super) struct Mb {
@@ -26,6 +26,7 @@ pub(super) struct Job {
     pub end: usize,
     pub qp: u8,
     pub suppression: u8,
+    pub effort: u8,
     pub subpixel: bool,
     pub is_motion: bool,
     pub global: (i32, i32),
@@ -37,6 +38,8 @@ pub(super) struct Job {
 }
 pub(super) struct Band {
     pub first: usize,
+    pub elapsed_ms: f64,
+    pub deblock_ms: f64,
     pub picture: Yuv420,
     pub mbs: Vec<Mb>,
     pub nal: Vec<u8>,
@@ -304,6 +307,7 @@ fn motion_cost(
     mv: (i32, i32),
     pred: (i32, i32),
     lambda: u32,
+    limit: u32,
 ) -> u32 {
     let mut cost = lambda * (signed_bits(mv.0 - pred.0) + signed_bits(mv.1 - pred.1));
     let pw = r.padded_width() as i32;
@@ -314,15 +318,18 @@ fn motion_cost(
         if rx >= 0 && ry >= 0 && rx + 16 <= pw && ry + 16 <= ph {
             let so = y * src.y_stride + x;
             let ro = ry as usize * r.y_stride + rx as usize;
-            cost += predict::sad16x8(&src.y, src.y_stride, so, &r.y, r.y_stride, ro)
-                + predict::sad16x8(
-                    &src.y,
-                    src.y_stride,
-                    so + src.y_stride,
-                    &r.y,
-                    r.y_stride,
-                    ro + r.y_stride,
-                );
+            cost += predict::sad16x8(&src.y, src.y_stride, so, &r.y, r.y_stride, ro);
+            if cost >= limit {
+                return cost;
+            }
+            cost += predict::sad16x8(
+                &src.y,
+                src.y_stride,
+                so + src.y_stride,
+                &r.y,
+                r.y_stride,
+                ro + r.y_stride,
+            );
             return cost;
         }
         for yy in 0..16 {
@@ -364,7 +371,11 @@ fn motion_cost(
                     r.y_stride,
                     ro1,
                     ro2,
-                ) + predict::sad16x8_avg(
+                );
+                if cost >= limit {
+                    return cost;
+                }
+                cost += predict::sad16x8_avg(
                     &src.y,
                     src.y_stride,
                     so + src.y_stride,
@@ -375,15 +386,18 @@ fn motion_cost(
                     ro2 + r.y_stride,
                 );
             } else {
-                cost += predict::sad16x8(&src.y, src.y_stride, so, plane1, r.y_stride, ro1)
-                    + predict::sad16x8(
-                        &src.y,
-                        src.y_stride,
-                        so + src.y_stride,
-                        plane1,
-                        r.y_stride,
-                        ro1 + r.y_stride,
-                    );
+                cost += predict::sad16x8(&src.y, src.y_stride, so, plane1, r.y_stride, ro1);
+                if cost >= limit {
+                    return cost;
+                }
+                cost += predict::sad16x8(
+                    &src.y,
+                    src.y_stride,
+                    so + src.y_stride,
+                    plane1,
+                    r.y_stride,
+                    ro1 + r.y_stride,
+                );
             }
             return cost;
         }
@@ -499,7 +513,7 @@ fn motion(
         }
     }
     let round = |v: (i32, i32)| ((v.0 / 4) * 4, (v.1 / 4) * 4);
-    let cost = |mv| {
+    let cost = |mv, limit| {
         motion_cost(
             &job.source,
             &job.reference,
@@ -509,6 +523,7 @@ fn motion(
             mv,
             pred,
             lambda,
+            limit,
         )
     };
     let mut best = (0, 0);
@@ -518,7 +533,7 @@ fn motion(
         if candidates[..i].iter().any(|&p| round(p) == v) {
             continue;
         }
-        let s = cost(v);
+        let s = cost(v, score);
         if s < score {
             score = s;
             best = v;
@@ -529,12 +544,23 @@ fn motion(
     } else {
         32 + lambda * 2
     };
-    if score < early_exit_cost {
+    let early_exit_cost = if job.effort >= 2 {
+        early_exit_cost.max(lambda * 64)
+    } else {
+        early_exit_cost
+    };
+    if job.effort >= 4 || score < early_exit_cost {
         return (best, score);
     }
-    let max_iter = if is_motion { 2 } else { 4 };
+    let max_iter = if job.effort >= 2 {
+        1
+    } else if is_motion {
+        2
+    } else {
+        4
+    };
     let centre = best;
-    let steps = if score < 1024 + lambda * 16 {
+    let steps = if job.effort >= 2 || score < 1024 + lambda * 16 {
         [2, 1, 0, 0]
     } else {
         [8, 4, 2, 1]
@@ -550,7 +576,7 @@ fn motion(
                 if (v.0 - centre.0).abs() > 64 || (v.1 - centre.1).abs() > 64 {
                     continue;
                 }
-                let s = cost(v);
+                let s = cost(v, score);
                 if s < score {
                     score = s;
                     next = v;
@@ -579,7 +605,7 @@ fn motion(
                         continue;
                     }
                     let v = (centre.0 + dx, centre.1 + dy);
-                    let s = cost(v);
+                    let s = cost(v, score);
                     if s < score {
                         score = s;
                         best = v;
@@ -591,7 +617,14 @@ fn motion(
     (best, score)
 }
 
-pub(super) fn header(first: usize, idr: bool, frame_num: u32, idr_id: u32, qp: u8) -> Bits {
+pub(super) fn header(
+    first: usize,
+    idr: bool,
+    frame_num: u32,
+    idr_id: u32,
+    qp: u8,
+    slice_filter: bool,
+) -> Bits {
     let mut b = Bits::default();
     b.ue(first as u32);
     b.ue(if idr { 2 } else { 0 });
@@ -610,18 +643,40 @@ pub(super) fn header(first: usize, idr: bool, frame_num: u32, idr_id: u32, qp: u
         b.bit(false);
     }
     b.se(qp as i32 - 26);
-    b.ue(0);
+    // idc=2 retains deblocking inside slices and permits parallel filtering.
+    b.ue(if slice_filter { 2 } else { 0 });
     b.se(0);
     b.se(0);
     b
 }
 
+/// `mb_qp_delta` from `from` to `to`: the spec allows -26..=25 and wraps
+/// the sum modulo 52, so larger steps go the other way round.
+fn qp_delta(to: u8, from: u8) -> i32 {
+    let delta = to as i32 - from as i32;
+    if delta > 25 {
+        delta - 52
+    } else if delta < -26 {
+        delta + 52
+    } else {
+        delta
+    }
+}
+
 pub(super) fn encode(job: Job) -> Band {
+    let started = Instant::now();
     let w = job.source.padded_width() / 16;
     let rows = job.end - job.first;
     let mut rec = Yuv420::new(job.source.width, rows as u32 * 16);
     let mut mbs = vec![Mb::default(); w * rows];
-    let mut b = header(job.first * w, job.idr, job.frame_num, job.idr_id, job.qp);
+    let mut b = header(
+        job.first * w,
+        job.idr,
+        job.frame_num,
+        job.idr_id,
+        job.qp,
+        true,
+    );
     let mut skip_run = 0;
     let mut skipped = 0;
     let mut qpy = job.qp;
@@ -713,15 +768,25 @@ pub(super) fn encode(job: Job) -> Band {
             motion(&job, is_motion, &mbs, w, index, x, gy, pred, global, lambda)
         };
         // A single DC trial avoids evaluating every intra mode for an obvious temporal match.
-        let intra_trial = predict::intra_plane(&rec.y, rec.y_stride, x, y, 16, 2, false);
-        let mut intra_cost = 0;
-        for yy in 0..16 {
-            for xx in 0..16 {
-                intra_cost += job.source.y[(gy + yy) * job.source.y_stride + x + xx]
-                    .abs_diff(intra_trial[yy * 16 + xx]) as u32;
+        let try_intra = job.idr || job.effort < 2 || inter_cost > lambda * 128;
+        let intra_cost = if try_intra {
+            let intra_trial = predict::intra_plane(&rec.y, rec.y_stride, x, y, 16, 2, false);
+            let mut intra_cost = 0;
+            for yy in 0..16 {
+                if !job.idr && intra_cost + lambda * 24 >= inter_cost {
+                    break;
+                }
+                for xx in 0..16 {
+                    intra_cost += job.source.y[(gy + yy) * job.source.y_stride + x + xx]
+                        .abs_diff(intra_trial[yy * 16 + xx])
+                        as u32;
+                }
             }
-        }
-        let intra = job.idr || intra_cost + lambda * 24 < inter_cost;
+            intra_cost
+        } else {
+            u32::MAX
+        };
+        let intra = job.idr || (try_intra && intra_cost.saturating_add(lambda * 24) < inter_cost);
         mbs[index].intra = intra;
         mbs[index].mv = if intra { (0, 0) } else { mv };
         mbs[index].quality = if job.suppression == 0 { qp } else { 51 };
@@ -744,7 +809,8 @@ pub(super) fn encode(job: Job) -> Band {
         let mut best16 = (u32::MAX, 2u8, [0; 256]);
         if intra {
             for mode in 0..4 {
-                if (mode == 0 && y == 0)
+                if (job.effort >= 4 && mode != 2)
+                    || (mode == 0 && y == 0)
                     || (mode == 1 && x == 0)
                     || (mode == 3 && (x == 0 || y == 0))
                 {
@@ -775,7 +841,7 @@ pub(super) fn encode(job: Job) -> Band {
             }
         }
         let skip_intra4 = is_motion && (best16.0 <= lambda * 48 || inter_cost <= lambda * 48);
-        let fast16 = intra && (skip_intra4 || best16.0 <= lambda * 16);
+        let fast16 = intra && (job.effort >= 3 || skip_intra4 || best16.0 <= lambda * 16);
         for i in 0..if fast16 { 0 } else { 16 } {
             // All remaining intra4 costs are nonnegative; intra16 has already won.
             if intra && cost4 >= best16.0 {
@@ -940,18 +1006,21 @@ pub(super) fn encode(job: Job) -> Band {
                 let bx = (i % 2) * 4;
                 let by = (i / 2) * 4;
                 let off = (y / 2 + by) * rec.c_stride + x / 2 + bx;
-                let mut input = [0; 16];
-                for yy in 0..4 {
-                    for xx in 0..4 {
-                        let j = yy * 4 + xx;
-                        let p = dp[off + yy * rec.c_stride + xx];
-                        predictions[i][j] = p;
-                        input[j] = sp[(gy / 2 + by + yy) * job.source.c_stride + x / 2 + bx + xx]
-                            as i32
-                            - p as i32;
-                    }
-                }
-                transformed[i] = transform::forward(input);
+                predictions[i] = transform::pixels(dp, rec.c_stride, off);
+                let input = transform::residual(
+                    sp,
+                    job.source.c_stride,
+                    (gy / 2 + by) * job.source.c_stride + x / 2 + bx,
+                    &predictions[i],
+                );
+                // Constant chroma residuals have only DC; avoid both 4x4 passes.
+                transformed[i] = if input.iter().all(|&v| v == input[0]) {
+                    let mut dc = [0; 16];
+                    dc[0] = input[0] * 16;
+                    dc
+                } else {
+                    transform::forward(input)
+                };
             }
             dc[plane] = transform::chroma_dc(transformed.map(|c| c[0])).map(|v| {
                 transform::suppress(transform::quant(v, cqp, 0, intra, 1), job.suppression)
@@ -961,23 +1030,25 @@ pub(super) fn encode(job: Job) -> Band {
             }
             let dci = transform::chroma_dc_inverse(dc[plane], cqp);
             for i in 0..4 {
-                let (q, mut dq) = chroma_quantizer.apply(transformed[i]);
+                let mut dq = [0; 16];
+                if transformed[i][1..].iter().any(|&v| v != 0) {
+                    let (q, dequantized) = chroma_quantizer.apply(transformed[i]);
+                    dq = dequantized;
+                    for (j, &s) in SCAN.iter().enumerate().skip(1) {
+                        cc[plane][i][j] = q[s];
+                    }
+                    if cc[plane][i][1..].iter().any(|&v| v != 0) {
+                        chroma_cbp = 2;
+                    }
+                }
                 dq[0] = dci[i];
-                for (j, &s) in SCAN.iter().enumerate().skip(1) {
-                    cc[plane][i][j] = q[s];
-                }
-                if cc[plane][i][1..].iter().any(|&v| v != 0) {
-                    chroma_cbp = 2;
-                }
                 let r = transform::inverse(dq);
                 let bx = (i % 2) * 4;
                 let by = (i / 2) * 4;
+                let pixels = transform::reconstruct(&predictions[i], r);
                 for yy in 0..4 {
-                    for xx in 0..4 {
-                        let j = yy * 4 + xx;
-                        dp[(y / 2 + by + yy) * rec.c_stride + x / 2 + bx + xx] =
-                            (predictions[i][j] as i32 + r[j]).clamp(0, 255) as u8;
-                    }
+                    let off = (y / 2 + by + yy) * rec.c_stride + x / 2 + bx;
+                    dp[off..off + 4].copy_from_slice(&pixels[yy * 4..yy * 4 + 4]);
                 }
             }
         }
@@ -1032,7 +1103,7 @@ pub(super) fn encode(job: Job) -> Band {
             b.ue(table.iter().position(|&v| v as u32 == cbp).unwrap() as u32);
         }
         if cbp != 0 || intra16 {
-            b.se(qp as i32 - qpy as i32);
+            b.se(qp_delta(qp, qpy));
             qpy = qp;
         }
         mbs[index].qp = qpy;
@@ -1068,7 +1139,12 @@ pub(super) fn encode(job: Job) -> Band {
     }
     let mut nal = Vec::new();
     b.nal(if job.idr { 0x65 } else { 0x41 }, &mut nal);
+    let deblock_started = Instant::now();
+    super::deblock::filter(&mut rec, &mbs);
+    let deblock_ms = deblock_started.elapsed().as_secs_f64() * 1000.;
     Band {
+        deblock_ms,
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.,
         first: job.first,
         picture: rec,
         mbs,
@@ -1080,7 +1156,70 @@ pub(super) fn encode(job: Job) -> Band {
 
 #[cfg(test)]
 mod tests {
+    use super::qp_delta;
+
+    #[test]
+    fn qp_deltas_stay_in_range_and_wrap_to_the_target() {
+        for from in 0..=51u8 {
+            for to in 0..=51u8 {
+                let delta = qp_delta(to, from);
+                assert!((-26..=25).contains(&delta), "{from} -> {to}: {delta}");
+                assert_eq!((from as i32 + delta).rem_euclid(52), to as i32);
+            }
+        }
+    }
+
     use super::*;
+    #[test]
+    fn bounded_motion_cost_preserves_candidate_ordering() {
+        let mut seed = 27u32;
+        let mut src = Yuv420::new(64, 64);
+        let mut reference = src.clone();
+        for v in src.y.iter_mut().chain(reference.y.iter_mut()) {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            *v = (seed >> 16) as u8;
+        }
+        let hp = predict::compute_half_pel(&reference.y, 64, 64, 64);
+        for x in [0, 16, 48] {
+            for y in [0, 16, 48] {
+                for mv in [
+                    (0, 0),
+                    (-16, 12),
+                    (16, -12),
+                    (-1, -1),
+                    (1, 2),
+                    (2, 2),
+                    (3, 1),
+                ] {
+                    let expected = 7 * (signed_bits(mv.0 - 4) + signed_bits(mv.1 + 4))
+                        + (0..16)
+                            .flat_map(|yy| (0..16).map(move |xx| (xx, yy)))
+                            .map(|(xx, yy)| {
+                                src.y[(y + yy) * 64 + x + xx].abs_diff(predict::luma_mc(
+                                    &reference.y,
+                                    64,
+                                    64,
+                                    64,
+                                    (x + xx) as i32,
+                                    (y + yy) as i32,
+                                    mv,
+                                )) as u32
+                            })
+                            .sum::<u32>();
+                    for limit in [0, expected / 2, expected, expected + 1, u32::MAX] {
+                        let cost =
+                            motion_cost(&src, &reference, Some(&hp), x, y, mv, (4, -4), 7, limit);
+                        if expected < limit {
+                            assert_eq!(cost, expected);
+                        } else {
+                            assert!(cost >= limit && cost <= expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn unrelated_motion_is_not_a_scroll() {
         let mut a = Yuv420::new(640, 368);
@@ -1126,6 +1265,7 @@ mod tests {
                 end: 23,
                 qp: 30,
                 suppression: 0,
+                effort: 0,
                 subpixel: false,
                 is_motion: false,
                 global: (0, 0),

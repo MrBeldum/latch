@@ -41,6 +41,10 @@ pub fn number(value: i64) -> Owned {
     // SAFETY: CFNumber copies the signed 64-bit value before returning.
     Owned::new(unsafe { CFNumberCreate(ptr::null(), 4, (&value as *const i64).cast()) }).unwrap()
 }
+pub fn float_number(value: f64) -> Owned {
+    // SAFETY: CFNumber copies the float 64-bit value before returning (6 = kCFNumberFloat64Type).
+    Owned::new(unsafe { CFNumberCreate(ptr::null(), 6, (&value as *const f64).cast()) }).unwrap()
+}
 pub fn dictionary(entries: &[(Ref, Ref)]) -> Owned {
     let keys: Vec<_> = entries.iter().map(|e| e.0).collect();
     let values: Vec<_> = entries.iter().map(|e| e.1).collect();
@@ -90,6 +94,8 @@ extern "C" {
     pub fn CFArrayCreate(allocator: Ref, values: *const Ref, count: isize, callbacks: Ref) -> Ref;
     pub fn CFArrayGetCount(array: Ref) -> isize;
     pub fn CFArrayGetValueAtIndex(array: Ref, index: isize) -> Ref;
+    #[cfg(test)]
+    pub fn CFEqual(a: Ref, b: Ref) -> bool;
 }
 #[link(name = "VideoToolbox", kind = "framework")]
 extern "C" {
@@ -103,7 +109,13 @@ extern "C" {
     pub static kVTCompressionPropertyKey_AverageBitRate: Ref;
     pub static kVTCompressionPropertyKey_DataRateLimits: Ref;
     pub static kVTCompressionPropertyKey_MaxKeyFrameInterval: Ref;
+    pub static kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration: Ref;
+    pub static kVTCompressionPropertyKey_MaxFrameDelayCount: Ref;
+    pub static kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality: Ref;
     pub static kVTCompressionPropertyKey_ExpectedFrameRate: Ref;
+    pub static kVTCompressionPropertyKey_ColorPrimaries: Ref;
+    pub static kVTCompressionPropertyKey_TransferFunction: Ref;
+    pub static kVTCompressionPropertyKey_YCbCrMatrix: Ref;
     pub static kVTProfileLevel_HEVC_Main_AutoLevel: Ref;
     pub static kVTProfileLevel_H264_High_AutoLevel: Ref;
     pub static kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel: Ref;
@@ -144,6 +156,13 @@ extern "C" {
     pub fn CMSampleBufferGetFormatDescription(sample: Ref) -> Ref;
     pub fn CMSampleBufferGetDataBuffer(sample: Ref) -> Ref;
     pub fn CMBlockBufferGetDataLength(block: Ref) -> usize;
+    pub fn CMBlockBufferGetDataPointer(
+        block: Ref,
+        offset: usize,
+        length_at_offset: *mut usize,
+        total_length: *mut usize,
+        data_pointer: *mut *mut u8,
+    ) -> i32;
     pub fn CMBlockBufferCopyDataBytes(
         block: Ref,
         offset: usize,
@@ -204,6 +223,8 @@ extern "C" {
     #[cfg(test)]
     pub static kCVImageBufferYCbCrMatrixKey: Ref;
     pub static kCVImageBufferYCbCrMatrix_ITU_R_709_2: Ref;
+    pub static kCVImageBufferColorPrimaries_ITU_R_709_2: Ref;
+    pub static kCVImageBufferTransferFunction_ITU_R_709_2: Ref;
     #[cfg(test)]
     pub fn CVPixelBufferCreate(
         allocator: Ref,
@@ -228,6 +249,7 @@ extern "C" {
 extern "C" {
     pub fn CGPreflightScreenCaptureAccess() -> bool;
     pub fn CGMainDisplayID() -> u32;
+    pub fn CGDisplayBounds(display: u32) -> objc2_core_foundation::CGRect;
     pub static kCGColorBlack: Ref;
     pub fn CGColorGetConstantColor(name: Ref) -> Ref;
 }

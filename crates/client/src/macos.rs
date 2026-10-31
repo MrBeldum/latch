@@ -87,6 +87,42 @@ mod imp {
         let flags = unsafe { NSEvent::modifierFlags_class() };
         Some(flags.contains(NSEventModifierFlags::NSEventModifierFlagCapsLock))
     }
+
+    pub fn display_hz() -> Option<u32> {
+        let mtm = MainThreadMarker::new()?;
+        let screen = objc2_app_kit::NSScreen::mainScreen(mtm)?;
+        // The current mode can be below the panel's advertised maximum.
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGDisplayCopyDisplayMode(display: u32) -> *const std::ffi::c_void;
+            fn CGDisplayModeGetRefreshRate(mode: *const std::ffi::c_void) -> f64;
+            fn CGDisplayModeRelease(mode: *const std::ffi::c_void);
+        }
+        let current = unsafe {
+            let description = screen.deviceDescription();
+            let number = description.objectForKey(&NSString::from_str("NSScreenNumber"))?;
+            let display: u32 = objc2::msg_send![&*number, unsignedIntValue];
+            let mode = CGDisplayCopyDisplayMode(display);
+            if mode.is_null() {
+                0.0
+            } else {
+                let hz = CGDisplayModeGetRefreshRate(mode);
+                CGDisplayModeRelease(mode);
+                hz
+            }
+        };
+        let fps = if current > 0.0 {
+            current.round() as isize
+        } else {
+            // Variable-refresh modes may report zero.
+            unsafe { screen.maximumFramesPerSecond() }
+        };
+        if fps > 0 {
+            Some(fps as u32)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -98,6 +134,10 @@ mod imp {
     }
 
     pub fn caps_lock() -> Option<bool> {
+        None
+    }
+
+    pub fn display_hz() -> Option<u32> {
         None
     }
 }
@@ -112,6 +152,11 @@ pub fn stream_owns_keys(owned: bool) {
 /// None where there is no such count.
 pub fn pasteboard_changes() -> Option<isize> {
     imp::pasteboard_changes()
+}
+
+/// The main display's maximum frame rate (e.g. 120 Hz on ProMotion), or None.
+pub fn display_hz() -> Option<u32> {
+    imp::display_hz()
 }
 
 /// Whether Caps Lock is on on this Mac. None where that is not known.

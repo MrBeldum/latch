@@ -73,11 +73,9 @@ xcrun stapler staple dist.noindex/Latch.app
    first. A dot and one line say whether each is ready, asleep, or
    missing something on its side.
 3. Click **Connect** (**Wake and connect** for a machine that is asleep).
-   The first time with a machine, Latch pairs with it: it picks a
-   random PIN, sends it to Latch on that machine over Tailscale, and
-   Latch there enters it for you. You see the PIN but never need it. If
-   Latch is not sharing on that machine, pairing cannot finish: open
-   Latch there and set up sharing on its **Sharing** tab first.
+   There is no pairing: being on the same Tailscale account is the check.
+   If Latch is not sharing on that machine, open Latch there and set up
+   sharing on its **Sharing** tab first.
 4. The desktop appears.
 
 Command-1 opens **Machines**, Command-2 **Sharing** and Command-comma
@@ -229,8 +227,7 @@ itself, at the new size, when this Mac's window moves to a display of a
 different size.
 
 Settings are saved in `~/Library/Application Support/io.github.MrBeldum.Latch/client.toml`,
-along with the MAC, LAN address and pairing certificate of each PC Latch
-has paired with.
+along with the MAC and LAN address of each PC Latch has seen.
 
 ## Waking a PC from another network
 
@@ -251,8 +248,27 @@ a Raspberry Pi, or a router that runs Tailscale) is the alternative. Use
   go out.
 - **Incoming connections**: if the macOS firewall is on it may ask once,
   the first time the Mac serves a Latch Host install through the stream.
-- Nothing else. Latch captures no screen and reads the keyboard and
-  mouse only in its own window.
+- Only connecting, nothing else: Latch captures no screen and reads the
+  keyboard and mouse only in its own window.
+- Sharing this Mac also needs **Screen Recording** (the picture and the
+  sound, through ScreenCaptureKit) and **Accessibility** (the viewer's
+  keyboard and mouse). macOS asks once, when you set up sharing; after
+  that the switches are in System Settings > Privacy & Security, and the
+  **Sharing** tab has a button that opens each pane. macOS applies a
+  newly allowed permission only after Latch restarts, so once a pane has
+  been opened the tab offers **Restart Latch**, which restarts the
+  background service that records and moves the pointer.
+
+## Uninstalling
+
+`/Applications/Latch.app/Contents/MacOS/Latch --uninstall` stops the
+background service, removes its login item (under the names earlier
+versions used too), removes Latch from the macOS firewall's list if setup
+added it (macOS asks for an administrator), and resets Latch's Screen
+Recording and Accessibility permissions. Running it again is harmless.
+Then drag `Latch.app` to the Trash; settings stay in
+`~/Library/Application Support/io.github.MrBeldum.Latch` until you delete
+that folder.
 
 ## Connected, but the picture is black
 
@@ -322,7 +338,7 @@ it says what happened last. A copy that is not running from an app bundle
   node key expires. Open the machine in the
   [admin console](https://login.tailscale.com/admin/machines) and choose
   **Disable key expiry**; the warning goes away at the next scan.
-- PCs are remembered in `client.toml` with their Tailscale address, MAC and
-  the certificate from pairing. While Tailscale on this Mac is off they stay
+- PCs are remembered in `client.toml` with their Tailscale address and
+  MAC. While Tailscale on this Mac is off they stay
   listed with when they were last seen, and **Wake** still works over the
   LAN or the public address.

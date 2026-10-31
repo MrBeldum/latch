@@ -3,6 +3,10 @@
 //! `--keys` also exercises VK mapping once the parallel keymap work lands.
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if latch_engine::linux::run_helper() {
+        return Ok(());
+    }
     use anyhow::ensure;
     use latch_engine::input::{DisplayRect, Event};
     use latch_engine::software::{Bgra, CpuCapture};

@@ -6,6 +6,20 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- Restore start-to-start host frame cadence on software, macOS and Windows.
+- Pace video on a bounded sender queue, size UDP buffers explicitly, and adapt
+  bitrate within the requested ceiling using loss, RTT and sender queue age.
+- Recover a completely lost startup keyframe, batch readiness-driven receives,
+  reuse video shard buffers, and bound decode backlog by time.
+- Add compatible 250 ms feedback and transport telemetry; correct recovered
+  audio timestamps and guarantee Rice packets fit the existing wire format.
+- Windows: a viewer's mouse and keyboard reach windows that run as
+  administrator (installers, Task Manager, game launchers). Windows drops
+  an unelevated program's input while such a window is in front, so the
+  pointer froze. Setup now registers a `LatchInput` task that runs a copy of
+  Latch from `%ProgramFiles%\Latch\Input`, elevated, for streams to inject
+  through; run setup again after updating. Without it, the log names the
+  window that ignores input.
 - Display Tailscale peers by machine name (the first label of MagicDNS)
   rather than OS hostname, so iOS/iPadOS clients no longer display as
   "localhost".

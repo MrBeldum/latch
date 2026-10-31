@@ -20,6 +20,7 @@ fn request(name: &str) -> StreamRequest {
         udp_port: 9,
         audio: false,
         name: name.into(),
+        cursor: false,
     }
 }
 
@@ -136,6 +137,7 @@ fn post_accept_end_close_and_missing_media_are_reported_as_failures() {
                     encoder: "fake host without UDP".into(),
                     audio: None,
                     audio_problem: String::new(),
+                    cursor: false,
                 }),
             )
             .unwrap();
@@ -173,6 +175,7 @@ fn post_accept_end_close_and_missing_media_are_reported_as_failures() {
                 hevc: false,
                 audio: false,
                 name: "failure test".into(),
+                cursor: false,
             },
             Arc::new(FrameSlot::default()),
             tx,

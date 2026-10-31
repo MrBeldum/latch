@@ -1,0 +1,78 @@
+# Validation on 2026-10-31
+
+All commands below exited successfully on implementation commit 7436ec8.
+
+cargo fmt --all -- --check
+cargo clippy -p latch-codec --all-targets -- -D warnings
+cargo test --release -p latch-codec
+cargo test --release -p latch-codec --test encode_oracle -- --ignored
+cargo zigbuild -p latch-codec --release --target x86_64-unknown-linux-gnu
+cargo test -p latch-codec --target x86_64-apple-darwin --lib
+cargo zigbuild --release -p latch-codec --example encode_bench --example color_bench --target aarch64-unknown-linux-gnu.2.39
+bash scripts/audit-native.sh
+
+Release suite summaries:
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 6 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.76s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Explicit full-resolution FFmpeg + VideoToolbox oracles:
+    Finished `release` profile [optimized] target(s) in 0.04s
+     Running tests/encode_oracle.rs (target/release/deps/encode_oracle-f111762473d30bc1)
+
+running 2 tests
+test videotoolbox_oracle ... ok
+test software_oracle_desktop_matrix ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 34.76s
+
+
+Rosetta x86_64 library suite:
+   Compiling latch-codec v5.0.1 (/Users/daniel/.t3/worktrees/latch/t3-722a7fb7/crates/codec)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.47s
+     Running unittests src/lib.rs (target/x86_64-apple-darwin/debug/deps/latch_codec-7771d1ec1f9813d0)
+
+running 27 tests
+test h264::decode::cavlc::tests::level_prefix_over_28_is_refused ... ok
+test h264::decode::golomb::br_edge_tests::byte_read_requires_alignment ... ok
+test h264::decode::golomb::br_edge_tests::ue_prefix_over_31_zeros_rejects ... ok
+test h264::decode::intra::dc_helper_tests::dc_mean_arms ... ok
+test h264::decode::golomb::br_edge_tests::peek_rejects_over_32_bits ... ok
+test h264::decode::intra::dc_helper_tests::mode_rejects_bound_the_tables ... ok
+test h264::decode::sps::profile_name_tests::every_profile_names_itself ... ok
+test h264::decode::sps::tests::extended_profile_parses_as_extended ... ok
+test h264::decode::pps::tests::pps_field_bounds_reject ... ok
+test h264::decode::sps::tests::high_profile_extension_arms ... ok
+test color::tests::simd_matches_scalar_with_tails_strides_and_missing_rows ... ok
+test h264::decode::sps::tests::pic_order_cycles_over_255_refused ... ok
+test h264::decode::sps::tests::poc_type_1_and_rejects ... ok
+test h264::encode::predict::tests::chroma_simd_matches_scalar ... ok
+test h264::encode::bits::tests::put_matches_individual_bits_at_every_alignment ... ok
+test h264::encode::predict::tests::sad16x8_matches_scalar ... ok
+test h264::encode::transform::tests::quantization_matches_scalar ... ok
+test yuv::tests::padding_copies_the_last_visible_column_and_row ... ok
+test h264::nal::tests::mixed_start_codes_and_trailing_zeros ... ok
+test h264::encode::predict::tests::half_pel_simd_matches_scalar ... ok
+test h264::encode::predict::tests::half_pel_and_subpel_match_luma_mc ... ok
+test h264::encode::worker::tests::unrelated_motion_is_not_a_scroll ... ok
+test h264::encode::predict::tests::averaged_sad_and_copy_match_scalar_with_strides ... ok
+test h264::encode::worker::tests::sixty_four_pixel_scrolls_are_exact_in_both_directions ... ok
+test h264::encode::worker::tests::bounded_motion_cost_preserves_candidate_ordering ... ok
+test h264::encode::transform::tests::transforms_match_scalar ... ok
+test h264::decode::inter::tests::cached_motion_matches_per_sample_scalar_at_every_fraction_and_edge ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+Native audit:
+AUDIT PASSED: All packages comply with native code policy.
+
+The external ITU conformance fixtures are absent, and H264_CROSSCHECK is unset; those decoder fixture checks skip under the standard release command. Encoder FFmpeg and VideoToolbox oracles ran explicitly and passed.

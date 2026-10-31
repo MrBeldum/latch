@@ -38,18 +38,9 @@ pub fn probe() -> Result<Value> {
 /// Windows' "advanced colour" — HDR — for every display path, and the
 /// power to turn it off.
 ///
-/// A PC whose monitor is gone keeps composing in the colour mode that
-/// monitor asked for — half-float, ten bits a channel — while the
-/// placeholder display left behind reports no luminance at all. A capture
-/// converting that to an ordinary picture has nothing to describe the
-/// brightness with, and every frame comes out black even though the PC's
-/// own desktop draws normally.
-///
-/// Where the mode is one the display supports, turning it off restores an
-/// eight-bit desktop that captures normally. Where Windows is enforcing it
-/// on a placeholder display, it refuses every switch with
-/// ERROR_NOT_SUPPORTED: the mode is a consequence of having no display,
-/// not a setting, and only attaching one clears it.
+/// Capture accepts FP16 scRGB desktops and maps their SDR white level into
+/// the SDR stream. Keep these diagnostics and the manual switch for driver
+/// failures, including phantom displays left behind after monitor removal.
 pub fn advanced_color() -> Result<Value> {
     #[cfg(windows)]
     {

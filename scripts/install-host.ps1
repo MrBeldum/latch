@@ -1,7 +1,9 @@
 # Install Latch Host for the current user: copy the exe into
-# %LOCALAPPDATA%\Latch, add Start Menu and Desktop
-# shortcuts, and open it. The app itself runs the one administrator step
-# (firewall, Wake-on-LAN, virtual-display modes) when you click "Set up this PC".
+# %LOCALAPPDATA%\Latch, add Start Menu and Desktop shortcuts and an entry
+# in Settings > Apps, and open it. The app itself runs the one
+# administrator step (firewall, Wake-on-LAN, virtual-display modes) when you
+# click "Set up as administrator" on its Sharing tab. Uninstalling (from
+# Settings > Apps, or `latch-host.exe --uninstall`) undoes both.
 #
 # -NoStart leaves the window closed. The background service this stops to
 # replace the exe always comes back, in the signed-in user's session: run
@@ -54,6 +56,12 @@ if ((Test-Path $OldDir) -and -not (Test-Path (Join-Path $DestDir "host.toml"))) 
 New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
 Copy-Item $Exe $DestExe -Force
 Write-Host "Installed: $DestExe"
+# Latch 4 kept its engine's archive (about 25 MB) and the scripts that
+# started the engine in this folder. Latch 5 has no separate engine; the
+# engine itself was in Program Files, which setup's retire step removes.
+foreach ($old in 'Sunshine-Windows-AMD64-lite.zip', 'take-over-engine.ps1', 'take-over-engine.vbs', 'take-over-engine.cmd') {
+    Remove-Item -LiteralPath (Join-Path $DestDir $old) -Force -ErrorAction SilentlyContinue
+}
 $Wsh = New-Object -ComObject WScript.Shell
 $Desktop = [Environment]::GetFolderPath("Desktop")
 $StartMenu = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs"
@@ -72,13 +80,30 @@ $Run = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 Remove-ItemProperty -Path $Run -Name "BroLinkHost" -ErrorAction SilentlyContinue
 New-ItemProperty -Path $Run -Name "LatchHost" -Value "`"$DestExe`" --background" -PropertyType String -Force | Out-Null
 
+# Settings > Apps lists it, and its Uninstall runs latch-host --uninstall.
+$Apps = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Latch"
+New-Item -Path $Apps -Force | Out-Null
+$Version = (Get-Item -LiteralPath $DestExe).VersionInfo.ProductVersion
+foreach ($v in @(
+        @('DisplayName', 'Latch'),
+        @('DisplayIcon', $DestExe),
+        @('DisplayVersion', "$Version"),
+        @('InstallLocation', $DestDir),
+        @('UninstallString', "`"$DestExe`" --uninstall")
+    )) {
+    New-ItemProperty -Path $Apps -Name $v[0] -Value $v[1] -PropertyType String -Force | Out-Null
+}
+foreach ($flag in 'NoModify', 'NoRepair') {
+    New-ItemProperty -Path $Apps -Name $flag -Value 1 -PropertyType DWord -Force | Out-Null
+}
+
 if (Test-Path $OldDir) {
     Remove-Item -LiteralPath $OldDir -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path $OldDir) { Write-Host "Could not remove the previous install folder completely; it is safe to delete." }
 }
 
 Write-Host "Shortcut: Desktop\Latch Host.lnk"
-Write-Host "Open Latch Host and click 'Set up this PC' once."
+Write-Host "Open Latch and click 'Set up as administrator' on the Sharing tab once."
 Write-Host "If you already ran setup from the unzipped copy, run it once more from this install so the firewall allows $DestExe."
 if ((Get-Process -Id $PID).SessionId -eq 0) {
     # The task runs as this user, unelevated like the Run key, in the session
@@ -104,9 +129,11 @@ if ((Get-Process -Id $PID).SessionId -eq 0) {
         }
     } catch {
         Write-Host "Could not start Latch Host in the signed-in session: $_"
+    } finally {
+        # Deleting a task does not terminate its running instances. Remove
+        # the temporary registration even when startup failed or timed out.
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     }
-    # The task has no trigger, so left registered it never runs by itself;
-    # removing it could end the copy it just started.
     if ($up) {
         Write-Host "Latch Host is running in the signed-in user's session."
     } else {

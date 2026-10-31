@@ -7,9 +7,14 @@
 //! [`pattern`] a synthetic desktop for tests and measurements.
 
 pub mod audio;
+#[cfg(any(windows, test))]
+mod bitstream;
+mod congestion;
 pub mod display;
 pub mod input;
+mod pacing;
 pub mod pattern;
+pub mod priority;
 pub mod server;
 pub mod software;
 pub mod testmode;
@@ -21,3 +26,7 @@ pub mod linux;
 pub mod mac;
 #[cfg(windows)]
 pub mod windows;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "linux/x11.rs"]
+mod x11_bootstrap_tests;

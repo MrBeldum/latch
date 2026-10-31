@@ -47,10 +47,18 @@ fn session(addr: SocketAddr) -> Arc<Session> {
             display: info().display,
         }),
         rtt: Mutex::new(RttEstimator::new()),
+        rtt_low: Mutex::new(None),
+        pace_kbps: AtomicU32::new(0),
         fec: AtomicU8::new(DEFAULT_FEC_PERCENT),
         heard_us: AtomicU64::new(0),
         frames: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
+        transport: TransportState::new(1000),
+        keyframe_request: Mutex::new(None),
+        audio_enabled: false,
+        cursor_supported: false,
+        draw_cursor: AtomicBool::new(true),
+        control_writer: Mutex::new(None),
     })
 }
 
@@ -88,6 +96,112 @@ impl VideoPipeline for Video {
 }
 
 #[test]
+fn a_viewer_that_does_not_read_cannot_block_the_control_writer() {
+    let server = Server::bind(0, Options::default()).unwrap();
+    let session = session("127.0.0.1:9".parse().unwrap());
+    let (mut host, _client) = sockets();
+    // Windows grows a loopback send backlog on demand, so without a fixed
+    // send buffer the prefill below never fills it and the Accept never
+    // blocks. Setting SO_SNDBUF turns that autotuning off.
+    #[cfg(windows)]
+    {
+        let _ = socket2::SockRef::from(&host).set_send_buffer_size(8192);
+        let _ = socket2::SockRef::from(&_client).set_recv_buffer_size(8192);
+    }
+    host.set_nonblocking(true).unwrap();
+    let until = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < until {
+        match host.write(&[0; 65536]) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1))
+            }
+            Err(e) => panic!("prefill failed: {e}"),
+        }
+    }
+    host.set_nonblocking(false).unwrap();
+    let accept = Accept {
+        cursor: false,
+        session: session.id,
+        token: control::token_hex(&session.token),
+        codec: Codec::H264Baseline,
+        width: 64,
+        height: 64,
+        fps: 60,
+        bitrate_kbps: 1000,
+        encoder: "x".repeat(60_000),
+        audio: None,
+        audio_problem: String::new(),
+    };
+    let (tx, rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let reason = server.control(&session, host, accept, None, || {
+            panic!("blocked Accept must fail")
+        });
+        tx.send(reason).unwrap();
+    });
+    assert!(rx
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+        .contains("before the stream started"));
+    worker.join().unwrap();
+}
+
+#[test]
+fn an_opening_reservation_is_busy_before_a_viewer_is_installed() {
+    let server = Server::bind(0, Options::default()).unwrap();
+    assert!(!server.busy());
+    let guard = server.opening.lock();
+    assert!(server.busy());
+    assert!(server.status().viewer.is_none());
+    drop(guard);
+    assert!(!server.busy());
+}
+
+#[test]
+fn ending_revokes_and_releases_input_immediately() {
+    struct Sink(Arc<AtomicUsize>);
+    impl InputSink for Sink {
+        fn apply(&mut self, _: &input::Event, _: DisplayRect) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn release_all(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let session = session("127.0.0.1:9".parse().unwrap());
+    let releases = Arc::new(AtomicUsize::new(0));
+    session.input.lock().sink = Some(Box::new(Sink(releases.clone())));
+    session.end(end::ENDED, "done");
+    assert!(session.input.lock().sink.is_none());
+    assert_eq!(releases.load(Ordering::Relaxed), 1);
+    session.end(end::ENDED, "again");
+    assert_eq!(releases.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn video_reopen_failure_uses_remaining_budget() {
+    let server = Server::bind(0, Options::default()).unwrap();
+    let session = session("127.0.0.1:9".parse().unwrap());
+    let mut attempts = 0;
+    let pipeline = || {
+        Box::new(Video {
+            info: info(),
+            held: Arc::new(AtomicBool::new(true)),
+            next: Box::new(|_, _, _| anyhow::bail!("capture lost")),
+        }) as Box<dyn VideoPipeline>
+    };
+    send_video(&server, &session, pipeline(), config(), |_| {
+        attempts += 1;
+        if attempts == 1 {
+            anyhow::bail!("temporarily busy");
+        }
+        Ok(pipeline())
+    });
+    assert_eq!(attempts, VIDEO_RECOVERIES);
+}
+
+#[test]
 fn repeated_video_errors_release_exclusive_capture_and_have_a_retry_budget() {
     let server = Server::bind(0, Options::default()).unwrap();
     let session = session("127.0.0.1:9".parse().unwrap());
@@ -119,10 +233,8 @@ fn repeated_video_errors_release_exclusive_capture_and_have_a_retry_budget() {
         open(c)
     });
     assert_eq!(attempts.load(Ordering::Relaxed), VIDEO_RECOVERIES);
-    assert_eq!(
-        session.frames.load(Ordering::Relaxed),
-        (VIDEO_RECOVERIES + 1) as u64
-    );
+    // Fatal capture failure cancels queued media; reopening must still be bounded.
+    assert!(session.frames.load(Ordering::Relaxed) <= (VIDEO_RECOVERIES + 1) as u64);
     assert!(!held.load(Ordering::Acquire));
     assert_eq!(
         session.ended.lock().as_ref().unwrap().code,
@@ -159,10 +271,14 @@ fn idle_requests_are_prompt_and_each_encoded_frame_updates_mapping_and_is_sent()
                 };
                 info.encoder = "fallback".into();
                 info.hardware = false;
-            } else {
+            } else if calls == 2 {
                 assert!(keyframe);
                 idr_tx.send(()).unwrap();
-                worker_session.stop.store(true, Ordering::Release);
+            } else {
+                while !worker_session.stopping() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                anyhow::bail!("stopped");
             }
             Ok(EncodedVideo {
                 data: vec![calls; 100],
@@ -195,12 +311,6 @@ fn idle_requests_are_prompt_and_each_encoded_frame_updates_mapping_and_is_sent()
         start.elapsed(),
         IDLE_REPEAT
     );
-    worker.join().unwrap();
-    let display = session.input.lock().display;
-    assert_eq!(display.map(32, 32, 64, 64), (-64, 58));
-    assert_eq!(server.status().encoder, "fallback");
-    assert!(!server.status().hardware);
-    assert_eq!(session.frames.load(Ordering::Relaxed), 2);
     let mut seen = [false; 2];
     let mut buf = [0; 2048];
     while !seen.iter().all(|v| *v) {
@@ -209,6 +319,13 @@ fn idle_requests_are_prompt_and_each_encoded_frame_updates_mapping_and_is_sent()
             seen[shard.frame as usize] = true;
         }
     }
+    session.stop.store(true, Ordering::Release);
+    worker.join().unwrap();
+    let display = session.input.lock().display;
+    assert_eq!(display.map(32, 32, 64, 64), (-64, 58));
+    assert_eq!(server.status().encoder, "fallback");
+    assert!(!server.status().hardware);
+    assert_eq!(session.frames.load(Ordering::Relaxed), 2);
 }
 
 struct Sound {
@@ -267,6 +384,7 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
     };
     let (host, mut client) = sockets();
     let accept = Accept {
+        cursor: false,
         session: session.id,
         token: control::token_hex(&session.token),
         codec: Codec::H264Baseline,

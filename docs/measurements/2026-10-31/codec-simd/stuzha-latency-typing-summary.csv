@@ -1,0 +1,2 @@
+kind,width,height,frames,threads,target_kbps,ms_frame,achieved_kbps,psnr,max_frame_budget,skip_percent,average_qp,last_window_kbps
+typing,1920,1080,120,4,8000,3.862,856.880,-inf,3.892,98.71,18.82,63.992
