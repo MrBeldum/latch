@@ -13,6 +13,14 @@ pub use capture::X11Capture;
 use std::ffi::OsStr;
 use std::time::Duration;
 
+/// Query the root size through the same bounded initialization as capture.
+pub fn capture_size() -> anyhow::Result<[u32; 2]> {
+    use x11rb::connection::Connection;
+    let (conn, screen) = connect(X11_SILENCE)?;
+    let root = &conn.setup().roots[screen];
+    Ok([root.width_in_pixels.into(), root.height_in_pixels.into()])
+}
+
 pub fn open_video(config: &VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>> {
     Ok(Box::new(crate::software::SoftwarePipeline::new(
         X11Capture::new()?,

@@ -15,7 +15,11 @@ for RandR), covering display parsing, DNS, Unix/abstract/TCP socket connect,
 authority-file open/read and the setup exchange. A short-lived copy of the
 executable connects and selects credentials using x11rb, then passes the live
 socket and credentials over a private inherited socket. The parent kills and
-reaps it on completion or failure; no hung worker threads accumulate. Setup
+reaps it on completion or failure, allowing up to 100 ms of cleanup beyond
+the deadline. If SIGKILL cannot finish an uninterruptible kernel operation,
+the single helper slot is retained and further attempts fail until it exits;
+the next attempt reaps it before proceeding. No unbounded waitpid or growing
+set of workers is used. Concurrent bootstrap attempts return a retry error. Setup
 runs in the parent with the remaining deadline, including slow partial replies.
 `DISPLAY` and `XAUTHORITY`/`HOME/.Xauthority` selection are unchanged; TCP
 and hostname displays remain accepted (MIT-SHM still requires a local server).

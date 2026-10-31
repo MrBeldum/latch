@@ -173,25 +173,48 @@ fn helper() -> anyhow::Result<()> {
     anyhow::bail!("cannot connect to X11")
 }
 
-struct Helper(std::process::Child);
-impl Drop for Helper {
+// A killed process in uninterruptible kernel I/O may not exit immediately.
+// Keep at most one helper, refuse retries until it can be reaped, and never
+// turn the initialization timeout into an unbounded waitpid.
+static HELPER_SLOT: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+struct Helper<'a>(std::sync::MutexGuard<'a, Option<std::process::Child>>);
+impl Drop for Helper<'_> {
     fn drop(&mut self) {
-        // Also reap on read/parse errors. No detached workers or retry accumulation.
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if let Some(child) = self.0.as_mut() {
+            let _ = child.kill();
+            let deadline = Instant::now() + Duration::from_millis(100);
+            loop {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    *self.0 = None;
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
     }
 }
 
 fn bootstrap(mut command: Command, deadline: Instant) -> anyhow::Result<Bootstrap> {
+    let mut slot = HELPER_SLOT.try_lock().map_err(|_| {
+        anyhow::anyhow!("X11 initialization already in progress; retry after it completes")
+    })?;
+    if let Some(child) = slot.as_mut() {
+        anyhow::ensure!(child.try_wait()?.is_some(), "previous X11 initializer is still exiting after timeout; check stalled filesystem/DNS and retry");
+        *slot = None;
+    }
     let (parent, child) = UnixStream::pair()?;
     let (ipc, _) = DefaultStream::from_unix_stream(parent)?;
-    let _child = Helper(
+    *slot = Some(
         command
             .stdin(Stdio::from(OwnedFd::from(child)))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?,
     );
+    let _child = Helper(slot);
     drop(command); // Close the parent's copy of the child endpoint so EOF is observable.
     let mut payload = Vec::new();
     let mut fds = Vec::new();
@@ -228,6 +251,7 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use x11rb::protocol::xproto;
     use x11rb::x11_utils::Serialize;
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn helper_entry() {
@@ -266,6 +290,7 @@ mod tests {
 
     #[test]
     fn local_socket_transfers_selected_cookie_and_remains_usable() {
+        let _test = TEST_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("latch-bootstrap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let number = (40000 + std::process::id() % 10000).to_string();
@@ -341,6 +366,7 @@ mod tests {
 
     #[test]
     fn silent_setup_and_fifo_authority_fail_and_close_the_actual_socket() {
+        let _test = TEST_LOCK.lock().unwrap();
         for fifo in [false, true] {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
@@ -391,12 +417,14 @@ mod tests {
     }
     #[test]
     fn helper_guard_kills_and_reaps_on_failure() {
+        let _test = TEST_LOCK.lock().unwrap();
         let child = Command::new("/bin/sh")
             .args(["-c", "exec sleep 60"])
             .spawn()
             .unwrap();
         let pid = child.id() as libc::pid_t;
-        drop(Helper(child));
+        let slot = std::sync::Mutex::new(Some(child));
+        drop(Helper(slot.lock().unwrap()));
         // SAFETY: waitpid with WNOHANG writes only to this live status value.
         let mut status = 0;
         assert_eq!(
@@ -412,6 +440,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn abstract_socket_success_and_full_connect_queue_timeout() {
+        let _test = TEST_LOCK.lock().unwrap();
         use std::os::linux::net::SocketAddrExt;
         use std::os::unix::net::SocketAddr;
         let number = 50000 + std::process::id() % 5000;
