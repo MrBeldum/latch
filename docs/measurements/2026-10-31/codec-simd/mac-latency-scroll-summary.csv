@@ -1,0 +1,2 @@
+kind,width,height,frames,threads,target_kbps,ms_frame,achieved_kbps,psnr,max_frame_budget,skip_percent,average_qp,last_window_kbps
+scroll,1920,1080,120,4,8000,2.865,5240.128,-inf,3.892,94.38,20.58,4672.272

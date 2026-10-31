@@ -11,6 +11,8 @@ pub(crate) struct Controller {
     last_step: Instant,
     clean_since: Instant,
     pressure_windows: u8,
+    sent_kbps: Option<u32>,
+    pacing: bool,
 }
 
 impl Controller {
@@ -24,11 +26,26 @@ impl Controller {
             last_step: now,
             clean_since: now,
             pressure_windows: 0,
+            sent_kbps: None,
+            pacing: false,
         }
     }
 
     pub(crate) fn budget(&self) -> u32 {
         self.budget
+    }
+
+    pub(crate) fn observe_sent(&mut self, kbps: u32) {
+        self.sent_kbps = (kbps > 0).then_some(kbps);
+    }
+
+    pub(crate) fn pacing(&self) -> bool {
+        self.pacing
+    }
+
+    pub(crate) fn base_rtt(&self) -> Option<Duration> {
+        let rtt = self.min_rtt[1].min(self.min_rtt[0]);
+        (rtt < f32::MAX).then(|| Duration::from_secs_f32(rtt / 1000.0))
     }
 
     pub(crate) fn update(
@@ -42,7 +59,11 @@ impl Controller {
         for (i, rtt) in [report.rtt_ms, host_rtt_ms].into_iter().enumerate() {
             if rtt.is_finite() && rtt > 0.0 {
                 self.min_rtt[i] = self.min_rtt[i].min(rtt);
-                queued |= rtt - self.min_rtt[i] > 12.0f32.max(self.min_rtt[i] * 0.25);
+                // Prefer the lowest host ping in this report window. Viewer
+                // smoothed RTT includes transient jitter, not just standing queues.
+                if i == 1 || host_rtt_ms <= 0.0 {
+                    queued |= rtt - self.min_rtt[i] > 10.0f32.max(self.min_rtt[i] * 0.25);
+                }
             }
         }
         let loss = report.unrecovered_loss_pct.unwrap_or(report.loss_pct);
@@ -62,14 +83,18 @@ impl Controller {
             .min(1.0);
         self.last_step = now;
         if pressure {
+            self.pacing = true;
             self.clean_since = now;
             if self.pressure_windows >= 2
                 && now.duration_since(self.last_cut) >= Duration::from_millis(500)
             {
-                self.budget = (self.budget * 4 / 5).max(self.floor);
+                // A target cut above the encoder's actual wire rate has no effect.
+                let offered = self.sent_kbps.unwrap_or(self.budget).min(self.budget);
+                self.budget = (offered * 4 / 5).max(self.floor);
                 self.last_cut = now;
             }
         } else if now.duration_since(self.clean_since) >= Duration::from_secs(2) {
+            self.pacing = false;
             // 5% of requested capacity per second; no exponential probe bursts.
             self.budget = self
                 .budget
@@ -92,6 +117,32 @@ pub(crate) fn video_budget(wire_kbps: u32, fec: u8, audio: bool) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn underfilled_encoder_cuts_actual_rate_and_only_pressure_enables_pacing() {
+        let start = Instant::now();
+        let mut c = Controller::new(50_000, start);
+        let mut r = Report {
+            rtt_ms: 12.0,
+            ..Default::default()
+        };
+        c.observe_sent(8_000);
+        c.update(start, &r, 12.0, 0.0);
+        assert!(!c.pacing());
+        assert_eq!(c.base_rtt(), Some(Duration::from_millis(12)));
+        // Smoothed viewer RTT spikes must not override a clean host window.
+        r.rtt_ms = 50.0;
+        c.update(start + Duration::from_millis(250), &r, 12.0, 0.0);
+        assert!(!c.pacing());
+        for tick in 2..=3 {
+            c.update(start + Duration::from_millis(tick * 250), &r, 40.0, 0.0);
+        }
+        assert!(c.pacing());
+        assert_eq!(c.budget(), 6_400);
+        r.rtt_ms = 12.0;
+        c.update(start + Duration::from_secs(3), &r, 12.0, 0.0);
+        assert!(!c.pacing());
+    }
+
     #[test]
     fn capacity_steps_random_loss_and_steady_path() {
         let start = Instant::now();

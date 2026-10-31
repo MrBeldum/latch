@@ -7,12 +7,14 @@
 //! [`pattern`] a synthetic desktop for tests and measurements.
 
 pub mod audio;
-mod cadence;
+#[cfg(any(windows, test))]
+mod bitstream;
 mod congestion;
 pub mod display;
 pub mod input;
 mod pacing;
 pub mod pattern;
+pub mod priority;
 pub mod server;
 pub mod software;
 pub mod testmode;

@@ -1,0 +1,65 @@
+================================================================================
+LATCH NATIVE CODE AUDIT
+Allow file: scripts/audit-native.allow (8 allowed entries)
+================================================================================
+
+Target Triple: aarch64-apple-darwin
+--------------------------------------------------------------------------------
+Package                  Status     Build Tools        Native Files   Links / System Lib
+--------------------------------------------------------------------------------
+objc-sys                 ALLOWED    -                  2 files        links=objc_0_3
+  └─ sources: compat-headers-objfw/objc/objc.h, compat-headers-objfw/objc/runtime.h
+ttf-parser               ALLOWED    -                  12 files       -
+  └─ sources: testing-tools/font-view/harfbuzzfont.h, testing-tools/font-view/mainwindow.h, ... (+10 more)
+webbrowser               ALLOWED    -                  1 files        -
+  └─ sources: tests/test-ios-app/test-ios-app/Test-Glue-Header.h
+
+Target Triple: x86_64-pc-windows-msvc
+--------------------------------------------------------------------------------
+Package                  Status     Build Tools        Native Files   Links / System Lib
+--------------------------------------------------------------------------------
+ttf-parser               ALLOWED    -                  12 files       -
+  └─ sources: testing-tools/font-view/harfbuzzfont.h, testing-tools/font-view/mainwindow.h, ... (+10 more)
+webbrowser               ALLOWED    -                  1 files        -
+  └─ sources: tests/test-ios-app/test-ios-app/Test-Glue-Header.h
+
+Target Triple: x86_64-unknown-linux-gnu
+--------------------------------------------------------------------------------
+Package                  Status     Build Tools        Native Files   Links / System Lib
+--------------------------------------------------------------------------------
+alsa-sys                 ALLOWED    -                  1 files        links=alsa (pkg-config syslib)
+  └─ sources: wrapper.h
+cc                       ALLOWED    -                  1 files        -
+  └─ sources: src/detect_compiler_family.c
+nix                      ALLOWED    -                  1 files        -
+  └─ sources: test/test_kmod/hello_mod/hello.c
+ttf-parser               ALLOWED    -                  12 files       -
+  └─ sources: testing-tools/font-view/harfbuzzfont.h, testing-tools/font-view/mainwindow.h, ... (+10 more)
+wayland-backend          ALLOWED    cc                 2 files        -
+  └─ sources: src/sys/client_impl/log_shim.c, src/sys/server_impl/log_shim.c
+wayland-protocols-plasma ALLOWED    -                  1 files        -
+  └─ sources: plasma-wayland-protocols/autotests/build.c
+webbrowser               ALLOWED    -                  1 files        -
+  └─ sources: tests/test-ios-app/test-ios-app/Test-Glue-Header.h
+
+Target Triple: aarch64-unknown-linux-gnu
+--------------------------------------------------------------------------------
+Package                  Status     Build Tools        Native Files   Links / System Lib
+--------------------------------------------------------------------------------
+alsa-sys                 ALLOWED    -                  1 files        links=alsa (pkg-config syslib)
+  └─ sources: wrapper.h
+cc                       ALLOWED    -                  1 files        -
+  └─ sources: src/detect_compiler_family.c
+nix                      ALLOWED    -                  1 files        -
+  └─ sources: test/test_kmod/hello_mod/hello.c
+ttf-parser               ALLOWED    -                  12 files       -
+  └─ sources: testing-tools/font-view/harfbuzzfont.h, testing-tools/font-view/mainwindow.h, ... (+10 more)
+wayland-backend          ALLOWED    cc                 2 files        -
+  └─ sources: src/sys/client_impl/log_shim.c, src/sys/server_impl/log_shim.c
+wayland-protocols-plasma ALLOWED    -                  1 files        -
+  └─ sources: plasma-wayland-protocols/autotests/build.c
+webbrowser               ALLOWED    -                  1 files        -
+  └─ sources: tests/test-ios-app/test-ios-app/Test-Glue-Header.h
+
+================================================================================
+AUDIT PASSED: All packages comply with native code policy.

@@ -157,6 +157,7 @@ fn noise_stream_adapts_to_sustained_queue_delay_and_recovers() {
         // modest frame rate to deliberately underfill the requested bitrate;
         // the standing queue must still drive adaptation on a slow CI runner.
         Settings {
+            cursor: false,
             width: 640,
             height: 360,
             fps: 12,

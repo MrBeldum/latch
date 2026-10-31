@@ -1,15 +1,26 @@
 use super::capture::Gpu;
-use super::mf;
+use super::{display, mf};
+use crate::bitstream::{vbv_bits, Format, Sequence};
 use crate::video::{Codec, VideoConfig};
 use anyhow::{bail, Context, Result};
 use std::{
     mem::ManuallyDrop,
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 use windows::{
     core::{implement, Interface, GUID, VARIANT},
-    Win32::{Graphics::Direct3D11::ID3D11Texture2D, Media::MediaFoundation::*, System::Com::*},
+    Win32::{
+        Graphics::{
+            Direct3D11::{ID3D11Texture2D, D3D11_BIND_RENDER_TARGET},
+            Dxgi::Common::DXGI_FORMAT_NV12,
+        },
+        Media::MediaFoundation::*,
+        System::Com::*,
+    },
 };
 
 // One outstanding callback, one bounded wakeup. The MF callback never waits
@@ -37,6 +48,22 @@ impl IMFAsyncCallback_Impl for EventCallback_Impl {
         Ok(())
     }
 }
+/// Set `LATCH_WINDOWS_HEVC=1` to offer HEVC from a GPU's Media Foundation
+/// encoder. Off by default until it has run on real AMD, NVIDIA and Intel
+/// hardware; with it off nothing about H.264 changes.
+fn hevc_enabled() -> bool {
+    std::env::var_os("LATCH_WINDOWS_HEVC").is_some_and(|v| v == "1")
+}
+/// An HEVC encoder that did not work stays off until the process restarts,
+/// so the next viewer is offered H.264 instead of failing the same way.
+static HEVC_FAILED: AtomicBool = AtomicBool::new(false);
+/// A probe encoded a keyframe through the whole HEVC path.
+static HEVC_PROVEN: AtomicBool = AtomicBool::new(false);
+pub(super) fn hevc_failed(why: &anyhow::Error) {
+    tracing::debug!("HEVC encoder is not used again: {why:#}");
+    HEVC_FAILED.store(true, Ordering::Relaxed);
+}
+
 pub(super) fn media_type(subtype: &GUID, config: &VideoConfig) -> Result<IMFMediaType> {
     // SAFETY: MF is started on the calling worker; the returned type is owned.
     unsafe {
@@ -56,6 +83,7 @@ pub(super) fn media_type(subtype: &GUID, config: &VideoConfig) -> Result<IMFMedi
         Ok(ty)
     }
 }
+#[cfg(test)]
 pub(super) fn memory_sample(bytes: &[u8]) -> Result<IMFSample> {
     let length = u32::try_from(bytes.len()).context("MF sample exceeds 4 GiB")?;
     // SAFETY: Buffer capacity equals length, Lock is balanced before return.
@@ -71,11 +99,42 @@ pub(super) fn memory_sample(bytes: &[u8]) -> Result<IMFSample> {
         Ok(sample)
     }
 }
-fn activations(flags: MFT_ENUM_FLAG) -> Result<Vec<(IMFActivate, String)>> {
+/// An NV12 sample of `width` × `height` made from a mapped surface whose
+/// rows are `stride` bytes apart: the luma rows, then the chroma rows, each
+/// `width` bytes, copied once.
+pub(super) fn nv12_sample(
+    surface: &[u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+) -> Result<IMFSample> {
+    let rows = height * 3 / 2;
+    anyhow::ensure!(
+        stride >= width && surface.len() >= stride * (rows - 1) + width,
+        "NV12 surface smaller than {width}×{height}"
+    );
+    let length = u32::try_from(width * rows).context("MF sample exceeds 4 GiB")?;
+    // SAFETY: Buffer capacity equals length, Lock is balanced before return.
+    unsafe {
+        let sample = mf::MFCreateSample()?;
+        let buffer = mf::MFCreateMemoryBuffer(length)?;
+        let mut data = std::ptr::null_mut();
+        buffer.Lock(&mut data, None, None)?;
+        let tight = std::slice::from_raw_parts_mut(data, length as usize);
+        for (dst, row) in tight.chunks_exact_mut(width).zip(surface.chunks(stride)) {
+            dst.copy_from_slice(&row[..width]);
+        }
+        buffer.Unlock()?;
+        buffer.SetCurrentLength(length)?;
+        sample.AddBuffer(&buffer)?;
+        Ok(sample)
+    }
+}
+fn activations(flags: MFT_ENUM_FLAG, format: Format) -> Result<Vec<(IMFActivate, String)>> {
     let (mut array, mut count) = (std::ptr::null_mut(), 0);
     let filter = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
-        guidSubtype: MFVideoFormat_H264,
+        guidSubtype: subtype(format),
     };
     // SAFETY: MFTEnumEx allocates an array of owned activation references. Each
     // slot is moved out once and the array itself is freed with CoTaskMemFree.
@@ -88,7 +147,7 @@ fn activations(flags: MFT_ENUM_FLAG) -> Result<Vec<(IMFActivate, String)>> {
             &mut array,
             &mut count,
         )
-        .context("enumerate H.264 encoders")?;
+        .with_context(|| format!("enumerate {} encoders", label(format)))?;
         let mut out = Vec::new();
         for i in 0..count as usize {
             if let Some(activate) = array.add(i).read() {
@@ -98,7 +157,7 @@ fn activations(flags: MFT_ENUM_FLAG) -> Result<Vec<(IMFActivate, String)>> {
                     activate.GetString(&MFT_FRIENDLY_NAME_Attribute, &mut text, None)?;
                     Ok(String::from_utf16_lossy(&text[..length as usize]))
                 })()
-                .unwrap_or_else(|_| "hardware H.264 encoder".into());
+                .unwrap_or_else(|_| format!("hardware {} encoder", label(format)));
                 out.push((activate, name));
             }
         }
@@ -106,11 +165,30 @@ fn activations(flags: MFT_ENUM_FLAG) -> Result<Vec<(IMFActivate, String)>> {
         Ok(out)
     }
 }
-fn hardware() -> Result<Vec<(IMFActivate, String)>> {
-    activations(MFT_ENUM_FLAG_HARDWARE)
+fn subtype(format: Format) -> GUID {
+    match format {
+        Format::H264 => MFVideoFormat_H264,
+        Format::Hevc => MFVideoFormat_HEVC,
+    }
+}
+fn label(format: Format) -> &'static str {
+    match format {
+        Format::H264 => "H.264",
+        Format::Hevc => "HEVC",
+    }
+}
+fn format_of(codec: Codec) -> Format {
+    if codec == Codec::Hevc {
+        Format::Hevc
+    } else {
+        Format::H264
+    }
+}
+fn hardware(format: Format) -> Result<Vec<(IMFActivate, String)>> {
+    activations(MFT_ENUM_FLAG_HARDWARE, format)
 }
 pub(super) fn available() -> bool {
-    if hardware().is_ok_and(|v| !v.is_empty()) {
+    if hardware(Format::H264).is_ok_and(|v| !v.is_empty()) {
         return true;
     }
     // SAFETY: This probe runs in an initialized MTA with MF started.
@@ -119,6 +197,75 @@ pub(super) fn available() -> bool {
             .is_ok()
     }
 }
+/// HEVC may be opened: enabled, and not given up on.
+pub(super) fn hevc_allowed() -> bool {
+    hevc_enabled() && !HEVC_FAILED.load(Ordering::Relaxed)
+}
+/// Whether an HEVC encoder is worth offering: enabled, a GPU has one, and
+/// it has encoded a keyframe through the whole path here (activation,
+/// configuration, one frame, parameter sets in band). The probe runs once
+/// per process when it succeeds.
+pub(super) fn hevc_available() -> bool {
+    if !hevc_allowed() {
+        return false;
+    }
+    if HEVC_PROVEN.load(Ordering::Relaxed) {
+        return true;
+    }
+    if !hardware(Format::Hevc).is_ok_and(|v| !v.is_empty()) {
+        return false;
+    }
+    let _dpi = display::DpiAwareness::physical();
+    // No display or device now says nothing about the encoder: try again at
+    // the next connection.
+    let Ok(output) = display::select() else {
+        return false;
+    };
+    let Ok(gpu) = Gpu::new(&output.adapter) else {
+        return false;
+    };
+    let config = VideoConfig {
+        width: 1920,
+        height: 1080,
+        fps: 60,
+        bitrate_kbps: 10_000,
+        codec: Codec::Hevc,
+    };
+    match probe_keyframe(&config, &gpu) {
+        Ok(()) => {
+            HEVC_PROVEN.store(true, Ordering::Relaxed);
+            true
+        }
+        Err(e) => {
+            hevc_failed(&e);
+            false
+        }
+    }
+}
+fn probe_keyframe(config: &VideoConfig, gpu: &Gpu) -> Result<()> {
+    let mut encoder = Encoder::new(config, gpu)?;
+    let texture = gpu.texture(
+        config.width,
+        config.height,
+        DXGI_FORMAT_NV12,
+        D3D11_BIND_RENDER_TARGET.0 as u32,
+        false,
+    )?;
+    let sample = Encoder::texture_sample(&texture)?;
+    for _ in 0..4 {
+        if let Some((_, idr)) = encoder.encode(&sample, true)? {
+            anyhow::ensure!(idr, "HEVC encoder did not make a keyframe when asked");
+            return Ok(());
+        }
+    }
+    bail!("HEVC encoder produced no output")
+}
+
+/// Toward speed (0 is fastest, 100 best quality) for Microsoft's CPU
+/// encoder, which is the bottleneck of its own pipeline. GPU encoders keep
+/// their default: low-latency mode already picks their fast presets.
+const QUALITY_VS_SPEED_SOFTWARE: u32 = 20;
+
 pub(super) struct Encoder {
     transform: IMFTransform,
     api: ICodecAPI,
@@ -131,14 +278,19 @@ pub(super) struct Encoder {
     pub name: String,
     duration: i64,
     time: i64,
-    sequence: Vec<u8>,
+    seq: Sequence,
     activation: Option<IMFActivate>,
+    /// Reused CPU output with growth when an MFT underreports its size.
     output_sample: Option<IMFSample>,
     output_capacity: u32,
+    kbps: u32,
+    fps: u32,
 }
 impl Encoder {
     pub fn new(config: &VideoConfig, gpu: &Gpu) -> Result<Self> {
-        for (activation, name) in hardware().unwrap_or_default() {
+        let format = format_of(config.codec);
+        let label = label(format);
+        for (activation, name) in hardware(format).unwrap_or_default() {
             // SAFETY: Activation is performed on the worker's MTA.
             let transform = unsafe { activation.ActivateObject::<IMFTransform>() };
             let result = transform
@@ -150,13 +302,16 @@ impl Encoder {
                     return Ok(encoder);
                 }
                 Err(e) => {
-                    tracing::debug!("hardware H.264 MFT rejected configuration: {e:#}");
+                    tracing::debug!("hardware {label} MFT rejected configuration: {e:#}");
                     // SAFETY: Releases resources held by this failed activation.
                     unsafe {
                         let _ = activation.ShutdownObject();
                     }
                 }
             }
+        }
+        if format == Format::Hevc {
+            bail!("no hardware HEVC encoder accepted the configuration");
         }
         Self::software(config)
     }
@@ -165,7 +320,7 @@ impl Encoder {
         let transform =
             unsafe { CoCreateInstance(&CLSID_MSH264EncoderMFT, None, CLSCTX_INPROC_SERVER) }
                 .context("create Microsoft H.264 encoder")?;
-        let name = activations(MFT_ENUM_FLAG_SYNCMFT)
+        let name = activations(MFT_ENUM_FLAG_SYNCMFT, Format::H264)
             .unwrap_or_default()
             .into_iter()
             .find_map(|(activation, name)| {
@@ -177,6 +332,33 @@ impl Encoder {
             .unwrap_or_else(|| "Microsoft H.264 Video Encoder MFT".into());
         Self::configure(transform, config, None, name, false)
     }
+    /// Sets a property the encoder may lack.
+    fn optional(api: &ICodecAPI, what: &str, key: &GUID, value: VARIANT) {
+        // SAFETY: The API belongs to the calling worker's transform.
+        if let Err(e) = unsafe { api.SetValue(key, &value) } {
+            tracing::debug!("encoder {what} not set: {e}");
+        }
+    }
+    /// Rate control for a mean of `kbps`: CBR, capped at the same rate, with
+    /// a buffer of about a frame and a half. A driver's default buffer is
+    /// often a second long, and lets a keyframe or a burst of motion run to
+    /// many times the average: a burst a link that carries the bitrate
+    /// delivers late, and loses to its queue.
+    fn rate(api: &ICodecAPI, kbps: u32, fps: u32) {
+        let bps = kbps.saturating_mul(1000);
+        Self::optional(
+            api,
+            "peak bit rate",
+            &CODECAPI_AVEncCommonMaxBitRate,
+            bps.into(),
+        );
+        Self::optional(
+            api,
+            "buffer size",
+            &CODECAPI_AVEncCommonBufferSize,
+            vbv_bits(kbps, fps).into(),
+        );
+    }
     fn configure(
         transform: IMFTransform,
         config: &VideoConfig,
@@ -184,6 +366,7 @@ impl Encoder {
         name: String,
         hardware: bool,
     ) -> Result<Self> {
+        let format = format_of(config.codec);
         // SAFETY: All transform calls are serialized on its owning worker.
         unsafe {
             let attributes = transform.GetAttributes().context("encoder attributes")?;
@@ -233,6 +416,16 @@ impl Encoder {
                 &VARIANT::from(config.bitrate_kbps.saturating_mul(1000)),
             )
             .context("encoder bitrate")?;
+            Self::rate(&api, config.bitrate_kbps, config.fps);
+            if !hardware {
+                // The CPU encoder is the bottleneck of its own pipeline.
+                Self::optional(
+                    &api,
+                    "quality vs speed",
+                    &CODECAPI_AVEncCommonQualityVsSpeed,
+                    QUALITY_VS_SPEED_SOFTWARE.into(),
+                );
+            }
             api.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &VARIANT::from(0u32))
                 .context("disable B pictures")?;
             if api
@@ -253,25 +446,39 @@ impl Encoder {
                 api.SetValue(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(longest))
                     .context("encoder longest supported GOP")?;
             }
-            if config.codec == Codec::H264Baseline {
-                let _ = api.SetValue(&CODECAPI_AVEncH264CABACEnable, &VARIANT::from(false));
+            if format == Format::H264 {
+                // CABAC saves bits at the same quality; Constrained Baseline
+                // has none.
+                Self::optional(
+                    &api,
+                    "CABAC",
+                    &CODECAPI_AVEncH264CABACEnable,
+                    (config.codec == Codec::H264High).into(),
+                );
             }
-            let output = media_type(&MFVideoFormat_H264, config)?;
+            let output = media_type(&subtype(format), config)?;
             output.SetUINT32(&MF_MT_AVG_BITRATE, config.bitrate_kbps.saturating_mul(1000))?;
-            let profile = if config.codec == Codec::H264High {
-                eAVEncH264VProfile_High
-            } else {
-                eAVEncH264VProfile_ConstrainedBase
-            };
-            output.SetUINT32(&MF_MT_MPEG2_PROFILE, profile.0 as u32)?;
-            if let Err(e) = transform.SetOutputType(0, &output, 0) {
-                if config.codec != Codec::H264Baseline {
-                    return Err(e).context("encoder H.264 output type");
-                }
-                output.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
+            if format == Format::Hevc {
+                output.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH265VProfile_Main_420_8.0 as u32)?;
                 transform
                     .SetOutputType(0, &output, 0)
-                    .context("encoder baseline output type")?;
+                    .context("encoder HEVC output type")?;
+            } else {
+                let profile = if config.codec == Codec::H264High {
+                    eAVEncH264VProfile_High
+                } else {
+                    eAVEncH264VProfile_ConstrainedBase
+                };
+                output.SetUINT32(&MF_MT_MPEG2_PROFILE, profile.0 as u32)?;
+                if let Err(e) = transform.SetOutputType(0, &output, 0) {
+                    if config.codec != Codec::H264Baseline {
+                        return Err(e).context("encoder H.264 output type");
+                    }
+                    output.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
+                    transform
+                        .SetOutputType(0, &output, 0)
+                        .context("encoder baseline output type")?;
+                }
             }
             transform
                 .SetInputType(0, &media_type(&MFVideoFormat_NV12, config)?, 0)
@@ -286,17 +493,24 @@ impl Encoder {
                 output_credit: 0,
                 _manager: manager,
                 hardware,
-                name: format!("Media Foundation H.264 ({name})"),
+                name: format!("Media Foundation {} ({name})", label(format)),
                 duration: 10_000_000 / i64::from(config.fps),
                 time: 0,
-                sequence: Vec::new(),
+                seq: Sequence::new(format),
                 activation: None,
                 output_sample: None,
                 output_capacity: 0,
+                kbps: config.bitrate_kbps,
+                fps: config.fps,
             })
         }
     }
-    pub fn bitrate(&self, kbps: u32) -> Result<()> {
+    /// A new mean rate, with the rate buffer kept at a frame and a half of
+    /// it. The buffer and cap are best effort; the mean is not.
+    pub fn bitrate(&mut self, kbps: u32) -> Result<()> {
+        if kbps == self.kbps {
+            return Ok(());
+        }
         // SAFETY: The API belongs to this worker's transform.
         unsafe {
             self.api.SetValue(
@@ -304,8 +518,12 @@ impl Encoder {
                 &VARIANT::from(kbps.saturating_mul(1000)),
             )
         }
-        .context("update encoder bitrate")
+        .context("update encoder bitrate")?;
+        Self::rate(&self.api, kbps, self.fps);
+        self.kbps = kbps;
+        Ok(())
     }
+    /// Wait for one callback, bounded by the frame deadline.
     fn event(&mut self, deadline: Instant) -> Result<()> {
         let events = self
             .events
@@ -347,7 +565,8 @@ impl Encoder {
             self.input_credit -= 1;
         }
         // SAFETY: The input sample remains referenced by the transform until it
-        // finishes. Each GPU frame has its own texture, so it cannot be overwritten.
+        // finishes. The caller does not reuse a texture until the encoder has
+        // returned the frames given after it (see Converter's ring).
         unsafe {
             if keyframe {
                 self.api
@@ -420,6 +639,9 @@ impl Encoder {
                         self.output_sample = None;
                         let ty = self.transform.GetOutputAvailableType(0, 0)?;
                         self.transform.SetOutputType(0, &ty, 0)?;
+                        // The new type may need a bigger sample and has its
+                        // own sequence header.
+                        self.seq.clear();
                         continue;
                     }
                     Err(e) => return Err(e).context("encoder ProcessOutput"),
@@ -432,56 +654,14 @@ impl Encoder {
                 let buffer = sample.ConvertToContiguousBuffer()?;
                 let (mut data, mut length) = (std::ptr::null_mut(), 0);
                 buffer.Lock(&mut data, None, Some(&mut length))?;
-                let bytes = std::slice::from_raw_parts(data, length as usize).to_vec();
+                // One copy, out of the encoder's buffer into the access unit.
+                let result = self
+                    .seq
+                    .assemble(std::slice::from_raw_parts(data, length as usize), || {
+                        sequence_header(&self.transform)
+                    });
                 buffer.Unlock()?;
-                let output_type = self.transform.GetOutputCurrentType(0)?;
-                if let Ok(size) = output_type.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER) {
-                    let mut header = vec![0; size as usize];
-                    if output_type
-                        .GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut header, None)
-                        .is_ok()
-                    {
-                        self.sequence = normalize(&header)?;
-                    }
-                }
-                let mut bytes = normalize(&bytes)?;
-                for kind in [7, 8] {
-                    if let Some(nal) = nals(&bytes)
-                        .into_iter()
-                        .find(|nal| nal.first().is_some_and(|v| v & 31 == kind))
-                    {
-                        let mut headers = Vec::new();
-                        for old in nals(&self.sequence) {
-                            if old.first().is_some_and(|v| v & 31 != kind) {
-                                headers.extend_from_slice(&[0, 0, 0, 1]);
-                                headers.extend_from_slice(old);
-                            }
-                        }
-                        headers.extend_from_slice(&[0, 0, 0, 1]);
-                        headers.extend_from_slice(nal);
-                        self.sequence = headers;
-                    }
-                }
-                let idr = nal_types(&bytes).contains(&5);
-                if idr {
-                    let mut access_unit = Vec::new();
-                    for kind in [7, 8] {
-                        let header = nals(&self.sequence)
-                            .into_iter()
-                            .find(|nal| nal.first().is_some_and(|v| v & 31 == kind))
-                            .context("encoder IDR has no parameter sets or sequence header")?;
-                        access_unit.extend_from_slice(&[0, 0, 0, 1]);
-                        access_unit.extend_from_slice(header);
-                    }
-                    for nal in nals(&bytes) {
-                        if nal.first().is_some_and(|v| !matches!(v & 31, 7 | 8)) {
-                            access_unit.extend_from_slice(&[0, 0, 0, 1]);
-                            access_unit.extend_from_slice(nal);
-                        }
-                    }
-                    bytes = access_unit;
-                }
-                return Ok(Some((bytes, idr)));
+                return result.map(Some);
             }
         }
         bail!("encoder exceeded bounded output retries")
@@ -495,6 +675,18 @@ impl Encoder {
             sample.AddBuffer(&buffer)?;
             Ok(sample)
         }
+    }
+}
+/// The parameter sets the encoder keeps in its output type.
+fn sequence_header(transform: &IMFTransform) -> Option<Vec<u8>> {
+    // SAFETY: The transform belongs to the calling worker; the blob is copied.
+    unsafe {
+        let ty = transform.GetOutputCurrentType(0).ok()?;
+        let size = ty.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER).ok()?;
+        let mut header = vec![0; size as usize];
+        ty.GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut header, None)
+            .ok()?;
+        Some(header)
     }
 }
 impl Drop for Encoder {
@@ -519,85 +711,86 @@ fn grown_output_capacity(current: u32, advertised: u32) -> Result<u32> {
     anyhow::ensure!(size <= 64 * 1024 * 1024, "encoder output exceeds 64 MiB");
     Ok(size)
 }
-fn nals(data: &[u8]) -> Vec<&[u8]> {
-    let mut starts = Vec::new();
-    let mut i = 0;
-    while i + 3 <= data.len() {
-        if data[i..].starts_with(&[0, 0, 0, 1]) {
-            starts.push((i, i + 4));
-            i += 4;
-        } else if data[i..].starts_with(&[0, 0, 1]) {
-            starts.push((i, i + 3));
-            i += 3;
-        } else {
-            i += 1;
-        }
-    }
-    starts
-        .iter()
-        .enumerate()
-        .map(|(i, &(_, start))| &data[start..starts.get(i + 1).map_or(data.len(), |v| v.0)])
-        .collect()
-}
-fn nal_types(data: &[u8]) -> Vec<u8> {
-    nals(data)
-        .iter()
-        .filter_map(|v| v.first().map(|v| v & 31))
-        .collect()
-}
-fn normalize(data: &[u8]) -> Result<Vec<u8>> {
-    if data.is_empty() || data.starts_with(&[0, 0, 1]) || data.starts_with(&[0, 0, 0, 1]) {
-        return Ok(data.to_vec());
-    }
-    let mut out = Vec::new();
-    if data[0] == 1 && data.len() >= 7 {
-        // AVCDecoderConfigurationRecord, used by some hardware sequence headers.
-        let mut at = 6;
-        let sps_count = data[5] & 31;
-        for count in 0..2 {
-            let n = if count == 0 {
-                sps_count
-            } else {
-                let n = *data.get(at).context("truncated avcC PPS count")?;
-                at += 1;
-                n
-            };
-            for _ in 0..n {
-                let bytes = data.get(at..at + 2).context("truncated avcC length")?;
-                let length = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
-                at += 2;
-                let nal = data.get(at..at + length).context("truncated avcC NAL")?;
-                at += length;
-                out.extend_from_slice(&[0, 0, 0, 1]);
-                out.extend_from_slice(nal);
-            }
-        }
-    } else {
-        let mut at = 0;
-        while at < data.len() {
-            let bytes = data.get(at..at + 4).context("truncated H.264 NAL length")?;
-            let length = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-            at += 4;
-            if length == 0 {
-                bail!("empty length-prefixed H.264 NAL");
-            }
-            let nal = data.get(at..at + length).context("truncated H.264 NAL")?;
-            at += length;
-            out.extend_from_slice(&[0, 0, 0, 1]);
-            out.extend_from_slice(nal);
-        }
-    }
-    Ok(out)
-}
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn annex_b_parameter_sets_and_length_prefixes() -> Result<()> {
-        let header = [1, 66, 0, 31, 255, 225, 0, 2, 0x67, 42, 1, 0, 2, 0x68, 7];
-        assert_eq!(nal_types(&normalize(&header)?), [7, 8]);
-        assert_eq!(normalize(&[0, 0, 0, 2, 0x65, 3])?, [0, 0, 0, 1, 0x65, 3]);
-        assert!(normalize(&[0, 0, 0, 9, 0x65]).is_err());
+    fn nv12_sample_drops_the_surface_padding() -> Result<()> {
+        let runtime = match super::super::runtime::Runtime::new(true) {
+            Ok(r) => r,
+            Err(e) => {
+                if super::super::unavailable(&e, "Media Foundation") {
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        };
+        // 4 × 4 picture: 6 rows, each 4 bytes in a 8-byte pitch.
+        let mut surface = vec![0xee; 8 * 6];
+        for (row, bytes) in surface.chunks_mut(8).enumerate() {
+            bytes[..4].fill(row as u8);
+        }
+        let sample = nv12_sample(&surface, 8, 4, 4)?;
+        // SAFETY: The buffer is locked and unlocked on this thread.
+        let bytes = unsafe {
+            let buffer = sample.ConvertToContiguousBuffer()?;
+            let (mut data, mut length) = (std::ptr::null_mut(), 0);
+            buffer.Lock(&mut data, None, Some(&mut length))?;
+            let bytes = std::slice::from_raw_parts(data, length as usize).to_vec();
+            buffer.Unlock()?;
+            bytes
+        };
+        assert_eq!(bytes.len(), 24);
+        assert_eq!(bytes[..4], [0; 4]);
+        assert_eq!(bytes[20..], [5; 4]);
+        assert!(nv12_sample(&surface[..20], 8, 4, 4).is_err());
+        drop(runtime);
+        Ok(())
+    }
+
+    #[test]
+    fn software_encoder_takes_a_new_bitrate_between_frames() -> Result<()> {
+        let _runtime = match super::super::runtime::Runtime::new(true) {
+            Ok(r) => r,
+            Err(e) => {
+                if super::super::unavailable(&e, "Media Foundation") {
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        };
+        let config = VideoConfig {
+            width: 160,
+            height: 96,
+            fps: 30,
+            bitrate_kbps: 4000,
+            codec: Codec::H264High,
+        };
+        let mut encoder = match Encoder::software(&config) {
+            Ok(e) => e,
+            Err(e) => {
+                if super::super::unavailable(&e, "software H.264 encoder") {
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        };
+        let picture = vec![100; 160 * 96 * 3 / 2];
+        let mut keyframes = 0;
+        let mut outputs = 0;
+        for i in 0..24 {
+            if i == 8 {
+                encoder.bitrate(1500)?;
+                encoder.bitrate(1500)?;
+            }
+            if let Some((data, idr)) = encoder.encode(&memory_sample(&picture)?, i == 0)? {
+                outputs += 1;
+                keyframes += usize::from(idr);
+                assert!(!data.is_empty());
+            }
+        }
+        assert!(keyframes >= 1 && outputs >= 12, "{keyframes} {outputs}");
         Ok(())
     }
 }

@@ -980,6 +980,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             hevc: settings.codec != Codec::H264,
             audio: true,
             name: latch_core::config::machine_name(),
+            cursor: true,
         },
         frames.clone(),
         tx,

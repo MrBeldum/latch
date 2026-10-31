@@ -47,6 +47,8 @@ fn session(addr: SocketAddr) -> Arc<Session> {
             display: info().display,
         }),
         rtt: Mutex::new(RttEstimator::new()),
+        rtt_low: Mutex::new(None),
+        pace_kbps: AtomicU32::new(0),
         fec: AtomicU8::new(DEFAULT_FEC_PERCENT),
         heard_us: AtomicU64::new(0),
         frames: AtomicU64::new(0),
@@ -54,6 +56,8 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         transport: TransportState::new(1000),
         keyframe_request: Mutex::new(None),
         audio_enabled: false,
+        draw_cursor: AtomicBool::new(true),
+        control_writer: Mutex::new(None),
     })
 }
 
@@ -116,6 +120,7 @@ fn a_viewer_that_does_not_read_cannot_block_the_control_writer() {
     }
     host.set_nonblocking(false).unwrap();
     let accept = Accept {
+        cursor: false,
         session: session.id,
         token: control::token_hex(&session.token),
         codec: Codec::H264Baseline,
@@ -378,6 +383,7 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
     };
     let (host, mut client) = sockets();
     let accept = Accept {
+        cursor: false,
         session: session.id,
         token: control::token_hex(&session.token),
         codec: Codec::H264Baseline,

@@ -1,4 +1,4 @@
-//! A byte token bucket. At most sixteen datagrams are sent without waiting.
+//! Conditional byte token bucket; clean paths send immediately.
 use std::time::{Duration, Instant};
 
 pub(crate) struct Pacer {
@@ -14,6 +14,11 @@ impl Pacer {
         }
     }
     pub(crate) fn delay(&mut self, now: Instant, bytes: usize, kbps: u32) -> Duration {
+        if kbps == 0 {
+            self.tokens = BURST;
+            self.updated = now;
+            return Duration::ZERO;
+        }
         let rate = f64::from(kbps.max(1)) * 1000.0 / 8.0 * 2.5;
         self.tokens = (self.tokens
             + now.saturating_duration_since(self.updated).as_secs_f64() * rate)
@@ -31,6 +36,14 @@ impl Pacer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clean_path_never_waits_even_for_large_keyframes() {
+        let now = Instant::now();
+        let mut p = Pacer::new(now);
+        for _ in 0..10_000 {
+            assert!(p.delay(now, 1200, 0).is_zero());
+        }
+    }
     #[test]
     fn keyframe_is_a_train_with_a_bounded_initial_burst() {
         let start = Instant::now();

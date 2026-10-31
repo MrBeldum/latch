@@ -110,7 +110,10 @@ impl Encoder {
             session: Owned::new(session)?,
             output,
             hardware: required_hardware,
-            config: config.clone(),
+            config: VideoConfig {
+                bitrate_kbps: 0,
+                ..config.clone()
+            },
             index: 0,
         };
         // SAFETY: the session is live and each property receives the documented CF value type.
@@ -120,6 +123,16 @@ impl Encoder {
                 kVTCompressionPropertyKey_AllowFrameReordering,
                 kCFBooleanFalse,
             )?;
+            let _ = VTSessionSetProperty(
+                encoder.session.0,
+                kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
+                kCFBooleanTrue,
+            );
+            let _ = VTSessionSetProperty(
+                encoder.session.0,
+                kVTCompressionPropertyKey_MaxFrameDelayCount,
+                number(0).0,
+            );
             let profile = match config.codec {
                 Codec::Hevc => kVTProfileLevel_HEVC_Main_AutoLevel,
                 Codec::H264High => kVTProfileLevel_H264_High_AutoLevel,
@@ -138,6 +151,26 @@ impl Encoder {
                 kVTCompressionPropertyKey_MaxKeyFrameInterval,
                 number(i32::MAX as i64).0,
             )?;
+            let _ = VTSessionSetProperty(
+                encoder.session.0,
+                kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+                float_number(0.0).0,
+            );
+            let _ = VTSessionSetProperty(
+                encoder.session.0,
+                kVTCompressionPropertyKey_ColorPrimaries,
+                kCVImageBufferColorPrimaries_ITU_R_709_2,
+            );
+            let _ = VTSessionSetProperty(
+                encoder.session.0,
+                kVTCompressionPropertyKey_TransferFunction,
+                kCVImageBufferTransferFunction_ITU_R_709_2,
+            );
+            let _ = VTSessionSetProperty(
+                encoder.session.0,
+                kVTCompressionPropertyKey_YCbCrMatrix,
+                kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+            );
             encoder.set(
                 kVTCompressionPropertyKey_ExpectedFrameRate,
                 number(config.fps as i64).0,
@@ -195,7 +228,13 @@ impl Encoder {
         )
     }
     pub fn bitrate(&mut self, kbps: u32) -> Result<()> {
+        self.set_bitrate(kbps)
+    }
+    pub fn set_bitrate(&mut self, kbps: u32) -> Result<()> {
         ensure!(kbps > 0, "bitrate must be positive");
+        if kbps == self.config.bitrate_kbps {
+            return Ok(());
+        }
         let rate = number(i64::from(kbps) * 1000);
         let bytes = number(i64::from(kbps) * 1000 * 3 / 16);
         let seconds = number(1);
@@ -213,12 +252,7 @@ impl Encoder {
                 kVTCompressionPropertyKey_DataRateLimits,
                 limits.0,
             );
-            if status == -12900 {
-                // kVTPropertyNotSupportedErr (notably software HEVC)
-                tracing::debug!(
-                    "VideoToolbox encoder does not support peak rate limits; using average bitrate"
-                );
-            } else {
+            if status != 0 && status != -12900 {
                 check(status, "set VideoToolbox data rate limits")?;
             }
             self.config.bitrate_kbps = kbps;
@@ -259,8 +293,7 @@ impl Encoder {
             out.captured = captured;
             out.frame = None;
         }
-        // SAFETY: capture retains image throughout this call. Completing the submitted PTS drains
-        // the callback before the next submission changes its capture timestamp.
+        // SAFETY: capture retains image throughout this call.
         unsafe {
             let options = dictionary(&[(
                 kVTEncodeFrameOptionKey_ForceKeyFrame,
@@ -362,7 +395,10 @@ unsafe fn annex_b(sample: Ref, hevc: bool, captured: Instant) -> Result<EncodedV
             "read parameter set count",
         )?;
         ensure!((1..=4).contains(&header), "invalid NAL length width");
-        let mut data = Vec::new();
+        let block = CMSampleBufferGetDataBuffer(sample);
+        ensure!(!block.is_null(), "encoded picture has no data");
+        let total_length = CMBlockBufferGetDataLength(block);
+        let mut data = Vec::with_capacity(total_length + (if keyframe { 128 } else { 0 }));
         if keyframe {
             for i in 0..count {
                 let mut p = ptr::null();
@@ -383,14 +419,29 @@ unsafe fn annex_b(sample: Ref, hevc: bool, captured: Instant) -> Result<EncodedV
                 data.extend_from_slice(std::slice::from_raw_parts(p, size));
             }
         }
-        let block = CMSampleBufferGetDataBuffer(sample);
-        ensure!(!block.is_null(), "encoded picture has no data");
-        let mut bytes = vec![0; CMBlockBufferGetDataLength(block)];
-        check(
-            CMBlockBufferCopyDataBytes(block, 0, bytes.len(), bytes.as_mut_ptr()),
-            "read encoded bytes",
-        )?;
-        append_nals(&bytes, header as usize, &mut data)?;
+        let mut length_at_offset = 0;
+        let mut block_total = 0;
+        let mut data_pointer = ptr::null_mut();
+        let status = CMBlockBufferGetDataPointer(
+            block,
+            0,
+            &mut length_at_offset,
+            &mut block_total,
+            &mut data_pointer,
+        );
+        if status == 0 && length_at_offset == block_total && !data_pointer.is_null() {
+            // Contiguous buffer: convert to Annex B directly from block buffer memory with a single copy.
+            let slice = std::slice::from_raw_parts(data_pointer, block_total);
+            append_nals(slice, header as usize, &mut data)?;
+        } else {
+            // Non-contiguous fallback
+            let mut bytes = vec![0; total_length];
+            check(
+                CMBlockBufferCopyDataBytes(block, 0, bytes.len(), bytes.as_mut_ptr()),
+                "read encoded bytes",
+            )?;
+            append_nals(&bytes, header as usize, &mut data)?;
+        }
         Ok(EncodedVideo {
             data,
             keyframe,

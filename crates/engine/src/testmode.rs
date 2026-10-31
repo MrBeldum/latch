@@ -62,6 +62,8 @@ impl CpuCapture for Shared {
         let deadline = Instant::now() + timeout;
         loop {
             let now = Instant::now();
+            // Refreshes on a fixed grid, as a display does, whenever it is
+            // looked at.
             if now >= self.next {
                 // Keep the synthetic display's refresh phase. Re-stamping now
                 // adds scheduler wake latency on top of every refresh interval.
@@ -84,6 +86,14 @@ impl CpuCapture for Shared {
 
     fn name(&self) -> String {
         "test pattern".into()
+    }
+
+    fn set_cursor_drawn(&mut self, drawn: bool) -> bool {
+        self.pattern.lock().set_cursor_drawn(drawn)
+    }
+
+    fn take_cursor(&mut self) -> Option<crate::video::CursorUpdate> {
+        self.pattern.lock().take_cursor()
     }
 }
 

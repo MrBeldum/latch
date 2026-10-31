@@ -773,6 +773,7 @@ fn test_6_control_messages_roundtrip_and_errors() {
                 codec: "opus".into(),
             }),
             audio_problem: "".into(),
+            cursor: true,
         }),
         Message::End(End {
             code: end::CAPTURE_FAILED,
@@ -790,6 +791,18 @@ fn test_6_control_messages_roundtrip_and_errors() {
             rtt_ms: 12.0,
             ..Default::default()
         }),
+        Message::Cursor(latch_proto::control::Cursor {
+            visible: true,
+            shape: Some(latch_proto::control::CursorShape::new(
+                1,
+                16,
+                16,
+                0,
+                0,
+                &[255; 16 * 16 * 4],
+            )),
+        }),
+        Message::DrawCursor(latch_proto::control::DrawCursor { draw: false }),
         Message::Unknown(42),
     ];
 

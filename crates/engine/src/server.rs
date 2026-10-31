@@ -14,7 +14,7 @@ use latch_proto::audio::AudioPacketizer;
 use latch_proto::control::{self, end, Accept, AudioFormat, End, Message, Notice, StreamRequest};
 use latch_proto::input::InputReceiver;
 use latch_proto::rtt::RttEstimator;
-use latch_proto::video::{fec_percent_for_loss, OutFrame, Packetizer, DEFAULT_FEC_PERCENT};
+use latch_proto::video::{fec_percent_for, OutFrame, Packetizer, DEFAULT_FEC_PERCENT};
 use latch_proto::wire::{self, Datagram};
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
@@ -36,7 +36,9 @@ const KEEPALIVE: Duration = Duration::from_secs(1);
 /// A viewer heard from neither over TCP nor UDP for this long is gone.
 const SILENT: Duration = Duration::from_secs(10);
 const HELLO_EVERY: Duration = Duration::from_millis(50);
-const PING_EVERY: Duration = Duration::from_millis(125);
+/// Often enough that each viewer report (once a second) has round trips
+/// to tell a filling queue from the path's base; a ping is 16 bytes.
+const PING_EVERY: Duration = Duration::from_millis(100);
 /// Keyframes for requests at most this often: a burst of requests for one
 /// loss must not turn into a burst of keyframes.
 const KEYFRAME_GAP: Duration = Duration::from_millis(50);
@@ -122,7 +124,7 @@ impl Server {
     pub fn bind(port: u16, options: Options) -> anyhow::Result<Arc<Self>> {
         let udp = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))
             .map_err(|e| anyhow::anyhow!("cannot listen on UDP port {port}: {e}"))?;
-        latch_proto::transport::configure_socket(&udp, 2 * 1024 * 1024, 1024 * 1024)?;
+        latch_proto::transport::configure_socket(&udp, 8 * 1024 * 1024, 8 * 1024 * 1024)?;
         udp.set_read_timeout(Some(Duration::from_millis(200)))?;
         let server = Arc::new(Self {
             udp,
@@ -269,7 +271,11 @@ impl Server {
 
     /// Runs a prepared session on the upgraded connection until it ends.
     pub fn run(self: &Arc<Self>, mut prepared: Prepared, tcp: TcpStream) {
-        let (pipeline, config) = prepared.pipeline.take().expect("prepared has a pipeline");
+        let (mut pipeline, config) = prepared.pipeline.take().expect("prepared has a pipeline");
+        let cursor_supported = prepared.req.cursor && pipeline.set_cursor_drawn(false);
+        if !prepared.req.cursor {
+            pipeline.set_cursor_drawn(true);
+        }
         let info = prepared.info.take().expect("prepared has video info");
         let token: [u8; 16] = rand::random();
         let id: u32 = rand::random();
@@ -291,6 +297,8 @@ impl Server {
                 display: info.display,
             }),
             rtt: Mutex::new(RttEstimator::new()),
+            rtt_low: Mutex::new(None),
+            pace_kbps: AtomicU32::new(0),
             fec: AtomicU8::new(DEFAULT_FEC_PERCENT),
             heard_us: AtomicU64::new(self.now_us()),
             frames: AtomicU64::new(0),
@@ -298,6 +306,8 @@ impl Server {
             transport: TransportState::new(config.bitrate_kbps),
             keyframe_request: Mutex::new(None),
             audio_enabled: prepared.audio.is_some(),
+            draw_cursor: AtomicBool::new(!cursor_supported),
+            control_writer: Mutex::new(None),
         });
         // prepare owns the reservation until installation, so a second
         // prepare must see this session and wait for its undo before opening.
@@ -309,12 +319,15 @@ impl Server {
             status.hardware = info.hardware;
             status.audio_problem = prepared.audio_problem.clone();
             status.requested_bitrate_kbps = config.bitrate_kbps;
-            let buffers =
-                latch_proto::transport::configure_socket(&self.udp, 2 * 1024 * 1024, 1024 * 1024)
-                    .unwrap_or_default();
+            let buffers = latch_proto::transport::configure_socket(
+                &self.udp,
+                8 * 1024 * 1024,
+                8 * 1024 * 1024,
+            )
+            .unwrap_or_default();
             status.socket_send_bytes = buffers.send;
             status.socket_receive_bytes = buffers.receive;
-            self.log(format!("host UDP buffers: send={} receive={} bytes (requested 2097152/1048576; Linux may cap at net.core.wmem_max/rmem_max)", buffers.send, buffers.receive));
+            self.log(format!("host UDP buffers: send={} receive={} bytes (requested 8388608/8388608; Linux may cap at net.core.wmem_max/rmem_max)", buffers.send, buffers.receive));
         }
         let audio = prepared.audio.take();
         let accept = Accept {
@@ -333,6 +346,7 @@ impl Server {
                 codec: "lpcm-rice".into(),
             }),
             audio_problem: prepared.audio_problem.clone(),
+            cursor: cursor_supported,
         };
         self.log(format!(
             "{} is watching: {}×{} at {} fps, {} kb/s, {}{}",
@@ -444,6 +458,7 @@ impl Server {
                     }
                 });
         }
+        *session.control_writer.lock() = Some(writer);
         let (video, audio) = start_media();
         let mut controller =
             crate::congestion::Controller::new(accept.bitrate_kbps, Instant::now());
@@ -451,22 +466,19 @@ impl Server {
         let mut last_keepalive = Instant::now();
         let mut last_hello = Instant::now() - HELLO_EVERY;
         let mut last_ping = Instant::now();
+        // Bytes the encoder had produced at the last viewer report.
+        let mut sent_mark = (Instant::now(), session.bytes.load(Ordering::Relaxed));
         let reason = loop {
             if let Some(e) = session.ended.lock().clone() {
-                let _ = control::write_message(&mut writer, &Message::End(e.clone()));
+                let _ = session.send_control(&Message::End(e.clone()));
                 break e.message;
             }
             let audio_notice = session.audio_notice.lock().take();
             if let Some(message) = audio_notice {
-                if control::write_message(
-                    &mut writer,
-                    &Message::Notice(Notice {
-                        kind: "audio".into(),
-                        message,
-                    }),
-                )
-                .is_err()
-                {
+                if !session.send_control(&Message::Notice(Notice {
+                    kind: "audio".into(),
+                    message,
+                })) {
                     break "the viewer's connection broke".to_string();
                 }
             }
@@ -478,15 +490,26 @@ impl Server {
                         e.message
                     }
                 }
+                Ok(Message::DrawCursor(d)) => {
+                    session.heard(self.now_us());
+                    session.draw_cursor.store(d.draw, Ordering::Relaxed);
+                }
                 Ok(Message::Report(r)) => {
                     session.heard(self.now_us());
-                    let fec = fec_percent_for_loss(r.loss_pct).min(30);
-                    session.fec.store(fec, Ordering::Relaxed);
                     let host_rtt = session
-                        .rtt
+                        .rtt_low
                         .lock()
-                        .srtt()
+                        .take()
                         .map_or(0.0, |d| d.as_secs_f32() * 1000.0);
+                    let bytes = session.bytes.load(Ordering::Relaxed);
+                    let now = Instant::now();
+                    let (then, before) = std::mem::replace(&mut sent_mark, (now, bytes));
+                    let secs = now.duration_since(then).as_secs_f64();
+                    if secs >= 0.1 {
+                        controller.observe_sent(
+                            (bytes.saturating_sub(before) as f64 * 8.0 / 1000.0 / secs) as u32,
+                        );
+                    }
                     let queue_ms =
                         session.transport.queue_us.swap(0, Ordering::Relaxed) as f32 / 1000.0;
                     if controller.update(Instant::now(), &r, host_rtt, queue_ms) {
@@ -504,6 +527,16 @@ impl Server {
                             "bitrate controller decision"
                         );
                     }
+                    session.pace_kbps.store(
+                        if controller.pacing() || r.loss_pct >= 1.5 {
+                            controller.budget()
+                        } else {
+                            0
+                        },
+                        Ordering::Relaxed,
+                    );
+                    let fec = fec_percent_for(r.loss_pct, controller.base_rtt()).min(30);
+                    session.fec.store(fec, Ordering::Relaxed);
                     let status = self.status();
                     let report = control::Report {
                         requested_bitrate_kbps: requested_bitrate,
@@ -515,7 +548,7 @@ impl Server {
                         socket_receive_bytes: status.socket_receive_bytes,
                         ..Default::default()
                     };
-                    if control::write_message(&mut writer, &Message::Report(report)).is_err() {
+                    if !session.send_control(&Message::Report(report)) {
                         break "the viewer's connection broke".to_string();
                     }
                 }
@@ -527,7 +560,7 @@ impl Server {
             }
             let now = Instant::now();
             if now - last_keepalive >= KEEPALIVE {
-                if control::write_message(&mut writer, &Message::Keepalive).is_err() {
+                if !session.send_control(&Message::Keepalive) {
                     break "the viewer's connection broke".to_string();
                 }
                 last_keepalive = now;
@@ -558,12 +591,14 @@ impl Server {
                     code: end::VIEWER_SILENT,
                     message: "The viewer stopped answering.".into(),
                 };
-                let _ = control::write_message(&mut writer, &Message::End(e.clone()));
+                let _ = session.send_control(&Message::End(e.clone()));
                 break e.message;
             }
         };
         session.stop.store(true, Ordering::Release);
-        let _ = writer.flush();
+        if let Some(mut w) = session.control_writer.lock().take() {
+            let _ = w.flush();
+        }
         let _ = tcp.shutdown(Shutdown::Both);
         if let Some(v) = video {
             let _ = v.join();
@@ -662,6 +697,10 @@ struct Session {
     keyframe: AtomicBool,
     input: Mutex<InputState>,
     rtt: Mutex<RttEstimator>,
+    /// The lowest round trip since the last viewer report.
+    rtt_low: Mutex<Option<Duration>>,
+    /// How fast to send a frame's datagrams; 0 sends each frame at once.
+    pace_kbps: AtomicU32,
     fec: AtomicU8,
     /// When the viewer was last heard from, on the server's clock.
     heard_us: AtomicU64,
@@ -670,6 +709,8 @@ struct Session {
     transport: TransportState,
     keyframe_request: Mutex<Option<(u32, Instant)>>,
     audio_enabled: bool,
+    draw_cursor: AtomicBool,
+    control_writer: Mutex<Option<TcpStream>>,
 }
 
 struct TransportState {
@@ -692,6 +733,15 @@ impl TransportState {
 }
 
 impl Session {
+    fn send_control(&self, msg: &Message) -> bool {
+        let mut guard = self.control_writer.lock();
+        if let Some(writer) = guard.as_mut() {
+            control::write_message(writer, msg).is_ok() && writer.flush().is_ok()
+        } else {
+            false
+        }
+    }
+
     fn end(&self, code: u32, message: &str) {
         let mut input = self.input.lock();
         if let Some(mut sink) = input.sink.take() {
@@ -737,6 +787,7 @@ impl Session {
 
 /// The server's datagram loop: hellos, input, keyframe requests, pings.
 fn receive(server: Weak<Server>) {
+    crate::priority::media_thread();
     let mut buf = vec![0u8; latch_proto::MAX_DATAGRAM + 1];
     let mut out = Vec::with_capacity(64);
     loop {
@@ -828,8 +879,10 @@ fn receive(server: Weak<Server>) {
                 let _ = server.udp.send_to(&out, from);
             }
             Datagram::Pong { time, .. } => {
-                let rtt = server.now_us().saturating_sub(time);
-                session.rtt.lock().sample(Duration::from_micros(rtt));
+                let rtt = Duration::from_micros(server.now_us().saturating_sub(time));
+                session.rtt.lock().sample(rtt);
+                let mut low = session.rtt_low.lock();
+                *low = Some(low.map_or(rtt, |low| low.min(rtt)));
             }
             _ => {}
         }
@@ -858,6 +911,7 @@ fn encode_video(
     mut reopen: impl FnMut(&VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>>,
     tx: mpsc::SyncSender<(video::EncodedVideo, Instant)>,
 ) {
+    crate::priority::media_thread();
     let mut last_keyframe: Option<Instant> = None;
     let mut info = pipeline.info();
     let mut recoveries = VecDeque::new();
@@ -875,6 +929,7 @@ fn encode_video(
             applied = target;
             session.transport.applied.store(target, Ordering::Relaxed);
         }
+        pipeline.set_cursor_drawn(session.draw_cursor.load(Ordering::Relaxed));
         let due = last_keyframe.is_none_or(|t| t.elapsed() >= KEYFRAME_GAP);
         let keyframe = due && session.keyframe.swap(false, Ordering::AcqRel);
         // Short idle repeats bound how long a request arriving inside next
@@ -920,6 +975,12 @@ fn encode_video(
                 continue;
             }
         };
+        if let Some(update) = pipeline.take_cursor() {
+            session.send_control(&Message::Cursor(control::Cursor {
+                visible: update.visible,
+                shape: update.shape,
+            }));
+        }
         let next_info = pipeline.info();
         if next_info != info {
             {
@@ -958,6 +1019,7 @@ fn paced_video(
     session: &Session,
     rx: mpsc::Receiver<(video::EncodedVideo, Instant)>,
 ) {
+    crate::priority::media_thread();
     let mut packetizer = Packetizer::new(session.id);
     let mut pacer = crate::pacing::Pacer::new(Instant::now());
     while !session.stopping() {
@@ -976,6 +1038,7 @@ fn paced_video(
             keyframe: frame.keyframe,
             host_delay: delay,
         };
+        let pace = session.pace_kbps.load(Ordering::Relaxed);
         packetizer.packetize(&out, |datagram| {
             loop {
                 if session.stopping() {
@@ -985,11 +1048,7 @@ fn paced_video(
                     .transport
                     .queue_us
                     .fetch_max(queued.elapsed().as_micros() as u64, Ordering::Relaxed);
-                let wait = pacer.delay(
-                    Instant::now(),
-                    datagram.len(),
-                    session.transport.budget.load(Ordering::Relaxed),
-                );
+                let wait = pacer.delay(Instant::now(), datagram.len(), pace);
                 if wait.is_zero() {
                     break;
                 }
@@ -1007,6 +1066,7 @@ fn send_audio(
     capture: Box<dyn AudioCapture>,
     mut reopen: impl FnMut() -> anyhow::Result<Box<dyn AudioCapture>>,
 ) {
+    crate::priority::media_thread();
     let mut packetizer = AudioPacketizer::new(session.id);
     let mut pcm = [0i16; audio::FRAME * audio::CHANNELS];
     let mut coded = Vec::with_capacity(2048);

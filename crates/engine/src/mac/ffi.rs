@@ -41,6 +41,10 @@ pub fn number(value: i64) -> Owned {
     // SAFETY: CFNumber copies the signed 64-bit value before returning.
     Owned::new(unsafe { CFNumberCreate(ptr::null(), 4, (&value as *const i64).cast()) }).unwrap()
 }
+pub fn float_number(value: f64) -> Owned {
+    // SAFETY: CFNumber copies the float 64-bit value before returning (6 = kCFNumberFloat64Type).
+    Owned::new(unsafe { CFNumberCreate(ptr::null(), 6, (&value as *const f64).cast()) }).unwrap()
+}
 pub fn dictionary(entries: &[(Ref, Ref)]) -> Owned {
     let keys: Vec<_> = entries.iter().map(|e| e.0).collect();
     let values: Vec<_> = entries.iter().map(|e| e.1).collect();
@@ -105,6 +109,9 @@ extern "C" {
     pub static kVTCompressionPropertyKey_AverageBitRate: Ref;
     pub static kVTCompressionPropertyKey_DataRateLimits: Ref;
     pub static kVTCompressionPropertyKey_MaxKeyFrameInterval: Ref;
+    pub static kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration: Ref;
+    pub static kVTCompressionPropertyKey_MaxFrameDelayCount: Ref;
+    pub static kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality: Ref;
     pub static kVTCompressionPropertyKey_ExpectedFrameRate: Ref;
     pub static kVTCompressionPropertyKey_ColorPrimaries: Ref;
     pub static kVTCompressionPropertyKey_TransferFunction: Ref;
@@ -149,6 +156,13 @@ extern "C" {
     pub fn CMSampleBufferGetFormatDescription(sample: Ref) -> Ref;
     pub fn CMSampleBufferGetDataBuffer(sample: Ref) -> Ref;
     pub fn CMBlockBufferGetDataLength(block: Ref) -> usize;
+    pub fn CMBlockBufferGetDataPointer(
+        block: Ref,
+        offset: usize,
+        length_at_offset: *mut usize,
+        total_length: *mut usize,
+        data_pointer: *mut *mut u8,
+    ) -> i32;
     pub fn CMBlockBufferCopyDataBytes(
         block: Ref,
         offset: usize,

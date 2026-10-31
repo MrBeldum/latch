@@ -29,14 +29,30 @@ fn compare(
     frames: usize,
     hardware: bool,
 ) {
+    compare_budget(width, height, threads, kbps, kind, frames, hardware, 0);
+}
+#[allow(clippy::too_many_arguments)]
+fn compare_budget(
+    width: u32,
+    height: u32,
+    threads: usize,
+    kbps: u32,
+    kind: &str,
+    frames: usize,
+    hardware: bool,
+    budget: u8,
+) {
     let Some(ffmpeg) = ffmpeg() else { return };
-    let mut e = Encoder::new(EncoderConfig {
-        width,
-        height,
-        fps: 30,
-        bitrate_kbps: kbps,
-        threads,
-    })
+    let mut e = Encoder::new(
+        EncoderConfig {
+            width,
+            height,
+            fps: 30,
+            bitrate_kbps: kbps,
+            threads,
+        }
+        .with_frame_budget(budget),
+    )
     .unwrap();
     e.set_subpixel_refinement(threads != 1);
     let mut native = latch_codec::h264::Decoder::new();
@@ -273,13 +289,16 @@ fn software_oracle_refinement_and_scene_changes() {
 
 #[test]
 fn settled_desktop_skips_and_bitrate_changes_apply() {
-    let mut e = Encoder::new(EncoderConfig {
-        width: 640,
-        height: 360,
-        fps: 30,
-        bitrate_kbps: 8000,
-        threads: 4,
-    })
+    let mut e = Encoder::new(
+        EncoderConfig {
+            width: 640,
+            height: 360,
+            fps: 30,
+            bitrate_kbps: 8000,
+            threads: 4,
+        }
+        .with_frame_budget(0),
+    )
     .unwrap();
     let p = encode_content::frame(640, 360, 0, "still");
     let mut out = Vec::new();
@@ -334,4 +353,18 @@ fn settled_desktop_skips_and_bitrate_changes_apply() {
 #[test]
 fn fractional_motion_oracle() {
     compare(130, 98, 3, 2000, "motion", 20, false);
+}
+
+#[test]
+fn realtime_effort_oracle() {
+    for kind in ["motion", "typing", "scroll", "noise"] {
+        compare_budget(640, 360, 4, 2000, kind, 40, false, 1);
+    }
+}
+#[test]
+#[ignore = "requires macOS VideoToolbox; run explicitly"]
+fn realtime_videotoolbox_oracle() {
+    if cfg!(target_os = "macos") {
+        compare_budget(1280, 720, 4, 8000, "motion", 40, true, 1);
+    }
 }

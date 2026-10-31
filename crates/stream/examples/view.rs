@@ -43,13 +43,18 @@ fn rss_mb() -> f64 {
 }
 
 fn square_is_white(f: &Frame) -> bool {
-    let mut sum = 0u64;
-    for y in 16..48 {
-        for x in 16..48 {
-            sum += f.y[y * f.y_stride + x] as u64;
+    f.with_planes(|y, y_stride, _, _| {
+        let mut sum = 0u64;
+        for y_pos in 16..48 {
+            for x_pos in 16..48 {
+                let idx = y_pos * y_stride + x_pos;
+                if idx < y.len() {
+                    sum += y[idx] as u64;
+                }
+            }
         }
-    }
-    sum / (32 * 32) > 128
+        sum / (32 * 32) > 128
+    })
 }
 
 fn main() -> anyhow::Result<()> {
@@ -93,6 +98,7 @@ fn main() -> anyhow::Result<()> {
             hevc: flag("--hevc"),
             audio: flag("--audio"),
             name: "view example".into(),
+            cursor: false,
         },
         frames.clone(),
         tx,
@@ -110,6 +116,26 @@ fn main() -> anyhow::Result<()> {
     eprintln!("connected in {:?}", asked.elapsed());
     let cpu0 = cpu_seconds();
     let t0 = Instant::now();
+
+    // Smoothness: when each decoded frame appears, polled every 250 µs.
+    let timing_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let arrivals = {
+        let done = timing_done.clone();
+        let frames = frames.clone();
+        std::thread::spawn(move || {
+            let mut times = Vec::new();
+            let mut seq = frames.seq();
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                let now = frames.seq();
+                if now != seq {
+                    seq = now;
+                    times.push(Instant::now());
+                }
+                std::thread::sleep(Duration::from_micros(250));
+            }
+            times
+        })
+    };
 
     if let Some((x, y)) = arg("--point", "")
         .split_once(',')
@@ -194,10 +220,9 @@ fn main() -> anyhow::Result<()> {
             "host_socket_receive_bytes": s.host_socket_receive_bytes,
             // Sparse luma samples confirm changing decoded content without saving pictures.
             "luma_sample": frames.take().map(|f| {
-                let sample: Vec<u8> = (0..16).map(|i| {
-                    f.y[(f.height as usize * (2 * i + 1) / 32) * f.y_stride
-                        + f.width as usize / 2]
-                }).collect();
+                let sample: Vec<u8> = f.with_planes(|y, stride, _, _| (0..16).map(|i| {
+                    y[(f.height as usize * (2 * i + 1) / 32) * stride + f.width as usize / 2]
+                }).collect());
                 frames.recycle(f);
                 sample
             }),
@@ -207,6 +232,25 @@ fn main() -> anyhow::Result<()> {
     let cpu = (cpu_seconds() - cpu0) / elapsed * 100.0;
     let stats = session.stats();
     presses.sort_by(f64::total_cmp);
+    timing_done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let times = arrivals.join().unwrap_or_default();
+    let mut gaps: Vec<f64> = times
+        .windows(2)
+        .map(|w| (w[1] - w[0]).as_secs_f64() * 1000.0)
+        .collect();
+    let mean_gap = gaps.iter().sum::<f64>() / gaps.len().max(1) as f64;
+    let stdev_gap = (gaps.iter().map(|g| (g - mean_gap).powi(2)).sum::<f64>()
+        / gaps.len().max(1) as f64)
+        .sqrt();
+    gaps.sort_by(f64::total_cmp);
+    let gap = |p: f64| {
+        gaps.get(((gaps.len() as f64 - 1.0) * p).round() as usize)
+            .copied()
+    };
+    let span = times
+        .last()
+        .zip(times.first())
+        .map_or(0.0, |(l, f)| (*l - *f).as_secs_f64());
     let pct = |p: f64| {
         presses
             .get(((presses.len() as f64 - 1.0) * p).round() as usize)
@@ -218,6 +262,7 @@ fn main() -> anyhow::Result<()> {
         "decoder": stats.decoder, "encoder": stats.encoder, "codec": stats.codec,
         "viewer_cpu_pct_one_core": cpu, "viewer_rss_mb": rss_mb(),
         "key_to_picture_ms": { "n": presses.len(), "min": presses.first(), "p50": pct(0.5), "p95": pct(0.95), "max": presses.last() },
+        "frame_interval_ms": { "n": gaps.len(), "fps": if span > 0.0 { gaps.len() as f64 / span } else { 0.0 }, "mean": mean_gap, "stdev": stdev_gap, "p50": gap(0.5), "p95": gap(0.95), "p99": gap(0.99), "max": gaps.last() },
         "seconds": lines,
     });
     println!("{}", serde_json::to_string_pretty(&summary)?);
