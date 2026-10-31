@@ -10,6 +10,7 @@ pub mod audio;
 pub mod display;
 pub mod input;
 pub mod pattern;
+pub mod priority;
 pub mod server;
 pub mod software;
 pub mod testmode;

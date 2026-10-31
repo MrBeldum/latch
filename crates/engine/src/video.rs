@@ -56,6 +56,59 @@ pub trait VideoPipeline: Send {
     }
 }
 
+/// When frames are taken: on a fixed grid a hair faster than the stream's
+/// rate, so that time spent capturing, converting and encoding a frame comes
+/// out of its interval instead of adding to it. A screen that refreshes at
+/// the stream's rate gives up every refresh (its clock runs a little slower
+/// than the grid, so the grid waits for it), and a screen that changes all
+/// the time is sampled at the stream's rate. A frame more than an interval
+/// late moves the grid rather than bursting to catch up.
+#[derive(Debug, Clone)]
+pub struct Pacer {
+    interval: Duration,
+    due: Option<Instant>,
+}
+
+impl Pacer {
+    pub fn new(fps: u32) -> Self {
+        Self {
+            interval: Duration::from_secs_f64(PACE / f64::from(fps.max(1))),
+            due: None,
+        }
+    }
+
+    /// The grid's step.
+    pub fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    /// When the next frame may be taken; `None` before the first.
+    pub fn due(&self) -> Option<Instant> {
+        self.due
+    }
+
+    /// Sleeps until the next frame may be taken.
+    pub fn wait(&self) {
+        if let Some(wait) = self
+            .due
+            .and_then(|due| due.checked_duration_since(Instant::now()))
+        {
+            std::thread::sleep(wait);
+        }
+    }
+
+    /// A frame was taken at `at`.
+    pub fn taken(&mut self, at: Instant) {
+        self.due = Some(match self.due {
+            Some(due) if at < due + self.interval => due + self.interval,
+            _ => at + self.interval,
+        });
+    }
+}
+
+/// The grid runs this much of a nominal interval per frame: 1% fast.
+const PACE: f64 = 0.99;
+
 /// What this machine can encode, best first.
 pub fn encodable() -> Vec<Codec> {
     if crate::testmode::motion().is_some() {
@@ -80,4 +133,41 @@ pub fn open(config: &VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>> {
     return crate::windows::open_video(config);
     #[cfg(target_os = "linux")]
     return crate::linux::open_video(config);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn work_comes_out_of_the_interval() {
+        let mut pacer = Pacer::new(100);
+        let t0 = Instant::now();
+        assert_eq!(pacer.due(), None);
+        pacer.taken(t0);
+        let step = pacer.interval();
+        assert!(step < Duration::from_millis(10) && step > Duration::from_micros(9_800));
+        // Taken 4 ms late: the next is still on the grid.
+        pacer.taken(t0 + step + Duration::from_millis(4));
+        assert_eq!(pacer.due(), Some(t0 + step * 2));
+        // More than an interval late: the grid moves, no burst.
+        let late = t0 + step * 4;
+        pacer.taken(late);
+        assert_eq!(pacer.due(), Some(late + step));
+    }
+
+    #[test]
+    fn an_encoder_slower_than_the_grid_is_never_ahead_of_it() {
+        let mut pacer = Pacer::new(60);
+        let t0 = Instant::now();
+        let mut at = t0;
+        for _ in 0..50 {
+            pacer.taken(at);
+            // 20 ms of work per frame at a 16.5 ms grid: each frame is taken
+            // as soon as the last is done, never before its slot.
+            at = (at + Duration::from_millis(20)).max(pacer.due().unwrap());
+        }
+        let per_frame = (at - t0) / 50;
+        assert!(per_frame >= Duration::from_millis(20) && per_frame < Duration::from_millis(21));
+    }
 }

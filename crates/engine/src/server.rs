@@ -634,6 +634,7 @@ impl Session {
 
 /// The server's datagram loop: hellos, input, keyframe requests, pings.
 fn receive(server: Weak<Server>) {
+    crate::priority::media_thread();
     let mut buf = vec![0u8; latch_proto::MAX_DATAGRAM + 1];
     let mut out = Vec::with_capacity(64);
     loop {
@@ -729,6 +730,7 @@ fn send_video(
     config: VideoConfig,
     mut reopen: impl FnMut(&VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>>,
 ) {
+    crate::priority::media_thread();
     let mut packetizer = Packetizer::new(session.id);
     let mut last_keyframe: Option<Instant> = None;
     let mut info = pipeline.info();
@@ -810,6 +812,7 @@ fn send_audio(
     capture: Box<dyn AudioCapture>,
     mut reopen: impl FnMut() -> anyhow::Result<Box<dyn AudioCapture>>,
 ) {
+    crate::priority::media_thread();
     let mut packetizer = AudioPacketizer::new(session.id);
     let mut pcm = [0i16; audio::FRAME * audio::CHANNELS];
     let mut coded = Vec::with_capacity(2048);

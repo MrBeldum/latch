@@ -715,6 +715,7 @@ fn receive(
     token: [u8; 16],
     mut player: Option<Player>,
 ) {
+    crate::priority::media_thread();
     let session = accept.session;
     let _ = udp.set_read_timeout(Some(Duration::from_millis(5)));
     let mut buf = vec![0u8; latch_proto::MAX_DATAGRAM + 1];
@@ -932,6 +933,7 @@ fn handle(
 
 /// The decode thread: frames in order, newest picture out.
 fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
+    crate::priority::media_thread();
     // A decoder knows whether it runs on hardware only once it has a
     // session, after the first keyframe; the stats follow it.
     let mut named = decoder.name();

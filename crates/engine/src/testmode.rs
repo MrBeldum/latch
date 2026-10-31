@@ -62,8 +62,13 @@ impl CpuCapture for Shared {
         let deadline = Instant::now() + timeout;
         loop {
             let now = Instant::now();
+            // Refreshes on a fixed grid, as a display does, whenever it is
+            // looked at.
             if now >= self.next {
-                self.next = now + self.interval;
+                self.next += self.interval;
+                if self.next <= now {
+                    self.next = now + self.interval;
+                }
                 if self.pattern.lock().grab(frame, Duration::ZERO)? {
                     return Ok(true);
                 }

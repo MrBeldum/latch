@@ -106,6 +106,25 @@ fn main() -> anyhow::Result<()> {
     let cpu0 = cpu_seconds();
     let t0 = Instant::now();
 
+    // Smoothness: when each decoded frame appears, polled every 250 µs.
+    let arrivals = {
+        let frames = frames.clone();
+        let stop = Instant::now() + Duration::from_secs(seconds) + Duration::from_secs(keys as u64);
+        std::thread::spawn(move || {
+            let mut times = Vec::new();
+            let mut seq = frames.seq();
+            while Instant::now() < stop {
+                let now = frames.seq();
+                if now != seq {
+                    seq = now;
+                    times.push(Instant::now());
+                }
+                std::thread::sleep(Duration::from_micros(250));
+            }
+            times
+        })
+    };
+
     if let Some((x, y)) = arg("--point", "")
         .split_once(',')
         .and_then(|(x, y)| Some((x.parse::<i16>().ok()?, y.parse::<i16>().ok()?)))
@@ -181,6 +200,24 @@ fn main() -> anyhow::Result<()> {
     let cpu = (cpu_seconds() - cpu0) / elapsed * 100.0;
     let stats = session.stats();
     presses.sort_by(f64::total_cmp);
+    let times = arrivals.join().unwrap_or_default();
+    let mut gaps: Vec<f64> = times
+        .windows(2)
+        .map(|w| (w[1] - w[0]).as_secs_f64() * 1000.0)
+        .collect();
+    let mean_gap = gaps.iter().sum::<f64>() / gaps.len().max(1) as f64;
+    let stdev_gap = (gaps.iter().map(|g| (g - mean_gap).powi(2)).sum::<f64>()
+        / gaps.len().max(1) as f64)
+        .sqrt();
+    gaps.sort_by(f64::total_cmp);
+    let gap = |p: f64| {
+        gaps.get(((gaps.len() as f64 - 1.0) * p).round() as usize)
+            .copied()
+    };
+    let span = times
+        .last()
+        .zip(times.first())
+        .map_or(0.0, |(l, f)| (*l - *f).as_secs_f64());
     let pct = |p: f64| {
         presses
             .get(((presses.len() as f64 - 1.0) * p).round() as usize)
@@ -191,6 +228,7 @@ fn main() -> anyhow::Result<()> {
         "decoder": stats.decoder, "encoder": stats.encoder, "codec": stats.codec,
         "viewer_cpu_pct_one_core": cpu, "viewer_rss_mb": rss_mb(),
         "key_to_picture_ms": { "n": presses.len(), "min": presses.first(), "p50": pct(0.5), "p95": pct(0.95), "max": presses.last() },
+        "frame_interval_ms": { "n": gaps.len(), "fps": if span > 0.0 { gaps.len() as f64 / span } else { 0.0 }, "mean": mean_gap, "stdev": stdev_gap, "p50": gap(0.5), "p95": gap(0.95), "p99": gap(0.99), "max": gaps.last() },
         "seconds": lines,
     });
     println!("{}", serde_json::to_string_pretty(&summary)?);

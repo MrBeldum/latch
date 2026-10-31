@@ -275,6 +275,7 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
     thread::Builder::new()
         .name("latch-dxgi-mf".into())
         .spawn(move || {
+            crate::priority::media_thread();
             let initialized = (|| {
                 let runtime = Runtime::new(false)?;
                 let mf = Runtime::new(true)
