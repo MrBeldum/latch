@@ -415,6 +415,8 @@ impl Server {
         let mut last_keepalive = Instant::now();
         let mut last_hello = Instant::now() - HELLO_EVERY;
         let mut last_ping = Instant::now();
+        // Bytes the encoder had produced at the last viewer report.
+        let mut sent_mark = (Instant::now(), session.bytes.load(Ordering::Relaxed));
         let reason = loop {
             if let Some(e) = session.ended.lock().clone() {
                 let _ = control::write_message(&mut writer, &Message::End(e.clone()));
@@ -445,9 +447,18 @@ impl Server {
                 Ok(Message::Report(r)) => {
                     session.heard(self.now_us());
                     let rtt = session.rtt_low.lock().take();
+                    let sent_kbps = {
+                        let bytes = session.bytes.load(Ordering::Relaxed);
+                        let now = Instant::now();
+                        let (then, before) = std::mem::replace(&mut sent_mark, (now, bytes));
+                        let secs = now.duration_since(then).as_secs_f64();
+                        (secs >= 0.25).then(|| {
+                            (bytes.saturating_sub(before) as f64 * 8.0 / 1000.0 / secs) as u32
+                        })
+                    };
                     let (changed, base, pace) = {
                         let mut rate = session.rate.lock();
-                        let changed = rate.report(Instant::now(), r.loss_pct, rtt);
+                        let changed = rate.report(Instant::now(), r.loss_pct, rtt, sent_kbps);
                         (changed, rate.base_rtt(), rate.pacing_kbps())
                     };
                     let pace = pace.unwrap_or(0);

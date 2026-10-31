@@ -19,8 +19,10 @@ const LOSS_CONGESTED: f32 = 4.0;
 const LOSS_SEVERE: f32 = 10.0;
 /// Below this the path counts as clean (Wi-Fi drops a little regardless).
 const LOSS_CLEAN: f32 = 1.5;
-/// Queueing past `max(this, base / 4)` means the path is full.
-const QUEUE_CONGESTED: Duration = Duration::from_millis(20);
+/// Queueing past `max(this, base / 4)` means the path is full. The round
+/// trip judged is the lowest of a second's pings, so Wi-Fi's jitter does
+/// not reach it; a standing queue does.
+const QUEUE_CONGESTED: Duration = Duration::from_millis(10);
 const BACKOFF: f64 = 0.85;
 const BACKOFF_SEVERE: f64 = 0.65;
 /// After a decrease, no increase for this long.
@@ -95,9 +97,19 @@ impl RateControl {
 
     /// One viewer report: `loss_pct` of the datagrams sent were lost on the
     /// way, and `rtt` is the round trip measured since the last report (its
-    /// lowest sample, so one late pong is not taken for a queue). Returns
-    /// the new rate when it changed.
-    pub fn report(&mut self, now: Instant, loss_pct: f32, rtt: Option<Duration>) -> Option<u32> {
+    /// lowest sample, so one late pong is not taken for a queue). `sent_kbps`
+    /// is what the encoder actually produced since the last report: an
+    /// encoder can stay well under its target (a software encoder on a busy
+    /// picture, any encoder on a still one), and backing off from a target
+    /// it never reached would change nothing on the wire. Returns the new
+    /// rate when it changed.
+    pub fn report(
+        &mut self,
+        now: Instant,
+        loss_pct: f32,
+        rtt: Option<Duration>,
+        sent_kbps: Option<u32>,
+    ) -> Option<u32> {
         if loss_pct >= PACE_LOSS {
             self.paced = true;
             self.clean_reports = 0;
@@ -130,7 +142,13 @@ impl RateControl {
         };
         let before = self.rate;
         if factor < 1.0 {
-            self.rate = ((self.rate as f64 * factor) as u32).max(self.floor);
+            // A stream using less than half its rate is not what filled the
+            // path (it may be a still screen); it backs off from its rate.
+            let from = match sent_kbps {
+                Some(sent) if sent >= self.rate / 2 => sent.min(self.rate),
+                _ => self.rate,
+            };
+            self.rate = ((from as f64 * factor) as u32).max(self.floor);
             self.hold_until = Some(now + HOLD);
             self.clean_since = None;
         } else {
@@ -160,7 +178,7 @@ mod tests {
     fn run(rc: &mut RateControl, t: &mut Instant, secs: u32, loss: f32, rtt: Duration) {
         for _ in 0..secs {
             *t += Duration::from_secs(1);
-            rc.report(*t, loss, Some(rtt));
+            rc.report(*t, loss, Some(rtt), None);
         }
     }
 
@@ -178,9 +196,9 @@ mod tests {
         let mut t = Instant::now();
         run(&mut rc, &mut t, 3, 0.0, 13 * MS);
         t += Duration::from_secs(1);
-        assert_eq!(rc.report(t, 6.0, Some(13 * MS)), Some(17_000));
+        assert_eq!(rc.report(t, 6.0, Some(13 * MS), None), Some(17_000));
         t += Duration::from_secs(1);
-        assert_eq!(rc.report(t, 15.0, Some(13 * MS)), Some(11_050));
+        assert_eq!(rc.report(t, 15.0, Some(13 * MS), None), Some(11_050));
         // Held, then two clean seconds before each step up.
         run(&mut rc, &mut t, 2, 0.0, 13 * MS);
         assert_eq!(rc.rate(), 11_050);
@@ -195,9 +213,9 @@ mod tests {
         run(&mut rc, &mut t, 5, 0.0, 150 * MS);
         // 150 ms base: queueing counts past 37.5 ms.
         t += Duration::from_secs(1);
-        assert_eq!(rc.report(t, 0.0, Some(180 * MS)), None);
+        assert_eq!(rc.report(t, 0.0, Some(180 * MS), None), None);
         t += Duration::from_secs(1);
-        assert_eq!(rc.report(t, 0.0, Some(200 * MS)), Some(25_500));
+        assert_eq!(rc.report(t, 0.0, Some(200 * MS), None), Some(25_500));
     }
 
     #[test]
@@ -215,6 +233,35 @@ mod tests {
         let mut slow = RateControl::new(4_000);
         run(&mut slow, &mut t, 1, 2.0, 13 * MS);
         assert_eq!(slow.pacing_kbps(), Some(40_000));
+    }
+
+    #[test]
+    fn backing_off_starts_from_what_was_actually_sent() {
+        let mut rc = RateControl::new(40_000);
+        let mut t = Instant::now();
+        run(&mut rc, &mut t, 3, 0.0, 11 * MS);
+        // The encoder made 27 Mb/s of its 40: the next rate is under 27.
+        t += Duration::from_secs(1);
+        assert_eq!(rc.report(t, 6.9, Some(11 * MS), Some(27_000)), Some(22_950));
+        // A still screen sending 1 Mb/s that sees loss backs off from its
+        // rate, not from its trickle.
+        let mut still = RateControl::new(20_000);
+        run(&mut still, &mut t, 3, 0.0, 11 * MS);
+        t += Duration::from_secs(1);
+        assert_eq!(
+            still.report(t, 5.0, Some(11 * MS), Some(1_000)),
+            Some(17_000)
+        );
+    }
+
+    #[test]
+    fn a_short_path_backs_off_on_a_standing_queue() {
+        let mut rc = RateControl::new(30_000);
+        let mut t = Instant::now();
+        run(&mut rc, &mut t, 5, 0.0, 11 * MS);
+        // 11 ms base: a second whose best ping is 22 ms has a queue.
+        t += Duration::from_secs(1);
+        assert_eq!(rc.report(t, 0.0, Some(22 * MS), Some(30_000)), Some(25_500));
     }
 
     #[test]
