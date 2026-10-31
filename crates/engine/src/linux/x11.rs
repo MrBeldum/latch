@@ -155,7 +155,11 @@ fn helper() -> anyhow::Result<()> {
                 .flatten()
                 .unwrap_or_default();
             let payload = serde_json::to_vec(&(usize::from(display.screen), name, data))?;
-            let mut fds = vec![OwnedFd::from(stream)];
+            // Keep the original alive until the parent confirms receipt.
+            // Closing the sender's last descriptor immediately after sendmsg
+            // can deliver premature EOF on macOS while rights are in transit.
+            let retained = OwnedFd::from(stream);
+            let mut fds = vec![retained.try_clone()?];
             let mut bytes = payload.as_slice();
             while !bytes.is_empty() {
                 match ipc.write(bytes, &mut fds) {
@@ -167,7 +171,23 @@ fn helper() -> anyhow::Result<()> {
                     Err(e) => return Err(e.into()),
                 }
             }
-            return Ok(());
+            // EOF frames the payload, but keep reading the private socket for
+            // the receiver's acknowledgment before releasing the X11 socket.
+            // SAFETY: ipc owns this live connected socket.
+            if unsafe { libc::shutdown(ipc.as_raw_fd(), libc::SHUT_WR) } != 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+            let mut ack = [0];
+            loop {
+                match ipc.read(&mut ack, &mut Vec::new()) {
+                    Ok(1) if ack[0] == 1 => return Ok(()),
+                    Ok(_) => anyhow::bail!("closed or invalid bootstrap acknowledgment"),
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        ipc.poll(PollMode::Readable)?;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
         }
     }
     anyhow::bail!("cannot connect to X11")
@@ -255,6 +275,19 @@ fn bootstrap(mut command: Command, deadline: Instant) -> anyhow::Result<Bootstra
     let (screen, name, data): (usize, Vec<u8>, Vec<u8>) = serde_json::from_slice(&payload)
         .map_err(|_| anyhow::anyhow!("invalid X11 bootstrap response"))?;
     let (stream, _) = DefaultStream::from_unix_stream(UnixStream::from(fds.pop().unwrap()))?;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        anyhow::ensure!(
+            !remaining.is_zero() && wait_fd(ipc.as_raw_fd(), libc::POLLOUT, remaining)?,
+            "X11 initialization timed out acknowledging the socket handoff"
+        );
+        match ipc.write(&[1], &mut Vec::new()) {
+            Ok(1) => break,
+            Ok(_) => anyhow::bail!("closed bootstrap socket"),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
     Ok((stream, screen, name, data))
 }
 
@@ -301,6 +334,64 @@ mod tests {
         };
         setup.length = ((setup.serialize().len() - 8) / 4) as u16;
         socket.write_all(&setup.serialize()).unwrap();
+    }
+
+    #[test]
+    fn handoff_keeps_the_helper_alive_until_the_receiver_acknowledges() {
+        let _test = TEST_LOCK.lock().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (parent, child) = UnixStream::pair().unwrap();
+        let (ipc, _) = DefaultStream::from_unix_stream(parent).unwrap();
+        let mut command = command(
+            &format!("127.0.0.1:{}", port - 6000),
+            std::path::Path::new("/dev/null"),
+        );
+        let helper = command
+            .stdin(Stdio::from(OwnedFd::from(child)))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        drop(command);
+        let slot = std::sync::Mutex::new(Some(helper));
+        let mut helper = Helper(slot.lock().unwrap());
+        let mut fds = Vec::new();
+        let mut payload = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(wait_fd(
+                ipc.as_raw_fd(),
+                libc::POLLIN,
+                deadline.saturating_duration_since(Instant::now())
+            )
+            .unwrap());
+            let mut buf = [0; 4096];
+            match ipc.read(&mut buf, &mut fds) {
+                Ok(0) => break,
+                Ok(n) => payload.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => panic!("{e}"),
+            }
+        }
+        assert!(!payload.is_empty());
+        assert_eq!(fds.len(), 1);
+        let mut socket = UnixStream::from(fds.pop().unwrap());
+        let (mut server, _) = listener.accept().unwrap();
+        socket.set_nonblocking(false).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        // The helper must stay alive after completing its outgoing payload.
+        // Waiting here cannot make correct code fail: it is waiting for our ACK.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(helper.0.as_mut().unwrap().try_wait().unwrap().is_none());
+        server.write_all(b"owned").unwrap();
+        let mut bytes = [0; 5];
+        socket.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"owned");
+        assert_eq!(ipc.write(&[1], &mut Vec::new()).unwrap(), 1);
+        drop(helper);
     }
 
     #[test]

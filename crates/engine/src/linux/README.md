@@ -14,7 +14,9 @@ X11 initialization has one elapsed deadline (2 s for capture/XTest, 10 s
 for RandR), covering display parsing, DNS, Unix/abstract/TCP socket connect,
 authority-file open/read and the setup exchange. A short-lived copy of the
 executable connects and selects credentials using x11rb, then passes the live
-socket and credentials over a private inherited socket. The parent kills and
+socket and credentials over a private inherited socket. The helper retains its
+original descriptor until the parent validates and acknowledges the received
+socket, preventing premature closure while rights are in transit. The parent kills and
 reaps it on completion or failure, allowing up to 100 ms of cleanup beyond
 the deadline. If SIGKILL cannot finish an uninterruptible kernel operation,
 the single helper slot is retained and further attempts fail until it exits;
