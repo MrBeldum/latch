@@ -223,12 +223,14 @@ mod tests {
     struct Fake {
         changed: bool,
         size: (u32, u32),
+        waits: Vec<Duration>,
     }
     impl CpuCapture for Fake {
         fn size(&self) -> (u32, u32) {
             self.size
         }
-        fn grab(&mut self, frame: &mut Bgra, _: Duration) -> anyhow::Result<bool> {
+        fn grab(&mut self, frame: &mut Bgra, timeout: Duration) -> anyhow::Result<bool> {
+            self.waits.push(timeout);
             if !std::mem::take(&mut self.changed) {
                 return Ok(false);
             }
@@ -256,6 +258,7 @@ mod tests {
             Fake {
                 changed: true,
                 size: (16, 16),
+                waits: Vec::new(),
             },
             &VideoConfig {
                 width: 1920,
@@ -275,14 +278,21 @@ mod tests {
         assert!(!p.info().hardware);
         assert!(p.acquire(false, Duration::ZERO).unwrap());
         p.last_sent = Some(Instant::now());
-        let start = Instant::now();
+        p.capture.waits.clear();
         assert!(!p.acquire(true, Duration::from_secs(10)).unwrap());
-        assert!(start.elapsed() >= Duration::from_millis(10));
-        assert!(start.elapsed() < Duration::from_millis(100));
-        p.last_sent = Some(Instant::now());
-        let start = Instant::now();
+        // A keyframe polls once and ignores the idle wait. Cadence's
+        // fake-clock test verifies pacing without relying on VM scheduling.
+        assert_eq!(p.capture.waits, [Duration::ZERO]);
+        p.capture.waits.clear();
+        let last_sent = Instant::now();
+        p.last_sent = Some(last_sent);
         assert!(!p.acquire(false, Duration::from_millis(25)).unwrap());
-        assert!(start.elapsed() >= Duration::from_millis(25));
+        assert!(last_sent.elapsed() >= Duration::from_millis(25));
+        assert!(p
+            .capture
+            .waits
+            .iter()
+            .all(|&wait| wait <= Duration::from_millis(10)));
         p.capture.size = (32, 16);
         p.capture.changed = true;
         assert!(p.acquire(false, Duration::ZERO).unwrap());
