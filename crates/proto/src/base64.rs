@@ -4,9 +4,8 @@ const ENCODE_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrst
 
 /// Encodes binary data to a standard Base64 string with padding.
 pub fn encode(data: &[u8]) -> String {
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
-    let chunks = data.chunks_exact(3);
-    let remainder = chunks.remainder();
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    let (chunks, remainder) = data.as_chunks::<3>();
 
     for chunk in chunks {
         let b0 = chunk[0];
@@ -57,12 +56,12 @@ pub fn decode(s: &str) -> Result<Vec<u8>, &'static str> {
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err("invalid base64 length");
     }
 
     let mut out = Vec::with_capacity((bytes.len() / 4) * 3);
-    for chunk in bytes.chunks_exact(4) {
+    for chunk in bytes.as_chunks::<4>().0 {
         let (c0, c1, c2, c3) = (chunk[0], chunk[1], chunk[2], chunk[3]);
         let d0 = decode_char(c0)?;
         let d1 = decode_char(c1)?;

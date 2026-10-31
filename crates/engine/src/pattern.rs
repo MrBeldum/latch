@@ -61,13 +61,20 @@ impl Pattern {
                 self.dirty = true;
             }
             Event::MouseMove { dx, dy } => {
-                self.cursor_pos.0 = (self.cursor_pos.0 + *dx as i32).clamp(0, self.width.saturating_sub(1) as i32);
-                self.cursor_pos.1 = (self.cursor_pos.1 + *dy as i32).clamp(0, self.height.saturating_sub(1) as i32);
+                self.cursor_pos.0 =
+                    (self.cursor_pos.0 + *dx as i32).clamp(0, self.width.saturating_sub(1) as i32);
+                self.cursor_pos.1 =
+                    (self.cursor_pos.1 + *dy as i32).clamp(0, self.height.saturating_sub(1) as i32);
                 if self.cursor_drawn {
                     self.dirty = true;
                 }
             }
-            Event::MousePosition { x, y, width, height } => {
+            Event::MousePosition {
+                x,
+                y,
+                width,
+                height,
+            } => {
                 let px = if *width > 0 {
                     (*x as u64 * self.width as u64 / *width as u64) as i32
                 } else {
@@ -387,7 +394,10 @@ impl CpuCapture for Pattern {
     }
 
     fn set_cursor_drawn(&mut self, drawn: bool) -> bool {
-        self.cursor_drawn = drawn;
+        if self.cursor_drawn != drawn {
+            self.cursor_drawn = drawn;
+            self.dirty = true;
+        }
         true
     }
 

@@ -64,7 +64,7 @@ fn host() -> u16 {
     panic!("no free port");
 }
 
-fn connect(port: u16) -> (Session, Arc<FrameSlot>, mpsc::Receiver<Event>) {
+fn connect(port: u16, cursor: bool) -> (Session, Arc<FrameSlot>, mpsc::Receiver<Event>) {
     let frames = Arc::new(FrameSlot::default());
     let (tx, rx) = mpsc::channel();
     let session = Session::start(
@@ -80,7 +80,7 @@ fn connect(port: u16) -> (Session, Arc<FrameSlot>, mpsc::Receiver<Event>) {
             hevc: false,
             audio: false,
             name: "loopback test".into(),
-            cursor: false,
+            cursor,
         },
         frames.clone(),
         tx,
@@ -154,11 +154,14 @@ fn square_is_white(f: &Frame) -> bool {
     sum / (32 * 32) > 128
 }
 
+static LOOPBACK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn the_picture_arrives_and_keys_show_up_in_it() {
+    let _lock = LOOPBACK_LOCK.lock().unwrap();
     std::env::set_var("LATCH_TEST_PATTERN", "still");
     let port = host();
-    let (session, frames, events) = connect(port);
+    let (session, frames, events) = connect(port, false);
     let (mut seq, first) =
         next_frame(&frames, 0, Duration::from_secs(5)).expect("no frame arrived");
     assert_eq!((first.width, first.height), (W, H));
@@ -211,7 +214,7 @@ fn the_picture_arrives_and_keys_show_up_in_it() {
     assert!(times[times.len() / 2] < Duration::from_millis(150));
     let stats = session.stats();
     eprintln!("{stats:?}");
-    let (takeover, picture, _events) = connect(port);
+    let (takeover, picture, _events) = connect(port, false);
     next_frame(&picture, 0, Duration::from_secs(5)).expect("takeover has no picture");
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -233,4 +236,120 @@ fn the_picture_arrives_and_keys_show_up_in_it() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn local_cursor_negotiated_and_host_omits_pointer_when_asked() {
+    let _lock = LOOPBACK_LOCK.lock().unwrap();
+    std::env::set_var("LATCH_TEST_PATTERN", "still");
+    let port = host();
+    let (session, frames, _events) = connect(port, true);
+
+    // 1. Check cursor negotiated
+    assert!(
+        session.cursor_supported(),
+        "cursor support must be negotiated with host"
+    );
+
+    // 2. Wait for Cursor shape to arrive
+    let start = Instant::now();
+    let shape = loop {
+        if let Some(cursor_state) = session.cursor() {
+            assert!(cursor_state.visible);
+            if let Some(shape) = cursor_state.shape {
+                break shape;
+            }
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "cursor shape did not arrive"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    assert_eq!(shape.width, 16);
+    assert_eq!(shape.height, 16);
+    assert_eq!(shape.hot_x, 0);
+    assert_eq!(shape.hot_y, 0);
+
+    // 3. Since cursor: true, host starts with draw_cursor: false.
+    // Receive a frame with cursor omitted.
+    let (seq1, frame_omitted) = next_frame(&frames, 0, Duration::from_secs(5))
+        .expect("frame without cursor did not arrive");
+    let luma_omitted = frame_omitted.y.clone();
+    frames.recycle(frame_omitted);
+
+    // 4. Request host to draw cursor
+    session.draw_cursor(true);
+
+    // Wait for frame with cursor drawn (at synthetic position 100, 100)
+    let mut seq = seq1;
+    let start = Instant::now();
+    let mut cursor_drawn_seen = false;
+    while start.elapsed() < Duration::from_secs(3) {
+        if let Some((s, f)) = next_frame(&frames, seq, Duration::from_millis(100)) {
+            seq = s;
+            // Compare around (100, 100) where synthetic arrow is composited
+            let mut diff = 0u64;
+            for y in 95..125 {
+                for x in 95..125 {
+                    let idx = y * f.y_stride + x;
+                    if idx < f.y.len() && idx < luma_omitted.len() {
+                        let d = f.y[idx].abs_diff(luma_omitted[idx]);
+                        diff += d as u64;
+                    }
+                }
+            }
+            frames.recycle(f);
+            if diff > 100 {
+                cursor_drawn_seen = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        cursor_drawn_seen,
+        "host did not composite cursor when draw_cursor(true)"
+    );
+
+    // 5. Request host to omit cursor again
+    session.draw_cursor(false);
+
+    let start = Instant::now();
+    let mut cursor_omitted_again = false;
+    while start.elapsed() < Duration::from_secs(3) {
+        if let Some((s, f)) = next_frame(&frames, seq, Duration::from_millis(100)) {
+            seq = s;
+            let mut diff = 0u64;
+            for y in 95..125 {
+                for x in 95..125 {
+                    let idx = y * f.y_stride + x;
+                    if idx < f.y.len() && idx < luma_omitted.len() {
+                        let d = f.y[idx].abs_diff(luma_omitted[idx]);
+                        diff += d as u64;
+                    }
+                }
+            }
+            frames.recycle(f);
+            if diff < 50 {
+                cursor_omitted_again = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        cursor_omitted_again,
+        "host did not omit cursor when draw_cursor(false)"
+    );
+
+    session.stop();
+    let start = Instant::now();
+    while !session.finished() {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the session never ended"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(300));
 }

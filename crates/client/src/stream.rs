@@ -1362,7 +1362,9 @@ impl View {
                                 Some((s, h)) if *s == shape.serial => Some(h.clone()),
                                 _ => {
                                     if let Ok(rgba) = latch_proto::base64::decode(&shape.rgba) {
-                                        if rgba.len() == (shape.width as usize) * (shape.height as usize) * 4 {
+                                        if rgba.len()
+                                            == (shape.width as usize) * (shape.height as usize) * 4
+                                        {
                                             let img = egui::ColorImage::from_rgba_unmultiplied(
                                                 [shape.width as usize, shape.height as usize],
                                                 &rgba,
@@ -1372,7 +1374,8 @@ impl View {
                                                 img,
                                                 egui::TextureOptions::LINEAR,
                                             );
-                                            self.cursor_texture = Some((shape.serial, handle.clone()));
+                                            self.cursor_texture =
+                                                Some((shape.serial, handle.clone()));
                                             Some(handle)
                                         } else {
                                             None

@@ -641,7 +641,7 @@ impl Session {
     fn send_control(&self, msg: &Message) -> bool {
         let mut guard = self.control_writer.lock();
         if let Some(writer) = guard.as_mut() {
-            control::write_message(writer, msg).is_ok()
+            control::write_message(writer, msg).is_ok() && writer.flush().is_ok()
         } else {
             false
         }

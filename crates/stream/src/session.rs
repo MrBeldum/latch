@@ -19,6 +19,7 @@ use latch_proto::video::{InFrame, KeyframeRequests, Reassembled, Reassembler, Re
 use latch_proto::wire::{self, Datagram};
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
+use std::io::Write;
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -432,9 +433,10 @@ impl Session {
                     message: String::new(),
                 }),
             );
+            let _ = w.flush();
         }
         if let Some(tcp) = self.inner.tcp.lock().as_ref() {
-            let _ = tcp.shutdown(Shutdown::Read);
+            let _ = tcp.shutdown(Shutdown::Both);
         }
         self.inner.queue_cv.notify_all();
     }
@@ -550,7 +552,9 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
             )
         }
     };
-    inner.cursor_supported.store(accept.cursor, Ordering::Release);
+    inner
+        .cursor_supported
+        .store(accept.cursor, Ordering::Release);
     let Some(token) = control::token_from_hex(&accept.token) else {
         return fail("starting", "the host sent a malformed session token".into());
     };
