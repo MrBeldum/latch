@@ -10,7 +10,7 @@ use latch_engine::server::{Options, Server};
 use latch_engine::software::{Bgra, CpuCapture};
 use latch_proto::control::{self, StreamRequest};
 use latch_stream::{Event, Frame, FrameSlot, Session, Settings};
-use std::net::{IpAddr, Ipv4Addr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, TcpListener, UdpSocket};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
@@ -22,8 +22,17 @@ const FPS: u32 = 60;
 /// the engine's server, both on the same port number.
 fn host() -> u16 {
     for _ in 0..50 {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
+        // The OS's next free UDP port, then TCP on the same number. Taking
+        // TCP's next port first failed 50 times running on Windows CI: its
+        // TCP ports come in sequence and can sit inside a block reserved
+        // (by Hyper-V) against UDP.
+        let port = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .and_then(|u| u.local_addr())
+            .unwrap()
+            .port();
+        let Ok(listener) = TcpListener::bind((Ipv4Addr::LOCALHOST, port)) else {
+            continue;
+        };
         let Ok(server) = Server::bind(port, Options::default()) else {
             continue;
         };

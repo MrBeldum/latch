@@ -20,8 +20,17 @@ use std::time::{Duration, Instant};
 
 fn host() -> u16 {
     for _ in 0..50 {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
+        // The OS's next free UDP port, then TCP on the same number. Taking
+        // TCP's next port first failed 50 times running on Windows CI: its
+        // TCP ports come in sequence and can sit inside a block reserved
+        // (by Hyper-V) against UDP.
+        let port = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .and_then(|u| u.local_addr())
+            .unwrap()
+            .port();
+        let Ok(listener) = TcpListener::bind((Ipv4Addr::LOCALHOST, port)) else {
+            continue;
+        };
         let Ok(server) = Server::bind(port, Options::default()) else {
             continue;
         };
@@ -58,9 +67,10 @@ fn relay(
     queue_delay_ms: Arc<std::sync::atomic::AtomicU32>,
 ) -> u16 {
     let (listener, udp) = loop {
-        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = l.local_addr().unwrap().port();
-        if let Ok(u) = UdpSocket::bind((Ipv4Addr::LOCALHOST, port)) {
+        // UDP picks the port, as in `host`.
+        let u = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = u.local_addr().unwrap().port();
+        if let Ok(l) = TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
             break (l, u);
         }
     };
