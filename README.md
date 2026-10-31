@@ -1,5 +1,5 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/logo-knockout.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/logo-dark.svg">
   <img src="docs/brand/logo.svg" alt="Latch" width="64" height="64">
 </picture>
 
