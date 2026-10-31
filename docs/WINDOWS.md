@@ -33,6 +33,10 @@ built-in streaming engine that captures and streams the desktop.
      (`%ProgramFiles%\Latch\engine`, `%ProgramFiles%\BroLink\engine`), a
      `SunshineService` installed in one of them, and the old firewall
      rules;
+   - copies the checked `latch-host.exe` into `%ProgramFiles%\Latch\Input`
+     and registers the `LatchInput` task, which runs that copy with
+     `--input-helper` as the user who ran setup, elevated (see
+     [Windows that run as administrator](#windows-that-run-as-administrator));
    - adds firewall rules: TCP 47850 inbound and UDP 47850 inbound for
      `latch-host.exe` from Tailscale's `100.64.0.0/10` and
      `fd7a:115c:a1e0::/48` only, and UDP 9 for the wake-packet listener;
@@ -87,13 +91,47 @@ when run from an administrator's SSH session:
 The streaming engine is part of the background service, so it streams the
 desktop of the session the service runs in.
 
+## Windows that run as administrator
+
+Windows ignores input that a program sends while a window of a higher
+integrity level is in front (User Interface Privilege Isolation), and tells
+the program it was delivered. Latch runs unelevated in the signed-in
+session, so on its own it cannot move the pointer or type while an
+installer, Task Manager, an administrator's terminal or a game launcher that
+runs as administrator (HoYoPlay, for one) has focus: the viewer's pointer
+freezes until that window is closed at the PC.
+
+Each stream therefore starts the `LatchInput` task that setup registers. It
+runs the copy of Latch in `%ProgramFiles%\Latch\Input`, a folder only
+administrators can change, elevated, as the user who ran setup, with no
+prompt. The stream sends its input to that helper through a named pipe
+(`\\.\pipe\LatchInput-<session>`) that only that user's processes in the
+same session can open, and only after checking that the pipe's server is
+that very copy; until the helper answers, and if it ever goes away, Latch
+injects input itself. The helper lets go of every key and button its stream
+held when the stream ends, and exits a minute after the last stream.
+
+Updates replace only the copy in `%LOCALAPPDATA%`. The helper keeps
+serving newer versions until one changes how the two talk; then
+`service.log` says the helper did not answer, and running setup again
+brings it up to date. The Sharing tab asks for setup while the helper is
+missing, and `service.log` names any window that ignores the viewer's
+input because it runs as administrator.
+
+Any program running as that user can start the task, so it lets that user's
+unelevated programs send keyboard and mouse input to their own elevated
+windows, which Windows would otherwise refuse. Windows' secure desktop (UAC
+prompts, the sign-in and lock screens) still cannot be reached: it needs a
+SYSTEM service, which Latch 5 does not install.
+
 ## Uninstalling
 
 **Uninstall** on Latch's entry in Settings > Apps (written by
 `install-host.ps1`), or `latch-host.exe --uninstall`, stops Latch and
 removes, for the signed-in user, the Run values, the `LatchHostStart` task,
 the shortcuts and the Apps entry; then, through one administrator prompt
-(none in an elevated session), the firewall rules, the start task, every
+(none in an elevated session), the firewall rules, the start task, the
+`LatchInput` task and `%ProgramFiles%\Latch\Input`, every
 Latch 4 or BroLink registration setup retires, and `%ProgramFiles%\Latch\Setup`,
 and it puts back Fast Startup and the AC sleep and hibernate timeouts
 recorded by the first setup. The network card's wake settings and the

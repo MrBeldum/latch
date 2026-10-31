@@ -240,6 +240,7 @@ Step "Opening UDP 9 to check the wake path while this PC is awake"
 netsh advfirewall firewall delete rule name="Latch wake" | Out-Null
 netsh advfirewall firewall add rule name="Latch wake" dir=in action=allow protocol=UDP localport=9 program='{exe}' | Out-Null
 if ($LASTEXITCODE -ne 0) {{ $setupFailed = $true }}
+{input_helper}
 {virtual_display}
 Step "Recording the power settings this PC had before Latch"
 {record}
@@ -261,7 +262,43 @@ exit 0
         tailnet = "100.64.0.0/10,fd7a:115c:a1e0::/48",
         exe = q(&p.exe.display().to_string()),
         virtual_display = crate::virtual_display::setup_ps(),
+        input_helper = input_helper_ps(),
         record = record_power_ps(),
+    )
+}
+
+/// The task that runs the input helper, elevated, for windows that run as
+/// administrator (see `latch_engine::windows`'s `elevated` module).
+const INPUT_TASK: &str = "LatchInput";
+
+/// Setup's step for the input helper. Windows ignores input an unelevated
+/// Latch sends while an elevated window is in front, so a stream starts
+/// this task, which runs a copy of this checked file elevated as the user
+/// who ran setup. The copy sits in `%ProgramFiles%\Latch\Input`, which
+/// only administrators can change, and is replaced on every setup.
+fn input_helper_ps() -> String {
+    format!(
+        r#"Step "Letting a viewer control windows that run as administrator"
+try {{
+    $inputSource = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Latch\Setup\latch-host.exe'
+    Assert-ProtectedTree $inputSource
+    $inputDir = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Latch\Input'
+    if (-not (Test-Path -LiteralPath $inputDir)) {{ New-Item -ItemType Directory -Path $inputDir | Out-Null }}
+    Assert-ProtectedTree $inputDir
+    $inputExe = Join-Path $inputDir 'latch-host.exe'
+    # A running helper holds the file it runs from.
+    Stop-ScheduledTask -TaskName '{task}' -ErrorAction SilentlyContinue
+    Get-Process -Name 'latch-host' -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -ieq $inputExe }} | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    if (Test-Path -LiteralPath $inputExe) {{ Assert-Protected $inputExe }}
+    Copy-Item -LiteralPath $inputSource -Destination $inputExe -Force -ErrorAction Stop
+    $action = New-ScheduledTaskAction -Execute $inputExe -Argument '{arg}' -WorkingDirectory $inputDir
+    $principal = New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType Interactive -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -Priority 4
+    Register-ScheduledTask -TaskName '{task}' -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
+}} catch {{ Write-Output "  input helper: $_"; $setupFailed = $true }}"#,
+        task = INPUT_TASK,
+        arg = "--input-helper",
     )
 }
 
@@ -674,6 +711,10 @@ foreach ($rule in 'Latch Host', 'Latch Media', 'Latch wake') {{ netsh advfirewal
 if (Get-ScheduledTask -TaskName '{task}' -ErrorAction SilentlyContinue) {{
     Unregister-ScheduledTask -TaskName '{task}' -Confirm:$false -ErrorAction SilentlyContinue
 }}
+Stop-ScheduledTask -TaskName '{input_task}' -ErrorAction SilentlyContinue
+if (Get-ScheduledTask -TaskName '{input_task}' -ErrorAction SilentlyContinue) {{
+    Unregister-ScheduledTask -TaskName '{input_task}' -Confirm:$false -ErrorAction SilentlyContinue
+}}
 Step "Putting back the power settings setup changed"
 $latchSaved = '{key}'
 $saved = Get-ItemProperty -LiteralPath $latchSaved -ErrorAction SilentlyContinue
@@ -699,11 +740,18 @@ if ($saved) {{
     # Kept until everything is back, so running this again finishes the job.
     if ($restored) {{ Remove-Item -LiteralPath $latchSaved -Recurse -Force }} else {{ $setupFailed = $true }}
 }} else {{ Write-Output "  nothing recorded; the power settings stay as they are" }}
-Step "Removing setup's folder"
+Step "Removing setup's folder and the input helper"
 $latchDir = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Latch'
 $setupDir = Join-Path $latchDir 'Setup'
 if (Test-Path -LiteralPath $setupDir) {{
     try {{ Assert-ProtectedTree $setupDir; Remove-Item -LiteralPath $setupDir -Recurse -Force -ErrorAction Stop }} catch {{ Write-Output "  setup folder: $_"; $setupFailed = $true }}
+}}
+$inputDir = Join-Path $latchDir 'Input'
+if (Test-Path -LiteralPath $inputDir) {{
+    $inputExe = Join-Path $inputDir 'latch-host.exe'
+    Get-Process -Name 'latch-host' -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -ieq $inputExe }} | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    try {{ Assert-ProtectedTree $inputDir; Remove-Item -LiteralPath $inputDir -Recurse -Force -ErrorAction Stop }} catch {{ Write-Output "  input helper folder: $_"; $setupFailed = $true }}
 }}
 foreach ($empty in @($latchDir, 'HKLM:\SOFTWARE\Latch')) {{
     if ((Test-Path -LiteralPath $empty) -and -not (Get-ChildItem -LiteralPath $empty -Force)) {{ Remove-Item -LiteralPath $empty -Force }}
@@ -715,6 +763,7 @@ exit 0
         protection = include_str!("../../../scripts/setup-protection.ps1"),
         retire = crate::legacy::retire_windows_ps(),
         task = START_TASK,
+        input_task = INPUT_TASK,
         key = SAVED_KEY,
     )
 }
@@ -908,6 +957,57 @@ mod tests {
         assert!(u.contains("'Latch Host.lnk'"));
         assert!(u.contains(r"'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Latch'"));
         assert!(u.contains("Unregister-ScheduledTask -TaskName 'LatchHostStart'"));
+    }
+
+    /// Setup puts the input helper in a folder only administrators can
+    /// change, from the checked copy it runs from, and registers the task
+    /// that runs it elevated; uninstall takes both away again.
+    #[test]
+    fn setup_installs_the_elevated_input_helper_and_uninstall_removes_it() {
+        let setup = script(&Plan {
+            exe: Path::new("C:\\Latch\\latch-host.exe"),
+            adapter: "",
+            adapter_description: "",
+        });
+        let step = input_helper_ps();
+        assert!(setup.contains(&step));
+        assert!(step.contains(r"'Latch\Setup\latch-host.exe'"));
+        assert!(step.contains(r"'Latch\Input'"));
+        let copy = step.find("Copy-Item -LiteralPath $inputSource").unwrap();
+        for check in [
+            "Assert-ProtectedTree $inputSource",
+            "Assert-ProtectedTree $inputDir",
+            "Assert-Protected $inputExe",
+            "Stop-ScheduledTask -TaskName 'LatchInput'",
+        ] {
+            assert!(step.find(check).unwrap() < copy, "{check} before the copy");
+        }
+        assert!(step.contains("-Argument '--input-helper'"));
+        assert!(step.contains("-RunLevel Highest"));
+        assert!(step.contains("-LogonType Interactive"));
+        assert!(step.contains("-MultipleInstances IgnoreNew"));
+        assert!(step.contains("Register-ScheduledTask -TaskName 'LatchInput'"));
+        assert!(step.contains("$setupFailed = $true"));
+        assert!(
+            !step.contains("LOCALAPPDATA"),
+            "nothing elevated from the user's folder"
+        );
+
+        let m = uninstall_machine_ps();
+        assert!(m.contains("Unregister-ScheduledTask -TaskName 'LatchInput'"));
+        assert!(m.contains("$inputDir = Join-Path $latchDir 'Input'"));
+        assert!(
+            m.find("Assert-ProtectedTree $inputDir").unwrap()
+                < m.find("Remove-Item -LiteralPath $inputDir").unwrap()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_engine_starts_the_task_setup_registers() {
+        assert_eq!(INPUT_TASK, latch_engine::windows::INPUT_TASK);
+        let exe = latch_engine::windows::input_helper_exe().unwrap();
+        assert!(exe.ends_with(r"Latch\Input\latch-host.exe"));
     }
 
     #[test]
