@@ -3,6 +3,7 @@
 mod audio;
 mod capture;
 mod display;
+mod elevated;
 mod encode;
 mod input;
 mod mf;
@@ -342,8 +343,11 @@ pub fn open_audio() -> Result<Box<dyn AudioCapture>> {
     audio::open()
 }
 pub fn open_input() -> Result<Box<dyn InputSink>> {
-    Ok(Box::<input::Injector>::default())
+    Ok(Box::new(input::Injector::new()))
 }
+pub use elevated::{
+    helper_exe as input_helper_exe, run_helper as run_input_helper, TASK as INPUT_TASK,
+};
 pub fn encodable() -> Vec<Codec> {
     thread::Builder::new()
         .name("latch-mf-probe".into())

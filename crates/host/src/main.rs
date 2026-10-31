@@ -81,6 +81,11 @@ fn log_file(args: &Args) -> Option<&'static str> {
 }
 
 fn main() -> Result<()> {
+    // The elevated input helper setup registers: nothing of the host runs.
+    #[cfg(windows)]
+    if latch_engine::windows::run_input_helper() {
+        return Ok(());
+    }
     #[cfg(target_os = "linux")]
     if latch_engine::linux::run_helper() {
         return Ok(());

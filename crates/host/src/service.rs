@@ -493,6 +493,12 @@ impl Service {
                 "The virtual display does not list every screen size a viewer can ask for.".into(),
             );
         }
+        #[cfg(windows)]
+        if !latch_engine::windows::input_helper_exe().is_some_and(|exe| exe.is_file()) {
+            setup.push(
+                "Windows that run as administrator ignore a viewer's mouse and keyboard.".into(),
+            );
+        }
         Status {
             app: latch_core::APP_ID.into(),
             version: env!("CARGO_PKG_VERSION").into(),
