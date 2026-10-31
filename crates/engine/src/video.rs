@@ -41,6 +41,13 @@ pub struct VideoInfo {
     pub display: DisplayRect,
 }
 
+/// A cursor update from the capture pipeline to be sent to the viewer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CursorUpdate {
+    pub visible: bool,
+    pub shape: Option<latch_proto::control::CursorShape>,
+}
+
 pub trait VideoPipeline: Send {
     fn info(&self) -> VideoInfo;
 
@@ -53,6 +60,17 @@ pub trait VideoPipeline: Send {
     /// Takes effect from the next frame where the encoder allows.
     fn set_bitrate(&mut self, kbps: u32) {
         let _ = kbps;
+    }
+
+    /// Controls whether the pipeline composites the host cursor into video frames.
+    /// Returns `true` if the pipeline supports controlling cursor drawing.
+    fn set_cursor_drawn(&mut self, _drawn: bool) -> bool {
+        false
+    }
+
+    /// Returns any pending cursor visibility or shape update to send to the viewer.
+    fn take_cursor(&mut self) -> Option<CursorUpdate> {
+        None
     }
 }
 

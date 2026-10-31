@@ -28,6 +28,10 @@ pub struct Pattern {
     square_white: bool,
     dirty: bool,
     last_grab_time: Option<Instant>,
+    pub cursor_pos: (i32, i32),
+    pub cursor_drawn: bool,
+    pub cursor_pending: bool,
+    pub cursor_serial: u32,
 }
 
 impl Pattern {
@@ -41,15 +45,46 @@ impl Pattern {
             square_white: false,
             dirty: true,
             last_grab_time: None,
+            cursor_pos: (100, 100),
+            cursor_drawn: true,
+            cursor_pending: true,
+            cursor_serial: 1,
         }
     }
 
     /// Feeds an input event in (the square at the top left flips between
-    /// black and white on every key press).
+    /// black and white on every key press; mouse motion updates the synthetic cursor).
     pub fn input(&mut self, event: &Event) {
-        if let Event::Key { down: true, .. } = event {
-            self.square_white = !self.square_white;
-            self.dirty = true;
+        match event {
+            Event::Key { down: true, .. } => {
+                self.square_white = !self.square_white;
+                self.dirty = true;
+            }
+            Event::MouseMove { dx, dy } => {
+                self.cursor_pos.0 = (self.cursor_pos.0 + *dx as i32).clamp(0, self.width.saturating_sub(1) as i32);
+                self.cursor_pos.1 = (self.cursor_pos.1 + *dy as i32).clamp(0, self.height.saturating_sub(1) as i32);
+                if self.cursor_drawn {
+                    self.dirty = true;
+                }
+            }
+            Event::MousePosition { x, y, width, height } => {
+                let px = if *width > 0 {
+                    (*x as u64 * self.width as u64 / *width as u64) as i32
+                } else {
+                    *x as i32
+                };
+                let py = if *height > 0 {
+                    (*y as u64 * self.height as u64 / *height as u64) as i32
+                } else {
+                    *y as i32
+                };
+                self.cursor_pos.0 = px.clamp(0, self.width.saturating_sub(1) as i32);
+                self.cursor_pos.1 = py.clamp(0, self.height.saturating_sub(1) as i32);
+                if self.cursor_drawn {
+                    self.dirty = true;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -205,6 +240,85 @@ impl Pattern {
                 row[x * 4..x * 4 + 4].copy_from_slice(&sq_color);
             }
         }
+
+        // 8. Synthetic cursor compositing if host drawing is enabled
+        if self.cursor_drawn {
+            composite_arrow(frame, self.cursor_pos.0, self.cursor_pos.1);
+        }
+    }
+}
+
+pub fn synthetic_cursor_shape(serial: u32) -> latch_proto::control::CursorShape {
+    const ARROW: [&str; 16] = [
+        "X...............",
+        "XX..............",
+        "X.X.............",
+        "X..X............",
+        "X...X...........",
+        "X....X..........",
+        "X.....X.........",
+        "X......X........",
+        "X.......X.......",
+        "X........X......",
+        "X.....XXXX......",
+        "X..X..X.........",
+        "X.X X..X........",
+        "XX   X..X.......",
+        "X     X..X......",
+        "       XX.......",
+    ];
+    let mut rgba = Vec::with_capacity(16 * 16 * 4);
+    for row in ARROW {
+        for ch in row.chars() {
+            match ch {
+                'X' => rgba.extend_from_slice(&[0, 0, 0, 255]),
+                '.' => rgba.extend_from_slice(&[255, 255, 255, 255]),
+                _ => rgba.extend_from_slice(&[0, 0, 0, 0]),
+            }
+        }
+    }
+    latch_proto::control::CursorShape::new(serial, 16, 16, 0, 0, &rgba)
+}
+
+fn composite_arrow(frame: &mut Bgra, cur_x: i32, cur_y: i32) {
+    const ARROW: [&str; 16] = [
+        "X...............",
+        "XX..............",
+        "X.X.............",
+        "X..X............",
+        "X...X...........",
+        "X....X..........",
+        "X.....X.........",
+        "X......X........",
+        "X.......X.......",
+        "X........X......",
+        "X.....XXXX......",
+        "X..X..X.........",
+        "X.X X..X........",
+        "XX   X..X.......",
+        "X     X..X......",
+        "       XX.......",
+    ];
+    for (row_idx, row) in ARROW.iter().enumerate() {
+        let dy = cur_y + row_idx as i32;
+        if !(0..frame.height as i32).contains(&dy) {
+            continue;
+        }
+        for (col_idx, ch) in row.chars().enumerate() {
+            let dx = cur_x + col_idx as i32;
+            if !(0..frame.width as i32).contains(&dx) {
+                continue;
+            }
+            let color: Option<[u8; 4]> = match ch {
+                'X' => Some([0, 0, 0, 255]),       // Black (BGRA)
+                '.' => Some([255, 255, 255, 255]), // White (BGRA)
+                _ => None,
+            };
+            if let Some(c) = color {
+                let dst = dy as usize * frame.stride + dx as usize * 4;
+                frame.data[dst..dst + 4].copy_from_slice(&c);
+            }
+        }
     }
 }
 
@@ -270,6 +384,23 @@ impl CpuCapture for Pattern {
 
     fn name(&self) -> String {
         "test pattern".into()
+    }
+
+    fn set_cursor_drawn(&mut self, drawn: bool) -> bool {
+        self.cursor_drawn = drawn;
+        true
+    }
+
+    fn take_cursor(&mut self) -> Option<crate::video::CursorUpdate> {
+        if self.cursor_pending {
+            self.cursor_pending = false;
+            Some(crate::video::CursorUpdate {
+                visible: true,
+                shape: Some(synthetic_cursor_shape(self.cursor_serial)),
+            })
+        } else {
+            None
+        }
     }
 }
 
