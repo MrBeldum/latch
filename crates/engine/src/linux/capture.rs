@@ -664,6 +664,10 @@ mod tests {
             desktop: Bgra::default(),
             cursor: None,
             first: true,
+            cursor_drawn: true,
+            last_reported_serial: None,
+            last_reported_visible: None,
+            pending_cursor: None,
         };
         capture.allocate();
         assert!(!capture.uses_shm());
