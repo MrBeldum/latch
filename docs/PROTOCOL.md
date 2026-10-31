@@ -47,6 +47,7 @@ Content-Length: <n>
 | `udp_port` | u16 | the viewer's media socket port |
 | `audio` | bool | send desktop audio |
 | `name` | string | the viewer's machine name, for the host's log |
+| `cursor` | bool | optional, default false; viewer can draw pointer locally and handle shape updates |
 
 The control service authorizes the caller exactly as for every other
 route. A refusal is an ordinary HTTP error with an `Ack` JSON body. On
@@ -72,6 +73,8 @@ type byte and the payload and is at most 65 536. Payloads are JSON objects.
 | 3 | `Keepalive` | either | `{}` |
 | 4 | `Notice` | host → viewer | `{"kind": "audio" \| "video" \| "input", "message": string}`; `message` empty clears it |
 | 5 | `Report` | viewer → host | `{"fps", "loss_pct", "decode_ms", "rtt_ms"}`, once a second, for the host's log and FEC |
+| 6 | `Cursor` | host → viewer | `{"visible": bool, "shape": null \| {"serial": u32, "width": u32, "height": u32, "hot_x": u32, "hot_y": u32, "rgba": "<base64>"}}` |
+| 7 | `DrawCursor` | viewer → host | `{"draw": bool}`; tells host whether to composite pointer into video |
 
 `Accept`:
 
@@ -85,6 +88,7 @@ type byte and the payload and is at most 65 536. Payloads are JSON objects.
 | `encoder` | string | e.g. `"VideoToolbox HEVC"`, `"Media Foundation H.264 (NVIDIA)"`, `"Latch software H.264"` |
 | `audio` | object or null | `{"rate": 48000, "channels": 2, "frame_samples": 240, "codec": "lpcm-rice"}`; null when there is none |
 | `audio_problem` | string | why there is no audio, when `audio` is null |
+| `cursor` | bool | optional, default false; host supports omitting pointer from video and sending shape updates |
 
 Either side sends `Keepalive` when it has sent nothing for one second. A
 connection that has been silent for ten seconds is dead. The session ends
