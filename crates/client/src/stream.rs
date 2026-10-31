@@ -169,6 +169,10 @@ pub struct View {
     /// The other machine is a Mac: ⌘ is Command there, whatever the
     /// "Command acts as Ctrl" setting says for Windows and Linux.
     host_mac: bool,
+    /// Texture handle and shape serial for rendering host cursor locally.
+    cursor_texture: Option<(u32, egui::TextureHandle)>,
+    /// Whether the host is currently told to draw its pointer into video.
+    host_cursor_drawn: bool,
     /// The Mac's Caps Lock as the PC was last brought in line with it (see
     /// [`caps_tap`]); None until the stream first has the keys.
     caps: Option<bool>,
@@ -248,6 +252,8 @@ impl Default for View {
             pasted_since_v_up: false,
             cmd_since_v_up: false,
             host_mac: false,
+            cursor_texture: None,
+            host_cursor_drawn: false,
             caps: None,
             #[cfg(test)]
             caps_now: None,
@@ -323,6 +329,12 @@ impl View {
         self.toasts.clear();
         self.hint_since = None;
         self.capture_chord_held = false;
+        if let Some(l) = live {
+            if l.session.cursor_supported() && !self.host_cursor_drawn {
+                self.host_cursor_drawn = true;
+                l.session.draw_cursor(true);
+            }
+        }
     }
 
     fn set_captured(&mut self, ctx: &egui::Context, on: bool) {
@@ -1329,8 +1341,78 @@ impl View {
             self.held.release_all(out);
         }
 
+        if live.session.cursor_supported() && connected {
+            let host_should_draw = self.captured || !over_stream;
+            if self.host_cursor_drawn != host_should_draw {
+                self.host_cursor_drawn = host_should_draw;
+                live.session.draw_cursor(host_should_draw);
+            }
+        }
+
         if (over_stream || self.captured) && connected {
             ctx.set_cursor_icon(CursorIcon::None);
+        }
+
+        if live.session.cursor_supported() && !self.captured && over_stream && connected {
+            if let Some(pos) = pointer {
+                if let Some(cursor_state) = live.session.cursor() {
+                    if cursor_state.visible {
+                        if let Some(shape) = cursor_state.shape {
+                            let texture = match &self.cursor_texture {
+                                Some((s, h)) if *s == shape.serial => Some(h.clone()),
+                                _ => {
+                                    if let Ok(rgba) = latch_proto::base64::decode(&shape.rgba) {
+                                        if rgba.len() == (shape.width as usize) * (shape.height as usize) * 4 {
+                                            let img = egui::ColorImage::from_rgba_unmultiplied(
+                                                [shape.width as usize, shape.height as usize],
+                                                &rgba,
+                                            );
+                                            let handle = ctx.load_texture(
+                                                "host-cursor",
+                                                img,
+                                                egui::TextureOptions::LINEAR,
+                                            );
+                                            self.cursor_texture = Some((shape.serial, handle.clone()));
+                                            Some(handle)
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                }
+                            };
+                            if let Some(tex) = texture {
+                                let stats = live.session.stats();
+                                let vw = if stats.width > 0 {
+                                    stats.width
+                                } else {
+                                    live.requested.0
+                                };
+                                let cursor_rect = host_cursor_rect(
+                                    pos,
+                                    video,
+                                    vw,
+                                    shape.hot_x,
+                                    shape.hot_y,
+                                    shape.width,
+                                    shape.height,
+                                );
+                                let painter = ctx.layer_painter(egui::LayerId::new(
+                                    egui::Order::Middle,
+                                    egui::Id::new("host_cursor"),
+                                ));
+                                painter.image(
+                                    tex.id(),
+                                    cursor_rect,
+                                    Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                                    Color32::WHITE,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         let at = At {
@@ -1630,6 +1712,29 @@ fn wheel_to_host(unit: egui::MouseWheelUnit, delta: Vec2) -> (f32, f32) {
     (-delta.x * scale, delta.y * scale)
 }
 
+/// Position and bounding rectangle for the host cursor rendered locally in free mouse mode.
+fn host_cursor_rect(
+    pointer: Pos2,
+    video: Rect,
+    stream_w: u32,
+    hot_x: u32,
+    hot_y: u32,
+    shape_w: u32,
+    shape_h: u32,
+) -> Rect {
+    let scale = if stream_w > 0 {
+        video.width() / stream_w as f32
+    } else {
+        1.0
+    };
+    let cw = shape_w as f32 * scale;
+    let ch = shape_h as f32 * scale;
+    let hx = hot_x as f32 * scale;
+    let hy = hot_y as f32 * scale;
+    let cursor_pos = Pos2::new(pointer.x - hx, pointer.y - hy);
+    Rect::from_min_size(cursor_pos, Vec2::new(cw, ch))
+}
+
 /// Free mouse mode maps the bars to the nearest pixel in the picture.
 fn mouse_position_in_video(p: Pos2, video: Rect, ppp: f32) -> (i16, i16, i16, i16) {
     let width = ((video.width() * ppp).round() as i16).max(2);
@@ -1742,6 +1847,29 @@ pub(crate) mod tests {
     use crate::config::ClientConfig;
     use crate::session::Live;
     use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn host_cursor_rect_unscaled_and_scaled() {
+        let video = Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(1920.0, 1080.0));
+        let pointer = Pos2::new(500.0, 400.0);
+
+        // 1:1 scale: stream_w = 1920 matches video.width()
+        let rect = host_cursor_rect(pointer, video, 1920, 5, 10, 32, 48);
+        assert_eq!(rect.min, Pos2::new(495.0, 390.0));
+        assert_eq!(rect.size(), Vec2::new(32.0, 48.0));
+
+        // Half scale: video.width() is 960 (half of 1920)
+        let half_video = Rect::from_min_size(Pos2::ZERO, Vec2::new(960.0, 540.0));
+        let rect_half = host_cursor_rect(pointer, half_video, 1920, 10, 20, 40, 60);
+        // scale = 0.5; hot_x = 5.0, hot_y = 10.0, cw = 20.0, ch = 30.0
+        assert_eq!(rect_half.min, Pos2::new(495.0, 390.0));
+        assert_eq!(rect_half.size(), Vec2::new(20.0, 30.0));
+
+        // Fallback when stream_w is 0
+        let rect_zero = host_cursor_rect(pointer, video, 0, 2, 3, 16, 16);
+        assert_eq!(rect_zero.min, Pos2::new(498.0, 397.0));
+        assert_eq!(rect_zero.size(), Vec2::new(16.0, 16.0));
+    }
 
     #[test]
     fn fit_letterboxes_a_16_9_stream_on_a_16_10_screen() {
@@ -1961,6 +2089,7 @@ pub(crate) mod tests {
                 hevc: true,
                 audio: true,
                 name: "UI test".into(),
+                cursor: true,
             },
             frames.clone(),
             tx,
