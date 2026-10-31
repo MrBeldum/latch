@@ -11,7 +11,7 @@ mod encode;
 pub mod nal;
 
 pub use decode::Decoder;
-pub use encode::{EncodedInfo, Encoder, EncoderConfig};
+pub use encode::{EncodeTiming, EncodedInfo, Encoder, EncoderConfig, EncoderOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodecError {

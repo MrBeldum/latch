@@ -1,4 +1,4 @@
-//! Filtering follows H.264 section 8.7, including edges between slices.
+//! Filtering follows H.264 section 8.7 inside each independently filtered slice.
 use super::{transform::chroma_qp, worker::Mb};
 use crate::Yuv420;
 const ALPHA: [i32; 52] = [

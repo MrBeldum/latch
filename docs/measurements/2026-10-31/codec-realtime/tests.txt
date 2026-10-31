@@ -1,0 +1,131 @@
+   Compiling latch-codec v5.0.1 (/Users/daniel/.t3/worktrees/latch/t3-ada53532/crates/codec)
+    Finished `release` profile [optimized] target(s) in 16.18s
+     Running unittests src/lib.rs (target/release/deps/latch_codec-e8f5c97141570630)
+
+running 30 tests
+test h264::decode::cavlc::tests::level_prefix_over_28_is_refused ... ok
+test h264::decode::golomb::br_edge_tests::byte_read_requires_alignment ... ok
+test h264::decode::golomb::br_edge_tests::ue_prefix_over_31_zeros_rejects ... ok
+test h264::decode::golomb::br_edge_tests::peek_rejects_over_32_bits ... ok
+test h264::decode::intra::dc_helper_tests::dc_mean_arms ... ok
+test h264::decode::intra::dc_helper_tests::mode_rejects_bound_the_tables ... ok
+test h264::decode::sps::profile_name_tests::every_profile_names_itself ... ok
+test h264::decode::pps::tests::pps_field_bounds_reject ... ok
+test h264::decode::sps::tests::extended_profile_parses_as_extended ... ok
+test h264::decode::sps::tests::high_profile_extension_arms ... ok
+test h264::decode::sps::tests::pic_order_cycles_over_255_refused ... ok
+test color::tests::simd_matches_scalar_with_tails_strides_and_missing_rows ... ok
+test h264::decode::sps::tests::poc_type_1_and_rejects ... ok
+test h264::encode::bits::tests::put_matches_individual_bits_at_every_alignment ... ok
+test h264::encode::effort::tests::overload_recovery_and_disabled_are_deterministic ... ok
+test h264::encode::predict::tests::chroma_simd_matches_scalar ... ok
+test h264::encode::predict::tests::half_pel_simd_matches_scalar ... ok
+test h264::encode::predict::tests::sad16x8_matches_scalar ... ok
+test h264::encode::transform::tests::quantization_matches_scalar ... ok
+test h264::encode::predict::tests::half_pel_and_subpel_match_luma_mc ... ok
+test h264::encode::predict::tests::averaged_sad_and_copy_match_scalar_with_strides ... ok
+test h264::encode::transform::tests::transforms_match_scalar ... ok
+test h264::nal::tests::mixed_start_codes_and_trailing_zeros ... ok
+test yuv::tests::padding_copies_the_last_visible_column_and_row ... ok
+test h264::encode::worker::tests::unrelated_motion_is_not_a_scroll ... ok
+test h264::encode::worker::tests::bounded_motion_cost_preserves_candidate_ordering ... ok
+test h264::encode::worker::tests::sixty_four_pixel_scrolls_are_exact_in_both_directions ... ok
+test h264::encode::tests::effort_transitions_preserve_decoder_reference ... ok
+test h264::decode::inter::tests::cached_motion_matches_per_sample_scalar_at_every_fraction_and_edge ... ok
+test h264::encode::deblock::tests::weak_edges_match_scalar ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/audio_tests.rs (target/release/deps/audio_tests-fef01eddbc4ea8c0)
+
+running 8 tests
+test test_constant ... ok
+test test_full_scale_extrema ... ok
+test test_silence ... ok
+test test_one_channel_silent ... ok
+test test_sine_and_square_waves ... ok
+test test_white_noise ... ok
+test test_various_sample_counts ... ok
+test test_fuzz_100k_inputs_never_panics ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/color_tests.rs (target/release/deps/color_tests-b096d139cf7ae8f0)
+
+running 5 tests
+test test_odd_strides_and_non_multiple_of_16 ... ok
+test test_rows_variant_equals_full_conversion ... ok
+test test_black_white_primaries ... ok
+test test_yuv420_to_nv12_round_trip ... ok
+test test_random_images_within_plus_minus_one ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (target/release/deps/conformance-a048610b0ac9ac9a)
+
+running 1 test
+test itu_h264_1_is_byte_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/decode_compare.rs (target/release/deps/decode_compare-393e2105a9c7bf47)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/decode_crosscheck.rs (target/release/deps/decode_crosscheck-bf03da34e218ace1)
+
+running 1 test
+test ffmpeg_is_byte_exact ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/decode_robustness.rs (target/release/deps/decode_robustness-7a4402c8c87b3ac0)
+
+running 2 tests
+test missing_references_and_reset_are_explicit ... ok
+test one_hundred_thousand_malformed_access_units_never_panic_and_recover ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+     Running tests/decode_syntax.rs (target/release/deps/decode_syntax-b4699b93b83ff255)
+
+running 6 tests
+test idr_long_term_reference_and_large_unrestricted_motion ... ok
+test redundant_pictures_are_ignored_and_overlaps_rejected ... ok
+test pcm_keeps_previous_qp_for_the_next_macroblock ... ok
+test unsupported_tools_and_allocation_bounds_are_explicit ... ok
+test pcm_planes_cropping_aso_and_profile_subset ... ok
+test sixteen_references_sliding_window_and_frame_num_wrap ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/encode_content.rs (target/release/deps/encode_content-3172a50b9458180a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/encode_oracle.rs (target/release/deps/encode_oracle-f111762473d30bc1)
+
+running 10 tests
+test realtime_videotoolbox_oracle ... ignored, requires macOS VideoToolbox; run explicitly
+test software_oracle_desktop_matrix ... ignored, full resolution FFmpeg matrix; run with --ignored
+test videotoolbox_oracle ... ignored, requires macOS VideoToolbox; run explicitly
+test validation_and_append ... ok
+test settled_desktop_skips_and_bitrate_changes_apply ... ok
+test fractional_motion_oracle ... ok
+test software_oracle_natural_motion ... ok
+test realtime_effort_oracle ... ok
+test software_oracle_small ... ok
+test software_oracle_refinement_and_scene_changes ... ok
+
+test result: ok. 7 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.85s
+
+   Doc-tests latch_codec
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -3,6 +3,7 @@
 mod bits;
 mod cavlc;
 mod deblock;
+mod effort;
 mod predict;
 mod transform;
 mod worker;
@@ -13,6 +14,7 @@ use bits::Bits;
 use std::collections::VecDeque;
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncoderConfig {
@@ -22,6 +24,45 @@ pub struct EncoderConfig {
     pub bitrate_kbps: u32,
     /// Worker threads; 0 picks the number of CPUs (at most 8).
     pub threads: usize,
+}
+
+/// Encoding configuration with an explicit real-time budget.
+/// Construct with [`EncoderConfig::with_frame_budget`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct EncoderOptions {
+    config: EncoderConfig,
+    frame_budget_percent: u8,
+}
+impl EncoderConfig {
+    /// Encode-time budget as a percentage of `1 / fps` (default 65).
+    /// Zero disables adaptation for deterministic tests and offline encoding.
+    /// Values above 100 are rejected by `Encoder::new`.
+    pub fn with_frame_budget(self, percent: u8) -> EncoderOptions {
+        EncoderOptions {
+            config: self,
+            frame_budget_percent: percent,
+        }
+    }
+}
+impl From<EncoderConfig> for EncoderOptions {
+    fn from(config: EncoderConfig) -> Self {
+        config.with_frame_budget(65)
+    }
+}
+
+/// Wall times for the last successful encode, including rate-control retries.
+#[derive(Debug, Clone, Default)]
+pub struct EncodeTiming {
+    pub elapsed_ms: f64,
+    pub preparation_ms: f64,
+    pub band_ms: Vec<f64>,
+    /// Sum of filtering wall times across workers (parallel, not frame latency).
+    pub deblock_ms: f64,
+    pub passes: u32,
+    /// 0 is full quality; 4 is minimum compression effort.
+    pub effort: u8,
+    /// Recent nearest-rank p95 at this effort; zero with adaptation off.
+    pub p95_ms: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +102,8 @@ impl Drop for Worker {
 
 pub struct Encoder {
     config: EncoderConfig,
+    governor: effort::Governor,
+    timing: EncodeTiming,
     workers: Vec<Worker>,
     reconstruction: Arc<Yuv420>,
     source: Option<Arc<Yuv420>>,
@@ -75,7 +118,14 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    pub fn new(config: EncoderConfig) -> Result<Self, CodecError> {
+    pub fn new(options: impl Into<EncoderOptions>) -> Result<Self, CodecError> {
+        let EncoderOptions {
+            config,
+            frame_budget_percent,
+        } = options.into();
+        if frame_budget_percent > 100 {
+            return Err(CodecError::Config("frame budget must be 0..=100 percent"));
+        }
         if config.width == 0
             || config.height == 0
             || !config.width.is_multiple_of(2)
@@ -111,6 +161,8 @@ impl Encoder {
             let handle = thread::Builder::new()
                 .name(format!("h264-{i}"))
                 .spawn(move || {
+                    #[cfg(not(test))]
+                    crate::priority::media_thread();
                     while let Ok(task) = rx.recv() {
                         let sent = match task {
                             Task::Encode(job) => out_tx.send(worker::encode(job)).is_ok(),
@@ -138,6 +190,8 @@ impl Encoder {
         }
         let total = reconstruction.padded_width() / 16 * rows;
         Ok(Self {
+            governor: effort::Governor::new(config.fps, frame_budget_percent),
+            timing: EncodeTiming::default(),
             config,
             workers,
             reconstruction,
@@ -163,10 +217,18 @@ impl Encoder {
         out: &mut Vec<u8>,
     ) -> Result<EncodedInfo, CodecError> {
         self.validate(picture)?;
+        let started = Instant::now();
+        self.timing = EncodeTiming {
+            effort: self.governor.level,
+            band_ms: vec![0.; self.workers.len()],
+            ..EncodeTiming::default()
+        };
         let idr = keyframe || self.source.is_none();
         if !idr && self.quality.iter().all(|&q| q <= 18) && self.source.as_deref() == Some(picture)
         {
-            return self.encode_settled(out);
+            let result = self.encode_settled(out)?;
+            self.finish_timing(started);
+            return Ok(result);
         }
         let frame_num = if idr { 0 } else { self.frame_num };
         let source = Arc::new(picture.clone());
@@ -249,8 +311,11 @@ impl Encoder {
                 .collect::<Result<Vec<_>, _>>()?
         };
         // At high QP fractional search costs more than its quality gain; also skip tiny updates and scrolls.
-        let refine_motion =
-            self.subpixel && qp < 38 && changed_mbs * 32 > total_mbs && globals.contains(&(0, 0));
+        let refine_motion = self.governor.level == 0
+            && self.subpixel
+            && qp < 38
+            && changed_mbs * 32 > total_mbs
+            && globals.contains(&(0, 0));
         let half_pel = if !idr && refine_motion {
             Some(Arc::new(predict::compute_half_pel(
                 &self.reconstruction.y,
@@ -261,7 +326,9 @@ impl Encoder {
         } else {
             None
         };
+        self.timing.preparation_ms = started.elapsed().as_secs_f64() * 1000.;
         let (data, rec, mbs, skipped, qp_sum) = loop {
+            self.timing.passes += 1;
             let rows = picture.padded_height() / 16;
             let width = picture.padded_width() / 16;
             let refresh = (budget / 128.).max(1.) as usize;
@@ -280,6 +347,7 @@ impl Encoder {
                         end: (i + 1) * rows / self.workers.len(),
                         qp,
                         suppression,
+                        effort: self.governor.level,
                         subpixel: half_pel.is_some() && qp < 38,
                         is_motion,
                         global: globals[i],
@@ -299,11 +367,13 @@ impl Encoder {
             let mut mbs = Vec::with_capacity(width * rows);
             let mut skipped = 0;
             let mut qp_sum = 0;
-            for worker in &self.workers {
+            for (i, worker) in self.workers.iter().enumerate() {
                 let band = worker
                     .rx
                     .recv()
                     .map_err(|_| CodecError::Config("encoder worker stopped"))?;
+                self.timing.band_ms[i] += band.elapsed_ms;
+                self.timing.deblock_ms += band.deblock_ms;
                 data.extend_from_slice(&band.nal);
                 skipped += band.skipped;
                 qp_sum += band.qp_sum;
@@ -338,7 +408,14 @@ impl Encoder {
                 }
                 mbs.extend(band.mbs);
             }
-            if data.len() as f64 * 8. > if idr { budget * 4. } else { target * 1.3 } {
+            // Under pressure, spend the next frame's feedback correcting a soft
+            // bitrate overshoot instead of encoding this frame repeatedly. The
+            // hard access-unit bound below still applies at every effort.
+            let bits = data.len() as f64 * 8.;
+            let soft_retry = self.governor.level < 2 || idr;
+            if bits > budget * 8.
+                || (soft_retry && bits > if idr { budget * 4. } else { target * 1.3 })
+            {
                 if qp < 51 {
                     let step = (6.
                         * (data.len() as f64 * 8. / if idr { budget * 3.5 } else { target }).log2())
@@ -359,8 +436,7 @@ impl Encoder {
             }
             break (data, rec, mbs, skipped, qp_sum);
         };
-        let mut rec = rec;
-        deblock::filter(&mut rec, &mbs);
+        // Filtering was completed independently by each slice worker.
         self.reconstruction = Arc::new(rec);
         self.source = Some(source);
         self.quality = Arc::new(mbs.iter().map(|m| m.quality).collect());
@@ -385,6 +461,7 @@ impl Encoder {
         }
         let bytes = data.len();
         out.extend_from_slice(&data);
+        self.finish_timing(started);
         Ok(EncodedInfo {
             keyframe: idr,
             qp: (qp_sum / (mbs.len() as u32)) as u8,
@@ -392,6 +469,17 @@ impl Encoder {
             total_mbs: mbs.len() as u32,
             bytes,
         })
+    }
+
+    /// Timings and effort actually used, before the next feedback adjustment.
+    pub fn timing(&self) -> &EncodeTiming {
+        &self.timing
+    }
+
+    fn finish_timing(&mut self, started: Instant) {
+        self.timing.elapsed_ms = started.elapsed().as_secs_f64() * 1000.;
+        self.governor.observe(self.timing.elapsed_ms);
+        self.timing.p95_ms = self.governor.p95;
     }
 
     pub fn set_bitrate(&mut self, kbps: u32) {
@@ -426,7 +514,7 @@ impl Encoder {
         for i in 0..self.workers.len() {
             let first = i * rows / self.workers.len() * width;
             let end = (i + 1) * rows / self.workers.len() * width;
-            let mut b = worker::header(first, false, self.frame_num, 0, self.qp);
+            let mut b = worker::header(first, false, self.frame_num, 0, self.qp, true);
             b.ue((end - first) as u32);
             b.nal(0x41, &mut data);
         }
@@ -586,4 +674,43 @@ fn parameter_sets(c: &EncoderConfig, out: &mut Vec<u8>) -> Result<(), CodecError
     b.bit(false);
     b.nal(0x68, out);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effort_transitions_preserve_decoder_reference() {
+        let config = EncoderConfig {
+            width: 64,
+            height: 48,
+            fps: 60,
+            bitrate_kbps: 800,
+            threads: 3,
+        };
+        assert!(Encoder::new(config.clone().with_frame_budget(101)).is_err());
+        let mut encoder = Encoder::new(config.with_frame_budget(0)).unwrap();
+        let mut decoder = crate::h264::Decoder::new();
+        let mut picture = Yuv420::new(64, 48);
+        let mut seed = 17u32;
+        for effort in [0, 1, 2, 3, 4, 3, 2, 1, 0] {
+            encoder.governor.level = effort;
+            for v in picture
+                .y
+                .iter_mut()
+                .chain(&mut picture.u)
+                .chain(&mut picture.v)
+            {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                *v = (seed >> 16) as u8;
+            }
+            let mut bits = Vec::new();
+            encoder.encode(&picture, false, &mut bits).unwrap();
+            let decoded = decoder.decode(&bits).unwrap().unwrap();
+            assert_eq!(decoded, encoder.reconstruction(), "effort {effort}");
+            assert_eq!(encoder.timing().band_ms.len(), 3);
+            assert_eq!(encoder.timing().effort, effort);
+        }
+    }
 }
