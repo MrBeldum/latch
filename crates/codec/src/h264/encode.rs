@@ -34,9 +34,20 @@ pub struct EncodedInfo {
     pub bytes: usize,
 }
 
+enum Task {
+    Scroll {
+        source: Arc<Yuv420>,
+        previous: Arc<Yuv420>,
+        first: usize,
+        end: usize,
+    },
+    Encode(worker::Job),
+}
+
 struct Worker {
-    tx: Option<mpsc::Sender<worker::Job>>,
+    tx: Option<mpsc::Sender<Task>>,
     rx: mpsc::Receiver<worker::Band>,
+    scroll_rx: mpsc::Receiver<(i32, i32)>,
     handle: Option<JoinHandle<()>>,
 }
 impl Drop for Worker {
@@ -96,11 +107,23 @@ impl Encoder {
         for i in 0..threads {
             let (tx, rx) = mpsc::channel();
             let (out_tx, out_rx) = mpsc::channel();
+            let (scroll_tx, scroll_rx) = mpsc::channel();
             let handle = thread::Builder::new()
                 .name(format!("h264-{i}"))
                 .spawn(move || {
-                    while let Ok(job) = rx.recv() {
-                        if out_tx.send(worker::encode(job)).is_err() {
+                    while let Ok(task) = rx.recv() {
+                        let sent = match task {
+                            Task::Encode(job) => out_tx.send(worker::encode(job)).is_ok(),
+                            Task::Scroll {
+                                source,
+                                previous,
+                                first,
+                                end,
+                            } => scroll_tx
+                                .send(worker::scroll(&source, &previous, first, end))
+                                .is_ok(),
+                        };
+                        if !sent {
                             break;
                         }
                     }
@@ -109,6 +132,7 @@ impl Encoder {
             workers.push(Worker {
                 tx: Some(tx),
                 rx: out_rx,
+                scroll_rx,
                 handle: Some(handle),
             });
         }
@@ -198,20 +222,32 @@ impl Encoder {
         let rows = picture.padded_height() / 16;
         let total_mbs = rows * picture.padded_width() / 16;
         let is_motion = changed_mbs * 2 > total_mbs;
-        let globals: Vec<_> = (0..self.workers.len())
-            .map(|i| {
-                if idr {
-                    (0, 0)
-                } else {
-                    worker::scroll(
-                        picture,
-                        self.source.as_ref().unwrap(),
-                        i * rows / self.workers.len(),
-                        (i + 1) * rows / self.workers.len(),
-                    )
-                }
-            })
-            .collect();
+        let globals = if idr {
+            vec![(0, 0); self.workers.len()]
+        } else {
+            for (i, worker) in self.workers.iter().enumerate() {
+                worker
+                    .tx
+                    .as_ref()
+                    .unwrap()
+                    .send(Task::Scroll {
+                        source: source.clone(),
+                        previous: self.source.as_ref().unwrap().clone(),
+                        first: i * rows / self.workers.len(),
+                        end: (i + 1) * rows / self.workers.len(),
+                    })
+                    .map_err(|_| CodecError::Config("encoder worker stopped"))?;
+            }
+            self.workers
+                .iter()
+                .map(|worker| {
+                    worker
+                        .scroll_rx
+                        .recv()
+                        .map_err(|_| CodecError::Config("encoder worker stopped"))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
         // At high QP fractional search costs more than its quality gain; also skip tiny updates and scrolls.
         let refine_motion =
             self.subpixel && qp < 38 && changed_mbs * 32 > total_mbs && globals.contains(&(0, 0));
@@ -234,7 +270,7 @@ impl Encoder {
                     .tx
                     .as_ref()
                     .unwrap()
-                    .send(worker::Job {
+                    .send(Task::Encode(worker::Job {
                         source: source.clone(),
                         previous: self.source.clone(),
                         reference: self.reconstruction.clone(),
@@ -252,7 +288,7 @@ impl Encoder {
                         idr_id: self.idr_id,
                         refresh,
                         refresh_start: self.refresh_start,
-                    })
+                    }))
                     .map_err(|_| CodecError::Config("encoder worker stopped"))?;
             }
             let mut data = Vec::new();
