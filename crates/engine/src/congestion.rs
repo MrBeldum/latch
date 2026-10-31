@@ -82,7 +82,12 @@ impl Controller {
             .as_secs_f64()
             .min(1.0);
         self.last_step = now;
-        if pressure {
+        // One late ping or queue sample is a blip, not a path that is full:
+        // only pressure in two windows running, or frames actually lost,
+        // holds recovery back and paces. Otherwise a busy viewer or host whose
+        // pongs are now and then late keeps the rate at its floor for good.
+        let sustained = self.pressure_windows >= 2 || damaged;
+        if sustained {
             self.pacing = true;
             self.clean_since = now;
             if self.pressure_windows >= 2
@@ -93,7 +98,7 @@ impl Controller {
                 self.budget = (offered * 4 / 5).max(self.floor);
                 self.last_cut = now;
             }
-        } else if now.duration_since(self.clean_since) >= Duration::from_secs(2) {
+        } else if !pressure && now.duration_since(self.clean_since) >= Duration::from_secs(2) {
             self.pacing = false;
             // 5% of requested capacity per second; no exponential probe bursts.
             self.budget = self
@@ -140,6 +145,33 @@ mod tests {
         assert_eq!(c.budget(), 6_400);
         r.rtt_ms = 12.0;
         c.update(start + Duration::from_secs(3), &r, 12.0, 0.0);
+        assert!(!c.pacing());
+    }
+
+    #[test]
+    fn a_lone_late_window_does_not_stall_recovery() {
+        let start = Instant::now();
+        let mut c = Controller::new(50_000, start);
+        let r = Report {
+            rtt_ms: 12.0,
+            ..Default::default()
+        };
+        // Learn the base, then a standing queue cuts the budget.
+        c.update(start, &r, 12.0, 0.0);
+        let mut t = start;
+        for _ in 0..12 {
+            t += Duration::from_millis(250);
+            c.update(t, &r, 60.0, 0.0);
+        }
+        let floor = c.budget();
+        assert!(floor < 50_000);
+        // The queue drains; every fourth window one late pong arrives.
+        for i in 0..40 {
+            t += Duration::from_millis(250);
+            let host = if i % 4 == 3 { 40.0 } else { 12.0 };
+            c.update(t, &r, host, 0.0);
+        }
+        assert!(c.budget() > floor * 2, "{} vs {floor}", c.budget());
         assert!(!c.pacing());
     }
 
