@@ -8,6 +8,7 @@ use crate::{
 use anyhow::{bail, Context, Result};
 use std::{
     mem::ManuallyDrop,
+    thread,
     time::{Duration, Instant},
 };
 use windows::{
@@ -95,28 +96,49 @@ impl Gpu {
             .context("allocate D3D11 texture")?;
         texture.context("D3D11 returned no texture")
     }
-    pub fn read(&self, texture: &ID3D11Texture2D, rows: usize) -> Result<(Vec<u8>, usize)> {
+    /// Runs `use_rows` on the first `rows` rows of `texture` as the CPU sees
+    /// them, with their pitch. `staging` keeps the CPU-readable copy between
+    /// calls; it is replaced when the texture's size or format changes.
+    pub fn read<R>(
+        &self,
+        staging: &mut Option<ID3D11Texture2D>,
+        texture: &ID3D11Texture2D,
+        rows: usize,
+        use_rows: impl FnOnce(&[u8], usize) -> R,
+    ) -> Result<R> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: The texture and output descriptor are valid.
         unsafe {
             texture.GetDesc(&mut desc);
         }
-        let staging = self.texture(desc.Width, desc.Height, desc.Format, 0, true)?;
+        let mut have = D3D11_TEXTURE2D_DESC::default();
+        if let Some(staging) = staging {
+            // SAFETY: As above.
+            unsafe { staging.GetDesc(&mut have) };
+        }
+        let stale = staging.is_none()
+            || (have.Width, have.Height, have.Format) != (desc.Width, desc.Height, desc.Format);
+        if stale {
+            *staging = Some(self.texture(desc.Width, desc.Height, desc.Format, 0, true)?);
+        }
+        let staging = staging.as_ref().context("missing staging texture")?;
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         // SAFETY: CopyResource is ordered before Map. Map is paired with Unmap;
-        // the row pitch describes all accessible bytes copied below.
+        // the row pitch describes all accessible bytes handed to `use_rows`.
         unsafe {
-            self.context.CopyResource(&staging, texture);
+            self.context.CopyResource(staging, texture);
             self.context
-                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
                 .context("map staging texture")?;
-            let bytes = std::slice::from_raw_parts(
-                mapped.pData.cast::<u8>(),
-                mapped.RowPitch as usize * rows,
-            )
-            .to_vec();
-            self.context.Unmap(&staging, 0);
-            Ok((bytes, mapped.RowPitch as usize))
+            let result = use_rows(
+                std::slice::from_raw_parts(
+                    mapped.pData.cast::<u8>(),
+                    mapped.RowPitch as usize * rows,
+                ),
+                mapped.RowPitch as usize,
+            );
+            self.context.Unmap(staging, 0);
+            Ok(result)
         }
     }
 }
@@ -125,6 +147,11 @@ struct CursorRenderer {
     pixel: ID3D11PixelShader,
     constants: ID3D11Buffer,
     shape: Option<ID3D11ShaderResourceView>,
+    /// Views of the textures last drawn from and to, made once: a view holds
+    /// its texture, so one cannot be mistaken for a new texture at the
+    /// same address, and a new texture (after a resize) gets new views.
+    source: Option<(ID3D11Texture2D, ID3D11ShaderResourceView)>,
+    target: Option<(ID3D11Texture2D, ID3D11RenderTargetView)>,
 }
 const SHADER: &str = r#"
 Texture2D<float4> desktop : register(t0);
@@ -224,6 +251,8 @@ impl CursorRenderer {
             pixel: pixel.context("missing pixel shader")?,
             constants: constants.context("missing cursor buffer")?,
             shape: None,
+            source: None,
+            target: None,
         })
     }
     fn shape(
@@ -294,7 +323,7 @@ impl CursorRenderer {
         Ok(())
     }
     fn draw(
-        &self,
+        &mut self,
         gpu: &Gpu,
         source: &ID3D11Texture2D,
         target: &ID3D11Texture2D,
@@ -302,7 +331,6 @@ impl CursorRenderer {
         shape: &DXGI_OUTDUPL_POINTER_SHAPE_INFO,
         rotation: DXGI_MODE_ROTATION,
     ) -> Result<()> {
-        let (mut srv, mut rtv) = (None, None);
         let (mut raw, mut dst) = (
             D3D11_TEXTURE2D_DESC::default(),
             D3D11_TEXTURE2D_DESC::default(),
@@ -311,12 +339,30 @@ impl CursorRenderer {
         unsafe {
             source.GetDesc(&mut raw);
             target.GetDesc(&mut dst);
-            gpu.device
-                .CreateShaderResourceView(source, None, Some(&mut srv))
-                .context("desktop shader view")?;
-            gpu.device
-                .CreateRenderTargetView(target, None, Some(&mut rtv))
-                .context("cursor render target")?;
+            if self
+                .source
+                .as_ref()
+                .is_none_or(|(texture, _)| texture.as_raw() != source.as_raw())
+            {
+                let mut view = None;
+                gpu.device
+                    .CreateShaderResourceView(source, None, Some(&mut view))
+                    .context("desktop shader view")?;
+                self.source = Some((source.clone(), view.context("missing desktop view")?));
+            }
+            if self
+                .target
+                .as_ref()
+                .is_none_or(|(texture, _)| texture.as_raw() != target.as_raw())
+            {
+                let mut view = None;
+                gpu.device
+                    .CreateRenderTargetView(target, None, Some(&mut view))
+                    .context("cursor render target")?;
+                self.target = Some((target.clone(), view.context("missing cursor target")?));
+            }
+            let srv = self.source.as_ref().map(|(_, view)| view.clone());
+            let rtv = self.target.as_ref().map(|(_, view)| view.clone());
             let constants: [u32; 8] = [
                 cursor.Position.x as u32,
                 cursor.Position.y as u32,
@@ -379,6 +425,7 @@ pub(super) struct Capture {
     pub has_frame: bool,
     cpu_seeded: bool,
     retry: ReopenBackoff,
+    staging: Option<ID3D11Texture2D>,
 }
 struct ReopenBackoff {
     at: Instant,
@@ -472,7 +519,17 @@ impl Capture {
             has_frame: false,
             cpu_seeded: false,
             retry: ReopenBackoff::new(),
+            staging: None,
         })
+    }
+    /// See [`Gpu::read`]; the staging texture is kept for the next call.
+    pub fn read<R>(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        rows: usize,
+        use_rows: impl FnOnce(&[u8], usize) -> R,
+    ) -> Result<R> {
+        self.gpu.read(&mut self.staging, texture, rows, use_rows)
     }
     fn reopen(&mut self) -> Result<()> {
         let _dpi = display::DpiAwareness::physical();
@@ -527,7 +584,11 @@ impl Capture {
     }
     pub fn grab(&mut self, timeout: Duration) -> Result<bool> {
         if self.duplication.is_none() {
-            if Instant::now() < self.retry.at {
+            let now = Instant::now();
+            if now < self.retry.at {
+                // Nothing to wait on: sleep out the caller's wait (or the
+                // backoff) instead of having it poll in a loop.
+                thread::sleep(timeout.min(self.retry.at - now));
                 return Ok(false);
             }
             if let Err(e) = self.reopen() {
@@ -660,7 +721,14 @@ impl CpuCapture for Capture {
         if !changed && (self.cpu_seeded || !self.has_frame) {
             return Ok(false);
         }
-        let (data, stride) = self.gpu.read(&self.frame, self.display.height as usize)?;
+        // Fill the caller's buffer in place: a 1080p frame is 8 MB.
+        let mut data = std::mem::take(&mut frame.data);
+        let texture = self.frame.clone();
+        let stride = self.read(&texture, self.display.height as usize, |bytes, stride| {
+            data.clear();
+            data.extend_from_slice(bytes);
+            stride
+        })?;
         self.cpu_seeded = true;
         *frame = Bgra {
             width: self.display.width,
@@ -678,14 +746,36 @@ impl CpuCapture for Capture {
     }
 }
 
+/// NV12 textures the converter rotates through. The encoder is handed one
+/// per frame and, for a hardware MFT, holds it only until it has returned
+/// that frame's bitstream (`Encoder::encode` waits for it), or for a
+/// synchronous MFT that buffers its first inputs, a frame or two longer;
+/// the converter does not write a texture again until three others have
+/// been written since.
+pub(super) const RING: usize = 4;
+
+struct Slot {
+    texture: ID3D11Texture2D,
+    view: ID3D11VideoProcessorOutputView,
+}
+
+/// A converted frame: the ring slot it is in and its texture.
+pub(super) struct Converted {
+    pub slot: usize,
+    pub texture: ID3D11Texture2D,
+}
+
 pub(super) struct Converter {
-    gpu: Gpu,
-    enumerator: ID3D11VideoProcessorEnumerator,
     processor: ID3D11VideoProcessor,
+    enumerator: ID3D11VideoProcessorEnumerator,
     video: ID3D11VideoDevice,
     context: ID3D11VideoContext,
-    width: u32,
-    height: u32,
+    slots: Vec<Slot>,
+    next: usize,
+    /// The view of the last input, made once. It holds its texture, so the
+    /// texture cannot be freed and another allocated at the same address
+    /// while this is cached; a new texture (after a resize) gets a new view.
+    input: Option<(ID3D11Texture2D, ID3D11VideoProcessorInputView)>,
 }
 impl Converter {
     pub fn new(gpu: &Gpu, input: (u32, u32), output: (u32, u32), fps: u32) -> Result<Self> {
@@ -785,77 +875,98 @@ impl Converter {
                 },
             );
             context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&rect));
+            let mut slots = Vec::with_capacity(RING);
+            for _ in 0..RING {
+                let texture = gpu.texture(
+                    output.0,
+                    output.1,
+                    DXGI_FORMAT_NV12,
+                    D3D11_BIND_RENDER_TARGET.0 as u32,
+                    false,
+                )?;
+                let mut view = None;
+                video
+                    .CreateVideoProcessorOutputView(
+                        &texture,
+                        &enumerator,
+                        &D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+                            ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+                            Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
+                                Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
+                            },
+                        },
+                        Some(&mut view),
+                    )
+                    .context("video processor output view")?;
+                slots.push(Slot {
+                    texture,
+                    view: view.context("missing processor output view")?,
+                });
+            }
             Ok(Self {
-                gpu: gpu.clone(),
-                enumerator,
                 processor,
+                enumerator,
                 video,
                 context,
-                width: output.0,
-                height: output.1,
+                slots,
+                next: 0,
+                input: None,
             })
         }
     }
-    pub fn convert(&self, input: &ID3D11Texture2D) -> Result<ID3D11Texture2D> {
-        let texture = self.gpu.texture(
-            self.width,
-            self.height,
-            DXGI_FORMAT_NV12,
-            D3D11_BIND_RENDER_TARGET.0 as u32,
-            false,
-        )?;
-        let (mut iv, mut ov) = (None, None);
+    pub fn convert(&mut self, input: &ID3D11Texture2D) -> Result<Converted> {
         // SAFETY: Views and textures belong to the same video device. ManuallyDrop
         // fields in the Win32 ABI structs are explicitly released after the blit.
         unsafe {
-            self.video
-                .CreateVideoProcessorInputView(
-                    input,
-                    &self.enumerator,
-                    &D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
-                        FourCC: 0,
-                        ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
-                        Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
-                            Texture2D: D3D11_TEX2D_VPIV {
-                                MipSlice: 0,
-                                ArraySlice: 0,
+            if self
+                .input
+                .as_ref()
+                .is_none_or(|(texture, _)| texture.as_raw() != input.as_raw())
+            {
+                let mut view = None;
+                self.video
+                    .CreateVideoProcessorInputView(
+                        input,
+                        &self.enumerator,
+                        &D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+                            FourCC: 0,
+                            ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+                            Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+                                Texture2D: D3D11_TEX2D_VPIV {
+                                    MipSlice: 0,
+                                    ArraySlice: 0,
+                                },
                             },
                         },
-                    },
-                    Some(&mut iv),
-                )
-                .context("video processor input view")?;
-            self.video
-                .CreateVideoProcessorOutputView(
-                    &texture,
-                    &self.enumerator,
-                    &D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
-                        ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
-                        Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
-                            Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
-                        },
-                    },
-                    Some(&mut ov),
-                )
-                .context("video processor output view")?;
+                        Some(&mut view),
+                    )
+                    .context("video processor input view")?;
+                self.input = Some((input.clone(), view.context("missing processor input view")?));
+            }
+            let slot = self.next;
+            self.next = (self.next + 1) % RING;
+            let view = self.input.as_ref().map(|(_, view)| view.clone());
             let mut stream = D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: true.into(),
-                pInputSurface: ManuallyDrop::new(iv),
+                pInputSurface: ManuallyDrop::new(view),
                 ..Default::default()
             };
             let result = self
                 .context
                 .VideoProcessorBlt(
                     &self.processor,
-                    &ov.context("missing processor output view")?,
+                    &self.slots[slot].view,
                     0,
                     std::slice::from_ref(&stream),
                 )
                 .context("convert BGRA to NV12");
             ManuallyDrop::drop(&mut stream.pInputSurface);
             result?;
+            Ok(Converted {
+                slot,
+                texture: self.slots[slot].texture.clone(),
+            })
         }
-        Ok(texture)
     }
 }
 #[cfg(test)]
