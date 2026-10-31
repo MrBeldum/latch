@@ -43,13 +43,18 @@ fn rss_mb() -> f64 {
 }
 
 fn square_is_white(f: &Frame) -> bool {
-    let mut sum = 0u64;
-    for y in 16..48 {
-        for x in 16..48 {
-            sum += f.y[y * f.y_stride + x] as u64;
+    f.with_planes(|y, y_stride, _, _| {
+        let mut sum = 0u64;
+        for y_pos in 16..48 {
+            for x_pos in 16..48 {
+                let idx = y_pos * y_stride + x_pos;
+                if idx < y.len() {
+                    sum += y[idx] as u64;
+                }
+            }
         }
-    }
-    sum / (32 * 32) > 128
+        sum / (32 * 32) > 128
+    })
 }
 
 fn main() -> anyhow::Result<()> {
