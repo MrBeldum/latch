@@ -487,4 +487,58 @@ mod tests {
         .unwrap();
         assert!(error.to_string().contains("DISPLAY connect/DNS"));
     }
+    #[test]
+    fn partial_setup_bytes_do_not_reset_the_initialization_deadline() {
+        let _test = TEST_LOCK.lock().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut request = [0; 12];
+            socket.read_exact(&mut request).unwrap();
+            let mut bytes = Vec::new();
+            setup(&mut bytes);
+            for byte in bytes {
+                if socket.write_all(&[byte]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let timeout = Duration::from_secs(1);
+        let error = connect_with(
+            command(
+                &format!("127.0.0.1:{}", port - 6000),
+                std::path::Path::new("/dev/null"),
+            ),
+            timeout,
+            Instant::now() + timeout,
+        )
+        .err()
+        .unwrap();
+        assert!(error.downcast_ref::<x11rb::errors::ConnectError>().is_some_and(|e| matches!(e, x11rb::errors::ConnectError::IoError(e) if e.kind() == io::ErrorKind::TimedOut)), "{error:#}");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn unreaped_helper_prevents_another_spawn() {
+        let _test = TEST_LOCK.lock().unwrap();
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 60"])
+            .spawn()
+            .unwrap();
+        *HELPER_SLOT.lock().unwrap() = Some(child);
+        let error = bootstrap(
+            Command::new("/nonexistent-must-not-spawn"),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("previous X11 initializer"));
+        drop(Helper(HELPER_SLOT.lock().unwrap()));
+        assert!(HELPER_SLOT.lock().unwrap().is_none());
+    }
 }
