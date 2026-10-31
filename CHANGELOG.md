@@ -4,11 +4,37 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
-## Unreleased
+## 5.1.0 (2026-10-31)
 
-- Restore start-to-start host frame cadence on software, macOS and Windows.
-- Pace video on a bounded sender queue, size UDP buffers explicitly, and adapt
-  bitrate within the requested ceiling using loss, RTT and sender queue age.
+Faster, steadier streams: from a Linux host to a Mac at 1080p60, 60 fps
+where 5.0.1 managed 42, and a key press reaches the picture in about 30 ms
+instead of 37 (p95 39 ms instead of 47–52). Measurements:
+`docs/measurements/2026-10-31/`.
+
+- Frames are taken on a fixed grid: 5.0.1 waited a whole frame interval
+  after each encode, so a 60 fps stream ran at 42–50.
+- The viewer hands a completed frame to the decoder before waiting for more
+  datagrams; frames no longer arrive a frame late and in pairs.
+- The bitrate follows the path: it backs off from what was actually sent
+  when the viewer reports loss or a standing queue, and climbs back once the
+  path is clean. Parity grows with the round trip. Frames are paced only
+  while the path shows loss or queueing; on a clean path they leave at once.
+- A frame's data goes out before its parity is computed.
+- Media threads run at the OS's interactive priority.
+- The software H.264 encoder uses NEON for colour conversion, motion search,
+  reconstruction and deblocking, and keeps every frame within its time budget
+  by trading search effort rather than frames: full-motion 1080p on a 4-core
+  ARM host went from 39 to 60 fps.
+- Reed–Solomon parity uses SSSE3/AVX2 on x86 (6× faster).
+- Mac viewer: VideoToolbox's picture goes to the GPU without a CPU copy.
+- In free mouse mode the viewer draws the host's pointer itself, so it moves
+  without network delay (Linux hosts; Windows and macOS hosts keep drawing it).
+- Windows host: reuses its GPU textures, keeps keyframes near a frame and a
+  half of bits, and can encode HEVC with `LATCH_WINDOWS_HEVC=1` (off by
+  default until tested on more GPUs).
+- macOS host: VideoToolbox real-time settings; no frame held in the encoder.
+- Size UDP buffers explicitly, and adapt the bitrate within the requested
+  ceiling using loss, round trip and sender queue age.
 - Recover a completely lost startup keyframe, batch readiness-driven receives,
   reuse video shard buffers, and bound decode backlog by time.
 - Add compatible 250 ms feedback and transport telemetry; correct recovered
