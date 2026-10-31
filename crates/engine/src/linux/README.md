@@ -10,6 +10,22 @@ so does a GetImage that fails because the root shrank after the event poll.
 Rows whose pixels did not change are not copied, and a grab where none did
 (and the cursor stayed) reports no change, so the encoder repeats instead.
 
+X11 initialization has one elapsed deadline (2 s for capture/XTest, 10 s
+for RandR), covering display parsing, DNS, Unix/abstract/TCP socket connect,
+authority-file open/read and the setup exchange. A short-lived copy of the
+executable connects and selects credentials using x11rb, then passes the live
+socket and credentials over a private inherited socket. The parent kills and
+reaps it on completion or failure; no hung worker threads accumulate. Setup
+runs in the parent with the remaining deadline, including slow partial replies.
+`DISPLAY` and `XAUTHORITY`/`HOME/.Xauthority` selection are unchanged; TCP
+and hostname displays remain accepted (MIT-SHM still requires a local server).
+Cookies are never printed or passed as command-line arguments. A network or
+stalled authority path returns an initialization error; use an accessible X
+server and a readable authority file. Embedders must call
+`latch_engine::linux::run_helper()` before normal startup and return when it
+returns true. The shipping host and the capture/input/serve examples do this.
+The helper process needs the running executable to remain executable.
+
 Every X round trip fails after 2 s without a byte from the server (RandR:
 10 s), so a stalled X server ends a grab with an error instead of holding the
 session's stop and display restore. Rootless Xwayland (the XWAYLAND

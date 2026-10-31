@@ -318,6 +318,8 @@ mod tests {
             .to_vec();
             reply.resize(32, 0);
             socket.write_all(&reply).unwrap();
+            let mut eof = [0];
+            assert_eq!(socket.read(&mut eof).unwrap(), 0);
         });
         let timeout = Duration::from_secs(10);
         let (conn, screen) = connect_with(
@@ -331,6 +333,7 @@ mod tests {
             .unwrap()
             .reply()
             .unwrap();
+        drop(conn);
         server.join().unwrap();
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
@@ -385,5 +388,74 @@ mod tests {
                 std::fs::remove_file(path).unwrap();
             }
         }
+    }
+    #[test]
+    fn helper_guard_kills_and_reaps_on_failure() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 60"])
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        drop(Helper(child));
+        // SAFETY: waitpid with WNOHANG writes only to this live status value.
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn abstract_socket_success_and_full_connect_queue_timeout() {
+        use std::os::linux::net::SocketAddrExt;
+        use std::os::unix::net::SocketAddr;
+        let number = 50000 + std::process::id() % 5000;
+        let address = SocketAddr::from_abstract_name(format!("/tmp/.X11-unix/X{number}")).unwrap();
+        let listener = UnixListener::bind_addr(&address).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut header = [0; 12];
+            socket.read_exact(&mut header).unwrap();
+            setup(&mut socket);
+            let mut eof = [0];
+            assert_eq!(socket.read(&mut eof).unwrap(), 0);
+            listener
+        });
+        let timeout = Duration::from_secs(10);
+        let (conn, _) = connect_with(
+            command(
+                &format!("unix/:{number}"),
+                std::path::Path::new("/dev/null"),
+            ),
+            timeout,
+            Instant::now() + timeout,
+        )
+        .unwrap();
+        drop(conn);
+        let listener = server.join().unwrap();
+        // A zero backlog still admits one connection on Linux. Fill it before
+        // starting the helper: its blocking Unix connect must be killed.
+        // SAFETY: listener owns a live socket descriptor.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let _queued = UnixStream::connect_addr(&address).unwrap();
+        let timeout = Duration::from_secs(1);
+        let error = bootstrap(
+            command(
+                &format!("unix/:{number}"),
+                std::path::Path::new("/dev/null"),
+            ),
+            Instant::now() + timeout,
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("DISPLAY connect/DNS"));
     }
 }
