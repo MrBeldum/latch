@@ -591,7 +591,8 @@ impl Service {
     }
 
     /// One of this machine's own Tailscale addresses: a connection from it
-    /// is a process on this machine, as loopback is.
+    /// is a process on this machine, as loopback is. Unknown or malformed
+    /// self-address data gets the same conservative refusal.
     fn own_address(&self, ip: IpAddr) -> bool {
         self.tailscale.lock().as_ref().map_or(true, |st| {
             st.self_node.tailscale_ips.is_empty()
@@ -599,7 +600,7 @@ impl Service {
                     .self_node
                     .tailscale_ips
                     .iter()
-                    .any(|a| a.parse::<IpAddr>() == Ok(ip))
+                    .any(|a| a.parse::<IpAddr>().map_or(true, |address| address == ip))
         })
     }
 
@@ -1781,6 +1782,12 @@ mod tests {
         }
         *svc.tailscale.lock() = Ok(tailscale::Status::default());
         assert_eq!(svc.handle(own, &stream).status, 403);
+        let mut malformed = tailscale::Status::default();
+        malformed.self_node.tailscale_ips = vec!["not-an-address".into()];
+        *svc.tailscale.lock() = Ok(malformed);
+        for req in [&update, &write, &stream] {
+            assert_eq!(svc.handle(own, req).status, 403);
+        }
     }
 
     const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
