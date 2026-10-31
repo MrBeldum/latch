@@ -929,7 +929,24 @@ fn receive(
     let mut window_base = reassembler.stats();
     let mut poor = false;
     let mut good_windows = 0u32;
+    // The socket ran dry on the last pass, after which everything that had
+    // arrived was handled: wait for the next datagram or timer.
+    let mut drained = false;
     while !inner.stopping() {
+        if drained {
+            let now = Instant::now();
+            let deadline = reassembler
+                .next_deadline()
+                .into_iter()
+                .chain(audio_rx.next_deadline())
+                .min()
+                .unwrap_or(now + Duration::from_millis(20));
+            let wait = deadline
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(20));
+            let _ = poll.poll(&mut events, Some(wait));
+            drained = false;
+        }
         let now = Instant::now();
         let hello_every = if media_seen { HELLO_SLOW } else { HELLO_FAST };
         if last_hello.is_none_or(|t| now - t >= hello_every) {
@@ -969,18 +986,10 @@ fn receive(
                     }
                 }
                 Ok(_) => {}
+                // Hand on what completed before waiting for more: a frame's
+                // last datagram must not wait for the next frame's first.
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    let now = Instant::now();
-                    let deadline = reassembler
-                        .next_deadline()
-                        .into_iter()
-                        .chain(audio_rx.next_deadline())
-                        .min()
-                        .unwrap_or(now + Duration::from_millis(20));
-                    let wait = deadline
-                        .saturating_duration_since(now)
-                        .min(Duration::from_millis(20));
-                    let _ = poll.poll(&mut events, Some(wait));
+                    drained = true;
                     break;
                 }
                 Err(_) => {}
