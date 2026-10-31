@@ -198,9 +198,24 @@ impl Drop for Helper<'_> {
 }
 
 fn bootstrap(mut command: Command, deadline: Instant) -> anyhow::Result<Bootstrap> {
-    let mut slot = HELPER_SLOT.try_lock().map_err(|_| {
-        anyhow::anyhow!("X11 initialization already in progress; retry after it completes")
-    })?;
+    // Capture, input and the status size probe can initialize concurrently.
+    // Serialize ordinary startup within the caller's deadline instead of
+    // failing a healthy request because another helper is briefly running.
+    let mut slot = loop {
+        match HELPER_SLOT.try_lock() {
+            Ok(slot) => break slot,
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                anyhow::bail!("X11 initializer lock is poisoned; restart Latch");
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                anyhow::ensure!(
+                    Instant::now() < deadline,
+                    "X11 initialization timed out waiting for another initializer"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    };
     if let Some(child) = slot.as_mut() {
         anyhow::ensure!(child.try_wait()?.is_some(), "previous X11 initializer is still exiting after timeout; check stalled filesystem/DNS and retry");
         *slot = None;
@@ -521,6 +536,39 @@ mod tests {
         .unwrap();
         assert!(error.downcast_ref::<x11rb::errors::ConnectError>().is_some_and(|e| matches!(e, x11rb::errors::ConnectError::IoError(e) if e.kind() == io::ErrorKind::TimedOut)), "{error:#}");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn concurrent_initializer_waits_for_the_slot_within_its_deadline() {
+        let _test = TEST_LOCK.lock().unwrap();
+        let slot = HELPER_SLOT.lock().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let error = bootstrap(
+                Command::new("/nonexistent-bootstrap-test"),
+                Instant::now() + Duration::from_secs(10),
+            )
+            .err()
+            .unwrap();
+            done_tx.send(error).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let early = done_rx.recv_timeout(Duration::from_millis(100));
+        drop(slot);
+        worker.join().unwrap();
+        assert!(
+            early.is_err(),
+            "a busy initializer must not reject another request immediately"
+        );
+        let error = done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(
+            error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|e| e.kind() == io::ErrorKind::NotFound),
+            "{error:#}"
+        );
     }
 
     #[test]
