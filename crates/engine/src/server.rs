@@ -245,7 +245,11 @@ impl Server {
 
     /// Runs a prepared session on the upgraded connection until it ends.
     pub fn run(self: &Arc<Self>, mut prepared: Prepared, tcp: TcpStream) {
-        let (pipeline, config) = prepared.pipeline.take().expect("prepared has a pipeline");
+        let (mut pipeline, config) = prepared.pipeline.take().expect("prepared has a pipeline");
+        let cursor_supported = prepared.req.cursor && pipeline.set_cursor_drawn(false);
+        if !prepared.req.cursor {
+            pipeline.set_cursor_drawn(true);
+        }
         let info = prepared.info.take().expect("prepared has video info");
         let token: [u8; 16] = rand::random();
         let id: u32 = rand::random();
@@ -275,6 +279,8 @@ impl Server {
             heard_us: AtomicU64::new(self.now_us()),
             frames: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
+            draw_cursor: AtomicBool::new(!cursor_supported),
+            control_writer: Mutex::new(None),
         });
         // prepare owns the reservation until installation, so a second
         // prepare must see this session and wait for its undo before opening.
@@ -303,6 +309,7 @@ impl Server {
                 codec: "lpcm-rice".into(),
             }),
             audio_problem: prepared.audio_problem.clone(),
+            cursor: cursor_supported,
         };
         self.log(format!(
             "{} is watching: {}×{} at {} fps, {} kb/s, {}{}",
@@ -411,6 +418,7 @@ impl Server {
                     }
                 });
         }
+        *session.control_writer.lock() = Some(writer);
         let (video, audio) = start_media();
         let mut last_keepalive = Instant::now();
         let mut last_hello = Instant::now() - HELLO_EVERY;
@@ -419,20 +427,15 @@ impl Server {
         let mut sent_mark = (Instant::now(), session.bytes.load(Ordering::Relaxed));
         let reason = loop {
             if let Some(e) = session.ended.lock().clone() {
-                let _ = control::write_message(&mut writer, &Message::End(e.clone()));
+                let _ = session.send_control(&Message::End(e.clone()));
                 break e.message;
             }
             let audio_notice = session.audio_notice.lock().take();
             if let Some(message) = audio_notice {
-                if control::write_message(
-                    &mut writer,
-                    &Message::Notice(Notice {
-                        kind: "audio".into(),
-                        message,
-                    }),
-                )
-                .is_err()
-                {
+                if !session.send_control(&Message::Notice(Notice {
+                    kind: "audio".into(),
+                    message,
+                })) {
                     break "the viewer's connection broke".to_string();
                 }
             }
@@ -443,6 +446,10 @@ impl Server {
                     } else {
                         e.message
                     }
+                }
+                Ok(Message::DrawCursor(d)) => {
+                    session.heard(self.now_us());
+                    session.draw_cursor.store(d.draw, Ordering::Relaxed);
                 }
                 Ok(Message::Report(r)) => {
                     session.heard(self.now_us());
@@ -490,7 +497,7 @@ impl Server {
             }
             let now = Instant::now();
             if now - last_keepalive >= KEEPALIVE {
-                if control::write_message(&mut writer, &Message::Keepalive).is_err() {
+                if !session.send_control(&Message::Keepalive) {
                     break "the viewer's connection broke".to_string();
                 }
                 last_keepalive = now;
@@ -519,12 +526,14 @@ impl Server {
                     code: end::VIEWER_SILENT,
                     message: "The viewer stopped answering.".into(),
                 };
-                let _ = control::write_message(&mut writer, &Message::End(e.clone()));
+                let _ = session.send_control(&Message::End(e.clone()));
                 break e.message;
             }
         };
         session.stop.store(true, Ordering::Release);
-        let _ = writer.flush();
+        if let Some(mut w) = session.control_writer.lock().take() {
+            let _ = w.flush();
+        }
         let _ = tcp.shutdown(Shutdown::Both);
         if let Some(v) = video {
             let _ = v.join();
@@ -635,9 +644,20 @@ struct Session {
     heard_us: AtomicU64,
     frames: AtomicU64,
     bytes: AtomicU64,
+    draw_cursor: AtomicBool,
+    control_writer: Mutex<Option<TcpStream>>,
 }
 
 impl Session {
+    fn send_control(&self, msg: &Message) -> bool {
+        let mut guard = self.control_writer.lock();
+        if let Some(writer) = guard.as_mut() {
+            control::write_message(writer, msg).is_ok() && writer.flush().is_ok()
+        } else {
+            false
+        }
+    }
+
     fn end(&self, code: u32, message: &str) {
         let mut ended = self.ended.lock();
         if ended.is_none() {
@@ -789,6 +809,8 @@ fn send_video(
             pipeline.set_bitrate(wanted);
             bitrate = wanted;
         }
+        let draw = session.draw_cursor.load(Ordering::Relaxed);
+        pipeline.set_cursor_drawn(draw);
         let due = last_keyframe.is_none_or(|t| t.elapsed() >= KEYFRAME_GAP);
         let keyframe = due && session.keyframe.swap(false, Ordering::AcqRel);
         // Short idle repeats bound how long a request arriving inside next
@@ -807,7 +829,8 @@ fn send_video(
                 recoveries.retain(|t| now - *t < VIDEO_RECOVERY_WINDOW);
                 if recoveries.len() < VIDEO_RECOVERIES {
                     recoveries.push_back(now);
-                    if let Ok(p) = reopen(&config) {
+                    if let Ok(mut p) = reopen(&config) {
+                        p.set_cursor_drawn(session.draw_cursor.load(Ordering::Relaxed));
                         pipeline = p;
                         bitrate = config.bitrate_kbps;
                         session.keyframe.store(true, Ordering::Release);
@@ -821,6 +844,12 @@ fn send_video(
                 return;
             }
         };
+        if let Some(update) = pipeline.take_cursor() {
+            session.send_control(&Message::Cursor(control::Cursor {
+                visible: update.visible,
+                shape: update.shape,
+            }));
+        }
         let next_info = pipeline.info();
         if next_info != info {
             if next_info.display != info.display {

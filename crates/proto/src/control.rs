@@ -45,6 +45,8 @@ pub struct StreamRequest {
     pub audio: bool,
     #[serde(default)]
     pub name: String,
+    #[serde(default)]
+    pub cursor: bool,
 }
 
 fn known_codecs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Codec>, D::Error> {
@@ -77,6 +79,8 @@ pub struct Accept {
     pub audio: Option<AudioFormat>,
     #[serde(default)]
     pub audio_problem: String,
+    #[serde(default)]
+    pub cursor: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -110,6 +114,52 @@ pub struct Report {
     pub rtt_ms: f32,
 }
 
+/// A pointer shape sent by the host to the viewer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CursorShape {
+    pub serial: u32,
+    pub width: u32,
+    pub height: u32,
+    pub hot_x: u32,
+    pub hot_y: u32,
+    pub rgba: String,
+}
+
+impl CursorShape {
+    /// Creates a shape, downscaling if larger than 96×96.
+    pub fn new(serial: u32, width: u32, height: u32, hot_x: u32, hot_y: u32, rgba: &[u8]) -> Self {
+        let (w, h, hx, hy, data) = crate::base64::downscale_rgba(width, height, hot_x, hot_y, rgba);
+        Self {
+            serial,
+            width: w,
+            height: h,
+            hot_x: hx,
+            hot_y: hy,
+            rgba: crate::base64::encode(&data),
+        }
+    }
+
+    /// Decodes the straight-RGBA pixel buffer.
+    pub fn decode_rgba(&self) -> Result<Vec<u8>, &'static str> {
+        crate::base64::decode(&self.rgba)
+    }
+}
+
+/// Host → viewer pointer update. Sent when visibility or shape changes;
+/// `shape: None` means the shape has not changed since the last update.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Cursor {
+    pub visible: bool,
+    #[serde(default)]
+    pub shape: Option<CursorShape>,
+}
+
+/// Viewer → host command to include or omit the cursor from video frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrawCursor {
+    pub draw: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     Accept(Accept),
@@ -117,6 +167,8 @@ pub enum Message {
     Keepalive,
     Notice(Notice),
     Report(Report),
+    Cursor(Cursor),
+    DrawCursor(DrawCursor),
     /// A type this version does not know; skipped by the reader's caller.
     Unknown(u8),
 }
@@ -129,6 +181,8 @@ pub fn write_message(w: &mut impl Write, message: &Message) -> std::io::Result<(
         Message::Keepalive => (3, Ok(b"{}".to_vec())),
         Message::Notice(v) => (4, serde_json::to_vec(v)),
         Message::Report(v) => (5, serde_json::to_vec(v)),
+        Message::Cursor(v) => (6, serde_json::to_vec(v)),
+        Message::DrawCursor(v) => (7, serde_json::to_vec(v)),
         Message::Unknown(t) => (*t, Ok(b"{}".to_vec())),
     };
     let payload = payload.map_err(std::io::Error::other)?;
@@ -162,6 +216,8 @@ pub fn read_message(r: &mut impl Read) -> std::io::Result<Message> {
         }
         4 => Message::Notice(serde_json::from_slice(&bytes[1..]).map_err(invalid)?),
         5 => Message::Report(serde_json::from_slice(&bytes[1..]).map_err(invalid)?),
+        6 => Message::Cursor(serde_json::from_slice(&bytes[1..]).map_err(invalid)?),
+        7 => Message::DrawCursor(serde_json::from_slice(&bytes[1..]).map_err(invalid)?),
         t => Message::Unknown(t),
     })
 }
@@ -192,4 +248,154 @@ pub fn token_from_hex(s: &str) -> Option<[u8; 16]> {
         out[i] = digit(pair[0])? * 16 + digit(pair[1])?;
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_request_backward_compatible() {
+        let json = r#"{
+            "protocol": 1,
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "bitrate_kbps": 8000,
+            "codecs": ["hevc"],
+            "udp_port": 1234,
+            "audio": true,
+            "name": "old-viewer"
+        }"#;
+        let req: StreamRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.name, "old-viewer");
+        assert!(!req.cursor);
+
+        let json_with_cursor = r#"{
+            "protocol": 1,
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "bitrate_kbps": 8000,
+            "codecs": ["hevc"],
+            "udp_port": 1234,
+            "audio": true,
+            "name": "new-viewer",
+            "cursor": true
+        }"#;
+        let req_new: StreamRequest = serde_json::from_str(json_with_cursor).unwrap();
+        assert!(req_new.cursor);
+    }
+
+    #[test]
+    fn accept_backward_compatible() {
+        let json = r#"{
+            "session": 42,
+            "token": "0123456789abcdef0123456789abcdef",
+            "codec": "hevc",
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "bitrate_kbps": 8000,
+            "encoder": "nvenc",
+            "audio": null
+        }"#;
+        let acc: Accept = serde_json::from_str(json).unwrap();
+        assert!(!acc.cursor);
+
+        let json_with_cursor = r#"{
+            "session": 42,
+            "token": "0123456789abcdef0123456789abcdef",
+            "codec": "hevc",
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "bitrate_kbps": 8000,
+            "encoder": "nvenc",
+            "audio": null,
+            "cursor": true
+        }"#;
+        let acc_new: Accept = serde_json::from_str(json_with_cursor).unwrap();
+        assert!(acc_new.cursor);
+    }
+
+    #[test]
+    fn cursor_messages_wire_roundtrip() {
+        let shape = CursorShape::new(101, 2, 2, 0, 0, &[255; 16]);
+        let msg = Message::Cursor(Cursor {
+            visible: true,
+            shape: Some(shape),
+        });
+
+        let mut buf = Vec::new();
+        write_message(&mut buf, &msg).unwrap();
+
+        let mut read_slice = &buf[..];
+        let decoded = read_message(&mut read_slice).unwrap();
+        assert_eq!(msg, decoded);
+
+        let msg_noshape = Message::Cursor(Cursor {
+            visible: false,
+            shape: None,
+        });
+        let mut buf2 = Vec::new();
+        write_message(&mut buf2, &msg_noshape).unwrap();
+        let mut read_slice2 = &buf2[..];
+        let decoded2 = read_message(&mut read_slice2).unwrap();
+        assert_eq!(msg_noshape, decoded2);
+    }
+
+    #[test]
+    fn draw_cursor_message_wire_roundtrip() {
+        let msg = Message::DrawCursor(DrawCursor { draw: false });
+        let mut buf = Vec::new();
+        write_message(&mut buf, &msg).unwrap();
+        let mut read_slice = &buf[..];
+        let decoded = read_message(&mut read_slice).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn cursor_max_shape_fits_max_message() {
+        let raw_pixels = vec![255u8; 96 * 96 * 4];
+        let shape = CursorShape::new(1, 96, 96, 10, 10, &raw_pixels);
+        let msg = Message::Cursor(Cursor {
+            visible: true,
+            shape: Some(shape),
+        });
+        let mut buf = Vec::new();
+        write_message(&mut buf, &msg).unwrap();
+        assert!(buf.len() <= MAX_MESSAGE + 4);
+    }
+
+    #[test]
+    fn cursor_json_format_matches_spec() {
+        let shape = CursorShape::new(1, 1, 1, 0, 0, &[1, 2, 3, 4]);
+        let cursor = Cursor {
+            visible: true,
+            shape: Some(shape),
+        };
+        let s = serde_json::to_string(&cursor).unwrap();
+        assert!(s.contains("\"visible\":true"));
+        assert!(s.contains("\"shape\":{"));
+        assert!(s.contains("\"serial\":1"));
+
+        let cursor_null = Cursor {
+            visible: false,
+            shape: None,
+        };
+        let s_null = serde_json::to_string(&cursor_null).unwrap();
+        assert_eq!(s_null, r#"{"visible":false,"shape":null}"#);
+    }
+
+    #[test]
+    fn unknown_message_type_ignored() {
+        let mut buf = Vec::new();
+        let unknown = Message::Unknown(99);
+        write_message(&mut buf, &unknown).unwrap();
+
+        let mut read_slice = &buf[..];
+        let decoded = read_message(&mut read_slice).unwrap();
+        assert_eq!(decoded, Message::Unknown(99));
+    }
 }

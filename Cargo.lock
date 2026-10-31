@@ -1981,6 +1981,7 @@ dependencies = [
  "egui_kittest",
  "image",
  "latch-core",
+ "latch-proto",
  "latch-stream",
  "latch-ui",
  "metal",

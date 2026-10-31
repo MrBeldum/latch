@@ -93,6 +93,7 @@ fn main() -> anyhow::Result<()> {
             hevc: flag("--hevc"),
             audio: flag("--audio"),
             name: "view example".into(),
+            cursor: false,
         },
         frames.clone(),
         tx,

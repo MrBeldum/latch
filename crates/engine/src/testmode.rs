@@ -87,6 +87,14 @@ impl CpuCapture for Shared {
     fn name(&self) -> String {
         "test pattern".into()
     }
+
+    fn set_cursor_drawn(&mut self, drawn: bool) -> bool {
+        self.pattern.lock().set_cursor_drawn(drawn)
+    }
+
+    fn take_cursor(&mut self) -> Option<crate::video::CursorUpdate> {
+        self.pattern.lock().take_cursor()
+    }
 }
 
 struct PatternInput;

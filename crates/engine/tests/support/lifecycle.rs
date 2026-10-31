@@ -55,6 +55,8 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         heard_us: AtomicU64::new(0),
         frames: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
+        draw_cursor: AtomicBool::new(true),
+        control_writer: Mutex::new(None),
     })
 }
 
@@ -286,6 +288,7 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
             codec: "lpcm-rice".into(),
         }),
         audio_problem: String::new(),
+        cursor: false,
     };
     let worker = {
         let server = server.clone();

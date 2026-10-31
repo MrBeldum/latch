@@ -10,6 +10,7 @@
 //! `now`, so tests run on simulated time.
 
 pub mod audio;
+pub mod base64;
 pub mod control;
 pub mod fec;
 pub mod input;

@@ -31,6 +31,14 @@ pub trait CpuCapture: Send {
 
     /// For [`VideoInfo::encoder`]'s sake: "X11", "test pattern".
     fn name(&self) -> String;
+
+    fn set_cursor_drawn(&mut self, _drawn: bool) -> bool {
+        false
+    }
+
+    fn take_cursor(&mut self) -> Option<crate::video::CursorUpdate> {
+        None
+    }
 }
 
 /// Time spent in each stage of the last frame. Capture includes waiting
@@ -216,6 +224,14 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
         if let Some(encoder) = &mut self.encoder {
             encoder.set_bitrate(self.config.bitrate_kbps);
         }
+    }
+
+    fn set_cursor_drawn(&mut self, drawn: bool) -> bool {
+        self.capture.set_cursor_drawn(drawn)
+    }
+
+    fn take_cursor(&mut self) -> Option<crate::video::CursorUpdate> {
+        self.capture.take_cursor()
     }
 }
 
