@@ -437,7 +437,9 @@ impl Resources {
 
     /// Upload the newest frame, if there is one.
     fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, slot: &FrameSlot) {
-        let Some(mut frame) = slot.take() else { return };
+        let Some(frame) = slot.take() else { return };
+        #[cfg(target_os = "macos")]
+        let mut frame = frame;
         #[cfg(target_os = "macos")]
         if frame.native.is_some() {
             match self.upload_native(device, queue, frame, slot) {
@@ -835,7 +837,8 @@ mod tests {
             uv: vec![128; 64 * 32],
             uv_stride: 64,
             full_range: false,
-            ..Default::default()
+            #[cfg(target_os = "macos")]
+            native: None,
         });
         let mut harness = egui_kittest::Harness::builder()
             .wgpu()
