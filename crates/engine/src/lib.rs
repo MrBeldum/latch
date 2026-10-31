@@ -24,3 +24,7 @@ pub mod linux;
 pub mod mac;
 #[cfg(windows)]
 pub mod windows;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "linux/x11.rs"]
+mod x11_bootstrap_tests;

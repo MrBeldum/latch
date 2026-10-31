@@ -543,7 +543,15 @@ mod tests {
             }
         });
         let (stream, _) = DefaultStream::from_unix_stream(client).unwrap();
-        RustConnection::connect_to_stream(super::super::Bounded { stream, silence }, 0).unwrap()
+        RustConnection::connect_to_stream(
+            super::super::Bounded {
+                stream,
+                silence,
+                deadline: std::sync::Mutex::new(None),
+            },
+            0,
+        )
+        .unwrap()
     }
     /// x11rb serializes a reply's fields; the wire pads it to 32 bytes.
     fn reply(fields: &[u8]) -> Vec<u8> {

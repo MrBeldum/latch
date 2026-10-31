@@ -12,6 +12,10 @@ use latch_proto::control::{self, StreamRequest};
 use std::net::TcpListener;
 
 fn main() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    if latch_engine::linux::run_helper() {
+        return Ok(());
+    }
     let args: Vec<String> = std::env::args().collect();
     let arg = |name: &str, default: &str| {
         args.windows(2)

@@ -82,6 +82,10 @@ fn log_file(args: &Args) -> Option<&'static str> {
 
 fn main() -> Result<()> {
     #[cfg(target_os = "linux")]
+    if latch_engine::linux::run_helper() {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
     if latch_client::refresh::run_helper() {
         return Ok(());
     }

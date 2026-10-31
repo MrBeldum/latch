@@ -367,6 +367,7 @@ mod timeout_tests {
         let (stream, _) = DefaultStream::from_unix_stream(client).unwrap();
         let conn = RustConnection::connect_to_stream(
             super::super::Bounded {
+                deadline: std::sync::Mutex::new(None),
                 stream,
                 silence: Duration::from_millis(100),
             },
