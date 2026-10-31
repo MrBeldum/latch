@@ -18,6 +18,17 @@ use std::sync::Arc;
 /// close to the picture; a Wi-Fi hiccup longer than this is a click.
 const MAX_QUEUED_MS: usize = 120;
 const KEEP_MS: usize = 50;
+/// How much sound the mixer keeps queued: it starts after this much and
+/// then plays a little fast or slow (at most 2%, a few cents of pitch) to
+/// stay near it, so neither the two machines' clocks nor a burst of late
+/// packets leaves sound lagging the picture. It grows by
+/// [`TARGET_STEP_MS`] each time the queue runs dry, up to [`TARGET_MAX_MS`],
+/// and shrinks back after [`TARGET_RELAX_SECS`] without running dry.
+const TARGET_MS: usize = 30;
+const TARGET_MIN_MS: usize = 20;
+const TARGET_MAX_MS: usize = 100;
+const TARGET_STEP_MS: usize = 10;
+const TARGET_RELAX_SECS: u64 = 20;
 const MAX_CHANNELS: usize = 8;
 
 /// The output device, as the output thread found it.
@@ -234,7 +245,7 @@ fn output_thread(
                     channels as usize,
                     queue.clone(),
                     pulled.clone(),
-                    source_rate as usize * source_channels as usize * 40 / 1000,
+                    source_rate as usize * source_channels as usize * TARGET_MS / 1000,
                 )
             };
             // CoreAudio moves a default-device stream to the new default by
@@ -356,6 +367,13 @@ struct Mixer {
     /// so a late first packet is not a click of silence. Zero in tests.
     preroll: usize,
     started: bool,
+    /// Source samples the queue is steered towards; zero turns steering off.
+    target: usize,
+    /// Source samples in a millisecond.
+    per_ms: usize,
+    /// Output frames since the queue last ran dry.
+    since_dry: u64,
+    out_rate: u64,
     scratch: Vec<f32>,
 }
 
@@ -380,8 +398,22 @@ impl Mixer {
             next: [0.0; MAX_CHANNELS],
             preroll,
             started: false,
+            target: preroll,
+            per_ms: (src_rate as usize * src_channels.clamp(1, MAX_CHANNELS) / 1000).max(1),
+            since_dry: 0,
+            out_rate: u64::from(out_rate.max(1)),
             scratch: Vec::new(),
         }
+    }
+
+    /// This callback's step: the nominal one, a little longer when more
+    /// than the target is queued and shorter when less.
+    fn steered_step(&self, queued: usize) -> f64 {
+        if self.target == 0 {
+            return self.step;
+        }
+        let excess_ms = (queued as f64 - self.target as f64) / self.per_ms as f64;
+        self.step * (1.0 + (excess_ms * 0.0004).clamp(-0.01, 0.02))
     }
 
     fn fill(&mut self, out: &mut [f32]) {
@@ -395,6 +427,8 @@ impl Mixer {
             self.started = true;
         }
         let mut frames = 0u64;
+        let step = self.steered_step(q.len());
+        let mut dry = false;
         for frame in out.chunks_mut(self.out_channels) {
             while self.pos >= 1.0 {
                 self.pos -= 1.0;
@@ -404,6 +438,8 @@ impl Mixer {
                     for c in 0..self.src_channels {
                         self.next[c] = q.pop_front().unwrap_or(0.0);
                     }
+                } else {
+                    dry = true;
                 }
             }
             let t = self.pos as f32;
@@ -419,8 +455,25 @@ impl Mixer {
                     0.0
                 };
             }
-            self.pos += self.step;
+            self.pos += step;
             frames += 1;
+        }
+        drop(q);
+        if self.target > 0 {
+            if dry {
+                self.target =
+                    (self.target + TARGET_STEP_MS * self.per_ms).min(TARGET_MAX_MS * self.per_ms);
+                self.since_dry = 0;
+            } else {
+                self.since_dry += frames;
+                if self.since_dry >= TARGET_RELAX_SECS * self.out_rate {
+                    self.target = self
+                        .target
+                        .saturating_sub(TARGET_STEP_MS / 2 * self.per_ms)
+                        .max(TARGET_MIN_MS * self.per_ms);
+                    self.since_dry = 0;
+                }
+            }
         }
         self.pulled.fetch_add(frames, Ordering::Relaxed);
     }
@@ -588,5 +641,34 @@ mod tests {
         let mut out = vec![9.0f32; 6 * 10];
         m.fill(&mut out);
         assert_eq!(&out[6 * 9..], &[0.25, -0.25, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn the_mixer_steers_the_queue_towards_its_target() {
+        // 48 kHz mono in and out, 30 ms target: 1440 samples.
+        let queue: Arc<Mutex<VecDeque<f32>>> = Arc::default();
+        let pulled = Arc::new(AtomicU64::new(0));
+        let mut m = Mixer::new(48_000, 1, 48_000, 1, queue.clone(), pulled, 1440);
+        assert_eq!(m.steered_step(1440), 1.0);
+        // 50 ms too much: 2% fast. 10 ms too little: 0.4% slow.
+        assert!((m.steered_step(1440 + 2400) - 1.02).abs() < 1e-9);
+        assert!((m.steered_step(1440 - 480) - 0.996).abs() < 1e-9);
+        // 50 ms too much drains towards the target over a few seconds
+        // (a 2.5 s time constant) while sound keeps arriving in real time,
+        // without anything being dropped.
+        queue
+            .lock()
+            .extend(std::iter::repeat_n(0.1f32, 1440 + 2400));
+        let mut out = vec![0f32; 480];
+        for _ in 0..400 {
+            queue.lock().extend(std::iter::repeat_n(0.1f32, 480));
+            m.fill(&mut out);
+        }
+        let left = queue.lock().len();
+        assert!((1440..1440 + 960).contains(&left), "{left}");
+        // Running dry raises the target by 10 ms.
+        queue.lock().clear();
+        m.fill(&mut out);
+        assert_eq!(m.target, 1440 + 480);
     }
 }
