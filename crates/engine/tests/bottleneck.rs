@@ -84,57 +84,65 @@ fn relay(
         }
     });
     // Viewer → relay socket → host from a second socket, so the host sees
-    // the relay as the viewer. One thread per direction, each blocked on its
-    // own socket: polling both with short timeouts starved the relay on
-    // Windows, whose socket timeouts are coarse (about 15 ms), so the relay
-    // itself dropped what the test meant to deliver. Whatever the link holds
-    // back is delivered on the thread's next wake-up, at most 5 ms later.
+    // the relay as the viewer. Per direction, one thread blocks on its socket
+    // and puts what arrives into the link; another sleeps until the link's
+    // next datagram is due and sends it then. Releasing only when something
+    // else arrives (or when a socket timeout fires, about 15 ms on Windows)
+    // held pings behind a thin stream and looked like a queue that never
+    // drained.
     let to_host = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
     let viewer: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
-    for socket in [&udp, &to_host] {
-        socket
-            .set_read_timeout(Some(Duration::from_millis(5)))
-            .unwrap();
-    }
-    let up = {
-        let from_viewer = udp.try_clone().unwrap();
-        let to_host = to_host.try_clone().unwrap();
-        let viewer = viewer.clone();
-        move || {
-            let mut link = Link::new(impairment, 7);
+    let up = Arc::new(Mutex::new(Link::new(impairment, 7)));
+    let down = Arc::new(Mutex::new(Link::new(impairment, 11)));
+    {
+        let (from_viewer, link, viewer) = (udp.try_clone().unwrap(), up.clone(), viewer.clone());
+        std::thread::spawn(move || {
             let mut buf = [0u8; 2048];
-            loop {
-                if let Ok((n, from)) = from_viewer.recv_from(&mut buf) {
-                    *viewer.lock() = Some(from);
-                    link.send(Instant::now(), &buf[..n]);
-                }
-                for d in link.receive(Instant::now()) {
-                    let _ = to_host.send_to(&d, host_addr);
-                }
+            while let Ok((n, from)) = from_viewer.recv_from(&mut buf) {
+                *viewer.lock() = Some(from);
+                link.lock().send(Instant::now(), &buf[..n]);
             }
-        }
-    };
-    let down = move || {
-        let mut link = Link::new(impairment, 11);
-        let mut buf = [0u8; 2048];
-        loop {
-            if let Ok((n, _)) = to_host.recv_from(&mut buf) {
+        });
+    }
+    {
+        let (from_host, link) = (to_host.try_clone().unwrap(), down.clone());
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            while let Ok((n, _)) = from_host.recv_from(&mut buf) {
                 // Model standing cross-traffic queueing independently of the
                 // encoder's offered rate. All downstream traffic, including
                 // ping/pong, waits in the same queue; TCP reports stay untouched.
                 let delay = Duration::from_millis(u64::from(
                     queue_delay_ms.load(std::sync::atomic::Ordering::Relaxed),
                 ));
-                link.send(Instant::now() + delay, &buf[..n]);
+                link.lock().send(Instant::now() + delay, &buf[..n]);
             }
-            if let Some(v) = *viewer.lock() {
-                for d in link.receive(Instant::now()) {
-                    let _ = udp.send_to(&d, v);
+        });
+    }
+    let deliver = move |link: Arc<Mutex<Link>>,
+                        out: UdpSocket,
+                        to: Box<dyn Fn() -> Option<SocketAddr> + Send>| {
+        move || loop {
+            let now = Instant::now();
+            let (due, next) = {
+                let mut link = link.lock();
+                (link.receive(now), link.next_arrival())
+            };
+            if let Some(to) = to() {
+                for d in due {
+                    let _ = out.send_to(&d, to);
                 }
             }
+            // std's sleep is high resolution on every platform this runs on.
+            let wait = next.map_or(Duration::from_millis(1), |t| {
+                t.saturating_duration_since(now)
+            });
+            std::thread::sleep(wait.clamp(Duration::from_micros(100), Duration::from_millis(1)));
         }
     };
+    let up = deliver(up, to_host, Box::new(move || Some(host_addr)));
+    let down = deliver(down, udp, Box::new(move || *viewer.lock()));
     std::thread::spawn(up);
     std::thread::spawn(down);
     port

@@ -349,9 +349,9 @@ impl CpuCapture for X11Capture {
                             if a == 0 {
                                 rgba.extend_from_slice(&[0, 0, 0, 0]);
                             } else {
-                                let r_pre = ((pixel >> 16) & 0xff) as u32;
-                                let g_pre = ((pixel >> 8) & 0xff) as u32;
-                                let b_pre = (pixel & 0xff) as u32;
+                                let r_pre = (pixel >> 16) & 0xff;
+                                let g_pre = (pixel >> 8) & 0xff;
+                                let b_pre = pixel & 0xff;
                                 let a_u32 = a as u32;
                                 let r = ((r_pre * 255 + a_u32 / 2) / a_u32).min(255) as u8;
                                 let g = ((g_pre * 255 + a_u32 / 2) / a_u32).min(255) as u8;
