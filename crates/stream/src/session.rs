@@ -85,6 +85,14 @@ pub struct Settings {
     pub audio: bool,
     /// This machine's name, for the host's log.
     pub name: String,
+    /// Ask the host to stream cursor shapes and omit the pointer from video.
+    pub cursor: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CursorState {
+    pub visible: bool,
+    pub shape: Option<Arc<latch_proto::control::CursorShape>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -212,6 +220,9 @@ struct Inner {
     finished: AtomicBool,
     done: Mutex<bool>,
     done_cv: Condvar,
+    cursor_supported: AtomicBool,
+    cursor_state: Mutex<Option<CursorState>>,
+    control_writer: Mutex<Option<TcpStream>>,
 }
 
 #[derive(Default)]
@@ -355,6 +366,9 @@ impl Session {
             finished: AtomicBool::new(false),
             done: Mutex::new(false),
             done_cv: Condvar::new(),
+            cursor_supported: AtomicBool::new(false),
+            cursor_state: Mutex::new(None),
+            control_writer: Mutex::new(None),
         });
         let worker = inner.clone();
         let spawned = std::thread::Builder::new()
@@ -382,10 +396,43 @@ impl Session {
         self.inner.finished.load(Ordering::Acquire)
     }
 
+    /// Whether the host agreed to stream cursor shapes and omit the host pointer.
+    pub fn cursor_supported(&self) -> bool {
+        self.inner.cursor_supported.load(Ordering::Acquire)
+    }
+
+    /// The latest cursor shape and visibility received from the host, or None
+    /// if cursor shapes are not supported or none have arrived yet.
+    pub fn cursor(&self) -> Option<CursorState> {
+        if !self.inner.cursor_supported.load(Ordering::Acquire) {
+            return None;
+        }
+        self.inner.cursor_state.lock().clone()
+    }
+
+    /// Tell the host whether to draw the cursor into its video stream.
+    pub fn draw_cursor(&self, draw: bool) {
+        if let Some(w) = self.inner.control_writer.lock().as_mut() {
+            let _ = control::write_message(
+                w,
+                &Message::DrawCursor(latch_proto::control::DrawCursor { draw }),
+            );
+        }
+    }
+
     /// Ends the session; returns at once. [`Session::finished`] says when
     /// it is over.
     pub fn stop(&self) {
         self.inner.stop.store(true, Ordering::Release);
+        if let Some(w) = self.inner.control_writer.lock().as_mut() {
+            let _ = control::write_message(
+                w,
+                &Message::End(control::End {
+                    code: control::end::ENDED,
+                    message: String::new(),
+                }),
+            );
+        }
         if let Some(tcp) = self.inner.tcp.lock().as_ref() {
             let _ = tcp.shutdown(Shutdown::Read);
         }
@@ -460,6 +507,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         udp_port,
         audio: settings.audio,
         name: settings.name.clone(),
+        cursor: settings.cursor,
     };
     let body = serde_json::to_vec(&request).unwrap_or_default();
     let host = SocketAddr::new(server.address, server.port);
@@ -486,6 +534,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     let _ = tcp.set_nodelay(true);
     let _ = tcp.set_read_timeout(Some(START_TIMEOUT));
     *inner.tcp.lock() = tcp.try_clone().ok();
+    *inner.control_writer.lock() = tcp.try_clone().ok();
     if inner.stopping() {
         let _ = tcp.shutdown(Shutdown::Both);
         return;
@@ -501,6 +550,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
             )
         }
     };
+    inner.cursor_supported.store(accept.cursor, Ordering::Release);
     let Some(token) = control::token_from_hex(&accept.token) else {
         return fail("starting", "the host sent a malformed session token".into());
     };
@@ -614,13 +664,16 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
     let mut last_keepalive = Instant::now();
     loop {
         if inner.stopping() {
-            let _ = control::write_message(
-                tcp,
-                &Message::End(control::End {
-                    code: control::end::ENDED,
-                    message: String::new(),
-                }),
-            );
+            if let Some(w) = inner.control_writer.lock().as_mut() {
+                let _ = control::write_message(
+                    w,
+                    &Message::End(control::End {
+                        code: control::end::ENDED,
+                        message: String::new(),
+                    }),
+                );
+            }
+            *inner.control_writer.lock() = None;
             return Outcome::Stopped;
         }
         match inbox.recv_timeout(Duration::from_millis(100)) {
@@ -635,6 +688,17 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
                 } else {
                     Outcome::Failed("starting".into(), message)
                 };
+            }
+            Ok(Message::Cursor(c)) => {
+                inner.heard();
+                let mut state = inner.cursor_state.lock();
+                let prev_shape = state.as_ref().and_then(|s| s.shape.clone());
+                let shape = c.shape.map(Arc::new).or(prev_shape);
+                *state = Some(CursorState {
+                    visible: c.visible,
+                    shape,
+                });
+                (inner.wake)();
             }
             Ok(Message::Notice(n)) => {
                 inner.heard();
@@ -669,17 +733,21 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
         if now - last_keepalive >= KEEPALIVE {
             last_keepalive = now;
             let stats = inner.stats.lock().clone();
-            let sent = control::write_message(tcp, &Message::Keepalive).and_then(|()| {
-                control::write_message(
-                    tcp,
-                    &Message::Report(Report {
-                        fps: stats.fps,
-                        loss_pct: inner.raw_loss_milli.load(Ordering::Relaxed) as f32 / 1000.0,
-                        decode_ms: stats.decode_ms,
-                        rtt_ms: stats.rtt_ms as f32,
-                    }),
-                )
-            });
+            let sent = if let Some(w) = inner.control_writer.lock().as_mut() {
+                control::write_message(w, &Message::Keepalive).and_then(|()| {
+                    control::write_message(
+                        w,
+                        &Message::Report(Report {
+                            fps: stats.fps,
+                            loss_pct: inner.raw_loss_milli.load(Ordering::Relaxed) as f32 / 1000.0,
+                            decode_ms: stats.decode_ms,
+                            rtt_ms: stats.rtt_ms as f32,
+                        }),
+                    )
+                })
+            } else {
+                Ok(())
+            };
             if sent.is_err() && !inner.stopping() {
                 return Outcome::Ended(-1, "The connection to the host broke.".into());
             }
@@ -1050,6 +1118,7 @@ mod tests {
             hevc: false,
             audio: true,
             name: "test".into(),
+            cursor: false,
         };
         assert!(!offer(&s).contains(&Codec::Hevc));
         assert!(offer(&s).contains(&Codec::H264Baseline));

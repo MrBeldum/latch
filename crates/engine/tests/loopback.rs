@@ -80,6 +80,7 @@ fn connect(port: u16) -> (Session, Arc<FrameSlot>, mpsc::Receiver<Event>) {
             hevc: false,
             audio: false,
             name: "loopback test".into(),
+            cursor: false,
         },
         frames.clone(),
         tx,
