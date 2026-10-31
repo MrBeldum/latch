@@ -19,7 +19,7 @@ reaps it on completion or failure, allowing up to 100 ms of cleanup beyond
 the deadline. If SIGKILL cannot finish an uninterruptible kernel operation,
 the single helper slot is retained and further attempts fail until it exits;
 the next attempt reaps it before proceeding. No unbounded waitpid or growing
-set of workers is used. Concurrent bootstrap attempts return a retry error. Setup
+set of workers is used. Concurrent bootstrap attempts wait within their own deadline for the slot; an unreaped timed-out helper returns a retry error. Setup
 runs in the parent with the remaining deadline, including slow partial replies.
 `DISPLAY` and `XAUTHORITY`/`HOME/.Xauthority` selection are unchanged; TCP
 and hostname displays remain accepted (MIT-SHM still requires a local server).
@@ -110,3 +110,24 @@ encoder and color conversion are still skeletons. Encode throughput and
 bitrate changes inside a live encoder are not measured. VK-key injection
 also awaits the shared keymap. Rotated and multiple-output RandR setups
 and PipeWire's PulseAudio server have not been tested.
+
+## Qualification on Stuzha, 2026-10-30
+
+The bootstrap implementation and concurrent-initialization fix (497f431) passed
+eight regressions on ARM Linux, including abstract sockets, a full connect
+queue, silent/partial setup, FIFO authority input, cookie selection and helper
+cleanup. A separate authenticated dummy-driver Xorg on `:9` passed XTest,
+Unicode keymap restoration, resize to an existing mode, creation of a larger
+mode, restoration, known-pixel capture and damage/cursor checks. Captured H.264
+also decoded successfully with FFmpeg.
+
+The candidate engine streamed moving testsrc2 content to the Mac viewer at
+actual 1280x720 and 1920x1080 dimensions for ten seconds each. The 720p run
+reported no loss; the 1080p run had one zero-frame sample with reported loss
+and recovered in the next sample. Its cause is not isolated, so sustained
+network quality remains unqualified. The source ran at 30 fps; these runs do
+not establish 60 fps throughput. The measurement server used a separate port
+and display; the installed host and automation display were unchanged.
+Temporary processes and files were removed. Audio, physical input devices,
+HDR, long-run network recovery and software performance targets remain
+separate qualification work.
