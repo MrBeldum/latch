@@ -93,7 +93,14 @@ pub fn setup_ps() -> String {
         }}
         [void]$vddList.AppendChild($r)
     }}
-    New-Item -ItemType Directory -Force -Path $vddDir | Out-Null
+    # Never let an elevated XML write follow a user's junction or symlink.
+    try {{
+        Assert-ProtectedTree $vddDir
+        if (Test-Path -LiteralPath $vddFile) {{ Assert-Protected $vddFile }}
+    }} catch {{
+        Write-Output "  display settings are not protected: $_; left unchanged"
+        exit 1
+    }}
     $vddWriterSettings = New-Object System.Xml.XmlWriterSettings
     $vddWriterSettings.Indent = $true
     $vddWriterSettings.Encoding = New-Object System.Text.UTF8Encoding($false)

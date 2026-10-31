@@ -90,6 +90,8 @@ extern "C" {
     pub fn CFArrayCreate(allocator: Ref, values: *const Ref, count: isize, callbacks: Ref) -> Ref;
     pub fn CFArrayGetCount(array: Ref) -> isize;
     pub fn CFArrayGetValueAtIndex(array: Ref, index: isize) -> Ref;
+    #[cfg(test)]
+    pub fn CFEqual(a: Ref, b: Ref) -> bool;
 }
 #[link(name = "VideoToolbox", kind = "framework")]
 extern "C" {
@@ -104,6 +106,9 @@ extern "C" {
     pub static kVTCompressionPropertyKey_DataRateLimits: Ref;
     pub static kVTCompressionPropertyKey_MaxKeyFrameInterval: Ref;
     pub static kVTCompressionPropertyKey_ExpectedFrameRate: Ref;
+    pub static kVTCompressionPropertyKey_ColorPrimaries: Ref;
+    pub static kVTCompressionPropertyKey_TransferFunction: Ref;
+    pub static kVTCompressionPropertyKey_YCbCrMatrix: Ref;
     pub static kVTProfileLevel_HEVC_Main_AutoLevel: Ref;
     pub static kVTProfileLevel_H264_High_AutoLevel: Ref;
     pub static kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel: Ref;
@@ -204,6 +209,8 @@ extern "C" {
     #[cfg(test)]
     pub static kCVImageBufferYCbCrMatrixKey: Ref;
     pub static kCVImageBufferYCbCrMatrix_ITU_R_709_2: Ref;
+    pub static kCVImageBufferColorPrimaries_ITU_R_709_2: Ref;
+    pub static kCVImageBufferTransferFunction_ITU_R_709_2: Ref;
     #[cfg(test)]
     pub fn CVPixelBufferCreate(
         allocator: Ref,
@@ -228,6 +235,7 @@ extern "C" {
 extern "C" {
     pub fn CGPreflightScreenCaptureAccess() -> bool;
     pub fn CGMainDisplayID() -> u32;
+    pub fn CGDisplayBounds(display: u32) -> objc2_core_foundation::CGRect;
     pub static kCGColorBlack: Ref;
     pub fn CGColorGetConstantColor(name: Ref) -> Ref;
 }

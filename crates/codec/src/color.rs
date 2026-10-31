@@ -13,6 +13,7 @@
 //! within $\pm 1$ LSB.
 
 use crate::yuv::Yuv420;
+mod simd;
 
 // BT.709 limited-range fixed-point coefficients scaled by 65536 (2^16):
 // Y  = 16  + (219 / 255) * (0.2126 * R + 0.7152 * G + 0.0722 * B)
@@ -83,6 +84,16 @@ pub fn bgra_to_yuv420_rows(
     rows: std::ops::Range<u32>,
     dst: &mut Yuv420,
 ) {
+    bgra_to_yuv420_rows_impl::<true>(src, width, height, stride, rows, dst);
+}
+fn bgra_to_yuv420_rows_impl<const SIMD: bool>(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    stride: usize,
+    rows: std::ops::Range<u32>,
+    dst: &mut Yuv420,
+) {
     let w = width as usize;
     let h = height as usize;
     if w == 0 || h == 0 {
@@ -113,24 +124,28 @@ pub fn bgra_to_yuv420_rows(
             row0
         };
 
-        let y_dst_row0 = &mut dst.y[y * dst.y_stride..y * dst.y_stride + w];
-        convert_y_row(row0, y_dst_row0);
-
-        if has_row1 {
-            let y_dst_row1 = &mut dst.y[(y + 1) * dst.y_stride..(y + 1) * dst.y_stride + w];
-            convert_y_row(row1, y_dst_row1);
-        }
-
         let chroma_w = w.div_ceil(2);
         let chroma_y = y / 2;
         let u_dst = &mut dst.u[chroma_y * dst.c_stride..chroma_y * dst.c_stride + chroma_w];
         let v_dst = &mut dst.v[chroma_y * dst.c_stride..chroma_y * dst.c_stride + chroma_w];
+        let (before, after) = dst.y.split_at_mut((y + 1) * dst.y_stride);
+        let y0 = &mut before[y * dst.y_stride..y * dst.y_stride + w];
+        let y1 = if has_row1 { &mut after[..w] } else { &mut [] };
+        let done = if SIMD {
+            simd::rows(row0, row1, y0, y1, u_dst, v_dst)
+        } else {
+            0
+        };
+        convert_y_row(&row0[done * 4..], &mut y0[done..]);
+        if has_row1 {
+            convert_y_row(&row1[done * 4..], &mut y1[done..]);
+        }
 
         let pairs = w / 2;
-        let mut row0_chunks = row0.chunks_exact(8);
-        let mut row1_chunks = row1.chunks_exact(8);
+        let mut row0_chunks = row0[done * 4..].chunks_exact(8);
+        let mut row1_chunks = row1[done * 4..].chunks_exact(8);
 
-        for cx in 0..pairs {
+        for cx in done / 2..pairs {
             if let (Some(c0), Some(c1)) = (row0_chunks.next(), row1_chunks.next()) {
                 let b00 = c0[0] as i32;
                 let g00 = c0[1] as i32;
@@ -267,7 +282,7 @@ pub fn yuv420_to_nv12(src: &Yuv420, y: &mut Vec<u8>, uv: &mut Vec<u8>) -> (usize
     let w = src.width as usize;
     let h = src.height as usize;
     let y_stride = w;
-    let uv_stride = w;
+    let uv_stride = w.div_ceil(2) * 2;
 
     y.resize(y_stride * h, 0);
     for row in 0..h {
@@ -334,4 +349,74 @@ pub fn nv12_to_yuv420(
     }
 
     dst.pad_edges();
+}
+
+#[cfg(test)]
+mod simd_tests {
+    use super::*;
+    #[test]
+    fn integer_simd_matches_scalar_with_tails_strides_and_missing_rows() {
+        let mut rng = 42u32;
+        for w in 1..66 {
+            for h in [1, 2, 3, 18] {
+                let stride = w as usize * 4 + 13;
+                let mut src = vec![0; stride * h as usize];
+                for x in &mut src {
+                    rng ^= rng << 13;
+                    rng ^= rng >> 17;
+                    rng ^= rng << 5;
+                    *x = rng as u8;
+                }
+                for missing in [false, true] {
+                    let input = if missing {
+                        &src[..src.len() - stride]
+                    } else {
+                        &src[..]
+                    };
+                    let mut actual = Yuv420::new(w, h);
+                    let mut scalar = actual.clone();
+                    bgra_to_yuv420_rows_impl::<true>(input, w, h, stride, 0..h, &mut actual);
+                    bgra_to_yuv420_rows_impl::<false>(input, w, h, stride, 0..h, &mut scalar);
+                    assert_eq!(actual, scalar, "{w}x{h} missing={missing}");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod nv12_tests {
+    use super::*;
+
+    #[test]
+    fn odd_visible_sizes_preserve_the_last_chroma_pair() {
+        for (w, h) in [(19, 13), (1, 1), (2, 2), (17, 16)] {
+            let mut src = Yuv420::new(w, h);
+            for (i, v) in src.y.iter_mut().enumerate() {
+                *v = i as u8;
+            }
+            for (i, v) in src.u.iter_mut().enumerate() {
+                *v = i as u8;
+            }
+            for (i, v) in src.v.iter_mut().enumerate() {
+                *v = !(i as u8);
+            }
+            let (mut y, mut uv) = (vec![], vec![]);
+            let (ys, uvs) = yuv420_to_nv12(&src, &mut y, &mut uv);
+            assert_eq!(ys, w as usize);
+            assert_eq!(uvs, (w as usize).div_ceil(2) * 2);
+            for row in 0..h as usize {
+                assert_eq!(
+                    &y[row * ys..(row + 1) * ys],
+                    &src.y[row * src.y_stride..row * src.y_stride + ys]
+                );
+            }
+            for row in 0..(h as usize).div_ceil(2) {
+                for x in 0..(w as usize).div_ceil(2) {
+                    assert_eq!(uv[row * uvs + x * 2], src.u[row * src.c_stride + x]);
+                    assert_eq!(uv[row * uvs + x * 2 + 1], src.v[row * src.c_stride + x]);
+                }
+            }
+        }
+    }
 }

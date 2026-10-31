@@ -108,6 +108,31 @@ pub struct Report {
     pub loss_pct: f32,
     pub decode_ms: f32,
     pub rtt_ms: f32,
+    #[serde(default)]
+    pub received_kbps: u32,
+    #[serde(default)]
+    pub frames_lost: u64,
+    #[serde(default)]
+    pub unrecovered_loss_pct: Option<f32>,
+    #[serde(default)]
+    pub queue_ms: f32,
+    #[serde(default)]
+    pub window_ms: u32,
+    /// Host-to-viewer telemetry, on the existing Report message type.
+    #[serde(default)]
+    pub applied_bitrate_kbps: u32,
+    #[serde(default)]
+    pub requested_bitrate_kbps: u32,
+    #[serde(default)]
+    pub pacing_queue_ms: f32,
+    #[serde(default)]
+    pub send_errors: u64,
+    #[serde(default)]
+    pub send_retries: u64,
+    #[serde(default)]
+    pub socket_send_bytes: usize,
+    #[serde(default)]
+    pub socket_receive_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -7,7 +7,7 @@
 //! `--replaces <pid>` is how an update hands over.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use latch_core::config::data_dir;
 use latch_host::logfile::RotatingLog;
@@ -46,34 +46,60 @@ struct Args {
     /// Share this machine (UAC).
     #[arg(long, conflicts_with_all = ["background"])]
     setup: bool,
+    /// Undo setup and the installer: stop the service and remove its login
+    /// item, firewall rules, tasks and the power settings setup changed
+    /// (Windows asks for an administrator once). The program and its
+    /// settings stay.
+    #[arg(long, conflicts_with_all = ["background", "setup", "setup_elevated"])]
+    uninstall: bool,
     /// Run setup as administrator. The unelevated panel launches this so
     /// the script is generated after UAC, not from a user-writable file.
     #[arg(long, conflicts_with_all = ["background"])]
     setup_elevated: bool,
-    /// The launching user's %LOCALAPPDATA%, so an elevated setup approved
-    /// with another administrator's password still uses that user's
-    /// Latch folder (host.toml, setup.log).
-    #[arg(long, value_name = "DIR", requires = "setup_elevated")]
+    /// Accepted from 5.0.0's panel and docs, and ignored: the elevated step
+    /// writes nothing under a folder its caller names.
+    #[arg(long, value_name = "DIR", requires = "setup_elevated", hide = true)]
     local_app_data: Option<std::path::PathBuf>,
+    /// The installed latch-host.exe the firewall rules name, passed by the
+    /// staging step to the copy it runs from Program Files.
+    #[arg(long, value_name = "EXE", requires = "setup_elevated", hide = true)]
+    program: Option<std::path::PathBuf>,
+}
+
+/// The log file under the data directory, if this run keeps one. The
+/// elevated setup step keeps none: the data directory is the signed-in
+/// user's, and an administrator's process must not write where that user
+/// can point a link (setup.log is written beside its protected copy).
+fn log_file(args: &Args) -> Option<&'static str> {
+    if args.setup_elevated {
+        None
+    } else if args.background {
+        Some("service.log")
+    } else {
+        Some("panel.log")
+    }
 }
 
 fn main() -> Result<()> {
+    // The elevated input helper setup registers: nothing of the host runs.
+    #[cfg(windows)]
+    if latch_engine::windows::run_input_helper() {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    if latch_engine::linux::run_helper() {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    if latch_client::refresh::run_helper() {
+        return Ok(());
+    }
     // Before anything can replace it: which file this process is.
     let _ = service::started_from();
     let args = Args::parse();
-    if let Some(dir) = &args.local_app_data {
-        // Before any thread or data_dir() call; edition 2021, so set_var is safe.
-        std::env::set_var("LOCALAPPDATA", dir);
-    }
-    // The elevated setup helper logs with the panel; `setup.log` is the
-    // script's own output, which the setup card shows.
-    let log = if args.background {
-        "service.log"
-    } else {
-        "panel.log"
-    };
+    let log = log_file(&args);
     init_logging(log);
-    install_panic_hook(data_dir().ok().map(|d| d.join(log)));
+    install_panic_hook(log.and_then(|log| data_dir().ok().map(|d| d.join(log))));
     #[cfg(target_os = "macos")]
     if let Err(e) = latch_host::unix_setup::adopt_legacy_bundle(args.background) {
         // Only returns when there was nothing to move or the move failed;
@@ -98,7 +124,16 @@ fn main() -> Result<()> {
         return run_setup();
     }
     if args.setup_elevated {
-        return latch_host::setup::run_as_admin();
+        return latch_host::setup::run_as_admin(args.program.as_deref());
+    }
+    if args.uninstall {
+        let result = latch_host::setup::uninstall();
+        let text = match &result {
+            Ok(done) => done.join("\n"),
+            Err(e) => format!("{e:#}"),
+        };
+        latch_host::setup::tell("Uninstall Latch", &text, result.is_err());
+        return result.map(drop);
     }
     if service::starts_with_window(&latch_host::config::HostConfig::load()) {
         service::ensure_service_running();
@@ -174,14 +209,16 @@ fn panic_line(unix: u64, thread: Option<&str>, info: &str) -> String {
 }
 
 /// Logs go to a file in the data directory: neither mode has a console.
-fn init_logging(file: &str) {
+fn init_logging(file: Option<&str>) {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG));
-    let sink: Box<dyn std::io::Write + Send> =
-        match data_dir().and_then(|d| Ok(RotatingLog::open(d.join(file))?)) {
-            Ok(f) => Box::new(f),
-            Err(_) => Box::new(std::io::stderr()),
-        };
+    let sink: Box<dyn std::io::Write + Send> = match file
+        .context("no log file")
+        .and_then(|file| Ok(RotatingLog::open(data_dir()?.join(file))?))
+    {
+        Ok(f) => Box::new(f),
+        Err(_) => Box::new(std::io::stderr()),
+    };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -192,8 +229,42 @@ fn init_logging(file: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{panic_line, DEFAULT_LOG};
+    use super::{log_file, panic_line, Args, DEFAULT_LOG};
+    use clap::Parser;
     use tracing_subscriber::EnvFilter;
+
+    /// The elevated step opens no file under the data directory, and a
+    /// caller-supplied folder changes nothing (IN-02).
+    #[test]
+    fn the_elevated_step_logs_into_no_user_folder() {
+        let before = std::env::var_os("LOCALAPPDATA");
+        let args = Args::try_parse_from([
+            "latch-host",
+            "--setup-elevated",
+            "--local-app-data",
+            r"C:\Users\someone\junction",
+        ])
+        .unwrap();
+        assert_eq!(log_file(&args), None);
+        assert_eq!(std::env::var_os("LOCALAPPDATA"), before);
+        let staged = Args::try_parse_from([
+            "latch-host",
+            "--setup-elevated",
+            "--program",
+            r"C:\Users\Ada\AppData\Local\Latch\latch-host.exe",
+        ])
+        .unwrap();
+        assert_eq!(log_file(&staged), None);
+        assert!(staged.program.is_some());
+        assert!(Args::try_parse_from(["latch-host", "--program", "x.exe"]).is_err());
+        assert!(Args::try_parse_from(["latch-host", "--uninstall", "--background"]).is_err());
+        let uninstall = Args::try_parse_from(["latch-host", "--uninstall"]).unwrap();
+        assert_eq!(log_file(&uninstall), Some("panel.log"));
+        let service = Args::try_parse_from(["latch-host", "--background"]).unwrap();
+        assert_eq!(log_file(&service), Some("service.log"));
+        let window = Args::try_parse_from(["latch-host"]).unwrap();
+        assert_eq!(log_file(&window), Some("panel.log"));
+    }
 
     #[test]
     fn a_panic_leaves_a_line_in_the_log() {

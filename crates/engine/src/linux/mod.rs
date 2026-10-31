@@ -10,6 +10,16 @@ use crate::audio::AudioCapture;
 use crate::input::InputSink;
 use crate::video::{VideoConfig, VideoPipeline};
 pub use capture::X11Capture;
+use std::ffi::OsStr;
+use std::time::Duration;
+
+/// Query the root size through the same bounded initialization as capture.
+pub fn capture_size() -> anyhow::Result<[u32; 2]> {
+    use x11rb::connection::Connection;
+    let (conn, screen) = connect(X11_SILENCE)?;
+    let root = &conn.setup().roots[screen];
+    Ok([root.width_in_pixels.into(), root.height_in_pixels.into()])
+}
 
 pub fn open_video(config: &VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>> {
     Ok(Box::new(crate::software::SoftwarePipeline::new(
@@ -34,27 +44,44 @@ pub fn restore_display(previous: &crate::display::Previous) -> anyhow::Result<()
     display::restore(previous)
 }
 
-fn wait_fd(fd: std::os::fd::RawFd, timeout: std::time::Duration) -> std::io::Result<()> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let mut pollfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            return Ok(());
-        }
-        let millis = remaining.as_millis().max(1).min(i32::MAX as u128) as i32;
-        // SAFETY: pollfd is a live, initialized object for the duration of poll.
-        let result = unsafe { libc::poll(&mut pollfd, 1, millis) };
-        if result >= 0 {
-            return Ok(());
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            return Err(error);
-        }
+/// Why a Wayland desktop cannot be shared, and what the owner can do.
+const WAYLAND: &str = "this is a Wayland session, which Latch cannot share yet: \
+    log out, choose an Xorg (X11) session at the login screen, and log in again";
+
+/// Whether `$WAYLAND_DISPLAY` and `$XDG_SESSION_TYPE` describe a Wayland
+/// session. Only a hint: a separate Xorg server on `$DISPLAY` still works.
+fn wayland_session(display: Option<&OsStr>, session_type: Option<&OsStr>) -> bool {
+    display.is_some_and(|d| !d.is_empty())
+        || session_type.is_some_and(|t| t.eq_ignore_ascii_case("wayland"))
+}
+
+/// Whether these RandR output names are rootless Xwayland's, whose root
+/// window holds no desktop: XWAYLAND0, XWAYLAND1, …
+fn xwayland_outputs<'a>(mut names: impl Iterator<Item = &'a [u8]>) -> bool {
+    names.any(|name| name.starts_with(b"XWAYLAND"))
+}
+
+const X11_SILENCE: Duration = Duration::from_secs(2);
+mod x11;
+pub use x11::run_helper;
+#[cfg(test)]
+use x11::Bounded;
+use x11::{connect, wait_fd, X11};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn recognises_wayland_sessions_and_xwayland_outputs() {
+        let os = |s| Some(OsStr::new(s));
+        assert!(wayland_session(os("wayland-0"), None));
+        assert!(wayland_session(None, os("wayland")));
+        assert!(wayland_session(os(""), os("Wayland")));
+        assert!(!wayland_session(None, None));
+        assert!(!wayland_session(os(""), os("x11")));
+        let names: [&[u8]; 2] = [b"DUMMY0", b"XWAYLAND0"];
+        assert!(xwayland_outputs(names.into_iter()));
+        assert!(!xwayland_outputs(names[..1].iter().copied()));
+        assert!(!xwayland_outputs(std::iter::empty()));
     }
 }

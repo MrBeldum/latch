@@ -22,7 +22,19 @@ impl Drop for EventHandle {
         }
     }
 }
+fn endpoint_id(device: &IMMDevice) -> Result<String> {
+    // SAFETY: GetId allocates a terminated task string; copy before freeing it.
+    unsafe {
+        let id = device.GetId()?;
+        let text = id.to_string();
+        CoTaskMemFree(Some(id.0.cast()));
+        Ok(text?)
+    }
+}
 struct Loopback {
+    enumerator: IMMDeviceEnumerator,
+    endpoint: String,
+    check_at: Instant,
     capture: IAudioCaptureClient,
     client: IAudioClient,
     event: Option<EventHandle>,
@@ -45,6 +57,7 @@ impl Loopback {
             let device = enumerator
                 .GetDefaultAudioEndpoint(eRender, eConsole)
                 .context("default render endpoint")?;
+            let endpoint = endpoint_id(&device)?;
             let client: IAudioClient = device
                 .Activate(CLSCTX_ALL, None)
                 .context("activate WASAPI client")?;
@@ -114,6 +127,9 @@ impl Loopback {
                 client.GetService().context("get WASAPI capture service")?;
             client.Start().context("start WASAPI loopback")?;
             Ok(Self {
+                enumerator,
+                endpoint,
+                check_at: Instant::now(),
                 capture,
                 client,
                 event,
@@ -194,6 +210,17 @@ impl Loopback {
     fn read(&mut self, timeout: Duration) -> Result<Option<[i16; FRAME * CHANNELS]>> {
         let deadline = Instant::now() + timeout;
         loop {
+            if Instant::now() >= self.check_at {
+                self.check_at = Instant::now() + Duration::from_millis(500);
+                // SAFETY: The enumerator stays on its owning MTA. An ordinary
+                // default switch need not invalidate the still-connected old client.
+                let device = unsafe { self.enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }?;
+                if endpoint_id(&device)? != self.endpoint {
+                    return Err(
+                        windows::core::Error::from_hresult(AUDCLNT_E_DEVICE_INVALIDATED).into(),
+                    );
+                }
+            }
             while self.pending.len() < FRAME * CHANNELS && self.packet()? {}
             if self.pending.len() >= FRAME * CHANNELS {
                 let samples: Vec<f32> = self.pending.drain(..FRAME * CHANNELS).collect();

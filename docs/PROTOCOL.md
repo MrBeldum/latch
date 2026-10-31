@@ -71,7 +71,7 @@ type byte and the payload and is at most 65 536. Payloads are JSON objects.
 | 2 | `End` | either | `{"code": u32, "message": string}`; the sender closes after it |
 | 3 | `Keepalive` | either | `{}` |
 | 4 | `Notice` | host → viewer | `{"kind": "audio" \| "video" \| "input", "message": string}`; `message` empty clears it |
-| 5 | `Report` | viewer → host | `{"fps", "loss_pct", "decode_ms", "rtt_ms"}`, once a second, for the host's log and FEC |
+| 5 | `Report` | viewer → host | `{"fps", "loss_pct", "decode_ms", "rtt_ms"}`, every 250 ms (legacy viewers: once a second), for bitrate and FEC feedback |
 
 `Accept`:
 
@@ -252,3 +252,28 @@ version. A host that cannot speak the requested version answers 426 with
 an `Ack` naming the versions it speaks. `/v1/status` reports
 `streamer.protocol` (1 here; absent from Latch 4 hosts, which speak only
 GameStream).
+
+## Additive transport feedback (5.0.x compatible)
+
+Report retains its four original required fields. New JSON fields all have
+serde defaults, so older endpoints ignore them and new hosts accept the
+original four-field report. No datagram layout or protocol number changes.
+
+Viewer reports add `received_kbps` (received media rate), `frames_lost`
+(unrecovered frames in the last measurement window), `unrecovered_loss_pct`
+(optional; absence means legacy raw loss), `queue_ms` (decode queue age),
+and `window_ms` (measurement duration). Measurements and reports use 250 ms
+windows. Raw `loss_pct` includes FEC-recovered shards; recovery alone is
+not congestion. RTT is milliseconds on the reporter's clock.
+
+Hosts may reply using the existing Report type, adding
+`requested_bitrate_kbps`, `applied_bitrate_kbps`, `pacing_queue_ms`,
+`send_errors`, `send_retries`, `socket_send_bytes`, `socket_receive_bytes`.
+Applied bitrate is the encoder target after wire overhead reservation;
+requested bitrate is the session ceiling. Error/retry counts are cumulative.
+Legacy viewers ignore host Reports as an unhandled existing message type.
+
+Audio recovery derives PTS spacing from Accept's frame_samples/rate. The
+host's 240-sample packets therefore advance by 5000 us at 48 kHz. Rice
+encoding falls back to existing independent verbatim subframes when needed
+to enforce the 3 + 2*(1 + 2*n) byte bound; no new audio format is introduced.

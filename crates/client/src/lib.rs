@@ -8,6 +8,8 @@ pub mod handover;
 pub mod input;
 pub mod macos;
 pub mod path;
+#[doc(hidden)]
+pub mod refresh;
 pub mod session;
 pub mod settings;
 pub mod share;

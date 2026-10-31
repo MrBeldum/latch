@@ -153,10 +153,6 @@ impl<'a> DeadlineStream<'a> {
             deadline: Some(deadline),
         }
     }
-
-    fn clear_deadline(&mut self) {
-        self.deadline = None;
-    }
 }
 
 impl<'a> Read for DeadlineStream<'a> {
@@ -186,12 +182,13 @@ pub fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
 
 fn read_request_from<B>(
     deadline_stream: &mut DeadlineStream<'_>,
-    allow_large_body: B,
+    allow_body: B,
 ) -> Result<Option<std::result::Result<Request, Response>>>
 where
     B: FnOnce(&str, &[(String, String)], u64) -> bool,
 {
-    let mut reader = BufReader::new(deadline_stream);
+    // Never read past the request: the socket may be upgraded below.
+    let mut reader = BufReader::with_capacity(1, deadline_stream);
     let mut remaining = MAX_HEADER;
     let Some(line) = read_line(&mut reader, &mut remaining)? else {
         return Ok(None);
@@ -212,26 +209,14 @@ where
     if content_length > max_body(&path) as u64 {
         bail!("body too large ({content_length} bytes)");
     }
-    reader.get_mut().clear_deadline();
-
+    if !allow_body(&path, &headers, content_length) {
+        return Ok(Some(Err(Response::json(
+            403,
+            &crate::api::Ack::err("not a machine on this PC's Tailscale account"),
+        ))));
+    }
     if content_length > MAX_BODY as u64 {
-        if !allow_large_body(&path, &headers, content_length) {
-            return Ok(Some(Err(Response::json(
-                403,
-                &crate::api::Ack::err("not a machine on this PC's Tailscale account"),
-            ))));
-        }
-        reader
-            .get_mut()
-            .stream
-            .set_read_timeout(Some(UPDATE_BODY_TIMEOUT))
-            .map_err(io_err)?;
-    } else {
-        reader
-            .get_mut()
-            .stream
-            .set_read_timeout(Some(IDLE_TIMEOUT))
-            .map_err(io_err)?;
+        reader.get_mut().deadline = Some(Instant::now() + UPDATE_BODY_TIMEOUT);
     }
 
     // Grow only as bytes arrive; an untrusted size must not reserve the
@@ -318,13 +303,13 @@ where
     serve_with_auth(
         listener,
         authorize,
-        |_, path, _, _| path == crate::api::UPDATE_PATH,
+        |_, path, _, len| len <= MAX_BODY as u64 || path == crate::api::UPDATE_PATH,
         handler,
     );
 }
 
 /// Like [`serve_with_peer_check`], but runs `allow_body` after reading the
-/// request head and before reading or buffering a large body (over `MAX_BODY`).
+/// request head and before reading any body.
 pub fn serve_with_auth<A, B, F>(listener: TcpListener, authorize: A, allow_body: B, handler: F)
 where
     A: Fn(SocketAddr) -> bool + Send + Sync + 'static,
@@ -415,28 +400,150 @@ pub fn upgrade(
     body: &[u8],
     timeout: Duration,
 ) -> Result<std::result::Result<TcpStream, Response>> {
+    upgrade_cancellable(addr, path, protocol, body, timeout, |_| Ok(()), || false)
+}
+
+/// Handshake I/O checks cancellation between bounded socket waits. In
+/// particular, do not rely on shutdown of a clone to wake a blocking recv.
+struct UpgradeIo<'a, C> {
+    stream: &'a mut TcpStream,
+    deadline: Instant,
+    cancelled: C,
+}
+
+impl<C: Fn() -> bool> UpgradeIo<'_, C> {
+    fn retry<T>(
+        &mut self,
+        mut operation: impl FnMut(&mut TcpStream) -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        loop {
+            if (self.cancelled)() {
+                return Err(std::io::Error::new(
+                    ErrorKind::ConnectionAborted,
+                    "cancelled",
+                ));
+            }
+            if Instant::now() >= self.deadline {
+                return Err(std::io::Error::new(ErrorKind::TimedOut, "timed out"));
+            }
+            match operation(self.stream) {
+                Err(e) if is_timeout(&e) || e.kind() == ErrorKind::Interrupted => continue,
+                result => return result,
+            }
+        }
+    }
+}
+impl<C: Fn() -> bool> Read for UpgradeIo<'_, C> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.retry(|stream| stream.read(buf))
+    }
+}
+impl<C: Fn() -> bool> Write for UpgradeIo<'_, C> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.retry(|stream| stream.write(buf))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.retry(TcpStream::flush)
+    }
+}
+
+/// A cancellable variant of [`upgrade`] that exposes the connected socket before
+/// sending or waiting on headers, and checks a cancellation predicate.
+pub fn upgrade_cancellable(
+    addr: SocketAddr,
+    path: &str,
+    protocol: &str,
+    body: &[u8],
+    timeout: Duration,
+    on_socket: impl FnOnce(&TcpStream) -> Result<()>,
+    cancelled: impl Fn() -> bool,
+) -> Result<std::result::Result<TcpStream, Response>> {
+    if cancelled() {
+        bail!("cancelled");
+    }
     validate_target("POST", path)?;
     validate_header("Upgrade", protocol)?;
-    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(io_err)?;
-    stream.set_read_timeout(Some(timeout)).map_err(io_err)?;
-    stream.set_write_timeout(Some(timeout)).map_err(io_err)?;
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(addr),
+        socket2::Type::STREAM,
+        None,
+    )?;
+    socket.set_nonblocking(true)?;
+    let connecting = match socket.connect(&addr.into()) {
+        Ok(()) => false,
+        Err(e)
+            if e.kind() == ErrorKind::WouldBlock
+                || e.raw_os_error()
+                    == Some({
+                        #[cfg(unix)]
+                        {
+                            libc::EINPROGRESS
+                        }
+                        #[cfg(windows)]
+                        {
+                            10035
+                        }
+                    }) =>
+        {
+            true
+        }
+        Err(e) => return Err(io_err(e)),
+    };
+    let mut stream: TcpStream = socket.into();
+    on_socket(&stream)?;
+    let deadline = Instant::now() + timeout;
+    if connecting {
+        loop {
+            if cancelled() {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                bail!("cancelled");
+            }
+            if let Some(e) = stream.take_error()? {
+                return Err(io_err(e));
+            }
+            if stream.peer_addr().is_ok() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                bail!("timed out");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    stream.set_nonblocking(false)?;
+    if cancelled() {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        bail!("cancelled");
+    }
+    let poll = timeout.min(Duration::from_millis(100));
+    stream.set_read_timeout(Some(poll)).map_err(io_err)?;
+    stream.set_write_timeout(Some(poll)).map_err(io_err)?;
     let _ = stream.set_nodelay(true);
+    let mut io = UpgradeIo {
+        stream: &mut stream,
+        deadline,
+        cancelled: &cancelled,
+    };
     let head = format!(
         "POST {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: {protocol}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
-    stream.write_all(head.as_bytes()).map_err(io_err)?;
-    stream.write_all(body).map_err(io_err)?;
-    stream.flush().map_err(io_err)?;
+    io.write_all(head.as_bytes()).map_err(io_err)?;
+    io.write_all(body).map_err(io_err)?;
+    io.flush().map_err(io_err)?;
     // Byte by byte up to the blank line, so nothing the new protocol sends
     // right behind the head is swallowed by a buffer.
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
+        if cancelled() {
+            let _ = io.stream.shutdown(std::net::Shutdown::Both);
+            bail!("cancelled");
+        }
         if head.len() >= MAX_HEADER {
             bail!("reply head too large");
         }
-        match stream.read(&mut byte).map_err(io_err)? {
+        match io.read(&mut byte).map_err(io_err)? {
             0 => bail!("connection closed before the reply"),
             _ => head.push(byte[0]),
         }
@@ -458,10 +565,12 @@ pub fn upgrade(
         if !header(&headers, "upgrade").is_some_and(|u| u.eq_ignore_ascii_case(protocol)) {
             bail!("the server switched to another protocol");
         }
+        stream.set_read_timeout(Some(timeout)).map_err(io_err)?;
+        stream.set_write_timeout(Some(timeout)).map_err(io_err)?;
         return Ok(Ok(stream));
     }
     let mut body = Vec::new();
-    let mut rest = BufReader::new(&mut stream);
+    let mut rest = BufReader::new(&mut io);
     read_response_body(&mut rest, &headers, &mut body, MAX_BODY as u64, false)?;
     Ok(Err(Response {
         status,
@@ -830,6 +939,85 @@ mod tests {
     use std::io::ErrorKind;
 
     #[test]
+    fn upgrade_waits_across_poll_intervals_and_restores_protocol_timeouts() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                peer.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            std::thread::sleep(Duration::from_millis(250));
+            peer.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: test\r\nConnection: Upgrade\r\n\r\nnext").unwrap();
+        });
+        let timeout = Duration::from_secs(10);
+        let mut stream = upgrade(addr, "/stream", "test", b"", timeout)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stream.read_timeout().unwrap(), Some(timeout));
+        assert_eq!(stream.write_timeout().unwrap(), Some(timeout));
+        let mut next = [0; 4];
+        stream.read_exact(&mut next).unwrap();
+        assert_eq!(&next, b"next");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn upgrade_cancellation_does_not_require_socket_shutdown() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        };
+        // Cover a silent upgrade head and a refusal that stalls in its body.
+        for reply in [
+            b"".as_slice(),
+            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 5\r\n\r\nx",
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let stopped = cancel.clone();
+            let (tx, rx) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let result = upgrade_cancellable(
+                    addr,
+                    "/stream",
+                    "test",
+                    b"",
+                    Duration::from_secs(30),
+                    |_| Ok(()),
+                    || stopped.load(Ordering::Acquire),
+                );
+                tx.send(result.is_err()).unwrap();
+            });
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                peer.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            peer.write_all(reply).unwrap();
+            // Give the handshake time to enter a blocking read. Cancellation
+            // must also work if this runner instead schedules it later.
+            std::thread::sleep(Duration::from_millis(200));
+            cancel.store(true, Ordering::Release);
+            let result = rx.recv_timeout(Duration::from_secs(5));
+            // Always release/join the worker, even when testing broken code.
+            drop(peer);
+            worker.join().unwrap();
+            assert!(result.unwrap(), "the handshake must stop without shutdown");
+        }
+    }
+
+    #[test]
     fn client_and_server_agree_over_loopback() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -930,7 +1118,8 @@ mod tests {
         let mut s = TcpStream::connect(addr).unwrap();
         s.write_all(b"not http at all\r\n\r\n").unwrap();
         let mut out = String::new();
-        s.read_to_string(&mut out).unwrap();
+        let result = s.read_to_string(&mut out);
+        assert!(result.is_ok() || result.is_err_and(|e| e.kind() == ErrorKind::ConnectionReset));
         assert!(out.starts_with("HTTP/1.1 400"), "{out}");
     }
 
@@ -1005,6 +1194,38 @@ mod tests {
         .unwrap()
         .unwrap_err();
         assert_eq!(refused.status, 404);
+    }
+
+    #[test]
+    fn request_reader_leaves_pipelined_control_bytes_on_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client
+            .write_all(b"POST /v1/stream HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}MARK")
+            .unwrap();
+        let (mut host, _) = listener.accept().unwrap();
+        host.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        assert_eq!(read_request(&mut host).unwrap().unwrap().body, b"{}");
+        let mut marker = [0; 4];
+        host.read_exact(&mut marker).unwrap();
+        assert_eq!(&marker, b"MARK");
+    }
+
+    #[test]
+    fn small_body_is_authorized_before_it_is_read() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client
+            .write_all(b"POST /v1/power HTTP/1.1\r\nContent-Length: 2\r\n\r\n")
+            .unwrap();
+        let (mut host, _) = listener.accept().unwrap();
+        let mut stream =
+            DeadlineStream::new(&mut host, Instant::now() + Duration::from_millis(100));
+        let result = read_request_from(&mut stream, |_, _, _| false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.unwrap_err().status, 403);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! own clock.
 //!
 //!     view HOST [--port 47860] [--width 1280] [--height 720] [--fps 60]
-//!          [--kbps 10000] [--seconds 30] [--keys 0] [--hevc] [--audio]
+//!          [--kbps 10000] [--seconds 30] [--sample-ms 1000] [--keys 0] [--hevc] [--audio]
 //!          [--point X,Y]   (one absolute pointer position, in picture pixels)
 
 use latch_stream::{Event, Frame, FrameSlot, Session, Settings};
@@ -71,6 +71,11 @@ fn main() -> anyhow::Result<()> {
     let fps: u32 = arg("--fps", "60").parse()?;
     let kbps: u32 = arg("--kbps", "10000").parse()?;
     let seconds: u64 = arg("--seconds", "30").parse()?;
+    let sample_ms: u64 = arg("--sample-ms", "1000").parse()?;
+    anyhow::ensure!(
+        sample_ms > 0 && sample_ms <= 1000,
+        "sample-ms must be 1..=1000"
+    );
     let keys: usize = arg("--keys", "0").parse()?;
 
     let frames = Arc::new(FrameSlot::default());
@@ -160,14 +165,16 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut lines = Vec::new();
-    for second in 1..=seconds {
-        std::thread::sleep(Duration::from_secs(1));
+    let sample_start = Instant::now();
+    while sample_start.elapsed() < Duration::from_secs(seconds) {
+        std::thread::sleep(Duration::from_millis(sample_ms));
+        let second = t0.elapsed().as_secs_f64();
         while let Ok(e) = rx.try_recv() {
-            eprintln!("{e:?}");
+            eprintln!("elapsed_ms={} {e:?}", t0.elapsed().as_millis());
         }
         let s = session.stats();
         eprintln!(
-            "{second:>3}s {:5.1} fps {:6.2} Mbps rtt {:3} ms decode {:5.2} ms host {:5.2} ms assembly {:5.2} ms queue {:5.2} ms loss {:4.1}% fec {:3} {}x{} {} | {}",
+            "{second:>6.2}s {:5.1} fps {:6.2} Mbps rtt {:3} ms decode {:5.2} ms host {:5.2} ms assembly {:5.2} ms queue {:5.2} ms loss {:4.1}% fec {:3} {}x{} {} | {}",
             s.fps, s.mbps, s.rtt_ms, s.decode_ms, s.host_ms, s.assembly_ms, s.queue_ms, s.loss_pct,
             s.fec_recovered, s.width, s.height, s.decoder, s.audio
         );
@@ -175,6 +182,25 @@ fn main() -> anyhow::Result<()> {
             "fps": s.fps, "mbps": s.mbps, "rtt_ms": s.rtt_ms, "decode_ms": s.decode_ms,
             "host_ms": s.host_ms, "assembly_ms": s.assembly_ms, "queue_ms": s.queue_ms,
             "loss_pct": s.loss_pct, "fec_recovered": s.fec_recovered,
+            "elapsed_ms": t0.elapsed().as_millis(), "window_ms": s.window_ms,
+            "width": s.width, "height": s.height, "decoded_seq": frames.seq(),
+            "received_mbps": s.received_mbps, "frames_lost": s.frames_lost,
+            "video_problem": s.video_problem, "rtt_var_ms": s.rtt_var_ms,
+            "requested_bitrate_kbps": s.requested_bitrate_kbps,
+            "applied_bitrate_kbps": s.applied_bitrate_kbps, "pacing_queue_ms": s.pacing_queue_ms,
+            "send_errors": s.send_errors, "send_retries": s.send_retries,
+            "socket_send_bytes": s.socket_send_bytes, "socket_receive_bytes": s.socket_receive_bytes,
+            "host_socket_send_bytes": s.host_socket_send_bytes,
+            "host_socket_receive_bytes": s.host_socket_receive_bytes,
+            // Sparse luma samples confirm changing decoded content without saving pictures.
+            "luma_sample": frames.take().map(|f| {
+                let sample: Vec<u8> = (0..16).map(|i| {
+                    f.y[(f.height as usize * (2 * i + 1) / 32) * f.y_stride
+                        + f.width as usize / 2]
+                }).collect();
+                frames.recycle(f);
+                sample
+            }),
         }));
     }
     let elapsed = t0.elapsed().as_secs_f64();
@@ -188,6 +214,7 @@ fn main() -> anyhow::Result<()> {
     };
     let summary = serde_json::json!({
         "host": host.to_string(), "asked": [width, height, fps, kbps],
+        "sample_ms": sample_ms,
         "decoder": stats.decoder, "encoder": stats.encoder, "codec": stats.codec,
         "viewer_cpu_pct_one_core": cpu, "viewer_rss_mb": rss_mb(),
         "key_to_picture_ms": { "n": presses.len(), "min": presses.first(), "p50": pct(0.5), "p95": pct(0.95), "max": presses.last() },
@@ -199,5 +226,10 @@ fn main() -> anyhow::Result<()> {
     while !session.finished() && start.elapsed() < Duration::from_secs(5) {
         std::thread::sleep(Duration::from_millis(10));
     }
+    anyhow::ensure!(
+        session.finished(),
+        "stream did not stop within five seconds"
+    );
+    eprintln!("stream stopped in {:?}", start.elapsed());
     Ok(())
 }

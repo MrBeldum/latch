@@ -28,9 +28,41 @@ pub fn run(p: &Plan<'_>) -> Result<()> {
             }
             Err(e) => format!("Sharing setup failed: {e:#}"),
         };
+        let text = match linger() {
+            Some(note) => format!("{text}\n{note}"),
+            None => text,
+        };
         let _ = fs::write(log, text + "\n");
     }
     result
+}
+
+/// What the setup log adds when this user's services stop with their last
+/// login (IN-06). On a desktop that is right: without the session there is
+/// nothing to share, and a service started at boot would find no display.
+/// A headless machine whose display is a user unit needs lingering.
+#[cfg(any(target_os = "linux", test))]
+fn linger_note(linger: &str) -> Option<&'static str> {
+    (linger.trim() == "no").then_some(
+        "Lingering is off for this user, so Latch stops when the last login session ends (an SSH logout included). A headless machine needs `loginctl enable-linger`; see deploy/native/README.md.",
+    )
+}
+
+/// [`linger_note`] for this user, from `loginctl`.
+fn linger() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        let me = Command::new("id").arg("-un").output().ok()?;
+        let me = String::from_utf8_lossy(&me.stdout).trim().to_string();
+        let out = Command::new("loginctl")
+            .args(["show-user", &me, "-P", "Linger"])
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        linger_note(&String::from_utf8_lossy(&out.stdout))
+    }
+    #[cfg(not(target_os = "linux"))]
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -427,6 +459,124 @@ fn kickstart_args(uid: &str) -> Vec<String> {
 #[cfg(any(target_os = "macos", test))]
 fn bootstrap_args(uid: &str, plist: &str) -> Vec<String> {
     vec!["bootstrap".into(), format!("gui/{uid}"), plist.into()]
+}
+
+/// Unload a launch agent by label, which stops the job it runs.
+#[cfg(any(target_os = "macos", test))]
+fn bootout_args(uid: &str, label: &str) -> Vec<String> {
+    vec!["bootout".into(), format!("gui/{uid}/{label}")]
+}
+
+/// The app's bundle identifier, as `scripts/bundle-macos.sh` writes it.
+#[cfg(any(target_os = "macos", test))]
+const BUNDLE_ID: &str = "io.github.MrBeldum.Latch";
+
+/// The privacy grants setup asks for, by the names `tccutil` takes.
+#[cfg(any(target_os = "macos", test))]
+const TCC_SERVICES: [&str; 2] = ["ScreenCapture", "Accessibility"];
+
+/// Whether `socketfilterfw --getappblocked` knows the app at all: it lists
+/// an app it has a rule for as blocked or permitted.
+#[cfg(any(target_os = "macos", test))]
+fn firewall_lists(answer: &str) -> bool {
+    answer.contains("is blocked") || answer.contains("is permitted")
+}
+
+/// The AppleScript that runs `socketfilterfw --remove` for `exe` as an
+/// administrator.
+#[cfg(any(target_os = "macos", test))]
+fn firewall_remove_script(exe: &str) -> String {
+    let exe = exe.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        "set exe to \"{exe}\"\ndo shell script \"{FIREWALL} --remove \" & quoted form of exe with administrator privileges"
+    )
+}
+
+/// Undo `--setup` for this user: the login item under every name it has
+/// had, and the service it ran; on a Mac also the firewall entry setup
+/// added and the Screen Recording and Accessibility grants. The app, its
+/// settings and its logs stay. Safe to run again.
+pub fn uninstall() -> Result<Vec<String>> {
+    let mut done = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        let uid = uid()?;
+        for label in [
+            LAUNCH_AGENT_LABEL,
+            crate::legacy::MAC_LAUNCH_AGENT,
+            crate::legacy::MAC_LATCH_LAUNCH_AGENT,
+        ] {
+            let _ = launchctl(&bootout_args(&uid, label));
+        }
+        for path in [
+            launch_agent_path(),
+            legacy_launch_agent_path(),
+            prior_latch_launch_agent_path(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if path.exists() {
+                fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+            }
+        }
+        quit_service();
+        done.push("Latch no longer starts at login, and its service has stopped.".into());
+        if let Ok(exe) = std::env::current_exe() {
+            let exe = exe.display().to_string();
+            let listed = Command::new(FIREWALL)
+                .args(["--getappblocked", &exe])
+                .stderr(Stdio::null())
+                .output()
+                .is_ok_and(|o| firewall_lists(&String::from_utf8_lossy(&o.stdout)));
+            if listed {
+                let removed = Command::new("osascript")
+                    .args(["-e", &firewall_remove_script(&exe)])
+                    .stdin(Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success());
+                done.push(if removed {
+                    "Removed Latch from the macOS firewall's list.".into()
+                } else {
+                    "Latch is still in the macOS firewall's list; remove it in System Settings > Network > Firewall > Options.".into()
+                });
+            }
+        }
+        for service in TCC_SERVICES {
+            let _ = Command::new("tccutil")
+                .args(["reset", service, BUNDLE_ID])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        done.push("Reset Latch's Screen Recording and Accessibility permissions.".into());
+        done.push(format!(
+            "Left in place: {} and your settings; drag the app to the Trash to remove it.",
+            bundle_path().map_or_else(|| "the app".into(), |p| p.display().to_string())
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = systemctl_user(&["disable", "--now", "latch.service"]);
+        let _ = systemctl_user(&["disable", "--now", crate::legacy::LINUX_USER_UNIT]);
+        linux_user_unit(false, Path::new(""))?;
+        quit_service();
+        done.push("Removed Latch's user service; it no longer starts at login.".into());
+        done.push("Left in place: latch-host itself and your settings.".into());
+    }
+    Ok(done)
+}
+
+/// Ask a service nobody supervises (started by a window) to stop.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn quit_service() {
+    let _ = latch_core::http::request(
+        ("127.0.0.1", latch_core::CONTROL_PORT),
+        "POST",
+        "/v1/quit",
+        None,
+        std::time::Duration::from_secs(2),
+    );
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -850,6 +1000,70 @@ mod tests {
         assert!(plist.contains("<string>--background</string>"));
         assert!(plist.contains("B&amp;L&apos;s &lt;app&gt;.app"), "{plist}");
         assert!(plist.contains("<key>RunAtLoad</key><true/>"));
+    }
+
+    #[test]
+    fn a_user_without_lingering_is_told_what_logout_does() {
+        assert!(linger_note("no\n").is_some_and(|n| n.contains("loginctl enable-linger")));
+        assert_eq!(linger_note("yes\n"), None);
+        assert_eq!(linger_note(""), None, "no loginctl: nothing to say");
+    }
+
+    #[test]
+    fn uninstall_unloads_every_label_and_resets_the_grants_setup_asked_for() {
+        assert_eq!(
+            bootout_args("501", "io.github.MrBeldum.Latch.node"),
+            ["bootout", "gui/501/io.github.MrBeldum.Latch.node"]
+        );
+        assert_eq!(TCC_SERVICES, ["ScreenCapture", "Accessibility"]);
+        assert!(firewall_lists(
+            "Incoming connection to \"/A\" is permitted."
+        ));
+        assert!(firewall_lists("Incoming connection to \"/A\" is blocked."));
+        assert!(!firewall_lists(
+            "The application is not part of the firewall"
+        ));
+        let script = firewall_remove_script("/Applications/B\"s.app/Contents/MacOS/Latch");
+        assert!(script.contains("--remove \" & quoted form of exe with administrator privileges"));
+        assert!(
+            script.contains("set exe to \"/Applications/B\\\"s.app"),
+            "{script}"
+        );
+        let bundle = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/bundle-macos.sh"
+        ))
+        .unwrap();
+        assert!(bundle.contains(&format!("<string>{BUNDLE_ID}</string>")));
+        assert!(LAUNCH_AGENT_LABEL.starts_with(BUNDLE_ID));
+    }
+
+    /// Every privacy prompt Latch causes has its reason in Info.plist:
+    /// ScreenCaptureKit (screen and sound) wants
+    /// `NSScreenCaptureUsageDescription` (IN-12).
+    #[test]
+    fn the_app_bundle_explains_each_permission_it_asks_for() {
+        let bundle = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/bundle-macos.sh"
+        ))
+        .unwrap();
+        for key in [
+            "NSScreenCaptureUsageDescription",
+            "NSLocalNetworkUsageDescription",
+            "NSAppleEventsUsageDescription",
+        ] {
+            let at = bundle
+                .find(&format!("<key>{key}</key>"))
+                .unwrap_or_else(|| panic!("{key}"));
+            assert!(
+                bundle[at..]
+                    .trim_start_matches(|c| c != '\n')
+                    .trim_start()
+                    .starts_with("<string>Latch "),
+                "{key}"
+            );
+        }
     }
 
     #[test]

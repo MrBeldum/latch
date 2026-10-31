@@ -40,8 +40,30 @@ impl Default for HostConfig {
 }
 
 impl HostConfig {
+    fn safest() -> Self {
+        Self {
+            power_allowed: false,
+            accept_updates: false,
+            ..Self::default()
+        }
+    }
+
+    fn load_path(path: &std::path::Path) -> Self {
+        match std::fs::read_to_string(path) {
+            Ok(text) if !text.trim().is_empty() => match latch_core::config::parse_lenient(&text) {
+                Ok((config, dropped)) if dropped.is_empty() => config,
+                _ => Self::safest(),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            _ => Self::safest(),
+        }
+    }
+
     pub fn load() -> Self {
-        latch_core::config::load(FILE)
+        match latch_core::config::data_dir() {
+            Ok(dir) => Self::load_path(&dir.join(FILE)),
+            Err(_) => Self::safest(),
+        }
     }
 
     /// Read host.toml for a service that already runs on settings: an error
@@ -50,7 +72,7 @@ impl HostConfig {
     /// file left alone. Defaults mean remote power on and no prep command.
     pub fn try_load() -> anyhow::Result<Self> {
         let path = latch_core::config::data_dir()?.join(FILE);
-        if std::fs::metadata(&path).is_ok_and(|m| m.len() == 0) {
+        if std::fs::read_to_string(&path).is_ok_and(|text| text.trim().is_empty()) {
             anyhow::bail!("{} is empty", path.display());
         }
         latch_core::config::try_load(FILE)
@@ -69,6 +91,23 @@ impl HostConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn damaged_config_disables_remote_actions_without_rewriting_it() {
+        let path = std::env::temp_dir().join(format!("latch-config-{}", std::process::id()));
+        for text in [
+            "power_allowed = false\n[",
+            "power_allowed = \"false\"",
+            "",
+            " \n\t",
+        ] {
+            std::fs::write(&path, text).unwrap();
+            let cfg = HostConfig::load_path(&path);
+            assert!(!cfg.power_allowed && !cfg.accept_updates);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn defaults_allow_power_and_autostart() {

@@ -2,13 +2,10 @@
 
 #[cfg(target_os = "linux")]
 pub fn capture_size() -> Option<[u32; 2]> {
-    use x11rb::connection::Connection;
     if display_follows_viewer() {
         return None;
     }
-    let (conn, screen) = x11rb::connect(None).ok()?;
-    let root = conn.setup().roots.get(screen)?;
-    Some([root.width_in_pixels.into(), root.height_in_pixels.into()])
+    latch_engine::linux::capture_size().ok()
 }
 
 #[cfg(not(target_os = "linux"))]

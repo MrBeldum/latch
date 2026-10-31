@@ -20,7 +20,7 @@ use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -36,7 +36,7 @@ const KEEPALIVE: Duration = Duration::from_secs(1);
 /// A viewer heard from neither over TCP nor UDP for this long is gone.
 const SILENT: Duration = Duration::from_secs(10);
 const HELLO_EVERY: Duration = Duration::from_millis(50);
-const PING_EVERY: Duration = Duration::from_millis(500);
+const PING_EVERY: Duration = Duration::from_millis(125);
 /// Keyframes for requests at most this often: a burst of requests for one
 /// loss must not turn into a burst of keyframes.
 const KEYFRAME_GAP: Duration = Duration::from_millis(50);
@@ -80,6 +80,13 @@ pub struct ServerStatus {
     pub hardware: bool,
     /// Why the running or last session had no sound.
     pub audio_problem: String,
+    pub requested_bitrate_kbps: u32,
+    pub applied_bitrate_kbps: u32,
+    pub pacing_queue_ms: f32,
+    pub send_errors: u64,
+    pub send_retries: u64,
+    pub socket_send_bytes: usize,
+    pub socket_receive_bytes: usize,
 }
 
 /// Why a stream request was turned down, as an HTTP status and a sentence.
@@ -115,6 +122,7 @@ impl Server {
     pub fn bind(port: u16, options: Options) -> anyhow::Result<Arc<Self>> {
         let udp = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))
             .map_err(|e| anyhow::anyhow!("cannot listen on UDP port {port}: {e}"))?;
+        latch_proto::transport::configure_socket(&udp, 2 * 1024 * 1024, 1024 * 1024)?;
         udp.set_read_timeout(Some(Duration::from_millis(200)))?;
         let server = Arc::new(Self {
             udp,
@@ -138,16 +146,32 @@ impl Server {
     pub fn status(&self) -> ServerStatus {
         let mut status = self.status.lock().clone();
         status.viewer = self.current.lock().as_ref().map(|s| s.viewer.clone());
+        if let Some(session) = self.current.lock().as_ref() {
+            status.applied_bitrate_kbps = session.transport.applied.load(Ordering::Relaxed);
+            status.pacing_queue_ms =
+                session.transport.queue_us.load(Ordering::Relaxed) as f32 / 1000.0;
+            status.send_errors = session.transport.errors.load(Ordering::Relaxed);
+            status.send_retries = session.transport.retries.load(Ordering::Relaxed);
+        }
         status
     }
 
+    /// Includes a prepared stream waiting for its HTTP upgrade.
+    pub fn busy(&self) -> bool {
+        *self.opening.busy.lock() || self.current.lock().is_some()
+    }
+
     /// Ends the running session, if any.
-    pub fn stop(&self, code: u32, message: &str) {
+    pub fn stop(&self, code: u32, message: &str) -> bool {
         let current = self.current.lock().clone();
         if let Some(session) = current {
             session.end(code, message);
-            session.wait_finished(TAKEOVER_WAIT);
+            if !session.wait_finished(TAKEOVER_WAIT) {
+                self.log("stream cleanup did not finish before the stop deadline".into());
+                return false;
+            }
         }
+        !self.busy()
     }
 
     fn log(&self, line: String) {
@@ -233,7 +257,11 @@ impl Server {
             }
         }
         match input::open() {
-            Ok(sink) => prepared.input = Some(sink),
+            Ok(mut sink) => {
+                let info = prepared.info.as_ref().expect("prepared has video info");
+                sink.set_stream_size(info.width, info.height);
+                prepared.input = Some(sink);
+            }
             Err(e) => prepared.input_problem = Some(format!("{e:#}")),
         }
         Ok(prepared)
@@ -267,6 +295,9 @@ impl Server {
             heard_us: AtomicU64::new(self.now_us()),
             frames: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
+            transport: TransportState::new(config.bitrate_kbps),
+            keyframe_request: Mutex::new(None),
+            audio_enabled: prepared.audio.is_some(),
         });
         // prepare owns the reservation until installation, so a second
         // prepare must see this session and wait for its undo before opening.
@@ -277,6 +308,13 @@ impl Server {
             status.encoder = info.encoder.clone();
             status.hardware = info.hardware;
             status.audio_problem = prepared.audio_problem.clone();
+            status.requested_bitrate_kbps = config.bitrate_kbps;
+            let buffers =
+                latch_proto::transport::configure_socket(&self.udp, 2 * 1024 * 1024, 1024 * 1024)
+                    .unwrap_or_default();
+            status.socket_send_bytes = buffers.send;
+            status.socket_receive_bytes = buffers.receive;
+            self.log(format!("host UDP buffers: send={} receive={} bytes (requested 2097152/1048576; Linux may cap at net.core.wmem_max/rmem_max)", buffers.send, buffers.receive));
         }
         let audio = prepared.audio.take();
         let accept = Accept {
@@ -336,7 +374,7 @@ impl Server {
         });
         {
             let mut state = session.input.lock();
-            if let Some(sink) = state.sink.as_mut() {
+            if let Some(mut sink) = state.sink.take() {
                 sink.release_all();
             }
         }
@@ -370,12 +408,15 @@ impl Server {
             Option<std::thread::JoinHandle<()>>,
         ),
     ) -> String {
+        if let Err(e) = tcp.set_write_timeout(Some(Duration::from_secs(2))) {
+            return format!("cannot bound control writes: {e}");
+        }
         let _ = tcp.set_nodelay(true);
         let mut writer = match tcp.try_clone() {
             Ok(w) => w,
             Err(e) => return format!("the connection failed: {e}"),
         };
-        if let Err(e) = control::write_message(&mut writer, &Message::Accept(accept)) {
+        if let Err(e) = control::write_message(&mut writer, &Message::Accept(accept.clone())) {
             return format!("the viewer left before the stream started ({e})");
         }
         if let Some(problem) = input_problem {
@@ -404,6 +445,9 @@ impl Server {
                 });
         }
         let (video, audio) = start_media();
+        let mut controller =
+            crate::congestion::Controller::new(accept.bitrate_kbps, Instant::now());
+        let requested_bitrate = accept.bitrate_kbps;
         let mut last_keepalive = Instant::now();
         let mut last_hello = Instant::now() - HELLO_EVERY;
         let mut last_ping = Instant::now();
@@ -436,12 +480,43 @@ impl Server {
                 }
                 Ok(Message::Report(r)) => {
                     session.heard(self.now_us());
-                    let fec = fec_percent_for_loss(r.loss_pct);
-                    if session.fec.swap(fec, Ordering::Relaxed) != fec {
+                    let fec = fec_percent_for_loss(r.loss_pct).min(30);
+                    session.fec.store(fec, Ordering::Relaxed);
+                    let host_rtt = session
+                        .rtt
+                        .lock()
+                        .srtt()
+                        .map_or(0.0, |d| d.as_secs_f32() * 1000.0);
+                    let queue_ms =
+                        session.transport.queue_us.swap(0, Ordering::Relaxed) as f32 / 1000.0;
+                    if controller.update(Instant::now(), &r, host_rtt, queue_ms) {
+                        session
+                            .transport
+                            .budget
+                            .store(controller.budget(), Ordering::Relaxed);
                         tracing::debug!(
-                            "viewer reports {:.1}% loss; parity now {fec}%",
-                            r.loss_pct
+                            requested_bitrate,
+                            wire_kbps = controller.budget(),
+                            applied_kbps = session.transport.applied.load(Ordering::Relaxed),
+                            host_rtt,
+                            queue_ms,
+                            loss = r.loss_pct,
+                            "bitrate controller decision"
                         );
+                    }
+                    let status = self.status();
+                    let report = control::Report {
+                        requested_bitrate_kbps: requested_bitrate,
+                        applied_bitrate_kbps: session.transport.applied.load(Ordering::Relaxed),
+                        pacing_queue_ms: queue_ms,
+                        send_errors: status.send_errors,
+                        send_retries: status.send_retries,
+                        socket_send_bytes: status.socket_send_bytes,
+                        socket_receive_bytes: status.socket_receive_bytes,
+                        ..Default::default()
+                    };
+                    if control::write_message(&mut writer, &Message::Report(report)).is_err() {
+                        break "the viewer's connection broke".to_string();
                     }
                 }
                 Ok(_) => session.heard(self.now_us()),
@@ -459,7 +534,9 @@ impl Server {
             }
             let addr = *session.addr.lock();
             match addr {
-                None if now - last_hello >= HELLO_EVERY => {
+                None if !session.announced.ip().is_loopback()
+                    && now - last_hello >= HELLO_EVERY =>
+                {
                     let mut buf = Vec::with_capacity(16);
                     wire::write_hello(&mut buf, session.id, None);
                     let _ = self.udp.send_to(&buf, session.announced);
@@ -590,10 +667,36 @@ struct Session {
     heard_us: AtomicU64,
     frames: AtomicU64,
     bytes: AtomicU64,
+    transport: TransportState,
+    keyframe_request: Mutex<Option<(u32, Instant)>>,
+    audio_enabled: bool,
+}
+
+struct TransportState {
+    budget: AtomicU32,
+    applied: AtomicU32,
+    queue_us: AtomicU64,
+    errors: AtomicU64,
+    retries: AtomicU64,
+}
+impl TransportState {
+    fn new(kbps: u32) -> Self {
+        Self {
+            budget: AtomicU32::new(kbps),
+            applied: AtomicU32::new(0),
+            queue_us: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            retries: AtomicU64::new(0),
+        }
+    }
 }
 
 impl Session {
     fn end(&self, code: u32, message: &str) {
+        let mut input = self.input.lock();
+        if let Some(mut sink) = input.sink.take() {
+            sink.release_all();
+        }
         let mut ended = self.ended.lock();
         if ended.is_none() {
             *ended = Some(End {
@@ -689,25 +792,36 @@ fn receive(server: Weak<Server>) {
             Datagram::Input { first, events, .. } => {
                 let next = {
                     let mut guard = session.input.lock();
+                    if session.stopping() {
+                        continue;
+                    }
                     let state = &mut *guard;
                     let display = state.display;
                     let sink = &mut state.sink;
-                    state.receiver.receive(first, events.iter(), |event| {
+                    state.receiver.try_receive(first, events.iter(), |event| {
                         let Some(sink) = sink.as_mut() else {
-                            return;
+                            return Ok(());
                         };
-                        if event == input::Event::ReleaseAll {
-                            sink.release_all();
-                        } else if let Err(e) = sink.apply(&event, display) {
-                            tracing::debug!("input {event:?}: {e:#}");
+                        if let Err(e) = sink.apply(&event, display) {
+                            tracing::warn!("input {event:?}: {e:#}");
+                            return Err(e);
                         }
+                        Ok(())
                     })
                 };
                 wire::write_input_ack(&mut out, session.id, next);
                 let _ = server.udp.send_to(&out, from);
             }
-            Datagram::KeyframeRequest { .. } => {
-                session.keyframe.store(true, Ordering::Release);
+            Datagram::KeyframeRequest { last, .. } => {
+                let now = Instant::now();
+                let mut previous = session.keyframe_request.lock();
+                if previous.is_none_or(|(n, at)| {
+                    latch_proto::video::before(n, last)
+                        || (n == last && now - at >= Duration::from_millis(250))
+                }) {
+                    *previous = Some((last, now));
+                    session.keyframe.store(true, Ordering::Release);
+                }
             }
             Datagram::Ping { time, .. } => {
                 wire::write_pong(&mut out, session.id, time);
@@ -725,15 +839,42 @@ fn receive(server: Weak<Server>) {
 fn send_video(
     server: &Server,
     session: &Session,
-    mut pipeline: Box<dyn VideoPipeline>,
+    pipeline: Box<dyn VideoPipeline>,
     config: VideoConfig,
     mut reopen: impl FnMut(&VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>>,
 ) {
-    let mut packetizer = Packetizer::new(session.id);
+    std::thread::scope(|scope| {
+        let (tx, rx) = mpsc::sync_channel(2);
+        scope.spawn(move || paced_video(server, session, rx));
+        encode_video(server, session, pipeline, config, &mut reopen, tx);
+    });
+}
+
+fn encode_video(
+    server: &Server,
+    session: &Session,
+    mut pipeline: Box<dyn VideoPipeline>,
+    mut config: VideoConfig,
+    mut reopen: impl FnMut(&VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>>,
+    tx: mpsc::SyncSender<(video::EncodedVideo, Instant)>,
+) {
     let mut last_keyframe: Option<Instant> = None;
     let mut info = pipeline.info();
     let mut recoveries = VecDeque::new();
+    let audio = session.audio_enabled;
+    let mut applied = 0;
     while !session.stopping() {
+        let target = crate::congestion::video_budget(
+            session.transport.budget.load(Ordering::Relaxed),
+            session.fec.load(Ordering::Relaxed),
+            audio,
+        );
+        if applied == 0 || target.abs_diff(applied) >= (applied / 20).max(1) {
+            pipeline.set_bitrate(target);
+            config.bitrate_kbps = target;
+            applied = target;
+            session.transport.applied.store(target, Ordering::Relaxed);
+        }
         let due = last_keyframe.is_none_or(|t| t.elapsed() >= KEYFRAME_GAP);
         let keyframe = due && session.keyframe.swap(false, Ordering::AcqRel);
         // Short idle repeats bound how long a request arriving inside next
@@ -748,27 +889,45 @@ fn send_video(
                 server.log(format!("video stopped: {e:#}; starting it again"));
                 // Some capture APIs allow only one owner of an output.
                 drop(pipeline);
-                let now = Instant::now();
-                recoveries.retain(|t| now - *t < VIDEO_RECOVERY_WINDOW);
-                if recoveries.len() < VIDEO_RECOVERIES {
+                let mut failure = e;
+                loop {
+                    if session.stopping() {
+                        return;
+                    }
+                    let now = Instant::now();
+                    recoveries.retain(|t| now - *t < VIDEO_RECOVERY_WINDOW);
+                    if recoveries.len() >= VIDEO_RECOVERIES {
+                        session.end(
+                            end::CAPTURE_FAILED,
+                            &format!("The host could not capture its screen: {failure:#}"),
+                        );
+                        return;
+                    }
                     recoveries.push_back(now);
-                    if let Ok(p) = reopen(&config) {
-                        pipeline = p;
-                        session.keyframe.store(true, Ordering::Release);
-                        continue;
+                    match reopen(&config) {
+                        Ok(p) => {
+                            pipeline = p;
+                            break;
+                        }
+                        Err(e) => {
+                            server.log(format!("video reopen failed: {e:#}"));
+                            failure = e;
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
                     }
                 }
-                session.end(
-                    end::CAPTURE_FAILED,
-                    &format!("The host could not capture its screen: {e:#}"),
-                );
-                return;
+                session.keyframe.store(true, Ordering::Release);
+                continue;
             }
         };
         let next_info = pipeline.info();
         if next_info != info {
-            if next_info.display != info.display {
-                session.input.lock().display = next_info.display;
+            {
+                let mut input = session.input.lock();
+                input.display = next_info.display;
+                if let Some(sink) = &mut input.sink {
+                    sink.set_stream_size(next_info.width, next_info.height);
+                }
             }
             if next_info.encoder != info.encoder || next_info.hardware != info.hardware {
                 let mut status = server.status.lock();
@@ -784,6 +943,29 @@ fn send_video(
         if frame.keyframe {
             last_keyframe = Some(Instant::now());
         }
+        if session.addr.lock().is_none() {
+            continue;
+        }
+        // Blocking is deliberate: dropping an encoded reference corrupts the GOP.
+        if tx.send((frame, Instant::now())).is_err() {
+            return;
+        }
+    }
+}
+
+fn paced_video(
+    server: &Server,
+    session: &Session,
+    rx: mpsc::Receiver<(video::EncodedVideo, Instant)>,
+) {
+    let mut packetizer = Packetizer::new(session.id);
+    let mut pacer = crate::pacing::Pacer::new(Instant::now());
+    while !session.stopping() {
+        let (frame, queued) = match rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(frame) => frame,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(_) => return,
+        };
         let Some(addr) = *session.addr.lock() else {
             continue;
         };
@@ -795,12 +977,27 @@ fn send_video(
             host_delay: delay,
         };
         packetizer.packetize(&out, |datagram| {
-            send(&server.udp, datagram, addr);
+            loop {
+                if session.stopping() {
+                    return;
+                }
+                session
+                    .transport
+                    .queue_us
+                    .fetch_max(queued.elapsed().as_micros() as u64, Ordering::Relaxed);
+                let wait = pacer.delay(
+                    Instant::now(),
+                    datagram.len(),
+                    session.transport.budget.load(Ordering::Relaxed),
+                );
+                if wait.is_zero() {
+                    break;
+                }
+                std::thread::sleep(wait.min(Duration::from_millis(5)));
+            }
+            send(&server.udp, session, datagram, addr);
         });
         session.frames.fetch_add(1, Ordering::Relaxed);
-        session
-            .bytes
-            .fetch_add(frame.data.len() as u64, Ordering::Relaxed);
     }
 }
 
@@ -876,7 +1073,7 @@ fn send_audio(
             // 240 samples always fit (lpcm-rice's worst case is 965 bytes);
             // a refusal would mean the codec changed underneath.
             let fits = packetizer.packetize(pts, &coded, |datagram| {
-                send(&server.udp, datagram, addr);
+                send(&server.udp, session, datagram, addr);
             });
             debug_assert!(fits, "a coded 5 ms audio frame outgrew a datagram");
         }
@@ -890,16 +1087,22 @@ fn audio_problem(server: &Server, session: &Session, message: String) {
 
 /// One datagram, retried briefly when the socket's buffer is full (macOS
 /// says ENOBUFS when a keyframe outruns the interface).
-fn send(udp: &UdpSocket, datagram: &[u8], to: SocketAddr) {
-    for _ in 0..3 {
+fn send(udp: &UdpSocket, session: &Session, datagram: &[u8], to: SocketAddr) {
+    for attempt in 0..3 {
         match udp.send_to(datagram, to) {
-            Ok(_) => return,
-            Err(e)
-                if e.raw_os_error() == Some(55) || e.kind() == std::io::ErrorKind::WouldBlock =>
-            {
+            Ok(n) => {
+                session.bytes.fetch_add(n as u64, Ordering::Relaxed);
+                return;
+            }
+            Err(e) => {
+                session.transport.errors.fetch_add(1, Ordering::Relaxed);
+                if !latch_proto::transport::send_buffer_full(&e) || attempt == 2 {
+                    session.keyframe.store(true, Ordering::Release);
+                    return;
+                }
+                session.transport.retries.fetch_add(1, Ordering::Relaxed);
                 std::thread::sleep(Duration::from_micros(200));
             }
-            Err(_) => return,
         }
     }
 }

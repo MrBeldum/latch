@@ -3,7 +3,8 @@ use anyhow::{bail, Context, Result};
 use windows::{
     core::PCWSTR,
     Win32::{
-        Foundation::HWND,
+        Devices::Display::*,
+        Foundation::{ERROR_INSUFFICIENT_BUFFER, HWND},
         Graphics::{Dxgi::*, Gdi::*},
     },
 };
@@ -33,9 +34,95 @@ impl Drop for DpiAwareness {
     }
 }
 
-// Previous's shared contract contains dimensions only. Keep the display name
-// here so a primary-monitor change cannot make restore resize another output.
-static SAVED: parking_lot::Mutex<Option<([u16; 32], Previous)>> = parking_lot::Mutex::new(None);
+// Previous's shared contract contains dimensions only. Keep the full topology
+// here so disconnect restores paths by adapter/target identity, not DISPLAYn.
+struct Saved {
+    previous: Previous,
+    paths: Vec<DISPLAYCONFIG_PATH_INFO>,
+    modes: Vec<DISPLAYCONFIG_MODE_INFO>,
+}
+static SAVED: parking_lot::Mutex<Option<Saved>> = parking_lot::Mutex::new(None);
+fn topology() -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>)> {
+    for _ in 0..4 {
+        let (mut np, mut nm) = (0, 0);
+        // SAFETY: Sized output arrays remain live through the query.
+        unsafe {
+            GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut np, &mut nm).ok()?;
+            let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); np as usize];
+            let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); nm as usize];
+            let rc = QueryDisplayConfig(
+                QDC_ONLY_ACTIVE_PATHS,
+                &mut np,
+                paths.as_mut_ptr(),
+                &mut nm,
+                modes.as_mut_ptr(),
+                None,
+            );
+            if rc == ERROR_INSUFFICIENT_BUFFER {
+                continue;
+            }
+            rc.ok()?;
+            paths.truncate(np as usize);
+            modes.truncate(nm as usize);
+            return Ok((paths, modes));
+        }
+    }
+    bail!("display topology kept changing")
+}
+fn apply_topology(
+    paths: &[DISPLAYCONFIG_PATH_INFO],
+    modes: &[DISPLAYCONFIG_MODE_INFO],
+) -> Result<()> {
+    // SAFETY: Paths and their mode indices came from QueryDisplayConfig.
+    let rc = unsafe {
+        SetDisplayConfig(
+            Some(paths),
+            Some(modes),
+            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES,
+        )
+    };
+    if rc != 0 {
+        bail!("SetDisplayConfig returned {rc}");
+    }
+    Ok(())
+}
+fn only_virtual(
+    name: &[u16; 32],
+    paths: &[DISPLAYCONFIG_PATH_INFO],
+    modes: &[DISPLAYCONFIG_MODE_INFO],
+) -> Result<()> {
+    for path in paths {
+        let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            },
+            ..Default::default()
+        };
+        // SAFETY: Sized device-info packet and validated source mode index.
+        unsafe {
+            if DisplayConfigGetDeviceInfo(&mut source.header) != 0
+                || source.viewGdiDeviceName != *name
+            {
+                continue;
+            }
+            let mut modes = modes.to_vec();
+            let index = path.sourceInfo.Anonymous.modeInfoIdx as usize;
+            let mode = modes
+                .get_mut(index)
+                .context("virtual display has no source mode")?;
+            anyhow::ensure!(
+                mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
+                "invalid display source mode"
+            );
+            mode.Anonymous.sourceMode.position = Default::default();
+            return apply_topology(&[*path], &modes);
+        }
+    }
+    bail!("virtual display is missing from active display topology")
+}
 
 pub(super) struct Output {
     pub adapter: IDXGIAdapter1,
@@ -108,12 +195,57 @@ fn outputs() -> Result<Vec<Output>> {
         Ok(outputs)
     }
 }
+pub(super) fn sdr_white_level(name: &[u16; 32]) -> f32 {
+    let Ok((paths, _)) = topology() else {
+        return 1.0;
+    };
+    for path in paths {
+        let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                adapterId: path.sourceInfo.adapterId,
+                id: path.sourceInfo.id,
+            },
+            ..Default::default()
+        };
+        let mut level = DISPLAYCONFIG_SDR_WHITE_LEVEL {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL,
+                size: std::mem::size_of::<DISPLAYCONFIG_SDR_WHITE_LEVEL>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..Default::default()
+        };
+        // SAFETY: Both device-info packets have the SDK size and matching IDs.
+        unsafe {
+            if DisplayConfigGetDeviceInfo(&mut source.header) == 0
+                && source.viewGdiDeviceName == *name
+                && DisplayConfigGetDeviceInfo(&mut level.header) == 0
+                && level.SDRWhiteLevel > 0
+            {
+                return level.SDRWhiteLevel as f32 / 1000.0;
+            }
+        }
+    }
+    1.0
+}
+fn selection_rank(virtual_display: bool, primary: bool) -> (bool, bool) {
+    (!virtual_display, !primary)
+}
 pub(super) fn select() -> Result<Output> {
     let mut outputs = outputs()?;
     let index = outputs
         .iter()
-        .position(|o| o.desc.DesktopCoordinates.left == 0 && o.desc.DesktopCoordinates.top == 0)
-        .unwrap_or(0);
+        .enumerate()
+        .min_by_key(|(_, o)| {
+            selection_rank(
+                o.virtual_display,
+                o.desc.DesktopCoordinates.left == 0 && o.desc.DesktopCoordinates.top == 0,
+            )
+        })
+        .map_or(0, |(i, _)| i);
     if outputs.is_empty() {
         bail!("no DXGI output attached to the desktop");
     }
@@ -195,27 +327,21 @@ pub(super) fn prepare(width: u32, height: u32, fps: u32) -> Result<Option<Previo
             best = Some(mode);
         }
     }
-    let Some(mut mode) = best else {
+    let mut mode = best.unwrap_or_else(|| {
         tracing::warn!(
             width,
             height,
             fps,
             "virtual display has no requested size; keeping current mode and scaling capture"
         );
-        return Ok(None);
-    };
+        current
+    });
     if mode.dmDisplayFrequency < fps {
         tracing::info!(
             requested_fps = fps,
             refresh = mode.dmDisplayFrequency,
             "using highest available virtual display refresh rate"
         );
-    }
-    if current.dmPelsWidth == width
-        && current.dmPelsHeight == height
-        && current.dmDisplayFrequency == mode.dmDisplayFrequency
-    {
-        return Ok(None);
     }
     mode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
     let previous = Previous {
@@ -224,29 +350,34 @@ pub(super) fn prepare(width: u32, height: u32, fps: u32) -> Result<Option<Previo
         refresh_hz: current.dmDisplayFrequency,
     };
     let mut saved = SAVED.lock();
-    change(&output.desc.DeviceName, &mode)?;
-    *saved = Some((output.desc.DeviceName, previous.clone()));
+    anyhow::ensure!(saved.is_none(), "display topology already prepared");
+    let (paths, modes) = topology()?;
+    only_virtual(&output.desc.DeviceName, &paths, &modes)?;
+    if let Err(e) = change(&output.desc.DeviceName, &mode) {
+        apply_topology(&paths, &modes).context("restore topology after mode failure")?;
+        return Err(e);
+    }
+    *saved = Some(Saved {
+        previous: previous.clone(),
+        paths,
+        modes,
+    });
     Ok(Some(previous))
 }
 pub(super) fn restore(previous: &Previous) -> Result<()> {
     let mut saved = SAVED.lock();
-    let name = if let Some((name, _)) = saved.as_ref().filter(|(_, mode)| mode == previous) {
-        // A removed virtual adapter's DISPLAYn name can be reused by a physical
-        // monitor. Recheck the monitor identity before applying the saved mode.
-        if !outputs()?
-            .iter()
-            .any(|o| o.desc.DeviceName == *name && o.virtual_display)
-        {
-            return Ok(());
-        }
-        *name
-    } else {
-        let output = select()?;
-        if !output.virtual_display {
-            return Ok(());
-        }
-        output.desc.DeviceName
-    };
+    if let Some(state) = saved.as_ref().filter(|state| &state.previous == previous) {
+        // The snapshot includes the original modes and adapter/target identities.
+        // Restore them atomically rather than resizing an intermediate topology.
+        apply_topology(&state.paths, &state.modes)?;
+        *saved = None;
+        return Ok(());
+    }
+    let output = select()?;
+    if !output.virtual_display {
+        return Ok(());
+    }
+    let name = output.desc.DeviceName;
     let mode = DEVMODEW {
         dmSize: std::mem::size_of::<DEVMODEW>() as u16,
         dmFields: DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY,
@@ -256,11 +387,22 @@ pub(super) fn restore(previous: &Previous) -> Result<()> {
         ..Default::default()
     };
     change(&name, &mode)?;
-    *saved = None;
     Ok(())
 }
 #[cfg(test)]
 mod tests {
+    use super::selection_rank;
+    #[test]
+    fn virtual_output_wins_over_primary() {
+        let candidates = [(false, true), (true, false)];
+        assert_eq!(
+            candidates
+                .iter()
+                .min_by_key(|(v, p)| selection_rank(*v, *p)),
+            Some(&(true, false))
+        );
+        assert!(selection_rank(false, true) < selection_rank(false, false));
+    }
     #[test]
     fn refresh_falls_back_without_refusing_high_fps() {
         for (requested, expected) in [(30, 60), (60, 60), (90, 120), (144, 120), (240, 120)] {

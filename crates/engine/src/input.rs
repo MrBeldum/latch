@@ -47,6 +47,9 @@ impl DisplayRect {
 }
 
 pub trait InputSink: Send {
+    /// Stream dimensions for platforms whose cursor uses logical display points.
+    fn set_stream_size(&mut self, _width: u32, _height: u32) {}
+
     /// Applies one event. `display` is where absolute positions land.
     fn apply(&mut self, event: &Event, display: DisplayRect) -> anyhow::Result<()>;
 
@@ -259,6 +262,102 @@ pub mod keymap {
         })
     }
 
+    /// XKB physical key names for the same ANSI positions used by macOS.
+    /// The host layout and active group interpret these positions; never search
+    /// for a US symbol in an arbitrary shift level of the host's map.
+    pub fn vk_to_xkb_name(vk: u16) -> Option<[u8; 4]> {
+        Some(match vk {
+            0x08 => *b"BKSP",
+            0x09 => *b"TAB\0",
+            0x0C => *b"KP5\0",
+            0x0D => *b"RTRN",
+            0x13 => *b"PAUS",
+            0x14 => *b"CAPS",
+            0x1B => *b"ESC\0",
+            0x20 => *b"SPCE",
+            0x21 => *b"PGUP",
+            0x22 => *b"PGDN",
+            0x23 => *b"END\0",
+            0x24 => *b"HOME",
+            0x25 => *b"LEFT",
+            0x26 => *b"UP\0\0",
+            0x27 => *b"RGHT",
+            0x28 => *b"DOWN",
+            0x2A => *b"PRSC",
+            0x2C => *b"PRSC",
+            0x2D => *b"INS\0",
+            0x2E => *b"DELE",
+            0x2F => *b"HELP",
+            0x5B => *b"LWIN",
+            0x5C => *b"RWIN",
+            0x5D => *b"MENU",
+            0x6A => *b"KPMU",
+            0x6B => *b"KPAD",
+            0x6C => *b"KPCO",
+            0x6D => *b"KPSU",
+            0x6E => *b"KPDL",
+            0x6F => *b"KPDV",
+            0x90 => *b"NMLK",
+            0x91 => *b"SCLK",
+            0x10 => *b"LFSH",
+            0xA0 => *b"LFSH",
+            0xA1 => *b"RTSH",
+            0x11 => *b"LCTL",
+            0xA2 => *b"LCTL",
+            0xA3 => *b"RCTL",
+            0x12 => *b"LALT",
+            0xA4 => *b"LALT",
+            0xA5 => *b"RALT",
+            0xBA => *b"AC10",
+            0xBB => *b"AE12",
+            0xBC => *b"AB08",
+            0xBD => *b"AE11",
+            0xBE => *b"AB09",
+            0xBF => *b"AB10",
+            0xC0 => *b"TLDE",
+            0xDB => *b"AD11",
+            0xDC => *b"BKSL",
+            0xDD => *b"AD12",
+            0xDE => *b"AC11",
+            0x41 => *b"AC01",
+            0x42 => *b"AB05",
+            0x43 => *b"AB03",
+            0x44 => *b"AC03",
+            0x45 => *b"AD03",
+            0x46 => *b"AC04",
+            0x47 => *b"AC05",
+            0x48 => *b"AC06",
+            0x49 => *b"AD08",
+            0x4A => *b"AC07",
+            0x4B => *b"AC08",
+            0x4C => *b"AC09",
+            0x4D => *b"AB07",
+            0x4E => *b"AB06",
+            0x4F => *b"AD09",
+            0x50 => *b"AD10",
+            0x51 => *b"AD01",
+            0x52 => *b"AD04",
+            0x53 => *b"AC02",
+            0x54 => *b"AD05",
+            0x55 => *b"AD07",
+            0x56 => *b"AB04",
+            0x57 => *b"AD02",
+            0x58 => *b"AB02",
+            0x59 => *b"AD06",
+            0x5A => *b"AB01",
+            0x30..=0x39 => {
+                let n = if vk == 0x30 { 10 } else { vk - 0x30 } as u8;
+                [b'A', b'E', b'0' + n / 10, b'0' + n % 10]
+            }
+            0x60..=0x69 => [b'K', b'P', b'0' + (vk - 0x60) as u8, 0],
+            0x70..=0x87 => {
+                let n = (vk - 0x70 + 1) as u8;
+                [b'F', b'K', b'0' + n / 10, b'0' + n % 10]
+            }
+            _ => return None,
+        })
+    }
+
     /// X11 keysym for a Windows VK on a US layout, unshifted.
     pub fn vk_to_keysym(vk: u16) -> Option<u32> {
         Some(match vk {
@@ -343,6 +442,22 @@ pub mod keymap {
         use super::*;
         use std::collections::HashMap;
 
+        #[test]
+        fn xkb_keys_use_physical_names_independent_of_symbols_or_group() {
+            assert_eq!(vk_to_xkb_name(0x31), Some(*b"AE01"));
+            assert_eq!(vk_to_xkb_name(0x41), Some(*b"AC01"));
+            assert_eq!(vk_to_xkb_name(0x59), Some(*b"AD06"));
+            assert_eq!(vk_to_xkb_name(0xDB), Some(*b"AD11"));
+            assert_eq!(vk_to_xkb_name(0x60), Some(*b"KP0\0"));
+            assert_eq!(vk_to_xkb_name(0x5B), Some(*b"LWIN"));
+            assert_eq!(vk_to_xkb_name(0x87), Some(*b"FK24"));
+            for vk in 0..=255 {
+                // Select/Execute have no standard ANSI physical position.
+                if vk_to_keysym(vk).is_some() && !matches!(vk, 0x29 | 0x2B) {
+                    assert!(vk_to_xkb_name(vk).is_some(), "missing {vk:#x}");
+                }
+            }
+        }
         #[test]
         fn test_representative_keys() {
             // A -> kVK_ANSI_A (0x00), XK_a (0x0061)

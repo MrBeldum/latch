@@ -1,5 +1,5 @@
 use latch_proto::{
-    audio::{AudioOut, AudioPacketizer, AudioReceiver},
+    audio::{AudioOut, AudioPacketizer, AudioReceiver, AUDIO_HOLD},
     input::{Event, InputReceiver, InputSender, MAX_UNACKED, RESEND},
     sim::{Impairment, Link},
     video::{KeyframeRequests, OutFrame, Packetizer, Reassembled, Reassembler, FRAME_TIMEOUT},
@@ -76,18 +76,17 @@ fn input_overflow_preserves_oldest_and_critical_events() {
     for event in &critical {
         sender.push(event.clone());
     }
-    assert_eq!(sender.unacked(), MAX_UNACKED + critical.len());
+    assert_eq!(sender.unacked(), 1034 + critical.len());
     let applied = drain_input(&mut sender, start + Duration::from_secs(9));
     assert_eq!(
-        &applied[..MAX_UNACKED - 1],
-        &(0..1023).map(position).collect::<Vec<_>>()
+        &applied[..1034],
+        &(0..1034).map(position).collect::<Vec<_>>()
     );
-    assert_eq!(applied[MAX_UNACKED - 1], position(1033));
-    assert_eq!(&applied[MAX_UNACKED..], &critical);
+    assert_eq!(&applied[1034..], &critical);
 }
 
 #[test]
-fn input_full_queue_merges_relative_motion_saturating() {
+fn input_full_queue_preserves_relative_motion_without_saturation() {
     let mut sender = InputSender::new(1);
     for _ in 0..MAX_UNACKED - 1 {
         sender.push(Event::ReleaseAll);
@@ -101,31 +100,31 @@ fn input_full_queue_merges_relative_motion_saturating() {
         dy: -10_000,
     });
     let applied = drain_input(&mut sender, Instant::now());
-    assert_eq!(applied.len(), MAX_UNACKED);
+    assert_eq!(applied.len(), MAX_UNACKED + 1);
     assert_eq!(
         applied.last(),
         Some(&Event::MouseMove {
-            dx: i16::MAX,
-            dy: i16::MIN
+            dx: 10_000,
+            dy: -10_000
         })
     );
 }
 
 #[test]
-fn input_hard_cap_refuses_only_new_events_without_sequence_gaps() {
+fn input_backlog_never_discards_critical_events_or_creates_sequence_gaps() {
     let mut sender = InputSender::new(1);
     for _ in 0..65_536 + 1 {
         sender.push(Event::ReleaseAll);
     }
-    assert_eq!(sender.unacked(), 65_536);
-    assert_eq!(drain_input(&mut sender, Instant::now()).len(), 65_536);
+    assert_eq!(sender.unacked(), 65_537);
+    assert_eq!(drain_input(&mut sender, Instant::now()).len(), 65_537);
     sender.push(position(1));
     let mut out = Vec::new();
     assert!(sender.poll(Instant::now(), &mut out));
     let Datagram::Input { first, .. } = wire::parse(&out).unwrap() else {
         panic!()
     };
-    assert_eq!(first, 65_536);
+    assert_eq!(first, 65_537);
 }
 
 #[test]
@@ -264,7 +263,7 @@ fn audio_recovers_after_long_blackout_with_data_or_parity_first() {
                     panic!()
                 };
                 receiver.push(&packet, now);
-                while let Some(out) = receiver.pop() {
+                while let Some(out) = receiver.pop(now) {
                     if let AudioOut::Frame { seq, payload, .. } = out {
                         assert_eq!(payload, [seq as u8]);
                         delivered.push(seq);
@@ -302,7 +301,7 @@ fn audio_resynchronizes_across_sequence_wrap() {
             receiver.push(&packet, now);
         }
         let mut output = None;
-        while let Some(out) = receiver.pop() {
+        while let Some(out) = receiver.pop(now) {
             output = Some(out);
         }
         if seq == 5 {
@@ -419,4 +418,214 @@ fn video_initial_keyframe_requests_start_only_after_loss() {
             assert!(!requests.due(receiver.waiting_for_keyframe(), now, None));
         }
     }
+}
+
+#[test]
+fn input_lost_ack_does_not_mutate_already_applied_motion() {
+    let mut sender = InputSender::new(1);
+    let mut receiver = InputReceiver::new();
+    let mut out = Vec::new();
+    let now = Instant::now();
+    let mut total = 0i64;
+    for i in 0..10_000 {
+        sender.push(Event::MouseMove { dx: 1, dy: 0 });
+        // Polling marks the oldest batch in flight, even when the ACK is lost.
+        assert!(sender.poll(now + Duration::from_millis(i), &mut out));
+        let Datagram::Input { first, events, .. } = wire::parse(&out).unwrap() else {
+            panic!()
+        };
+        receiver.receive(first, events.iter(), |e| {
+            if let Event::MouseMove { dx, .. } = e {
+                total += i64::from(dx);
+            }
+        });
+    }
+    // Once acknowledgements resume all 1000 Hz motion must arrive exactly once.
+    sender.ack(receiver.next());
+    for step in 0..1000 {
+        if sender.unacked() == 0 {
+            break;
+        }
+        assert!(sender.poll(now + Duration::from_secs(10) + RESEND * step, &mut out));
+        let Datagram::Input { first, events, .. } = wire::parse(&out).unwrap() else {
+            panic!()
+        };
+        sender.ack(receiver.receive(first, events.iter(), |e| {
+            if let Event::MouseMove { dx, .. } = e {
+                total += i64::from(dx);
+            }
+        }));
+    }
+    assert_eq!(sender.unacked(), 0);
+    assert_eq!(total, 10_000);
+}
+
+#[test]
+fn input_full_queue_never_changes_sent_payload_or_moves_across_keys() {
+    let mut sender = InputSender::new(1);
+    let now = Instant::now();
+    let mut out = Vec::new();
+    sender.push(Event::MouseMove { dx: 1, dy: 0 });
+    sender.poll(now, &mut out);
+    let original = out.clone();
+    for _ in 1..MAX_UNACKED {
+        sender.push(Event::ReleaseAll);
+    }
+    sender.push(Event::MouseMove { dx: 2, dy: 0 });
+    sender.poll(now, &mut out);
+    let Datagram::Input { events, .. } = wire::parse(&original).unwrap() else {
+        panic!()
+    };
+    let first = events.iter().next().unwrap();
+    let Datagram::Input { events, .. } = wire::parse(&out).unwrap() else {
+        panic!()
+    };
+    assert_eq!(events.iter().next().unwrap(), first);
+    let applied = drain_input(&mut sender, now);
+    assert_eq!(applied.last(), Some(&Event::MouseMove { dx: 2, dy: 0 }));
+}
+
+#[test]
+fn another_frames_timeout_leaves_an_assembling_frame_alone() {
+    let start = Instant::now();
+    let mut link = Link::new(Impairment::NONE, 1);
+    let mut sender = Packetizer::new(1);
+    let mut receiver = Reassembler::new(1);
+    let mut frame = |data: &[u8], keyframe| {
+        let mut shards = Vec::new();
+        sender.packetize(
+            &OutFrame {
+                data,
+                keyframe,
+                host_delay: 0,
+            },
+            |dg| shards.push(dg.to_vec()),
+        );
+        shards
+    };
+    for dg in frame(&[1; 2400], true) {
+        link.send(start, &dg);
+    }
+    receive_video(&mut link, &mut receiver, start);
+    assert!(matches!(receiver.poll(start), Some(Reassembled::Frame(_))));
+    let one = frame(&[2; 3000], false);
+    let _two = frame(&[3; 3000], false);
+    let three = frame(&[4; 3000], false);
+    // Frame 3 starts at 0 and loses the rest; frame 1 starts 90 ms later.
+    link.send(start, &three[0]);
+    receive_video(&mut link, &mut receiver, start);
+    let at = start + Duration::from_millis(90);
+    link.send(at, &one[0]);
+    receive_video(&mut link, &mut receiver, at);
+    // Frame 3's timeout is not frame 1's: frame 1 has had 10 ms.
+    let other = start + FRAME_TIMEOUT;
+    assert_eq!(receiver.poll(other), None);
+    assert_eq!(receiver.next_deadline(), Some(at + FRAME_TIMEOUT));
+    // The rest of frame 1 arrives and it is delivered, not dropped as late.
+    let late = other + Duration::from_millis(5);
+    for dg in &one[1..] {
+        link.send(late, dg);
+    }
+    receive_video(&mut link, &mut receiver, late);
+    assert!(matches!(
+        receiver.poll(late),
+        Some(Reassembled::Frame(f)) if f.frame == 1 && f.data == [2; 3000]
+    ));
+    // Frame 2 never came; frame 3's timeout now decides both.
+    assert_eq!(receiver.poll(late), Some(Reassembled::Lost { frame: 2 }));
+    assert_eq!(receiver.poll(late), Some(Reassembled::Lost { frame: 3 }));
+}
+
+/// One group of four audio packets with payloads `[0]`..`[3]`, then its
+/// parity: the datagrams in the order the host sends them.
+fn audio_group() -> Vec<Vec<u8>> {
+    let mut packetizer = AudioPacketizer::new(1);
+    let mut out = Vec::new();
+    for seq in 0..4u32 {
+        packetizer.packetize(seq * 5000, &[seq as u8], |dg| out.push(dg.to_vec()));
+    }
+    out
+}
+
+/// Pushes each datagram and pops until nothing is ready, as the viewer
+/// does; returns the payloads played and the packets given up on.
+fn deliver_audio(
+    receiver: &mut AudioReceiver,
+    order: &[&[u8]],
+    now: Instant,
+) -> (Vec<Vec<u8>>, Vec<u32>) {
+    let (mut played, mut missing) = (Vec::new(), Vec::new());
+    for dg in order {
+        let Datagram::Audio { packet, .. } = wire::parse(dg).unwrap() else {
+            panic!()
+        };
+        receiver.push(&packet, now);
+        while let Some(out) = receiver.pop(now) {
+            match out {
+                AudioOut::Frame { payload, .. } => played.push(payload),
+                AudioOut::Missing { seq } => missing.push(seq),
+            }
+        }
+    }
+    (played, missing)
+}
+
+#[test]
+fn reordered_audio_parity_does_not_discard_data_that_arrives_after_it() {
+    let g = audio_group();
+    let (data, parity) = (&g[..4], &g[4]);
+    let now = Instant::now();
+    let all: Vec<Vec<u8>> = (0..4u8).map(|i| vec![i]).collect();
+    for order in [
+        vec![&data[0][..], &data[1], parity, &data[2], &data[3]],
+        vec![&parity[..], &data[0], &data[1], &data[2], &data[3]],
+    ] {
+        let mut receiver = AudioReceiver::new(1);
+        assert_eq!(
+            deliver_audio(&mut receiver, &order, now),
+            (all.clone(), vec![])
+        );
+    }
+    // One packet really lost: parity still rebuilds it.
+    let mut receiver = AudioReceiver::new(1);
+    let order = [&data[0][..], &data[1], &data[2], parity];
+    assert_eq!(deliver_audio(&mut receiver, &order, now), (all, vec![]));
+}
+
+#[test]
+fn audio_after_a_lost_packet_is_released_when_the_host_goes_quiet() {
+    let g = audio_group();
+    let start = Instant::now();
+    let mut receiver = AudioReceiver::new(1);
+    // Packet 2 and the parity are lost, then the desktop falls silent.
+    let order = [&g[0][..], &g[1], &g[3]];
+    let (played, missing) = deliver_audio(&mut receiver, &order, start);
+    assert_eq!((played, missing), (vec![vec![0], vec![1]], vec![]));
+    assert_eq!(receiver.next_deadline(), Some(start + AUDIO_HOLD));
+    let later = start + AUDIO_HOLD;
+    assert_eq!(receiver.pop(later), Some(AudioOut::Missing { seq: 2 }));
+    assert!(matches!(
+        receiver.pop(later),
+        Some(AudioOut::Frame { seq: 3, .. })
+    ));
+    assert_eq!(receiver.pop(later), None);
+    // Nothing is held now, so silence produces no concealment.
+    assert_eq!(receiver.next_deadline(), None);
+    assert_eq!(receiver.pop(later + Duration::from_secs(1)), None);
+}
+
+#[test]
+fn audio_given_up_at_the_end_of_a_sound_leaves_no_deadline_behind() {
+    let g = audio_group();
+    let start = Instant::now();
+    let mut receiver = AudioReceiver::new(1);
+    // Two packets lost, so parity cannot rebuild them; then silence.
+    let order = [&g[0][..], &g[1], &g[4]];
+    deliver_audio(&mut receiver, &order, start);
+    let later = start + AUDIO_HOLD;
+    assert_eq!(receiver.pop(later), Some(AudioOut::Missing { seq: 2 }));
+    assert_eq!(receiver.pop(later), Some(AudioOut::Missing { seq: 3 }));
+    assert_eq!(receiver.pop(later), None);
+    // A deadline in the past would spin the receive loop until sound resumes.
+    assert_eq!(receiver.next_deadline(), None);
 }

@@ -147,6 +147,7 @@ pub trait Sink {
     /// In 1/120ths of a wheel click; positive is up and right.
     fn scroll(&self, vertical: i16, horizontal: i16);
     fn release_all(&self);
+    fn text(&self, text: &str);
 }
 
 impl Sink for Input {
@@ -168,11 +169,14 @@ impl Sink for Input {
     fn scroll(&self, vertical: i16, horizontal: i16) {
         Input::scroll(self, vertical, horizontal);
     }
+    fn text(&self, text: &str) {
+        Input::text(self, text);
+    }
 }
 
 /// What a [`Recorder`] saw, in order.
 #[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sent {
     Key(i16, bool, u8),
     Button(u8, bool),
@@ -180,6 +184,7 @@ pub enum Sent {
     Motion(i16, i16),
     Scroll(i16, i16),
     ReleaseAll,
+    Text(String),
 }
 
 /// A [`Sink`] that keeps what it is sent, and says whether the stream is
@@ -234,6 +239,9 @@ impl Sink for Recorder {
     }
     fn scroll(&self, vertical: i16, horizontal: i16) {
         self.record(Sent::Scroll(vertical, horizontal));
+    }
+    fn text(&self, text: &str) {
+        self.record(Sent::Text(text.to_string()));
     }
 }
 

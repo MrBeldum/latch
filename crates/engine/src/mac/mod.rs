@@ -13,6 +13,9 @@ use capture::Capture;
 use encoder::Encoder;
 use std::time::{Duration, Instant};
 
+/// How often a running capture asks whether its display changed.
+const GEOMETRY_CHECK: Duration = Duration::from_millis(250);
+
 pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
     capture::permission()?;
     let encoder = Encoder::new(config)?;
@@ -22,8 +25,10 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
         encoder,
         config: config.clone(),
         generation: 0,
+        cadence: crate::cadence::Cadence::new(config.fps),
         sent: None,
         pending: None,
+        checked: Instant::now(),
     };
     // Some virtual Macs advertise hardware that fails only on the first encode.
     // Resolve that fallback before the server snapshots VideoInfo for status.
@@ -58,8 +63,10 @@ struct Video {
     encoder: Encoder,
     config: VideoConfig,
     generation: u64,
+    cadence: crate::cadence::Cadence,
     sent: Option<Instant>,
     pending: Option<EncodedVideo>,
+    checked: Instant,
 }
 impl VideoPipeline for Video {
     fn info(&self) -> VideoInfo {
@@ -84,6 +91,23 @@ impl VideoPipeline for Video {
             return Ok(frame);
         }
         let interval = Duration::from_secs_f64(1.0 / f64::from(self.config.fps));
+        self.cadence.wait();
+        if self.checked.elapsed() >= GEOMETRY_CHECK {
+            self.checked = Instant::now();
+            // A new capture refits the picture, and info() hands the server
+            // the display's new place for input.
+            if self.capture.moved() {
+                tracing::info!("display changed size or place; restarting screen capture");
+                self.capture = Capture::new(
+                    self.config.width,
+                    self.config.height,
+                    self.config.fps,
+                    false,
+                )?;
+                self.generation = 0;
+                keyframe = true;
+            }
+        }
         let start = Instant::now();
         loop {
             let mut state = self.capture.shared.state.lock();
@@ -106,7 +130,7 @@ impl VideoPipeline for Video {
                 .sent
                 .map_or(Duration::MAX, |sent| now.saturating_duration_since(sent));
             let due = if keyframe || changed {
-                interval
+                Duration::ZERO
             } else {
                 idle.max(interval)
             };
@@ -118,15 +142,15 @@ impl VideoPipeline for Video {
                     let captured = if changed { picture.captured } else { now };
                     self.generation = state.generation;
                     drop(state);
-                    let frame =
-                        self.encoder
-                            .encode(image.0, captured, keyframe || self.sent.is_none())?;
+                    let first = self.sent.is_none();
+                    self.sent = Some(now);
+                    let frame = self.encoder.encode(image.0, captured, keyframe || first)?;
                     // A real-time encoder may drop under load. Pace the retry and
                     // preserve a pending IDR request until a picture is emitted.
-                    self.sent = Some(Instant::now());
                     if let Some(frame) = frame {
                         return Ok(frame);
                     }
+                    self.cadence.wait();
                     keyframe = true;
                     continue;
                 }

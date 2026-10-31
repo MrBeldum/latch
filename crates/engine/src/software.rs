@@ -52,6 +52,7 @@ pub struct SoftwarePipeline<C: CpuCapture> {
     frame: Bgra,
     picture: Yuv420,
     encoder: Option<Encoder>,
+    cadence: crate::cadence::Cadence,
     last_sent: Option<Instant>,
     captured: Instant,
     timings: SoftwareTimings,
@@ -72,6 +73,7 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
             frame: Bgra::default(),
             picture: Yuv420::default(),
             encoder: None,
+            cadence: crate::cadence::Cadence::new(config.fps),
             last_sent: None,
             captured: Instant::now(),
             timings: SoftwareTimings::default(),
@@ -84,9 +86,7 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
 
     fn acquire(&mut self, keyframe: bool, idle: Duration) -> anyhow::Result<bool> {
         let interval = Duration::from_secs_f64(1.0 / self.config.fps as f64);
-        if let Some(last) = self.last_sent {
-            std::thread::sleep((last + interval).saturating_duration_since(Instant::now()));
-        }
+        self.cadence.wait();
         let deadline = self.last_sent.unwrap_or_else(Instant::now) + idle.max(interval);
         loop {
             let started = Instant::now();
@@ -200,7 +200,7 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
             .ok_or_else(|| anyhow::anyhow!("encoder unavailable"))?
             .encode(&self.picture, keyframe || resized, &mut data)?;
         self.timings.encode = started.elapsed();
-        self.last_sent = Some(started);
+        self.last_sent = Some(self.captured);
         Ok(EncodedVideo {
             data,
             keyframe: info.keyframe,
@@ -223,12 +223,14 @@ mod tests {
     struct Fake {
         changed: bool,
         size: (u32, u32),
+        waits: Vec<Duration>,
     }
     impl CpuCapture for Fake {
         fn size(&self) -> (u32, u32) {
             self.size
         }
-        fn grab(&mut self, frame: &mut Bgra, _: Duration) -> anyhow::Result<bool> {
+        fn grab(&mut self, frame: &mut Bgra, timeout: Duration) -> anyhow::Result<bool> {
+            self.waits.push(timeout);
             if !std::mem::take(&mut self.changed) {
                 return Ok(false);
             }
@@ -256,6 +258,7 @@ mod tests {
             Fake {
                 changed: true,
                 size: (16, 16),
+                waits: Vec::new(),
             },
             &VideoConfig {
                 width: 1920,
@@ -275,14 +278,21 @@ mod tests {
         assert!(!p.info().hardware);
         assert!(p.acquire(false, Duration::ZERO).unwrap());
         p.last_sent = Some(Instant::now());
-        let start = Instant::now();
+        p.capture.waits.clear();
         assert!(!p.acquire(true, Duration::from_secs(10)).unwrap());
-        assert!(start.elapsed() >= Duration::from_millis(10));
-        assert!(start.elapsed() < Duration::from_millis(100));
-        p.last_sent = Some(Instant::now());
-        let start = Instant::now();
+        // A keyframe polls once and ignores the idle wait. Cadence's
+        // fake-clock test verifies pacing without relying on VM scheduling.
+        assert_eq!(p.capture.waits, [Duration::ZERO]);
+        p.capture.waits.clear();
+        let last_sent = Instant::now();
+        p.last_sent = Some(last_sent);
         assert!(!p.acquire(false, Duration::from_millis(25)).unwrap());
-        assert!(start.elapsed() >= Duration::from_millis(25));
+        assert!(last_sent.elapsed() >= Duration::from_millis(25));
+        assert!(p
+            .capture
+            .waits
+            .iter()
+            .all(|&wait| wait <= Duration::from_millis(10)));
         p.capture.size = (32, 16);
         p.capture.changed = true;
         assert!(p.acquire(false, Duration::ZERO).unwrap());

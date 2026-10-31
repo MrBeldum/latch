@@ -51,6 +51,13 @@ printf '[Unit]\nDescription=Latch\nAfter=network.target\n\n[Service]\nExecStart=
 echo "==> display cookie"
 env_file="$HOME/.config/environment.d/10-display.conf"
 if [[ -f "$env_file" ]]; then sed -i 's/brolink\.Xauthority/latch.Xauthority/g' "$env_file"; fi
+echo "==> keeping the desktop up without a login"
+# These are user units: without lingering, systemd stops them when the last
+# session ends (an SSH logout) and starts them again only at a login.
+me="$(id -un)"
+if [[ "$(loginctl show-user "$me" -P Linger 2>/dev/null)" != yes ]]; then
+	loginctl enable-linger "$me" 2>/dev/null || sudo loginctl enable-linger "$me"
+fi
 echo "==> starting Latch"
 systemctl --user daemon-reload
 systemctl --user enable latch-display.service latch-desktop.service

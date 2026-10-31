@@ -3,6 +3,7 @@
 mod audio;
 mod capture;
 mod display;
+mod elevated;
 mod encode;
 mod input;
 mod mf;
@@ -30,6 +31,7 @@ struct MfPipeline {
     converter: Converter,
     encoder: Encoder,
     config: VideoConfig,
+    cadence: crate::cadence::Cadence,
     last_sent: Instant,
     last_capture: Instant,
 }
@@ -46,10 +48,7 @@ impl MfPipeline {
     }
     fn next(&mut self, keyframe: bool, idle: Duration) -> Result<EncodedVideo> {
         let interval = Duration::from_secs_f64(1.0 / f64::from(self.config.fps));
-        let due = self.last_sent + interval;
-        if let Some(wait) = due.checked_duration_since(Instant::now()) {
-            thread::sleep(wait);
-        }
+        self.cadence.wait();
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut force = keyframe;
         let mut buffered = false;
@@ -86,6 +85,7 @@ impl MfPipeline {
                 if !changed && !buffered {
                     self.last_capture = Instant::now();
                 }
+                self.last_sent = Instant::now();
                 let texture = self.converter.convert(&self.capture.frame)?;
                 let sample = if self.encoder.hardware {
                     Encoder::texture_sample(&texture)?
@@ -106,7 +106,6 @@ impl MfPipeline {
                     if force && !idr {
                         bail!("Media Foundation encoder did not honour force-IDR");
                     }
-                    self.last_sent = Instant::now();
                     return Ok(EncodedVideo {
                         data,
                         keyframe: idr,
@@ -116,6 +115,7 @@ impl MfPipeline {
                 // A synchronous MFT may initially buffer an input despite low latency.
                 force = keyframe;
                 buffered = true;
+                self.cadence.wait();
             }
             if Instant::now() >= deadline && (!self.capture.has_frame || buffered) {
                 bail!("desktop/encoder produced no frame within five seconds");
@@ -152,6 +152,7 @@ impl Pipeline {
                         converter,
                         encoder,
                         config: config.clone(),
+                        cadence: crate::cadence::Cadence::new(config.fps),
                         last_sent: Instant::now() - Duration::from_secs(1),
                         last_capture: Instant::now(),
                     })))
@@ -227,10 +228,20 @@ enum Request {
         reply: mpsc::SyncSender<Result<(EncodedVideo, VideoInfo)>>,
     },
     Bitrate(u32),
+    Shutdown,
 }
 struct VideoProxy {
     requests: mpsc::Sender<Request>,
     info: VideoInfo,
+    worker: Option<thread::JoinHandle<()>>,
+}
+impl Drop for VideoProxy {
+    fn drop(&mut self) {
+        let _ = self.requests.send(Request::Shutdown);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 impl VideoPipeline for VideoProxy {
     fn info(&self) -> VideoInfo {
@@ -272,7 +283,7 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
     let config = config.clone();
     let (requests, receive) = mpsc::channel();
     let (ready, startup) = mpsc::sync_channel(1);
-    thread::Builder::new()
+    let worker = thread::Builder::new()
         .name("latch-dxgi-mf".into())
         .spawn(move || {
             let initialized = (|| {
@@ -306,21 +317,37 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
                         let _ = reply.send(result);
                     }
                     Request::Bitrate(kbps) => pipeline.bitrate(kbps),
+                    Request::Shutdown => break,
                 }
             }
         })
         .context("spawn video worker")?;
-    let info = startup
+    let info = match startup
         .recv()
-        .context("video worker stopped during startup")??;
-    Ok(Box::new(VideoProxy { requests, info }))
+        .context("video worker stopped during startup")
+        .and_then(|v| v)
+    {
+        Ok(info) => info,
+        Err(e) => {
+            let _ = worker.join();
+            return Err(e);
+        }
+    };
+    Ok(Box::new(VideoProxy {
+        requests,
+        info,
+        worker: Some(worker),
+    }))
 }
 pub fn open_audio() -> Result<Box<dyn AudioCapture>> {
     audio::open()
 }
 pub fn open_input() -> Result<Box<dyn InputSink>> {
-    Ok(Box::<input::Injector>::default())
+    Ok(Box::new(input::Injector::new()))
 }
+pub use elevated::{
+    helper_exe as input_helper_exe, run_helper as run_input_helper, TASK as INPUT_TASK,
+};
 pub fn encodable() -> Vec<Codec> {
     thread::Builder::new()
         .name("latch-mf-probe".into())
@@ -393,6 +420,29 @@ mod test_decoder;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn proxy_drop_waits_for_worker_resources() {
+        let (requests, receive) = mpsc::channel();
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = released.clone();
+        let worker = thread::spawn(move || {
+            assert!(matches!(receive.recv().unwrap(), Request::Shutdown));
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        drop(VideoProxy {
+            requests,
+            info: VideoInfo {
+                encoder: String::new(),
+                hardware: false,
+                codec: Codec::H264Baseline,
+                width: 2,
+                height: 2,
+                display: Default::default(),
+            },
+            worker: Some(worker),
+        });
+        assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+    }
     #[test]
     fn software_mf_round_trip() -> Result<()> {
         let _runtime = match Runtime::new(true) {

@@ -93,6 +93,7 @@ fn is_mac_os(os: &str) -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Disconnect,
+    Reconnect,
     /// Ask the PC to leave HDR, which is what a black capture usually is.
     TurnOffHdr,
     Power(PowerAction),
@@ -103,6 +104,76 @@ pub enum Action {
     ApplySettings(StreamSettings),
     /// Whether a click on the picture captures the mouse.
     MouseCapture(bool),
+}
+
+/// An unexpected connection drop reconnection state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectState {
+    pub attempt: u32,
+    pub deadline: Instant,
+    pub in_flight: bool,
+}
+
+pub fn delay_for_attempt(attempt: u32) -> Duration {
+    match attempt {
+        1 => Duration::from_secs(2),
+        2 => Duration::from_secs(5),
+        _ => Duration::from_secs(10),
+    }
+}
+
+impl ReconnectState {
+    pub fn new(now: Instant) -> Self {
+        Self::with_attempt(1, now)
+    }
+
+    pub fn with_attempt(attempt: u32, now: Instant) -> Self {
+        Self {
+            attempt,
+            deadline: now + delay_for_attempt(attempt),
+            in_flight: false,
+        }
+    }
+
+    pub fn remaining(&self, now: Instant) -> Duration {
+        self.deadline.saturating_duration_since(now)
+    }
+
+    pub fn remaining_secs(&self, now: Instant) -> u64 {
+        let rem = self.remaining(now);
+        if rem.is_zero() {
+            0
+        } else {
+            (rem.as_millis() as u64).div_ceil(1000)
+        }
+    }
+
+    pub fn is_due(&self, now: Instant) -> bool {
+        now >= self.deadline
+    }
+
+    pub fn next_attempt(&self, now: Instant) -> Option<Self> {
+        if self.attempt >= 3 {
+            None
+        } else {
+            Some(Self::with_attempt(self.attempt + 1, now))
+        }
+    }
+}
+
+/// An interruption in the live stream before dropping the stream window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Interruption {
+    Reconnecting(ReconnectState),
+    Failed,
+    TakenOver(String),
+    HostSleeping,
+}
+
+impl Interruption {
+    pub fn reconnecting(now: Instant) -> Self {
+        Self::Reconnecting(ReconnectState::new(now))
+    }
 }
 
 /// What the window knows that the stream screen should show.
@@ -148,6 +219,11 @@ pub struct View {
     bar_h: f32,
     confirm: Option<PowerAction>,
     confirm_install: bool,
+    pub(crate) confirm_disconnect: Option<Instant>,
+    pub(crate) volume: u32,
+    pub(crate) muted: bool,
+    composing: bool,
+    pub(crate) interrupted: Option<Interruption>,
     poor: bool,
     poor_hinted: bool,
     toasts: Vec<Toast>,
@@ -238,6 +314,11 @@ impl Default for View {
             bar_h: size::TOOLBAR,
             confirm: None,
             confirm_install: false,
+            confirm_disconnect: None,
+            volume: 100,
+            muted: false,
+            composing: false,
+            interrupted: None,
             poor: false,
             poor_hinted: false,
             toasts: Vec::new(),
@@ -308,6 +389,7 @@ impl View {
         self.moved_to = None;
         self.pasted_since_v_up = false;
         self.cmd_since_v_up = false;
+        self.composing = false;
         if let Some(out) = out {
             self.held.release_all(out);
         }
@@ -318,6 +400,8 @@ impl View {
         self.confirm = None;
         self.settings = None;
         self.confirm_install = false;
+        self.confirm_disconnect = None;
+        self.interrupted = None;
         self.poor = false;
         self.poor_hinted = false;
         self.toasts.clear();
@@ -348,6 +432,32 @@ impl View {
         }
     }
 
+    pub fn handle_interruption_at(&mut self, now: Instant) {
+        match &mut self.interrupted {
+            Some(Interruption::Reconnecting(state)) => {
+                if let Some(next) = state.next_attempt(now) {
+                    *state = next;
+                } else {
+                    self.interrupted = Some(Interruption::Failed);
+                }
+            }
+            Some(Interruption::Failed)
+            | Some(Interruption::TakenOver(_))
+            | Some(Interruption::HostSleeping) => {}
+            None => {
+                self.interrupted = Some(Interruption::reconnecting(now));
+            }
+        }
+    }
+
+    pub fn handle_interruption(&mut self) {
+        self.handle_interruption_at(Instant::now());
+    }
+
+    pub fn cancel_reconnect(&mut self) {
+        self.interrupted = None;
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, env: &Env<'_>) -> Vec<Action> {
         let live = env.live;
         let mut actions = Vec::new();
@@ -367,9 +477,13 @@ impl View {
         let bottom_gap = screen.bottom() - video.bottom();
         let popup = ctx.memory(|m| m.any_popup_open());
         let bar_visible = self.bar_shown || popup || self.confirm.is_some() || self.confirm_install;
+        if !bar_visible {
+            self.confirm_disconnect = None;
+        }
         let mut bar_rect = bar_visible
             .then(|| Rect::from_min_size(screen.min, Vec2::new(screen.width(), self.bar_h)));
         let waiting = live.frames.seq() == 0;
+        let interruption = self.interrupted.clone();
 
         egui::CentralPanel::default()
             .frame(Frame::new().fill(Color32::BLACK))
@@ -388,7 +502,9 @@ impl View {
                     self.status_line(ui, screen, video, env, &stats, bottom_gap >= STATUS);
                 }
             });
-        if waiting {
+        if let Some(intr) = interruption.as_ref() {
+            self.interruption_overlay(ctx, screen, env, intr, &mut actions);
+        } else if waiting {
             self.waiting(ctx, screen, env, &mut actions);
         }
 
@@ -422,7 +538,12 @@ impl View {
         if self.stats {
             self.diagnostics(ctx, env, below_bar, &stats);
         }
-        self.input(ctx, live, env.cfg, video, bar_rect);
+        if interruption.is_none() {
+            self.input(ctx, live, env.cfg, video, bar_rect);
+        } else {
+            self.set_captured(ctx, false);
+            self.held.release_all(&live.input);
+        }
         actions
     }
 
@@ -436,7 +557,11 @@ impl View {
         actions: &mut Vec<Action>,
     ) {
         let live = env.live;
-        let w = overlay_width(420.0, screen.width());
+        let elapsed = live.started.elapsed();
+        if elapsed < Duration::from_secs(10) {
+            ctx.request_repaint_after(Duration::from_secs(10) - elapsed);
+        }
+        let w = overlay_width(440.0, screen.width());
         egui::Area::new(Id::new("stream-waiting"))
             .order(egui::Order::Middle)
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
@@ -461,10 +586,176 @@ impl View {
                             .font(theme::mono(theme::text::MONO - 0.5))
                             .color(P.text_tertiary),
                     );
+                    if elapsed >= Duration::from_secs(10) {
+                        ui.add_space(space::SM);
+                        ui.label(
+                            RichText::new("Connecting is taking longer than expected.")
+                                .font(theme::medium(theme::text::BODY))
+                                .color(P.warning),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "Check that {} is awake and signed in to Tailscale.",
+                                live.pc
+                            ))
+                            .font(theme::regular(theme::text::BODY - 1.0))
+                            .color(P.text_secondary),
+                        );
+                        if path.relayed() {
+                            ui.label(
+                                RichText::new(
+                                    "The connection is going through a Tailscale relay, which can be slow.",
+                                )
+                                .font(theme::regular(theme::text::BODY - 1.0))
+                                .color(P.text_secondary),
+                            );
+                        }
+                    }
                     ui.add_space(space::SM);
                     if ui::secondary_button(ui, "Cancel").clicked() {
                         actions.push(Action::Disconnect);
                     }
+                });
+            });
+    }
+
+    fn interruption_overlay(
+        &mut self,
+        ctx: &egui::Context,
+        screen: Rect,
+        env: &Env<'_>,
+        interruption: &Interruption,
+        actions: &mut Vec<Action>,
+    ) {
+        let live = env.live;
+        let w = overlay_width(440.0, screen.width());
+        egui::Area::new(Id::new("stream-interruption"))
+            .order(egui::Order::Foreground)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui::overlay_frame().show(ui, |ui| {
+                    ui.set_width(w);
+                    ui.vertical_centered(|ui| {
+                        ui.spacing_mut().item_spacing.y = space::SM;
+                        match interruption {
+                            Interruption::Reconnecting(state) => {
+                                let now = Instant::now();
+                                let remaining_secs = state.remaining_secs(now);
+                                ui.label(
+                                    RichText::new("Connection lost")
+                                        .font(theme::semibold(theme::text::TITLE))
+                                        .color(P.text),
+                                );
+                                if remaining_secs > 0 && !state.in_flight {
+                                    ui::muted(
+                                        ui,
+                                        format!(
+                                            "Reconnecting in {remaining_secs} s · attempt {} of 3",
+                                            state.attempt
+                                        ),
+                                    );
+                                    let rem = state.remaining(now);
+                                    let subsecond = rem.subsec_nanos();
+                                    let next_tick = if subsecond == 0 {
+                                        Duration::from_secs(1)
+                                    } else {
+                                        Duration::from_nanos(subsecond as u64)
+                                    };
+                                    ctx.request_repaint_after(next_tick);
+                                } else {
+                                    if !state.in_flight {
+                                        if let Some(Interruption::Reconnecting(ref mut s)) =
+                                            self.interrupted
+                                        {
+                                            s.in_flight = true;
+                                        }
+                                        actions.push(Action::Reconnect);
+                                    }
+                                    ui::muted(
+                                        ui,
+                                        format!("Attempting to restore stream to {}…", live.pc),
+                                    );
+                                }
+                                ui.add_space(space::XS);
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .add_enabled_ui(!state.in_flight, |ui| {
+                                            ui::primary_button(ui, "Reconnect now")
+                                        })
+                                        .inner
+                                        .clicked()
+                                    {
+                                        if let Some(Interruption::Reconnecting(ref mut s)) =
+                                            self.interrupted
+                                        {
+                                            s.in_flight = true;
+                                        }
+                                        actions.push(Action::Reconnect);
+                                    }
+                                    if ui::ghost_button(ui, "Back to machines").clicked() {
+                                        self.cancel_reconnect();
+                                        actions.push(Action::Disconnect);
+                                    }
+                                });
+                            }
+                            Interruption::Failed => {
+                                ui.label(
+                                    RichText::new(format!("Couldn't reconnect to {}", live.pc))
+                                        .font(theme::semibold(theme::text::TITLE))
+                                        .color(P.text),
+                                );
+                                ui.add_space(space::XS);
+                                ui.horizontal(|ui| {
+                                    if ui::primary_button(ui, "Try again").clicked() {
+                                        self.interrupted =
+                                            Some(Interruption::Reconnecting(ReconnectState {
+                                                attempt: 1,
+                                                deadline: Instant::now(),
+                                                in_flight: true,
+                                            }));
+                                        actions.push(Action::Reconnect);
+                                    }
+                                    if ui::ghost_button(ui, "Back to machines").clicked() {
+                                        self.cancel_reconnect();
+                                        actions.push(Action::Disconnect);
+                                    }
+                                });
+                            }
+                            Interruption::TakenOver(reason) => {
+                                ui.label(
+                                    RichText::new("Another device took over")
+                                        .font(theme::semibold(theme::text::TITLE))
+                                        .color(P.text),
+                                );
+                                ui::muted(ui, reason);
+                                ui.add_space(space::XS);
+                                ui.horizontal(|ui| {
+                                    if ui::primary_button(ui, "Reconnect now").clicked() {
+                                        actions.push(Action::Reconnect);
+                                    }
+                                    if ui::ghost_button(ui, "Back to machines").clicked() {
+                                        self.cancel_reconnect();
+                                        actions.push(Action::Disconnect);
+                                    }
+                                });
+                            }
+                            Interruption::HostSleeping => {
+                                ui.label(
+                                    RichText::new(format!("{} is going to sleep", live.pc))
+                                        .font(theme::semibold(theme::text::TITLE))
+                                        .color(P.text),
+                                );
+                                ui::muted(ui, "The remote machine was put to sleep.");
+                                ui.add_space(space::XS);
+                                ui.horizontal(|ui| {
+                                    if ui::ghost_button(ui, "Back to machines").clicked() {
+                                        self.cancel_reconnect();
+                                        actions.push(Action::Disconnect);
+                                    }
+                                });
+                            }
+                        }
+                    });
                 });
             });
     }
@@ -573,6 +864,10 @@ impl View {
                                 stats.mbps,
                                 live.settings.bitrate_kbps / 1000
                             ),
+                        ),
+                        Kv::new(
+                            "Received",
+                            format!("{:.1} Mbps with FEC and audio", stats.received_mbps),
                         ),
                         Kv::new(
                             "Round trip",
@@ -696,15 +991,43 @@ impl View {
                                     self.stats_button(ui);
                                     self.fullscreen_button(ui, env, actions);
                                     self.power_menu(ui, env);
+                                    if rect.width() >= 1100.0 {
+                                        self.volume_controls(ui, live);
+                                    } else {
+                                        ui::menu_button(ui, "Audio", |ui| {
+                                            self.volume_controls(ui, live);
+                                        });
+                                    }
                                 }
                                 if ui::ghost_button(ui, "Stream settings").clicked() {
                                     self.held.release_all(&live.input);
                                     self.set_captured(ctx, false);
                                     self.settings = Some(cfg.stream.clone());
+                                    self.confirm_disconnect = None;
                                 }
                                 toolbar_rule(ui);
-                                if ui::danger_button(ui, "Disconnect").clicked() {
-                                    actions.push(Action::Disconnect);
+                                let armed = self
+                                    .confirm_disconnect
+                                    .filter(|&t| t.elapsed() < Duration::from_secs(3));
+                                if self.confirm_disconnect.is_some() && armed.is_none() {
+                                    self.confirm_disconnect = None;
+                                }
+                                let disc_label = if armed.is_some() {
+                                    "Click again to disconnect"
+                                } else {
+                                    "Disconnect"
+                                };
+                                if let Some(t) = armed {
+                                    let rem = Duration::from_secs(3).saturating_sub(t.elapsed());
+                                    ctx.request_repaint_after(rem);
+                                }
+                                if ui::danger_button(ui, disc_label).clicked() {
+                                    if armed.is_some() {
+                                        actions.push(Action::Disconnect);
+                                        self.confirm_disconnect = None;
+                                    } else {
+                                        self.confirm_disconnect = Some(Instant::now());
+                                    }
                                 }
                             });
                         });
@@ -797,6 +1120,8 @@ impl View {
             if ui::menu_choice(ui, "Stream performance", self.stats).clicked() {
                 self.stats = !self.stats;
             }
+            ui::menu_label(ui, "Audio");
+            self.volume_controls(ui, live);
             ui::menu_label(ui, "Mouse");
             self.mouse_items(ui, ctx, live, cfg, actions);
             ui::menu_label(ui, "Send keys");
@@ -806,6 +1131,32 @@ impl View {
                 self.power_items(ui, env);
             }
         });
+    }
+
+    fn volume_controls(&mut self, ui: &mut egui::Ui, live: &Live) {
+        let mute_label = if self.muted { "Unmute" } else { "Mute" };
+        if ui::ghost_button(ui, mute_label).clicked() {
+            self.muted = !self.muted;
+            let gain = if self.muted {
+                0.0
+            } else {
+                self.volume as f32 / 100.0
+            };
+            live.session.set_volume(gain);
+        }
+        let mut vol = self.volume;
+        if ui::slider(ui, &mut vol, 0..=100, 60.0, "Volume").changed() {
+            self.volume = vol;
+            if self.muted && vol > 0 {
+                self.muted = false;
+            }
+            let gain = if self.muted {
+                0.0
+            } else {
+                self.volume as f32 / 100.0
+            };
+            live.session.set_volume(gain);
+        }
     }
 
     fn fullscreen_button(&self, ui: &mut egui::Ui, env: &Env<'_>, actions: &mut Vec<Action>) {
@@ -1169,6 +1520,11 @@ impl View {
     /// The stream has just connected: take the mouse if the window has
     /// focus, and say once how to get it back.
     pub fn stream_started(&mut self, ctx: &egui::Context, live: &Live, capture: bool) {
+        live.session.set_volume(if self.muted {
+            0.0
+        } else {
+            self.volume as f32 / 100.0
+        });
         // Capture as soon as the stream connects, whenever the window has
         // focus, without waiting for the pointer to be over the picture. A
         // game that reads raw relative motion (Genshin's camera, say) only
@@ -1220,6 +1576,12 @@ impl View {
         out: &S,
         connected: bool,
     ) {
+        if self.interrupted.is_some() {
+            self.held.release_all(out);
+            self.set_captured(ctx, false);
+            crate::macos::stream_owns_keys(false);
+            return;
+        }
         let (events, modifiers, pointer, focused) = ctx.input(|i| {
             (
                 i.events.clone(),
@@ -1229,7 +1591,10 @@ impl View {
             )
         });
         let popup = ctx.memory(|m| m.any_popup_open());
-        let overlay = self.confirm.is_some() || self.confirm_install || self.settings.is_some();
+        let overlay = self.confirm.is_some()
+            || self.confirm_install
+            || self.settings.is_some()
+            || self.interrupted.is_some();
         let over_bar = pointer.is_some_and(|p| bar.is_some_and(|b| b.contains(p)));
         let over_overlay = pointer.is_some_and(|p| {
             ctx.layer_id_at(p)
@@ -1337,7 +1702,40 @@ impl View {
             keys_to_pc,
             over_stream,
         };
+        let physical_text = events.iter().any(
+            |ev| matches!(ev, Event::Key { key, pressed: true, .. } if input::vk(*key).is_some()),
+        );
+        let commits: Vec<_> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                Event::Ime(egui::ImeEvent::Commit(t)) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
         for ev in events {
+            match &ev {
+                Event::Ime(egui::ImeEvent::Enabled | egui::ImeEvent::Preedit(_)) => {
+                    self.composing = true
+                }
+                Event::Ime(egui::ImeEvent::Disabled | egui::ImeEvent::Commit(_)) => {
+                    self.composing = false
+                }
+                Event::Key {
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if (self.composing || !commits.is_empty())
+                    && !modifiers.ctrl
+                    && !modifiers.command =>
+                {
+                    continue
+                }
+                _ => {}
+            }
+            if matches!(&ev, Event::Text(t) if self.composing || physical_text || commits.contains(t))
+            {
+                continue;
+            }
             match ev {
                 // The pointer is never held back behind a paste.
                 Event::PointerMoved(p) if !self.captured && over_stream => self.moved_to = Some(p),
@@ -1457,15 +1855,22 @@ impl View {
                 link.live.clipboard.poke();
             }
             Event::Paste(text) if at.keys_to_pc => self.paste(link, text),
+            Event::Text(text) if at.keys_to_pc => {
+                if !text.is_empty() {
+                    out.text(&text);
+                }
+            }
+            Event::Ime(egui::ImeEvent::Commit(text)) if at.keys_to_pc => {
+                if !text.is_empty() {
+                    out.text(&text);
+                }
+            }
             Event::PointerButton {
                 pos,
                 button,
                 pressed,
                 modifiers: m,
             } if self.captured || at.over_stream || (!pressed && self.held.any_down()) => {
-                if at.keys_to_pc && !(m.ctrl && m.alt) {
-                    self.held.modifiers(out, m, cmd_is_ctrl);
-                }
                 // The click lands where it was made: the pointer goes
                 // there first, before a capture would zero the motion.
                 if self.captured {
@@ -1475,15 +1880,18 @@ impl View {
                     self.send_position(link, pos);
                 }
                 // A click on the picture puts the toolbar away and, when
-                // capture is on, takes the mouse. The click itself still
-                // goes to the PC: what was clicked on is what was meant.
-                // Not before the stream connects: the mouse would be held
-                // with no way out but the host key, over the Cancel button.
-                if pressed && at.over_stream && !self.captured && link.connected {
+                // capture is on, takes the mouse. We complete capture before
+                // synchronizing modifiers and sending the click so grab's
+                // release does not drop the click's modifiers (F09).
+                let recaptured = pressed && at.over_stream && !self.captured && link.connected;
+                if recaptured {
                     self.bar_shown = false;
                     if link.cfg.capture_mouse {
                         self.grab(link.ctx, out);
                     }
+                }
+                if at.keys_to_pc && !(m.ctrl && m.alt) {
+                    self.held.modifiers(out, m, cmd_is_ctrl);
                 }
                 if let Some(b) = input::button(button) {
                     self.held.button(out, b, pressed);
@@ -1738,6 +2146,14 @@ fn toolbar_rule(ui: &mut egui::Ui) {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    pub fn hold_test_key(view: &mut super::View, input: &latch_stream::Input) {
+        view.held.key(input, 0x41, true);
+        assert!(view.held.any_down());
+    }
+    pub fn assert_no_held_input(view: &super::View) {
+        assert!(!view.held.any_down());
+    }
+
     use super::*;
     use crate::config::ClientConfig;
     use crate::session::Live;
@@ -1925,6 +2341,7 @@ pub(crate) mod tests {
         pub cfg: ClientConfig,
         pub fullscreen: bool,
         pub extra: Extra,
+        pub actions: Vec<Action>,
         applied: bool,
     }
 
@@ -1969,6 +2386,7 @@ pub(crate) mod tests {
         let ip: std::net::Ipv4Addr = "100.64.0.10".parse().unwrap();
         let input = session.input();
         Live {
+            generation: 0,
             pc: "Gaming-PC".into(),
             node_id: "n1".into(),
             ip,
@@ -2016,7 +2434,10 @@ pub(crate) mod tests {
             power_allowed: extra.power_allowed,
             can_sleep: extra.can_sleep,
         };
-        view.show(ctx, &env);
+        let actions = view.show(ctx, &env);
+        if !actions.is_empty() {
+            f.actions = actions;
+        }
     }
 
     /// A view with the toolbar dropped, as the host key leaves it.
@@ -2034,6 +2455,7 @@ pub(crate) mod tests {
             cfg: ClientConfig::default(),
             fullscreen: false,
             extra,
+            actions: Vec::new(),
             applied: false,
         }
     }
@@ -3050,6 +3472,59 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_click_that_recaptures_the_mouse_preserves_modifiers() {
+        let (mut h, tap) = recording(View::default(), true);
+        h.state_mut().cfg.capture_mouse = true;
+        assert!(!h.state().view.captured);
+
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::NONE
+        };
+        frame(
+            &mut h,
+            vec![Event::PointerButton {
+                pos: ON_PICTURE,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: shift,
+            }],
+            shift,
+        );
+
+        let sent = tap.take();
+        assert!(
+            h.state().view.captured,
+            "mouse must be captured after click"
+        );
+        let shift_down_pos = sent
+            .iter()
+            .position(|s| matches!(s, Sent::Key(k, true, _) if *k == input::VK_SHIFT));
+        let button_down_pos = sent
+            .iter()
+            .position(|s| matches!(s, Sent::Button(BUTTON_LEFT, true)));
+        assert!(
+            shift_down_pos.is_some(),
+            "shift down must be sent: {sent:?}"
+        );
+        assert!(
+            button_down_pos.is_some(),
+            "button down must be sent: {sent:?}"
+        );
+        assert!(
+            shift_down_pos.unwrap() < button_down_pos.unwrap(),
+            "shift down must precede button down: {sent:?}"
+        );
+        let shift_up_between = sent[shift_down_pos.unwrap()..button_down_pos.unwrap()]
+            .iter()
+            .any(|s| matches!(s, Sent::Key(k, false, _) if *k == input::VK_SHIFT));
+        assert!(
+            !shift_up_between,
+            "shift must not be released before button down: {sent:?}"
+        );
+    }
+
+    #[test]
     fn a_captured_click_comes_after_the_movement_before_it() {
         let view = View {
             captured: true,
@@ -3343,5 +3818,410 @@ pub(crate) mod tests {
         h.state_mut().view.bar_shown = false;
         h.run_steps(2);
         assert!(h.ctx.memory(|m| m.focused()).is_none());
+    }
+
+    #[test]
+    fn review_physical_text_and_ime_are_not_typed_twice() {
+        let (mut h, tap) = recording(View::default(), true);
+        frame(
+            &mut h,
+            vec![
+                key(Key::A, true, Modifiers::NONE),
+                Event::Text("a".into()),
+                key(Key::A, false, Modifiers::NONE),
+            ],
+            Modifiers::NONE,
+        );
+        assert!(
+            !tap.take().iter().any(|s| matches!(s, Sent::Text(_))),
+            "physical key already types a"
+        );
+        frame(
+            &mut h,
+            vec![
+                Event::Ime(egui::ImeEvent::Commit("世界".into())),
+                Event::Text("世界".into()),
+            ],
+            Modifiers::NONE,
+        );
+        assert_eq!(
+            tap.take()
+                .iter()
+                .filter(|s| matches!(s, Sent::Text(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn review_composition_keys_stay_local_until_commit() {
+        let (mut h, tap) = recording(View::default(), true);
+        frame(
+            &mut h,
+            vec![Event::Ime(egui::ImeEvent::Preedit("n".into()))],
+            Modifiers::NONE,
+        );
+        frame(
+            &mut h,
+            vec![
+                key(Key::N, true, Modifiers::NONE),
+                Event::Text("n".into()),
+                key(Key::N, false, Modifiers::NONE),
+            ],
+            Modifiers::NONE,
+        );
+        assert!(!tap
+            .take()
+            .iter()
+            .any(|s| matches!(s, Sent::Key(_, true, _) | Sent::Text(_))));
+        frame(
+            &mut h,
+            vec![Event::Ime(egui::ImeEvent::Commit("你".into()))],
+            Modifiers::NONE,
+        );
+        assert_eq!(
+            tap.take()
+                .iter()
+                .filter(|s| matches!(s, Sent::Text(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn review_new_session_restores_mute() {
+        let (mut h, _) = recording(
+            View {
+                muted: true,
+                volume: 35,
+                ..Default::default()
+            },
+            true,
+        );
+        let ctx = h.ctx.clone();
+        let f = h.state_mut();
+        f.view.stream_started(&ctx, f.live.as_ref().unwrap(), false);
+        assert_eq!(f.live.as_ref().unwrap().session.volume(), 0.0);
+    }
+
+    #[test]
+    fn text_and_ime_commit_events_are_forwarded_to_pc() {
+        let (mut h, tap) = recording(View::default(), true);
+        frame(
+            &mut h,
+            vec![
+                Event::Text("hello".into()),
+                Event::Ime(egui::ImeEvent::Commit("世界".into())),
+            ],
+            Modifiers::NONE,
+        );
+        let sent = tap.take();
+        assert!(
+            sent.iter()
+                .any(|s| matches!(s, Sent::Text(t) if t == "hello")),
+            "Event::Text must be forwarded to PC: {sent:?}"
+        );
+        assert!(
+            sent.iter()
+                .any(|s| matches!(s, Sent::Text(t) if t == "世界")),
+            "Event::Ime Commit must be forwarded to PC: {sent:?}"
+        );
+    }
+
+    #[test]
+    fn waiting_shows_troubleshooting_guidance_after_10_seconds() {
+        let (mut h, _) = recording(View::default(), false);
+        let live = h.state_mut().live.as_mut().unwrap();
+        live.started = Instant::now() - Duration::from_secs(11);
+        live.path = crate::path::Path {
+            direct: Some(true),
+            relay: String::new(),
+            peer_relay: String::new(),
+            rtt_ms: Some(25),
+        };
+        h.run_steps(1);
+        assert!(
+            h.query_by_label("Connecting is taking longer than expected.")
+                .is_some(),
+            "10s timeout guidance must be shown"
+        );
+        assert!(
+            h.query_by_label_contains("signed in to Tailscale")
+                .is_some(),
+            "Tailscale sign-in advice must be shown"
+        );
+        assert!(
+            h.query_by_label(
+                "The connection is going through a Tailscale relay, which can be slow."
+            )
+            .is_none(),
+            "relay warning should not be shown when direct"
+        );
+
+        // When the lobby/discovery path is relayed:
+        let (mut h_relayed, _) = recording(View::default(), false);
+        h_relayed.state_mut().live.as_mut().unwrap().started =
+            Instant::now() - Duration::from_secs(11);
+        h_relayed.state_mut().live.as_mut().unwrap().path = crate::path::Path {
+            direct: Some(false),
+            relay: "tok".into(),
+            peer_relay: String::new(),
+            rtt_ms: Some(150),
+        };
+        h_relayed.run_steps(1);
+        assert!(
+            h_relayed
+                .query_by_label(
+                    "The connection is going through a Tailscale relay, which can be slow."
+                )
+                .is_some(),
+            "relay warning must be shown when relayed"
+        );
+    }
+
+    #[test]
+    fn disconnect_requires_confirmation_in_toolbar() {
+        let mut h = harness(Vec2::new(1400.0, 860.0));
+        assert!(h.query_by_label("Disconnect").is_some());
+        assert!(h.query_by_label("Click again to disconnect").is_none());
+
+        // First click requests confirmation
+        h.get_by_label("Disconnect").simulate_click();
+        h.run_steps(2);
+        assert!(
+            h.query_by_label("Click again to disconnect").is_some(),
+            "Disconnect click must switch to Click again to disconnect"
+        );
+        assert!(h.state().view.confirm_disconnect.is_some());
+
+        // Second click confirms and resets
+        h.get_by_label("Click again to disconnect").simulate_click();
+        h.run_steps(2);
+        assert!(h.state().view.confirm_disconnect.is_none());
+
+        // Armed state expires after 3 seconds:
+        h.get_by_label("Disconnect").simulate_click();
+        h.run_steps(2);
+        assert!(h.query_by_label("Click again to disconnect").is_some());
+        // Fast-forward armed timestamp by 4s without sleeping
+        h.state_mut().view.confirm_disconnect = Some(Instant::now() - Duration::from_secs(4));
+        h.run_steps(2);
+        assert!(
+            h.query_by_label("Click again to disconnect").is_none(),
+            "armed state must expire back to Disconnect after 3s"
+        );
+        assert!(h.query_by_label("Disconnect").is_some());
+    }
+
+    #[test]
+    fn volume_slider_and_mute_control_audio_gain() {
+        let mut h = harness(Vec2::new(1400.0, 860.0));
+        assert!(h.query_by_label("Mute").is_some());
+        assert!(h.query_by_label("Volume").is_some());
+
+        // Initial state is 100% volume, unmuted
+        assert_eq!(h.state().view.volume, 100);
+        assert!(!h.state().view.muted);
+        assert!((h.state().live.as_ref().unwrap().session.volume() - 1.0).abs() < 1e-4);
+
+        // Click Mute
+        h.get_by_label("Mute").simulate_click();
+        h.run_steps(2);
+        assert!(h.state().view.muted);
+        assert_eq!(h.state().live.as_ref().unwrap().session.volume(), 0.0);
+        assert!(h.query_by_label("Unmute").is_some());
+
+        // Click Unmute
+        h.get_by_label("Unmute").simulate_click();
+        h.run_steps(2);
+        assert!(!h.state().view.muted);
+        assert!((h.state().live.as_ref().unwrap().session.volume() - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn in_stream_reconnecting_overlay_appears_when_connection_interrupted() {
+        let mut view = view_with_bar();
+        let live = dummy_live(&egui::Context::default());
+        live.frames.publish(latch_stream::video::Frame::default());
+        assert!(live.frames.seq() > 0);
+
+        // Using explicit interrupted state to avoid sleeping
+        view.interrupted = Some(Interruption::reconnecting(Instant::now()));
+
+        let mut h = harness_with(
+            Vec2::new(1400.0, 860.0),
+            1.0,
+            false,
+            fixture(view, Extra::default()),
+        );
+        h.state_mut().live = Some(live);
+        h.run_steps(2);
+
+        assert!(
+            h.query_by_label("Connection lost").is_some(),
+            "Connection lost overlay must appear when disconnected during stream"
+        );
+        assert!(h.query_by_label("Reconnect now").is_some());
+        assert!(h.query_by_label("Back to machines").is_some());
+
+        // Clicking Back to machines sends Disconnect
+        h.get_by_label("Back to machines").simulate_click();
+        h.run_steps(2);
+        assert!(h.state().actions.contains(&Action::Disconnect));
+    }
+
+    #[test]
+    fn review_countdown_dispatches_once_and_back_cancels_in_flight() {
+        let (mut h, _) = recording(View::default(), false);
+        h.state_mut().view.interrupted = Some(Interruption::Reconnecting(ReconnectState {
+            attempt: 1,
+            deadline: Instant::now() - Duration::from_secs(1),
+            in_flight: false,
+        }));
+        h.run_steps(1);
+        assert_eq!(
+            h.state()
+                .actions
+                .iter()
+                .filter(|a| **a == Action::Reconnect)
+                .count(),
+            1
+        );
+        h.state_mut().actions.clear();
+        h.run_steps(1);
+        assert!(!h.state().actions.contains(&Action::Reconnect));
+        h.get_by_label("Reconnect now").simulate_click();
+        h.run_steps(2);
+        assert!(
+            !h.state().actions.contains(&Action::Reconnect),
+            "in-flight retry is disabled"
+        );
+        frame(&mut h, vec![Event::WindowFocused(false)], Modifiers::NONE);
+        assert!(
+            h.state().view.interrupted.is_some(),
+            "focus loss must retain retry overlay"
+        );
+        h.get_by_label("Back to machines").simulate_click();
+        h.run_steps(2);
+        assert!(h.state().actions.contains(&Action::Disconnect));
+        assert!(h.state().view.interrupted.is_none());
+    }
+
+    #[test]
+    fn reconnect_state_transitions_countdown_and_attempts() {
+        let mut view = View::default();
+        let t0 = Instant::now();
+
+        // 1. Initial interruption: attempt 1 scheduled after 2 s
+        view.handle_interruption_at(t0);
+        let Some(Interruption::Reconnecting(ref s1)) = view.interrupted else {
+            panic!("expected Reconnecting state");
+        };
+        assert_eq!(s1.attempt, 1);
+        assert_eq!(s1.deadline, t0 + Duration::from_secs(2));
+        assert_eq!(s1.remaining_secs(t0), 2);
+        assert_eq!(s1.remaining_secs(t0 + Duration::from_millis(1500)), 1);
+        assert_eq!(s1.remaining_secs(t0 + Duration::from_secs(2)), 0);
+        assert!(s1.is_due(t0 + Duration::from_secs(2)));
+
+        // 2. Attempt 1 fails: attempt 2 scheduled after 5 s
+        let t1 = t0 + Duration::from_secs(2);
+        view.handle_interruption_at(t1);
+        let Some(Interruption::Reconnecting(ref s2)) = view.interrupted else {
+            panic!("expected Reconnecting state for attempt 2");
+        };
+        assert_eq!(s2.attempt, 2);
+        assert_eq!(s2.deadline, t1 + Duration::from_secs(5));
+        assert_eq!(s2.remaining_secs(t1), 5);
+        assert_eq!(s2.remaining_secs(t1 + Duration::from_secs(5)), 0);
+        assert!(s2.is_due(t1 + Duration::from_secs(5)));
+
+        // 3. Attempt 2 fails: attempt 3 scheduled after 10 s
+        let t2 = t1 + Duration::from_secs(5);
+        view.handle_interruption_at(t2);
+        let Some(Interruption::Reconnecting(ref s3)) = view.interrupted else {
+            panic!("expected Reconnecting state for attempt 3");
+        };
+        assert_eq!(s3.attempt, 3);
+        assert_eq!(s3.deadline, t2 + Duration::from_secs(10));
+        assert_eq!(s3.remaining_secs(t2), 10);
+        assert_eq!(s3.remaining_secs(t2 + Duration::from_secs(10)), 0);
+        assert!(s3.is_due(t2 + Duration::from_secs(10)));
+
+        // 4. Attempt 3 fails: exhausted retries transitions to Failed
+        let t3 = t2 + Duration::from_secs(10);
+        view.handle_interruption_at(t3);
+        assert_eq!(view.interrupted, Some(Interruption::Failed));
+    }
+
+    #[test]
+    fn reconnect_state_cancel_stops_retries() {
+        let mut view = View::default();
+        let t0 = Instant::now();
+        view.handle_interruption_at(t0);
+        assert!(view.interrupted.is_some());
+
+        // Cancelling stops pending retries and clears state
+        view.cancel_reconnect();
+        assert!(view.interrupted.is_none());
+    }
+
+    #[test]
+    fn reconnect_state_takeover_does_not_retry() {
+        let mut view = View {
+            interrupted: Some(Interruption::TakenOver("Another device connected".into())),
+            ..Default::default()
+        };
+
+        // Interruption handler must not overwrite or retry takeover
+        let t0 = Instant::now();
+        view.handle_interruption_at(t0);
+        assert_eq!(
+            view.interrupted,
+            Some(Interruption::TakenOver("Another device connected".into()))
+        );
+    }
+
+    #[test]
+    fn in_stream_reconnecting_overlay_countdown_and_exhaustion_ui() {
+        let mut view = view_with_bar();
+        let live = dummy_live(&egui::Context::default());
+        live.frames.publish(latch_stream::video::Frame::default());
+
+        let t0 = Instant::now();
+        view.handle_interruption_at(t0);
+
+        let mut h = harness_with(
+            Vec2::new(1400.0, 860.0),
+            1.0,
+            false,
+            fixture(view, Extra::default()),
+        );
+        h.state_mut().live = Some(live);
+        h.run_steps(1);
+
+        // Shows countdown
+        assert!(h.query_by_label("Connection lost").is_some());
+        assert!(h.query_by_label_contains("Reconnecting in").is_some());
+        assert!(h.query_by_label_contains("attempt 1 of 3").is_some());
+        assert!(h.query_by_label("Reconnect now").is_some());
+
+        // Primary click triggers Action::Reconnect
+        h.get_by_label("Reconnect now").simulate_click();
+        h.run_steps(1);
+        assert!(h.state().actions.contains(&Action::Reconnect));
+
+        // When exhausted, Failed state shows "Couldn't reconnect to {pc}" with Try again
+        h.state_mut().actions.clear();
+        h.state_mut().view.interrupted = Some(Interruption::Failed);
+        h.run_steps(1);
+        assert!(h.query_by_label_contains("Couldn't reconnect to").is_some());
+        assert!(h.query_by_label("Try again").is_some());
+        assert!(h.query_by_label("Back to machines").is_some());
+
+        // "Try again" initiates Reconnect
+        h.get_by_label("Try again").simulate_click();
+        h.run_steps(1);
+        assert!(h.state().actions.contains(&Action::Reconnect));
     }
 }
