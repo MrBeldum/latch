@@ -72,8 +72,8 @@ type byte and the payload and is at most 65 536. Payloads are JSON objects.
 | 2 | `End` | either | `{"code": u32, "message": string}`; the sender closes after it |
 | 3 | `Keepalive` | either | `{}` |
 | 4 | `Notice` | host → viewer | `{"kind": "audio" \| "video" \| "input", "message": string}`; `message` empty clears it |
-| 5 | `Report` | viewer → host | `{"fps", "loss_pct", "decode_ms", "rtt_ms"}`, once a second, for the host's log and FEC |
-| 6 | `Cursor` | host → viewer | `{"visible": bool, "shape": null \| {"serial": u32, "width": u32, "height": u32, "hot_x": u32, "hot_y": u32, "rgba": "<base64>"}}` |
+| 5 | `Report` | viewer → host | `{"fps", "loss_pct", "decode_ms", "rtt_ms"}`, once a second; `loss_pct` counts every video datagram the network lost, rebuilt by FEC or not. The host sets its bitrate, parity and pacing from it (`crates/proto/src/rate.rs`) |
+| 6 | `Cursor` | host → viewer | `{"visible": bool, "shape": null \| {"serial": u32, "width": u32, "height": u32, "hot_x": u32, "hot_y": u32, "rgba": "<base64>"}}`; only after an `Accept` with `cursor` true; sent when visibility or shape changes (`shape` null: unchanged); straight-alpha RGBA, at most 96×96 |
 | 7 | `DrawCursor` | viewer → host | `{"draw": bool}`; tells host whether to composite pointer into video |
 
 `Accept`:
@@ -245,9 +245,11 @@ requesting another one, unless a frame is declared lost.
 ### Ping (7) and Pong (8)
 
 `Ping` carries `u64 time` at offset 8, the sender's clock. The receiver
-answers at once with a `Pong` carrying the same `time`. Each side pings
-twice a second and keeps a smoothed round trip and its variance. No clocks
-are compared across machines.
+answers at once with a `Pong` carrying the same `time`. The viewer pings
+twice a second, the host ten times a second (the lowest round trip between
+two viewer reports tells a filling queue from the path's base), and each
+keeps a smoothed round trip and its variance. No clocks are compared
+across machines.
 
 ## Versioning
 
