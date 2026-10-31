@@ -131,6 +131,76 @@ fn pixel(p: &mut [u8], q: usize, step: usize, bs: usize, qp: usize, chroma: bool
         }
     }
 }
+// Four independent samples of a weak luma edge. Strong intra edges use the scalar oracle.
+#[cfg(target_arch = "aarch64")]
+fn weak4(p: &mut [u8], q: usize, step: usize, along: usize, bs: usize, qp: usize) {
+    use std::arch::aarch64::*;
+    assert!(q >= 3 * step && q + 2 * step + 3 * along < p.len());
+    unsafe {
+        let load = |delta: isize| {
+            let base = (q as isize + delta * step as isize) as usize;
+            let v: [i16; 4] = std::array::from_fn(|i| p[base + i * along] as i16);
+            vld1_s16(v.as_ptr())
+        };
+        let (p2, p1, p0, q0, q1, q2) = (load(-3), load(-2), load(-1), load(0), load(1), load(2));
+        let beta = vdup_n_s16(BETA[qp] as i16);
+        let mask = vand_u16(
+            vclt_s16(vabd_s16(p0, q0), vdup_n_s16(ALPHA[qp] as i16)),
+            vand_u16(
+                vclt_s16(vabd_s16(p1, p0), beta),
+                vclt_s16(vabd_s16(q1, q0), beta),
+            ),
+        );
+        if vget_lane_u64::<0>(vreinterpret_u64_u16(mask)) == 0 {
+            return;
+        }
+        let ap = vclt_s16(vabd_s16(p2, p0), beta);
+        let aq = vclt_s16(vabd_s16(q2, q0), beta);
+        let tc0 = vdup_n_s16(TC[qp][bs] as i16);
+        let tc = vsub_s16(
+            vsub_s16(tc0, vreinterpret_s16_u16(ap)),
+            vreinterpret_s16_u16(aq),
+        );
+        let clip = |v, t| vmin_s16(vmax_s16(v, vneg_s16(t)), t);
+        let delta = clip(
+            vshr_n_s16::<3>(vadd_s16(
+                vadd_s16(vshl_n_s16::<2>(vsub_s16(q0, p0)), vsub_s16(p1, q1)),
+                vdup_n_s16(4),
+            )),
+            tc,
+        );
+        let avg = vrhadd_s16(p0, q0);
+        let pp1 = vadd_s16(
+            p1,
+            clip(
+                vshr_n_s16::<1>(vsub_s16(vadd_s16(p2, avg), vshl_n_s16::<1>(p1))),
+                tc0,
+            ),
+        );
+        let qq1 = vadd_s16(
+            q1,
+            clip(
+                vshr_n_s16::<1>(vsub_s16(vadd_s16(q2, avg), vshl_n_s16::<1>(q1))),
+                tc0,
+            ),
+        );
+        let values = [
+            vbsl_s16(vand_u16(mask, ap), pp1, p1),
+            vbsl_s16(mask, vadd_s16(p0, delta), p0),
+            vbsl_s16(mask, vsub_s16(q0, delta), q0),
+            vbsl_s16(vand_u16(mask, aq), qq1, q1),
+        ];
+        for (i, value) in values.into_iter().enumerate() {
+            let bytes = vqmovun_s16(vcombine_s16(value, value));
+            let bytes = vget_lane_u32::<0>(vreinterpret_u32_u8(bytes)).to_le_bytes();
+            let base = (q as isize + (i as isize - 2) * step as isize) as usize;
+            for j in 0..4 {
+                p[base + j * along] = bytes[j];
+            }
+        }
+    }
+}
+
 pub(super) fn filter(p: &mut Yuv420, mbs: &[Mb]) {
     let w = p.padded_width() / 16;
     let h = p.padded_height() / 16;
@@ -138,6 +208,7 @@ pub(super) fn filter(p: &mut Yuv420, mbs: &[Mb]) {
         for mx in 0..w {
             let index = my * w + mx;
             let cur = &mbs[index];
+            let empty = !cur.intra && cur.nz == [0; 16];
             for vertical in [true, false] {
                 for edge in 0..4 {
                     if edge == 0 && if vertical { mx == 0 } else { my == 0 } {
@@ -148,6 +219,17 @@ pub(super) fn filter(p: &mut Yuv420, mbs: &[Mb]) {
                     } else {
                         &mbs[index - if vertical { 1 } else { w }]
                     };
+                    // Every segment has bS=0 on an empty internal edge, or between
+                    // empty inter MBs with matching motion. This is the desktop skip path.
+                    if empty
+                        && (edge > 0
+                            || (!other.intra
+                                && other.nz == [0; 16]
+                                && (cur.mv.0 - other.mv.0).abs() < 4
+                                && (cur.mv.1 - other.mv.1).abs() < 4))
+                    {
+                        continue;
+                    }
                     let qp = (cur.qp as usize + other.qp as usize + 1) >> 1;
                     let cqp = (chroma_qp(cur.qp) as usize + chroma_qp(other.qp) as usize + 1) >> 1;
                     for segment in 0..4 {
@@ -181,18 +263,35 @@ pub(super) fn filter(p: &mut Yuv420, mbs: &[Mb]) {
                         }
                         let x = mx * 16 + if vertical { edge * 4 } else { segment * 4 };
                         let y = my * 16 + if vertical { segment * 4 } else { edge * 4 };
-                        for i in 0..4 {
-                            let q = (y + if vertical { i } else { 0 }) * p.y_stride
-                                + x
-                                + if vertical { 0 } else { i };
-                            pixel(
+                        #[cfg(target_arch = "aarch64")]
+                        let simd = bs < 4;
+                        #[cfg(not(target_arch = "aarch64"))]
+                        let simd = false;
+                        #[cfg(target_arch = "aarch64")]
+                        if simd {
+                            weak4(
                                 &mut p.y,
-                                q,
+                                y * p.y_stride + x,
                                 if vertical { 1 } else { p.y_stride },
+                                if vertical { p.y_stride } else { 1 },
                                 bs,
                                 qp,
-                                false,
                             );
+                        }
+                        if !simd {
+                            for i in 0..4 {
+                                let q = (y + if vertical { i } else { 0 }) * p.y_stride
+                                    + x
+                                    + if vertical { 0 } else { i };
+                                pixel(
+                                    &mut p.y,
+                                    q,
+                                    if vertical { 1 } else { p.y_stride },
+                                    bs,
+                                    qp,
+                                    false,
+                                );
+                            }
                         }
                         if edge % 2 == 0 {
                             for plane in [&mut p.u, &mut p.v] {
@@ -210,6 +309,39 @@ pub(super) fn filter(p: &mut Yuv420, mbs: &[Mb]) {
                                     );
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod tests {
+    use super::*;
+    #[test]
+    fn weak_edges_match_scalar() {
+        let mut seed = 17u32;
+        for qp in 0..52 {
+            for bs in 1..4 {
+                for vertical in [false, true] {
+                    for range in [8, 32, 256] {
+                        for _ in 0..20 {
+                            let mut a: Vec<_> = (0..16 * 16)
+                                .map(|_| {
+                                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                                    (128 + (seed >> 16) % range - range / 2) as u8
+                                })
+                                .collect();
+                            let mut b = a.clone();
+                            let (step, along) = if vertical { (1, 16) } else { (16, 1) };
+                            let q = 4 * 16 + 4;
+                            weak4(&mut a, q, step, along, bs, qp);
+                            for i in 0..4 {
+                                pixel(&mut b, q + i * along, step, bs, qp, false);
+                            }
+                            assert_eq!(a, b, "qp={qp}, bs={bs}, vertical={vertical}");
                         }
                     }
                 }
