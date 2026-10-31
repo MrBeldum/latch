@@ -83,7 +83,11 @@ source pixels did not change since the last frame costs a skip and no
 search; changed macroblocks get a small motion search seeded by their
 neighbours and a scroll detector, and intra prediction. Rate control is a
 per-frame QP from a one-frame VBV, so a frame never takes much longer than
-its interval on the wire.
+its interval on the wire. Its hot loops (colour conversion, SAD, residual
+reconstruction, deblocking) use NEON or SSE/AVX2 through `std::arch`, and
+a governor keeps each frame's encode under 65% of the frame interval by
+trading search effort, not frames, so a slow or busy host still sends
+every frame it was asked for.
 
 ### Audio
 
@@ -104,6 +108,28 @@ captured ones, which lets tests check audio bit for bit. Opus is gone.
 * **Newest frame wins** on the viewer (`FrameSlot`), every frame is decoded
   (P-frames depend on each other), and a lost frame stops decoding until a
   keyframe.
+* **Frames on a fixed grid.** Every pipeline takes frames on a grid 1%
+  faster than the asked-for rate (`video::Pacer`): capture and encode time
+  comes out of the interval instead of adding to it, a screen refreshing at
+  the stream's rate gives up every refresh, and a late frame moves the
+  grid rather than bursting.
+* **The bitrate follows the path** (`latch_proto::rate`). The host starts
+  at the asked-for rate, backs off from what it actually sent when the
+  viewer reports 4% loss or the lowest round trip of a second rises
+  `max(10 ms, base/4)` above the path's base, and climbs back after two
+  clean seconds. Parity has a floor by base round trip (15% from 40 ms,
+  20% from 100 ms), since a lost frame freezes the picture for a round
+  trip. While the viewer reports loss, frames leave paced at four times the
+  bitrate; on a clean path each frame leaves at once.
+* **Data before parity.** A frame's data shards go out before any parity
+  is computed, so a frame that loses nothing never waits for FEC.
+* **Media threads at high priority** (user-interactive QoS on macOS,
+  highest priority on Windows) and media sockets with 8 MB buffers, so a
+  keyframe's burst is not dropped by the sender or the receiver.
+* **Sound follows the picture.** The viewer's mixer plays up to 2% fast or
+  slow to keep about 30 ms queued, more after the queue runs dry.
+* **A Mac viewer never copies a picture**: VideoToolbox decodes into an
+  IOSurface that the renderer samples as Metal textures.
 * **One viewer at a time.** A new authorized viewer takes the host over;
   the old one gets `End` code 1.
 * **Display sizing** stays where it was: a Linux desktop that follows its
