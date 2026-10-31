@@ -12,6 +12,7 @@ pub mod input;
 pub mod pattern;
 pub mod priority;
 pub mod server;
+pub mod sockets;
 pub mod software;
 pub mod testmode;
 pub mod video;

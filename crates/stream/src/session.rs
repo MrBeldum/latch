@@ -447,6 +447,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         Ok(u) => u,
         Err(e) => return fail("connecting", format!("no UDP socket for the picture: {e}")),
     };
+    crate::sockets::grow(&udp);
     let udp_port = udp.local_addr().map(|a| a.port()).unwrap_or(0);
     let codecs = offer(settings);
     let request = StreamRequest {

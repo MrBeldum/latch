@@ -13,14 +13,15 @@ use crate::video::{self, Codec, VideoConfig, VideoInfo, VideoPipeline};
 use latch_proto::audio::AudioPacketizer;
 use latch_proto::control::{self, end, Accept, AudioFormat, End, Message, Notice, StreamRequest};
 use latch_proto::input::InputReceiver;
+use latch_proto::rate::RateControl;
 use latch_proto::rtt::RttEstimator;
-use latch_proto::video::{fec_percent_for_loss, OutFrame, Packetizer, DEFAULT_FEC_PERCENT};
+use latch_proto::video::{fec_percent_for, OutFrame, Packetizer, DEFAULT_FEC_PERCENT};
 use latch_proto::wire::{self, Datagram};
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -36,7 +37,9 @@ const KEEPALIVE: Duration = Duration::from_secs(1);
 /// A viewer heard from neither over TCP nor UDP for this long is gone.
 const SILENT: Duration = Duration::from_secs(10);
 const HELLO_EVERY: Duration = Duration::from_millis(50);
-const PING_EVERY: Duration = Duration::from_millis(500);
+/// Often enough that each viewer report (once a second) has round trips
+/// to tell a filling queue from the path's base; a ping is 16 bytes.
+const PING_EVERY: Duration = Duration::from_millis(100);
 /// Keyframes for requests at most this often: a burst of requests for one
 /// loss must not turn into a burst of keyframes.
 const KEYFRAME_GAP: Duration = Duration::from_millis(50);
@@ -115,6 +118,7 @@ impl Server {
     pub fn bind(port: u16, options: Options) -> anyhow::Result<Arc<Self>> {
         let udp = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))
             .map_err(|e| anyhow::anyhow!("cannot listen on UDP port {port}: {e}"))?;
+        crate::sockets::grow(&udp);
         udp.set_read_timeout(Some(Duration::from_millis(200)))?;
         let server = Arc::new(Self {
             udp,
@@ -263,6 +267,9 @@ impl Server {
                 display: info.display,
             }),
             rtt: Mutex::new(RttEstimator::new()),
+            rtt_low: Mutex::new(None),
+            rate: Mutex::new(RateControl::new(config.bitrate_kbps)),
+            bitrate: AtomicU32::new(config.bitrate_kbps),
             fec: AtomicU8::new(DEFAULT_FEC_PERCENT),
             heard_us: AtomicU64::new(self.now_us()),
             frames: AtomicU64::new(0),
@@ -436,7 +443,24 @@ impl Server {
                 }
                 Ok(Message::Report(r)) => {
                     session.heard(self.now_us());
-                    let fec = fec_percent_for_loss(r.loss_pct);
+                    let rtt = session.rtt_low.lock().take();
+                    let (changed, base) = {
+                        let mut rate = session.rate.lock();
+                        (
+                            rate.report(Instant::now(), r.loss_pct, rtt),
+                            rate.base_rtt(),
+                        )
+                    };
+                    if let Some(kbps) = changed {
+                        session.bitrate.store(kbps, Ordering::Relaxed);
+                        tracing::debug!(
+                            "viewer reports {:.1}% loss, round trip {:?} (base {:?}); bitrate now {kbps} kb/s",
+                            r.loss_pct,
+                            rtt,
+                            base
+                        );
+                    }
+                    let fec = fec_percent_for(r.loss_pct, base);
                     if session.fec.swap(fec, Ordering::Relaxed) != fec {
                         tracing::debug!(
                             "viewer reports {:.1}% loss; parity now {fec}%",
@@ -585,6 +609,11 @@ struct Session {
     keyframe: AtomicBool,
     input: Mutex<InputState>,
     rtt: Mutex<RttEstimator>,
+    /// The lowest round trip since the last viewer report.
+    rtt_low: Mutex<Option<Duration>>,
+    rate: Mutex<RateControl>,
+    /// What the encoder should be set to, in kb/s.
+    bitrate: AtomicU32,
     fec: AtomicU8,
     /// When the viewer was last heard from, on the server's clock.
     heard_us: AtomicU64,
@@ -715,8 +744,10 @@ fn receive(server: Weak<Server>) {
                 let _ = server.udp.send_to(&out, from);
             }
             Datagram::Pong { time, .. } => {
-                let rtt = server.now_us().saturating_sub(time);
-                session.rtt.lock().sample(Duration::from_micros(rtt));
+                let rtt = Duration::from_micros(server.now_us().saturating_sub(time));
+                session.rtt.lock().sample(rtt);
+                let mut low = session.rtt_low.lock();
+                *low = Some(low.map_or(rtt, |low| low.min(rtt)));
             }
             _ => {}
         }
@@ -732,10 +763,16 @@ fn send_video(
 ) {
     crate::priority::media_thread();
     let mut packetizer = Packetizer::new(session.id);
+    let mut bitrate = config.bitrate_kbps;
     let mut last_keyframe: Option<Instant> = None;
     let mut info = pipeline.info();
     let mut recoveries = VecDeque::new();
     while !session.stopping() {
+        let wanted = session.bitrate.load(Ordering::Relaxed);
+        if wanted != bitrate {
+            pipeline.set_bitrate(wanted);
+            bitrate = wanted;
+        }
         let due = last_keyframe.is_none_or(|t| t.elapsed() >= KEYFRAME_GAP);
         let keyframe = due && session.keyframe.swap(false, Ordering::AcqRel);
         // Short idle repeats bound how long a request arriving inside next
@@ -756,6 +793,7 @@ fn send_video(
                     recoveries.push_back(now);
                     if let Ok(p) = reopen(&config) {
                         pipeline = p;
+                        bitrate = config.bitrate_kbps;
                         session.keyframe.store(true, Ordering::Release);
                         continue;
                     }
@@ -892,15 +930,17 @@ fn audio_problem(server: &Server, session: &Session, message: String) {
 }
 
 /// One datagram, retried briefly when the socket's buffer is full (macOS
-/// says ENOBUFS when a keyframe outruns the interface).
+/// says ENOBUFS when a keyframe outruns the interface). Up to about 5 ms:
+/// a datagram dropped here loses its frame, which costs a round trip and
+/// a keyframe; waiting for the interface to drain costs less.
 fn send(udp: &UdpSocket, datagram: &[u8], to: SocketAddr) {
-    for _ in 0..3 {
+    for _ in 0..20 {
         match udp.send_to(datagram, to) {
             Ok(_) => return,
             Err(e)
                 if e.raw_os_error() == Some(55) || e.kind() == std::io::ErrorKind::WouldBlock =>
             {
-                std::thread::sleep(Duration::from_micros(200));
+                std::thread::sleep(Duration::from_micros(250));
             }
             Err(_) => return,
         }

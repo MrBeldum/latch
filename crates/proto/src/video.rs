@@ -29,6 +29,19 @@ pub fn fec_percent_for_loss(loss_pct: f32) -> u8 {
         .clamp(MIN_FEC_PERCENT as f32, MAX_FEC_PERCENT as f32) as u8
 }
 
+/// The parity share for a path with `loss_pct` percent loss and a base
+/// round trip of `rtt`. The farther the viewer, the longer a lost frame
+/// freezes the picture (a keyframe takes a round trip to ask for and
+/// arrive), so a long path carries more parity before any loss is seen.
+pub fn fec_percent_for(loss_pct: f32, rtt: Option<std::time::Duration>) -> u8 {
+    let floor = match rtt.map_or(0, |rtt| rtt.as_millis()) {
+        0..40 => DEFAULT_FEC_PERCENT,
+        40..100 => 15,
+        _ => 20,
+    };
+    fec_percent_for_loss(loss_pct).max(floor)
+}
+
 /// One encoded frame for the packetizer.
 #[derive(Debug, Clone, Copy)]
 pub struct OutFrame<'a> {

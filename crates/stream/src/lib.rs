@@ -8,6 +8,8 @@ pub mod input;
 #[path = "../../engine/src/priority.rs"]
 mod priority;
 pub mod session;
+#[path = "../../engine/src/sockets.rs"]
+mod sockets;
 pub mod video;
 
 pub use latch_proto::control::Codec;
