@@ -208,7 +208,9 @@ fn a_bad_network_slows_the_picture_but_loses_no_key() {
     while Instant::now() < deadline {
         if frames.seq() > seq {
             seq = frames.seq();
-            if let Some(f) = frames.take() {
+            if let Some(mut f) = frames.take() {
+                // A Mac's decoder hands over its own buffer; read it here.
+                f.ensure_cpu_planes();
                 white = Some(square_is_white(&f));
                 frames.recycle(f);
             }

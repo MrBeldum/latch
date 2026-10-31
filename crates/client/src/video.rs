@@ -882,6 +882,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         let make_frame = || {
             #[link(name = "CoreVideo", kind = "framework")]
+            extern "C" {}
             #[link(name = "CoreFoundation", kind = "framework")]
             extern "C" {
                 static kCFTypeDictionaryKeyCallBacks: std::ffi::c_void;

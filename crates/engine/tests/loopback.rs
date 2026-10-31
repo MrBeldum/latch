@@ -103,7 +103,9 @@ fn next_frame(frames: &FrameSlot, after: u64, timeout: Duration) -> Option<(u64,
     while start.elapsed() < timeout {
         let seq = frames.seq();
         if seq > after {
-            if let Some(f) = frames.take() {
+            if let Some(mut f) = frames.take() {
+                // A Mac's decoder hands over its own buffer; read it here.
+                f.ensure_cpu_planes();
                 return Some((seq, f));
             }
         }

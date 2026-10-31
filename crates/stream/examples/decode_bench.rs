@@ -319,6 +319,8 @@ mod tests {
     }
 
     #[test]
+    // `native` exists only on macOS.
+    #[allow(clippy::needless_update)]
     fn test_pixel_oracle_validation() {
         let mut f = Frame {
             width: 64,
@@ -328,6 +330,7 @@ mod tests {
             y: vec![16; 4096],
             uv: vec![128; 2048],
             full_range: false,
+            ..Default::default()
         };
         f.y[16 * 64 + 32] = 235;
         f.y[48 * 64 + 32] = 16;

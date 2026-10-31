@@ -520,6 +520,8 @@ mod tests {
     }
 
     #[test]
+    // `native` exists only on macOS.
+    #[allow(clippy::needless_update)]
     fn black_detection_checks_visible_pixels_and_both_ranges() {
         let mut frame = Frame {
             width: 2,
@@ -564,6 +566,8 @@ mod tests {
     }
 
     #[test]
+    // `native` exists only on macOS.
+    #[allow(clippy::needless_update)]
     fn slot_keeps_only_the_newest() {
         let slot = FrameSlot::default();
         let f = |w| Frame {
