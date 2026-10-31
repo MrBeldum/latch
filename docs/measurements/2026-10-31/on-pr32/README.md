@@ -113,3 +113,12 @@ retained deterministic and relay tests for the latter.
 Compatibility smoke runs also streamed a merged host to the existing 5.0.1
 viewer and a #32 host to the merged viewer (640×360 sweep, five keys each).
 Both delivered all keys and about 60 fps. No installed services were used.
+
+The initial remote merged noise run had one late loss burst: the final
+250 ms statistics window reported 4.36% unrecovered loss, two lost frames
+and 27.9 fps, while its steady median was 59.7 fps. This is retained in the
+main table, not excluded. A subsequent 12-second run (`rechecks/`) reported
+zero loss, median 59.65 fps, interval SD 3.06 ms and p99 22.65 ms; the paired
+#32 repeat had zero loss, median 55.67 fps, SD 9.05 ms and p99 45.74 ms.
+The burst ended too near disconnection to measure controller recovery;
+controlled loss/queue recovery is verified by the retained bottleneck tests.
