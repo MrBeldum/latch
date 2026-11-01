@@ -95,11 +95,16 @@ fn construct(event: &Event, display: DisplayRect) -> Result<Vec<INPUT>> {
                 }
             }
         }
+        // A plain relative move, as Sunshine sends it. With
+        // MOUSEEVENTF_MOVE_NOCOALESCE the game's raw input reads usFlags
+        // MOUSE_MOVE_NOCOALESCE instead of MOUSE_MOVE_RELATIVE (0), and
+        // games that only accept the latter drop every move: Genshin
+        // Impact's and Honkai: Star Rail's cameras stood still.
         Event::MouseMove { dx, dy } => out.push(mouse(
             i32::from(*dx),
             i32::from(*dy),
             0,
-            MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE,
+            MOUSEEVENTF_MOVE,
         )),
         Event::MousePosition {
             x,
@@ -305,15 +310,15 @@ mod tests {
         }
     }
     #[test]
-    fn relative_motion_disables_windows_coalescing() -> Result<()> {
+    fn relative_motion_reaches_raw_input_as_plain_relative() -> Result<()> {
         let v = construct(&Event::MouseMove { dx: 1, dy: -2 }, DisplayRect::default())?;
         // SAFETY: construct produces mouse INPUT for MouseMove.
         unsafe {
-            assert!(v[0]
-                .Anonymous
-                .mi
-                .dwFlags
-                .contains(MOUSEEVENTF_MOVE_NOCOALESCE));
+            let mi = v[0].Anonymous.mi;
+            // Any other flag shows in RAWMOUSE.usFlags, and games that want
+            // MOUSE_MOVE_RELATIVE there ignore the move.
+            assert_eq!(mi.dwFlags, MOUSEEVENTF_MOVE);
+            assert_eq!((mi.dx, mi.dy), (1, -2));
         }
         Ok(())
     }
