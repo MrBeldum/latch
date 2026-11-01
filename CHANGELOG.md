@@ -4,6 +4,16 @@ The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
+## Unreleased
+
+- One pointer while the mouse is captured. The Mac's arrow was hidden only
+  by egui's cursor, which macOS applies when the pointer moves over the
+  window; a captured pointer is held still, so the Mac's arrow could stay
+  in the picture beside the PC's (seen streaming the Windows PC). AppKit
+  now hides it for as long as the mouse is captured, and a pointer that
+  was off the window when the stream took it is moved onto the picture
+  first, so its clicks no longer reach another app.
+
 ## 5.1.0 (2026-10-31)
 
 Faster, steadier streams: from a Linux host to a Mac at 1080p60, 60 fps

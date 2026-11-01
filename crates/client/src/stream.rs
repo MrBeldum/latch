@@ -434,13 +434,33 @@ impl View {
             } else {
                 egui::CursorGrab::None
             };
+            if on {
+                // The pointer is held where it is. Off the window (the
+                // stream connected with it elsewhere) it would stay in
+                // sight and its clicks reach another app: it goes to the
+                // middle of the picture first.
+                let inside = ctx.input(|i| {
+                    i.pointer
+                        .latest_pos()
+                        .is_some_and(|p| i.screen_rect().contains(p))
+                });
+                if !inside {
+                    let middle = ctx.screen_rect().center();
+                    ctx.send_viewport_cmd(ViewportCommand::CursorPosition(middle));
+                }
+            }
             ctx.send_viewport_cmd(ViewportCommand::CursorGrab(grab));
-            // The cursor is hidden through `set_cursor_icon(None)` alone,
-            // every frame the pointer is in the stream viewport. A
-            // `CursorVisible(true)` here would show it behind egui's
-            // back: egui only re-applies an icon when it changes, so the
-            // Mac cursor would stay on top of the PC's until the pointer
-            // left the window — two pointers.
+            // A free pointer is hidden through `set_cursor_icon(None)`,
+            // every frame it is over the picture. A `CursorVisible(true)`
+            // here would show it behind egui's back: egui only re-applies
+            // an icon when it changes, so the Mac cursor would stay on top
+            // of the PC's until the pointer left the window — two pointers.
+            // A captured one is hidden by AppKit as well: egui's icon is
+            // only a cursor rectangle over the window, which macOS applies
+            // when the pointer moves into it, and a held pointer never
+            // moves — the Mac's arrow stayed in the picture beside the
+            // PC's, or outside it when the window was not under it.
+            crate::macos::hide_pointer(on);
         }
     }
 
@@ -2266,6 +2286,38 @@ pub(crate) mod tests {
     use crate::config::ClientConfig;
     use crate::session::Live;
     use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn a_capture_puts_a_pointer_off_the_window_on_the_picture() {
+        let commands = |pointer: Option<Pos2>| {
+            let ctx = egui::Context::default();
+            let mut input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+                ..Default::default()
+            };
+            if let Some(p) = pointer {
+                input.events.push(Event::PointerMoved(p));
+            }
+            let mut view = View::default();
+            let out = ctx.run(input, |ctx| view.set_captured(ctx, true));
+            out.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .clone()
+        };
+        // Held where it was clicked, on the picture.
+        assert!(!commands(Some(Pos2::new(10.0, 20.0)))
+            .iter()
+            .any(|c| matches!(c, ViewportCommand::CursorPosition(_))));
+        // Somewhere else: moved to the middle before it is held.
+        let off = commands(None);
+        let warp = off
+            .iter()
+            .position(|c| *c == ViewportCommand::CursorPosition(Pos2::new(400.0, 300.0)));
+        let grab = off
+            .iter()
+            .position(|c| matches!(c, ViewportCommand::CursorGrab(_)));
+        assert!(warp.is_some() && warp < grab, "{off:?}");
+    }
 
     #[test]
     fn host_cursor_rect_unscaled_and_scaled() {
