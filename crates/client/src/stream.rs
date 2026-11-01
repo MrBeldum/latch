@@ -1552,6 +1552,10 @@ impl View {
     /// The stream has just connected: take the mouse if the window has
     /// focus, and say once how to get it back.
     pub fn stream_started(&mut self, ctx: &egui::Context, live: &Live, capture: bool) {
+        // A host that streams cursor shapes starts each session without
+        // its pointer in the picture. The last session's reset left this
+        // true, and a captured reconnect would then never ask for it.
+        self.host_cursor_drawn = false;
         live.session.set_volume(if self.muted {
             0.0
         } else {
@@ -1817,7 +1821,12 @@ impl View {
                 _ => None,
             })
             .collect();
-        for ev in events {
+        // The keys typed before a commit composed it and stay here; keys
+        // after it in the same frame are new typing and go to the PC.
+        let last_commit = events
+            .iter()
+            .rposition(|ev| matches!(ev, Event::Ime(egui::ImeEvent::Commit(_))));
+        for (i, ev) in events.into_iter().enumerate() {
             match &ev {
                 Event::Ime(egui::ImeEvent::Enabled | egui::ImeEvent::Preedit(_)) => {
                     self.composing = true
@@ -1829,7 +1838,7 @@ impl View {
                     pressed: true,
                     modifiers,
                     ..
-                } if (self.composing || !commits.is_empty())
+                } if (self.composing || last_commit.is_some_and(|c| i < c))
                     && !modifiers.ctrl
                     && !modifiers.command =>
                 {
@@ -4073,6 +4082,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn keys_after_a_commit_in_the_same_frame_reach_the_pc() {
+        let (mut h, tap) = recording(View::default(), true);
+        frame(
+            &mut h,
+            vec![
+                Event::Ime(egui::ImeEvent::Commit("你".into())),
+                key(Key::A, true, Modifiers::NONE),
+                Event::Text("a".into()),
+                key(Key::A, false, Modifiers::NONE),
+            ],
+            Modifiers::NONE,
+        );
+        let sent = tap.take();
+        assert!(sent.contains(&Sent::Text("你".into())), "{sent:?}");
+        assert!(sent.contains(&Sent::Key(0x41, true, 0)), "{sent:?}");
+        assert!(sent.contains(&Sent::Key(0x41, false, 0)), "{sent:?}");
+    }
+
+    #[test]
     fn review_new_session_restores_mute() {
         let (mut h, _) = recording(
             View {
@@ -4220,6 +4248,20 @@ pub(crate) mod tests {
         h.run_steps(2);
         assert!(!h.state().view.muted);
         assert!((h.state().live.as_ref().unwrap().session.volume() - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn each_session_starts_with_the_host_pointer_off() {
+        // The last session's reset leaves the host drawing; a new session
+        // starts with it off, so a captured reconnect must ask again.
+        let ctx = egui::Context::default();
+        let live = dummy_live(&ctx);
+        let mut view = View {
+            host_cursor_drawn: true,
+            ..Default::default()
+        };
+        view.stream_started(&ctx, &live, false);
+        assert!(!view.host_cursor_drawn);
     }
 
     #[test]

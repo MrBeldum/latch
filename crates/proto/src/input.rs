@@ -312,13 +312,22 @@ impl InputSender {
 pub struct InputReceiver {
     next: u32,
     pending: BTreeMap<u32, Event>,
+    /// The event at `next` that failed, and since when.
+    failing: Option<(u32, Instant)>,
 }
+
+/// How long a failing event is retried before it is dropped. A transient
+/// refusal (Windows' secure desktop, a busy display server) clears well
+/// within it; an event the host can never inject must not hold every
+/// later move, key-up and release behind it for the rest of the session.
+pub const GIVE_UP_AFTER: Duration = Duration::from_secs(2);
 
 impl InputReceiver {
     pub fn new() -> Self {
         Self {
             next: 0,
             pending: Default::default(),
+            failing: None,
         }
     }
 
@@ -338,9 +347,20 @@ impl InputReceiver {
         })
     }
 
-    /// Failed injection stays pending and is not acknowledged.
+    /// Failed injection stays pending and is not acknowledged, for up to
+    /// [`GIVE_UP_AFTER`]; then it is dropped and what follows goes on.
     pub fn try_receive<E>(
         &mut self,
+        first: u32,
+        events: impl IntoIterator<Item = Event>,
+        apply: impl FnMut(Event) -> Result<(), E>,
+    ) -> u32 {
+        self.try_receive_at(Instant::now(), first, events, apply)
+    }
+
+    fn try_receive_at<E>(
+        &mut self,
+        now: Instant,
         first: u32,
         events: impl IntoIterator<Item = Event>,
         mut apply: impl FnMut(Event) -> Result<(), E>,
@@ -354,9 +374,17 @@ impl InputReceiver {
         }
         while let Some(event) = self.pending.remove(&self.next) {
             if apply(event.clone()).is_err() {
-                self.pending.insert(self.next, event);
-                break;
+                let since = match self.failing {
+                    Some((seq, since)) if seq == self.next => since,
+                    _ => now,
+                };
+                if now.duration_since(since) < GIVE_UP_AFTER {
+                    self.failing = Some((self.next, since));
+                    self.pending.insert(self.next, event);
+                    break;
+                }
             }
+            self.failing = None;
             self.next = self.next.wrapping_add(1);
         }
         self.next
@@ -389,5 +417,36 @@ mod fallible_tests {
             1
         );
         assert_eq!(applied, 1);
+    }
+
+    #[test]
+    fn an_event_that_never_injects_is_dropped_and_the_rest_go_on() {
+        let start = Instant::now();
+        let mut receiver = InputReceiver::new();
+        let stuck = Event::Text("x".into());
+        let mut applied = Vec::new();
+        let mut apply = |e: Event| {
+            if e == stuck {
+                Err(())
+            } else {
+                applied.push(e);
+                Ok(())
+            }
+        };
+        let events = [stuck.clone(), Event::MouseMove { dx: 1, dy: 1 }];
+        assert_eq!(
+            receiver.try_receive_at(start, 0, events.clone(), &mut apply),
+            0
+        );
+        // Still within the grace period: held, not acknowledged.
+        let later = start + GIVE_UP_AFTER / 2;
+        assert_eq!(
+            receiver.try_receive_at(later, 0, events.clone(), &mut apply),
+            0
+        );
+        // Past it: dropped, and the move behind it goes through.
+        let past = start + GIVE_UP_AFTER;
+        assert_eq!(receiver.try_receive_at(past, 0, events, &mut apply), 2);
+        assert_eq!(applied, [Event::MouseMove { dx: 1, dy: 1 }]);
     }
 }

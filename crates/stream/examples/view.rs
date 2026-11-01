@@ -67,7 +67,10 @@ fn dump(frames: &FrameSlot, path: &str) -> anyhow::Result<()> {
         if let Some(f) = frames.take() {
             break f;
         }
-        anyhow::ensure!(start.elapsed() < Duration::from_secs(5), "no picture to dump");
+        anyhow::ensure!(
+            start.elapsed() < Duration::from_secs(5),
+            "no picture to dump"
+        );
         std::thread::sleep(Duration::from_millis(5));
     };
     let (w, h) = (frame.width as usize, frame.height as usize);
