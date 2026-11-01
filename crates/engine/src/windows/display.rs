@@ -366,12 +366,18 @@ pub(super) fn prepare(width: u32, height: u32, fps: u32) -> Result<Option<Previo
 }
 pub(super) fn restore(previous: &Previous) -> Result<()> {
     let mut saved = SAVED.lock();
-    if let Some(state) = saved.as_ref().filter(|state| &state.previous == previous) {
+    if let Some(state) = saved.take_if(|state| &state.previous == previous) {
         // The snapshot includes the original modes and adapter/target identities.
         // Restore them atomically rather than resizing an intermediate topology.
-        apply_topology(&state.paths, &state.modes)?;
-        *saved = None;
-        return Ok(());
+        // It is taken either way: a snapshot that no longer applies (an
+        // adapter went away mid-stream) left behind would refuse every
+        // later session with "display topology already prepared".
+        match apply_topology(&state.paths, &state.modes) {
+            Ok(()) => return Ok(()),
+            Err(e) => tracing::warn!(
+                "restore the saved display topology: {e:#}; setting the size back instead"
+            ),
+        }
     }
     let output = select()?;
     if !output.virtual_display {

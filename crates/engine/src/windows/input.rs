@@ -54,6 +54,75 @@ fn mouse(dx: i32, dy: i32, data: u32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
         },
     }
 }
+/// The set-1 scancode of a key on a US keyboard. The viewer sends keys by
+/// position as US virtual-key codes, and games bind scancodes: mapping them
+/// through the PC's own layout (French AZERTY turns A into scan 0x10, the
+/// US Q) would move every binding. Sunshine uses the same fixed table.
+fn us_scan(vk: u16) -> Option<u16> {
+    const LETTERS: [u16; 26] = [
+        0x1e, 0x30, 0x2e, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32, 0x31, 0x18,
+        0x19, 0x10, 0x13, 0x1f, 0x14, 0x16, 0x2f, 0x11, 0x2d, 0x15, 0x2c,
+    ];
+    const NUMPAD: [u16; 10] = [0x52, 0x4f, 0x50, 0x51, 0x4b, 0x4c, 0x4d, 0x47, 0x48, 0x49];
+    const F13_TO_F24: [u16; 12] = [
+        0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x76,
+    ];
+    Some(match vk {
+        0x41..=0x5a => LETTERS[usize::from(vk - 0x41)],
+        0x31..=0x39 => vk - 0x31 + 0x02,
+        0x30 => 0x0b,
+        0x60..=0x69 => NUMPAD[usize::from(vk - 0x60)],
+        0x70..=0x79 => vk - 0x70 + 0x3b, // F1–F10
+        0x7a => 0x57,                    // F11
+        0x7b => 0x58,                    // F12
+        0x7c..=0x87 => F13_TO_F24[usize::from(vk - 0x7c)],
+        0x08 => 0x0e,               // Backspace
+        0x09 => 0x0f,               // Tab
+        0x0d => 0x1c,               // Enter
+        0x10 | 0xa0 => 0x2a,        // Shift, left Shift
+        0xa1 => 0x36,               // right Shift
+        0x11 | 0xa2 | 0xa3 => 0x1d, // Control (right is extended)
+        0x12 | 0xa4 | 0xa5 => 0x38, // Alt (right is extended)
+        0x13 => 0x45,               // Pause
+        0x14 => 0x3a,               // Caps Lock
+        0x1b => 0x01,               // Escape
+        0x20 => 0x39,               // Space
+        0x21 => 0x49,               // Page Up
+        0x22 => 0x51,               // Page Down
+        0x23 => 0x4f,               // End
+        0x24 => 0x47,               // Home
+        0x25 => 0x4b,               // Left
+        0x26 => 0x48,               // Up
+        0x27 => 0x4d,               // Right
+        0x28 => 0x50,               // Down
+        0x2c => 0x37,               // Print Screen
+        0x2d => 0x52,               // Insert
+        0x2e => 0x53,               // Delete
+        0x5b => 0x5b,               // left Windows
+        0x5c => 0x5c,               // right Windows
+        0x5d => 0x5d,               // Menu
+        0x6a => 0x37,               // numpad *
+        0x6b => 0x4e,               // numpad +
+        0x6d => 0x4a,               // numpad -
+        0x6e => 0x53,               // numpad .
+        0x6f => 0x35,               // numpad /
+        0x90 => 0x45,               // Num Lock
+        0x91 => 0x46,               // Scroll Lock
+        0xba => 0x27,               // ;
+        0xbb => 0x0d,               // =
+        0xbc => 0x33,               // ,
+        0xbd => 0x0c,               // -
+        0xbe => 0x34,               // .
+        0xbf => 0x35,               // /
+        0xc0 => 0x29,               // `
+        0xdb => 0x1a,               // [
+        0xdc => 0x2b,               // \
+        0xdd => 0x1b,               // ]
+        0xde => 0x28,               // '
+        0xe2 => 0x56,               // the key between left Shift and Z
+        _ => return None,
+    })
+}
 fn extended(vk: u16) -> bool {
     matches!(vk, 0x21..=0x28 | 0x2c..=0x2e | 0x5b..=0x5d | 0x6f | 0x90 | 0xa3 | 0xa5)
 }
@@ -69,8 +138,12 @@ fn construct(event: &Event, display: DisplayRect) -> Result<Vec<INPUT>> {
     let mut out = Vec::new();
     match event {
         Event::Key { vk, down, .. } => {
-            // SAFETY: MapVirtualKeyW has no pointer parameters or side effects.
-            let scan = unsafe { MapVirtualKeyW(u32::from(*vk), MAPVK_VK_TO_VSC) } as u16;
+            // Keys outside the US table (IME and other layout-specific
+            // keys) keep the PC's own mapping.
+            let scan = us_scan(*vk).unwrap_or_else(|| {
+                // SAFETY: MapVirtualKeyW has no pointer parameters or side effects.
+                unsafe { MapVirtualKeyW(u32::from(*vk), MAPVK_VK_TO_VSC) as u16 }
+            });
             let mut flags = if *down {
                 KEYBD_EVENT_FLAGS(0)
             } else {
@@ -95,12 +168,14 @@ fn construct(event: &Event, display: DisplayRect) -> Result<Vec<INPUT>> {
                 }
             }
         }
-        Event::MouseMove { dx, dy } => out.push(mouse(
-            i32::from(*dx),
-            i32::from(*dy),
-            0,
-            MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE,
-        )),
+        // A plain relative move, as Sunshine sends it. With
+        // MOUSEEVENTF_MOVE_NOCOALESCE the game's raw input reads usFlags
+        // MOUSE_MOVE_NOCOALESCE instead of MOUSE_MOVE_RELATIVE (0), and
+        // games that only accept the latter drop every move: Genshin
+        // Impact's and Honkai: Star Rail's cameras stood still.
+        Event::MouseMove { dx, dy } => {
+            out.push(mouse(i32::from(*dx), i32::from(*dy), 0, MOUSEEVENTF_MOVE))
+        }
         Event::MousePosition {
             x,
             y,
@@ -305,17 +380,40 @@ mod tests {
         }
     }
     #[test]
-    fn relative_motion_disables_windows_coalescing() -> Result<()> {
+    fn relative_motion_reaches_raw_input_as_plain_relative() -> Result<()> {
         let v = construct(&Event::MouseMove { dx: 1, dy: -2 }, DisplayRect::default())?;
         // SAFETY: construct produces mouse INPUT for MouseMove.
         unsafe {
-            assert!(v[0]
-                .Anonymous
-                .mi
-                .dwFlags
-                .contains(MOUSEEVENTF_MOVE_NOCOALESCE));
+            let mi = v[0].Anonymous.mi;
+            // Any other flag shows in RAWMOUSE.usFlags, and games that want
+            // MOUSE_MOVE_RELATIVE there ignore the move.
+            assert_eq!(mi.dwFlags, MOUSEEVENTF_MOVE);
+            assert_eq!((mi.dx, mi.dy), (1, -2));
         }
         Ok(())
+    }
+    #[test]
+    fn keys_use_us_scancodes_whatever_the_pcs_layout() {
+        for (vk, scan) in [
+            (0x41, 0x1e), // A, not AZERTY's 0x10
+            (0x51, 0x10), // Q
+            (0x5a, 0x2c), // Z
+            (0x57, 0x11), // W
+            (0x31, 0x02), // 1
+            (0x30, 0x0b), // 0
+            (0x20, 0x39), // Space
+            (0x1b, 0x01), // Escape
+            (0x70, 0x3b), // F1
+            (0x7b, 0x58), // F12
+            (0xbd, 0x0c), // -
+            (0xde, 0x28), // '
+            (0x60, 0x52), // numpad 0
+            (0x69, 0x49), // numpad 9
+            (0x26, 0x48), // Up
+        ] {
+            assert_eq!(us_scan(vk), Some(scan), "vk {vk:#x}");
+        }
+        assert_eq!(us_scan(0x15), None, "Hangul keeps the PC's mapping");
     }
     #[test]
     fn constructs_without_posting() -> Result<()> {

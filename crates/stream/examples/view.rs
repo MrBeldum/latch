@@ -7,6 +7,9 @@
 //!     view HOST [--port 47860] [--width 1280] [--height 720] [--fps 60]
 //!          [--kbps 10000] [--seconds 30] [--sample-ms 1000] [--keys 0] [--hevc] [--audio]
 //!          [--point X,Y]   (one absolute pointer position, in picture pixels)
+//!          [--moves N]     (N relative moves of +10,+5, one every 16 ms)
+//!          [--dump PREFIX] (PREFIX-before.pgm and PREFIX-after.pgm: the
+//!                           picture's luma either side of the moves)
 
 use latch_stream::{Event, Frame, FrameSlot, Session, Settings};
 use std::net::IpAddr;
@@ -55,6 +58,31 @@ fn square_is_white(f: &Frame) -> bool {
         }
         sum / (32 * 32) > 128
     })
+}
+
+/// The next decoded picture's luma as a binary PGM.
+fn dump(frames: &FrameSlot, path: &str) -> anyhow::Result<()> {
+    let start = Instant::now();
+    let frame = loop {
+        if let Some(f) = frames.take() {
+            break f;
+        }
+        anyhow::ensure!(
+            start.elapsed() < Duration::from_secs(5),
+            "no picture to dump"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    let mut out = format!("P5\n{w} {h}\n255\n").into_bytes();
+    frame.with_planes(|y, stride, _, _| {
+        for row in 0..h {
+            out.extend_from_slice(&y[row * stride..row * stride + w]);
+        }
+    });
+    std::fs::write(path, out)?;
+    eprintln!("wrote {path}");
+    Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -146,6 +174,25 @@ fn main() -> anyhow::Result<()> {
             .input()
             .mouse_position(x, y, width as i16, height as i16);
         eprintln!("pointer sent to {x},{y} of {width}x{height}");
+    }
+
+    let moves: u32 = arg("--moves", "0").parse()?;
+    let dump_to = arg("--dump", "");
+    if moves > 0 {
+        std::thread::sleep(Duration::from_millis(500));
+        if !dump_to.is_empty() {
+            dump(&frames, &format!("{dump_to}-before.pgm"))?;
+        }
+        let input = session.input();
+        for _ in 0..moves {
+            input.mouse_move(10, 5);
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        eprintln!("{moves} relative moves sent");
+        if !dump_to.is_empty() {
+            std::thread::sleep(Duration::from_millis(500));
+            dump(&frames, &format!("{dump_to}-after.pgm"))?;
+        }
     }
 
     let mut presses = Vec::new();
