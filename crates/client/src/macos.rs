@@ -6,11 +6,13 @@
 //! and ⌘H hid it. While the stream has the keyboard those items keep their
 //! place in the menu but lose their shortcuts.
 //!
+//! The Mac pointer, hidden outright while the stream has the mouse.
+//!
 //! And the pasteboard's change count, which tells whether the Mac's
 //! clipboard has changed since the PC last copied something. And whether
 //! Caps Lock is on: egui has neither a key nor a modifier for it.
 //!
-//! Elsewhere both do nothing.
+//! Elsewhere they all do nothing.
 
 /// The app menu items whose shortcuts the stream takes over.
 #[cfg(any(target_os = "macos", test))]
@@ -35,13 +37,31 @@ fn equivalent(item: Item, stream_owns_keys: bool) -> &'static str {
 mod imp {
     use super::{equivalent, Item};
     use objc2::sel;
-    use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSPasteboard};
+    use objc2_app_kit::{NSApplication, NSCursor, NSEvent, NSEventModifierFlags, NSPasteboard};
     use objc2_foundation::{MainThreadMarker, NSString};
     use std::cell::Cell;
 
     thread_local! {
         /// What the menu was last set to, so AppKit is only asked on a change.
         static OWNED: Cell<Option<bool>> = const { Cell::new(None) };
+        /// Whether this app holds one `NSCursor::hide`, so each is undone once.
+        static HIDDEN: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub fn hide_pointer(hidden: bool) {
+        if MainThreadMarker::new().is_none() || HIDDEN.get() == hidden {
+            return;
+        }
+        HIDDEN.set(hidden);
+        // SAFETY: class methods on the main thread; hide and unhide are
+        // counted, and HIDDEN keeps them paired.
+        unsafe {
+            if hidden {
+                NSCursor::hide();
+            } else {
+                NSCursor::unhide();
+            }
+        }
     }
 
     pub fn stream_owns_keys(owned: bool) {
@@ -129,6 +149,8 @@ mod imp {
 mod imp {
     pub fn stream_owns_keys(_owned: bool) {}
 
+    pub fn hide_pointer(_hidden: bool) {}
+
     pub fn pasteboard_changes() -> Option<isize> {
         None
     }
@@ -146,6 +168,12 @@ mod imp {
 /// instead of quitting or hiding Latch. Cheap to call every frame.
 pub fn stream_owns_keys(owned: bool) {
     imp::stream_owns_keys(owned);
+}
+
+/// Hide the Mac pointer everywhere while `hidden`, whether or not it is
+/// over the window. Cheap to call every frame.
+pub fn hide_pointer(hidden: bool) {
+    imp::hide_pointer(hidden);
 }
 
 /// The Mac clipboard's change count: it moves whenever anything is copied.

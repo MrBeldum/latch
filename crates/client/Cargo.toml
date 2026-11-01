@@ -32,12 +32,13 @@ egui-wgpu.workspace = true
 semver = "1"
 
 # The versions winit already builds on: nothing new is compiled. Used to
-# take ⌘Q and ⌘H back from the app menu during a stream, and to read the
-# pasteboard's change count.
+# take ⌘Q and ⌘H back from the app menu during a stream, to hide the
+# pointer while the mouse is captured, and to read the pasteboard's
+# change count.
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.31"
 objc2 = "0.5"
-objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSEvent", "NSMenu", "NSMenuItem", "NSPasteboard", "NSResponder", "NSScreen", "NSGraphics"] }
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSCursor", "NSEvent", "NSMenu", "NSMenuItem", "NSPasteboard", "NSResponder", "NSScreen", "NSGraphics"] }
 objc2-foundation = { version = "0.2", features = ["NSString", "NSThread"] }
 
 [dev-dependencies]
