@@ -679,13 +679,15 @@ impl Vaapi {
         let mut errors = Vec::new();
         for node in Device::nodes() {
             let opened = Device::at(&node).and_then(|device| match device {
-                Some(device) => Self::open_on(device, codec, width, height, config).map(Some),
+                Some(device) => Self::open_on(device, codec, width, height, config)
+                    .map(Some)
+                    .map_err(|e| e.context(node.display().to_string())),
                 None => Ok(None),
             });
             match opened {
                 Ok(Some(this)) => return Ok(this),
                 Ok(None) => {}
-                Err(e) => errors.push(e.context(node.display().to_string())),
+                Err(e) => errors.push(e),
             }
         }
         if errors.is_empty() {
