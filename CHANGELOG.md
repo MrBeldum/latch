@@ -8,6 +8,10 @@
   after radio bursts, and RTT-gated recovery IDRs. Protocol 1 stays compatible.
 - Add codec-free transport/FEC measurements and deterministic capacity-step,
   240 fps, random/burst loss, long-RTT and jitter scenarios.
+- Cut for policers: uncorrected loss or lost frames cut at any raw loss, then
+  the climb holds just under the policed rate; 5–15 ms Wi-Fi ping
+  jitter no longer trips the queue threshold; a capacity collapse cuts on its
+  first report (100→20 Mbps at 10 ms RTT: 160→60 ms).
 
 
 The release workflow publishes the section that matches the tag as the

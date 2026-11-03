@@ -294,8 +294,12 @@ ignored. Added report fields default on read; old JSON readers ignore them.
 `engine::congestion` is the only bitrate controller. New report windows are
 50 ms; old 250 ms / one-second reports remain valid. Host pings at 50 Hz supply
 each window's lowest RTT. A smoothed increasing delay gradient or standing rise
-above max(6 ms, base RTT / 10) is pressure. Two windows trigger a budget cut,
-gated at max(50 ms, base RTT); clean recovery doubles the budget per 400 ms.
+above max(6 ms, base RTT / 10, 3× ping jitter) is pressure, as are uncorrected
+loss and lost frames at any raw loss. Two windows trigger a budget cut; one
+does when `received_kbps` is under half the host's send rate while loss is
+above 10% or delay above 20 ms (reports without `received_kbps` never do).
+Clean recovery doubles the budget per 400 ms, capped below a policer's rate
+for three seconds after loss without queueing.
 The session starts at its ceiling, and clean paths bypass pacing. Recovered
 random loss alone enables neither cuts nor pacing. Parity uses fast-attack,
 two-second-decay raw loss with a base-RTT floor (15% at 40 ms, 20% at 100 ms),

@@ -117,10 +117,14 @@ captured ones, which lets tests check audio bit for bit. Opus is gone.
   owns the wire budget, including audio, FEC and headers. It starts at the
   requested ceiling. New viewers report every 50 ms; display statistics retain 250 ms windows.
   Host pings run at 50 Hz.
-  Two pressure windows trigger cuts, no faster than max(50 ms, base RTT).
-  A smoothed positive delay gradient detects filling queues; sustained delay
-  above max(6 ms, 10% of base RTT) also counts. Recovered random loss alone
-  does not cut bitrate. Parity has a base-RTT floor of 15% at 40 ms and 20%
+  Two pressure windows trigger cuts; one does when under half of what was
+  sent arrived and the rest is lost or queued (a capacity drop). Queue cuts
+  repeat no faster than max(50 ms, base RTT), loss cuts only after a base RTT
+  plus a report window. A smoothed positive delay gradient detects filling
+  queues; sustained delay above max(6 ms, 10% of base RTT, 3× measured ping
+  jitter) also counts, so 5–15 ms of Wi-Fi jitter is not a queue. Recovered
+  random loss alone does not cut bitrate; uncorrected loss or lost frames do,
+  at any raw loss (a policer). Parity has a base-RTT floor of 15% at 40 ms and 20%
   at 100 ms (30% cap), with fast attack and a two-second decay after bursts.
 * **Send immediately on clean paths.** The bounded two-frame sender remains,
   with no token-bucket delay on a clean path. Queue or severe sustained loss
@@ -188,13 +192,19 @@ Under pressure video uses a wire-byte token bucket at 2.5 times the wire budget,
 with a sixteen-datagram burst. The encoder allowance reserves audio separately,
 then compounds header overhead with rounded FEC rather than adding the two.
 Cuts use the lower of current budget and actual successful send rate (and
-received throughput when severe loss supplies it). Each cut removes 20%, or
-40% for queue delay above 20 ms or loss above 10%. Sender age above 20 ms is
-also pressure. Sustained uncorrected loss above 3% counts when raw loss exceeds
-10%; legacy raw-loss-only reports retain the 3% threshold. The wire floor is
-max(1 Mbps, ceiling/10). After clean feedback the budget doubles per 400 ms,
-with each feedback step capped at 100 ms of growth so legacy reports do not
-make huge probe jumps. Rate setters run between frames at a 5% target change.
+received throughput when loss or a collapse supplies it). Each cut removes
+20%, or 40% for queue delay above 20 ms or loss above 10%. Sender age above
+20 ms is also pressure. Uncorrected loss above 3% (raw loss for legacy
+reports) or lost frames in two windows running count at any raw loss. Loss
+without queue delay is treated as a policer: a smoothed received rate (+7%
+headers) caps the climb at 97% of it for three seconds, during which one
+damaged window near it cuts again. A 50 ms window holds only a few frames, so
+received/sent ratios are too coarse to be a signal on their own; they gate only
+the one-window collapse cut, together with loss above 10% or delay above 20 ms. The
+ping-jitter estimate starts at 3 ms and learns only from falling delay outside
+congestion. The wire floor is max(1 Mbps, ceiling/10). After clean feedback the
+budget doubles per 400 ms, with each feedback step capped at 100 ms of growth
+so legacy reports do not make huge probe jumps. Rate setters run between frames at a 5% target change.
 This remains a heuristic controller; it is not a full GCC implementation.
 
 Linux sends up to 32 datagrams with `sendmmsg` and receives with `recvmmsg`.
