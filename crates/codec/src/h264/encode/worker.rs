@@ -557,9 +557,12 @@ pub(super) fn scroll(src: &Yuv420, old: &Yuv420, first: usize, end: usize) -> (i
             changed += usize::from(src.y[y * src.y_stride + x] != old.y[y * old.y_stride + x]);
         }
     }
-    if changed * 256 < samples {
+    // A change this small is no scroll worth a search: a cursor, a caret,
+    // a clock, a narrow animation.
+    if changed * 64 < samples {
         return (0, 0);
     }
+    let sampled = samples;
     let hash = |p: &Yuv420, row: usize| -> u64 {
         p.y[row * p.y_stride..row * p.y_stride + width]
             .iter()
@@ -587,6 +590,11 @@ pub(super) fn scroll(src: &Yuv420, old: &Yuv420, first: usize, end: usize) -> (i
         .unwrap();
     if best != 128 && hist[best] > hist[128] + 2 {
         return (0, (best as i32 - 128) * 4);
+    }
+    // Sideways scrolls move most of what changed; the search over 257
+    // offsets is the dearest part of preparing a frame.
+    if changed * 16 < sampled {
+        return (0, 0);
     }
     let mut best = (0, 0);
     let mut best_cost = u64::MAX;
