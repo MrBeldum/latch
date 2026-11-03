@@ -5,6 +5,103 @@ production Packetizer, ReedSolomon, wire parser and Reassembler; they exclude
 capture, encoders, decoders, rendering and audio. FEC is on (10% initially).
 No installed host was replaced or stopped. All manual servers used UDP 47881.
 
+## Follow-up: policers and UDP offloads
+
+Follow-up commits `82dd14d` and `2e7fbbb` build on `b8be885`. Tables below
+are medians of three interleaved five-second runs per mode, using the same
+follow-up binary with `LATCH_UDP_OFFLOAD=0` (before) or `1` (after).
+They isolate offloads; they are **not** main-versus-branch CPU comparisons.
+CPU µs/Mbit uses process user+system CPU and delivered media for receivers,
+successfully sent media for senders. It includes packetization/FEC/reassembly.
+
+| Loopback, 300 Mbps, 120 fps | CPU µs/Mbit before | After |
+| --- | ---: | ---: |
+| Linux ARM64 sender | 593.39 | 148.55 |
+| Linux ARM64 receiver | 346.24 | 71.54 |
+| Windows x64 sender | 614.58 | 281.25 |
+| Windows x64 receiver | 291.67 | 239.58 |
+
+All loopback runs delivered 600/600 frames with no send errors. Linux is the
+shared Oracle A1; Windows is the RX 6600 PC. Windows process CPU accounting is
+coarse over five seconds and individual runs vary substantially. Raw logs:
+[b2/linux-loopback.txt](b2/linux-loopback.txt),
+[b2/windows-loopback.txt](b2/windows-loopback.txt).
+
+| Tailscale, 50 Mbps offered, 120 fps | CPU µs/Mbit before | After |
+| --- | ---: | ---: |
+| Linux sender | 611.22 | 262.37 |
+| Linux receiver | 719.20 | 654.70 |
+| Windows sender (offered media denominator) | 375.00 | 187.50 |
+| Windows receiver (delivered media denominator) | 688.08 | 1584.52 |
+
+[b2/linux-tailnet.txt](b2/linux-tailnet.txt) records Linux GRO coalescing
+25,755–26,798 datagrams per enabled receive run. Linux→Mac delivered 590–600
+frames without offload and 598–600 enabled; Mac→Linux delivered 600 throughout.
+[b2/windows-tailnet.txt](b2/windows-tailnet.txt) is a saturated, lossy path:
+Windows→Mac median delivered 20.003→20.291 Mbps (240→244 frames),
+Mac→Windows 22.073→21.763 Mbps (224→217 frames). Windows URO coalesced **zero**
+datagrams in both loopback and tailnet logs. USO sends succeeded (6000 loopback
+batches/run, 1800 tailnet); URO is implemented and its option/receive path runs,
+but hardware coalescing and a URO CPU improvement are unverified. Do not interpret
+these Windows tailnet numbers as a throughput or receive CPU win.
+
+Senders segment equal-size runs, permitting a short final datagram, without
+changing the wire. Linux falls back to sendmmsg/recvmmsg; Windows to scalar UDP.
+Receive truncation is discarded. `LATCH_UDP_OFFLOAD=0` provides the comparison
+and an operational escape hatch. Per-message segmentation avoids changing the
+shared socket's audio/input datagrams. Darwin send remains scalar.
+
+### Feedback and compatibility
+
+[b2/scenarios-before.txt](b2/scenarios-before.txt) and
+[b2/scenarios-after.txt](b2/scenarios-after.txt) compare **b8be885** to the follow-up,
+not the original main baseline below. With a token bucket and zero queue growth,
+20% overshoot lost 667→22 frames; minimum budget 100000→69246 kbps.
+10% overshoot lost 158→22 frames. The 5% case loses mostly parity, so it does
+not require a rate cut. Sustained unrecovered loss or repeated lost frames now
+cuts regardless of raw loss; repaired 2% random loss leaves the ceiling intact.
+5–15 ms ping jitter with no capacity limit previously falsely cut to 78643 kbps;
+the follow-up stays at 100000 kbps throughout.
+
+The 100→20 Mbps step at 10 ms RTT first reaches ≤20 Mbps in **160→60 ms**;
+queue p95 11.23→10.60 ms, lost frames 19→7, recovery 960→910 ms.
+This measures first crossing, not permanent settlement. Subsequent capacity
+probing can still cause cuts: the final scenario log counts cuts during
+2.5–8 seconds. Oscillation-free convergence is not established.
+Tests now enforce the 60-ms first-crossing bound. Simulations still exclude
+sender pacing, codec overshoot and hardware IDR spikes.
+
+[b2/compat.txt](b2/compat.txt) retains ten-second 720p60 H.264 runs for main
+`9fe0ae9` serve ↔ new view and new serve ↔ main view, plus both matching pairs.
+All connected and decoded around 60 fps with zero reported loss. Final repeat
+results and validation are recorded alongside these logs.
+
+### Datagram size and reproduction
+
+`crates/client/src/path.rs`'s “Direct” is direct **Tailscale**, not a separate
+LAN transport; PeerRelay and DERP also traverse Tailscale. Discovery uses peer
+Tailscale addresses (`Node::ip` in `crates/core/src/tailscale.rs`), and the
+production host authorizes nonlocal clients through Tailscale whois. Loopback
+test examples bypass authorization, but do not establish a supported non-Tailscale
+remote connection. Both measured tailnet interfaces have MTU 1280. Retain 1200-byte
+datagrams; larger-datagram negotiation/probing is deferred until a supported
+non-Tailscale path exists. No wire format or capability change is needed for
+GSO/USO or GRO/URO.
+
+```sh
+cargo build --locked --release -p latch-proto --example transport
+# Separate shells, repeat each mode three times, alternate 0 and 1:
+LATCH_UDP_OFFLOAD=0 target/release/examples/transport receive 127.0.0.1:47881
+LATCH_UDP_OFFLOAD=0 target/release/examples/transport send 127.0.0.1:47881 300 5 120
+# Linux: cross-build as below, scp to ~/gfn-b2/transport, run there.
+# Windows: C:\Users\Daniel\dev\latch-gfn-b2, cargo build as above;
+# set $env:LATCH_UDP_OFFLOAD='0' (then '1') in both PowerShell processes.
+# Tailnet: replace loopback destination with peer Tailscale IP; 50 Mbps.
+cargo test --locked --release -p latch-engine --test transport_scenarios -- --nocapture
+```
+
+The remaining sections preserve the original b8be885 measurements and limits.
+
 ## Result and limits
 
 Mac loopback sustained **1.288 Gbps media / 153k packets/s** in the five-second
@@ -175,18 +272,17 @@ separate. Final validation status is recorded in [validation.txt](validation.txt
 
 Outstanding / unverified:
 
-- Windows USO/URO, Linux GSO/GRO, and a safe shared-socket Darwin batch-send
-  approach. No Windows socket code changed or Windows build was performed.
-- MTU discovery, probing, negotiated larger datagrams and fallback. Tailscale
-  1280 is confirmed, but direct-LAN 1500 and largest safe payload selection
-  were not measured or implemented. Protocol 1 stays at 1200 bytes.
+- Darwin batch send and demonstrated Windows URO coalescing remain open.
+  Linux GSO/GRO and Windows USO/URO implementation and measurements are above.
+- Larger-datagram probing is deferred: production remote paths use Tailscale.
+  Protocol 1 stays at 1200 bytes; see path analysis above.
 - Multi-minute sustained 1 Gbps and 300 Mbps / 120-Hz end-to-end streaming.
   Five-second codec-free loopback met >1 Gbps; the 1-Gbps/120-Hz case did not
   keep its requested cadence in the after run. Real-path 300 Mbps failed.
 - Timestamped encode-completion→last-packet egress and viewer handoff quantiles;
   no measured microsecond latency guarantee. Clean-path pacing and immediate
   data-before-parity handoff are checked structurally and in regressions.
-- Step-down within a few low-latency RTTs (160 ms at 10-ms RTT remains too slow),
+- Oscillation-free step-down (first crossing now 60 ms at 10-ms RTT),
   prolonged fairness/stability, route changes and adversarial feedback tests.
 - Reference invalidation is a negotiated protocol proposal only, with no wire
   plumbing or encoder implementation. KeyframeRequest keeps last-delivered-frame

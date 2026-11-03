@@ -75,6 +75,7 @@ fn transport_scenarios() {
         let mut damaged_windows = 0;
         let mut lost_windows = 0;
         let mut raw_when_lost = Vec::new();
+        let mut low_phase_cuts = 0;
         for ms in 0..12_000u64 {
             let now = start + Duration::from_millis(ms);
             let capacity = if name == "step" && (2000..8000).contains(&ms) {
@@ -192,7 +193,11 @@ fn transport_scenarios() {
             while feedback.front().is_some_and(|(at, ..)| *at <= now) {
                 let (_, report, rtt, sent) = feedback.pop_front().unwrap();
                 controller.observe_sent(sent);
+                let before = controller.budget();
                 controller.update(now, &report, rtt, 0.0);
+                if name == "step" && (2500..8000).contains(&ms) && controller.budget() < before {
+                    low_phase_cuts += 1;
+                }
                 fec_loss = latch_proto::video::fec_loss_sample(
                     fec_loss,
                     report.loss_pct,
@@ -213,13 +218,13 @@ fn transport_scenarios() {
         }
         queue_samples.sort_by(f32::total_cmp);
         let p95 = queue_samples[queue_samples.len() * 95 / 100];
-        println!("{name}: ceiling_ms={} cut_ms={} queue_p95_ms={p95:.2} lost={} skipped={} peak_kbps={peak} min_kbps={minimum} low_raw_damage_windows={damaged_windows} lost_windows={lost_windows} raw_loss_median_when_lost={:.1}", ceiling_at.map_or(-1, |v| v as i64), cut_at.map_or(-1, |v| v as i64), rx.stats().frames_lost, rx.stats().frames_skipped, {
+        println!("{name}: low_phase_cuts={low_phase_cuts} ceiling_ms={} cut_ms={} queue_p95_ms={p95:.2} lost={} skipped={} peak_kbps={peak} min_kbps={minimum} low_raw_damage_windows={damaged_windows} lost_windows={lost_windows} raw_loss_median_when_lost={:.1}", ceiling_at.map_or(-1, |v| v as i64), cut_at.map_or(-1, |v| v as i64), rx.stats().frames_lost, rx.stats().frames_skipped, {
             raw_when_lost.sort_by(f32::total_cmp);
             raw_when_lost.get(raw_when_lost.len() / 2).copied().unwrap_or(0.0)
         });
         assert!(p95 < 16.0, "{name}: standing queue {p95}");
         if name == "step" {
-            assert!(cut_at.is_some_and(|ms| ms <= 400));
+            assert!(cut_at.is_some_and(|ms| ms <= 60));
             assert!(ceiling_at.is_some_and(|ms| ms <= 1500));
             assert!(rx.stats().frames_lost <= 40);
         }
