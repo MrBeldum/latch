@@ -652,6 +652,8 @@ pub struct Live {
     pub clipboard: clipboard::Sync,
     /// How the PC spells copy, cut and paste.
     pub shortcuts: clipboard::Shortcuts,
+    /// This machine's gamepads, into the stream.
+    pub pads: crate::gamepads::Link,
 }
 
 impl Drop for Live {
@@ -1065,6 +1067,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             audio: true,
             name: latch_core::config::machine_name(),
             cursor: true,
+            gamepads: true,
         },
         frames.clone(),
         tx,
@@ -1079,6 +1082,11 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         bail!("cancelled");
     }
     let input = session.input();
+    let pads = crate::gamepads::Link::new(&session, input.clone());
+    crate::gamepads::pads().on_change({
+        let ctx = c.ctx.clone();
+        move || ctx.request_repaint()
+    });
     *live_guard = Some(Live {
         generation,
         pc: t.name.clone(),
@@ -1096,6 +1104,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         path,
         clipboard: clipboard::Sync::spawn(t.ip, c.ctx.clone()),
         shortcuts: clipboard::Shortcuts::for_os(if host.os.is_empty() { &t.os } else { &host.os }),
+        pads,
     });
     prog_guard.step = Step::Connecting;
     prog_guard.detail = "Connecting…".into();

@@ -9,6 +9,7 @@ mod encode;
 mod input;
 mod mf;
 mod runtime;
+mod vigem;
 
 use crate::{
     audio::AudioCapture,
@@ -535,6 +536,9 @@ pub fn open_audio() -> Result<Box<dyn AudioCapture>> {
 }
 pub fn open_input() -> Result<Box<dyn InputSink>> {
     Ok(Box::new(input::Injector::new()))
+}
+pub fn open_pads(feedback: crate::gamepad::FeedbackFn) -> Result<crate::gamepad::Opened> {
+    Ok(crate::gamepad::Pads::opened(vigem::open()?, feedback))
 }
 pub use elevated::{
     helper_exe as input_helper_exe, run_helper as run_input_helper, TASK as INPUT_TASK,

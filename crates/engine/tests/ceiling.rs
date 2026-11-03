@@ -36,6 +36,7 @@ fn a_cold_software_host_does_not_take_4k_at_the_display_refresh_rate() {
         audio: false,
         name: "cold".into(),
         cursor: false,
+        gamepads: false,
     };
     software::set_ceiling(Some(Ceiling::PROVISIONAL));
     drop(server.prepare(request.clone(), peer).unwrap());

@@ -774,6 +774,9 @@ fn test_6_control_messages_roundtrip_and_errors() {
             }),
             audio_problem: "".into(),
             cursor: true,
+            gamepads: 4,
+            gamepad_kinds: vec![latch_proto::gamepad::PadKind::Xbox],
+            gamepad_problem: String::new(),
         }),
         Message::End(End {
             code: end::CAPTURE_FAILED,
@@ -1062,6 +1065,7 @@ fn av1_offer_is_additive_and_unknown_codecs_still_fall_through() {
         audio: false,
         name: String::new(),
         cursor: false,
+        gamepads: false,
     })
     .unwrap();
     assert_eq!(request["codecs"][0], "av1");

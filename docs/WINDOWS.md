@@ -45,6 +45,8 @@ built-in streaming engine that captures and streams the desktop.
      (a minimal file when there is none; everything else in it is kept)
      and restarts the display, so the engine can switch the PC to the
      Mac's size;
+   - installs the [ViGEmBus](https://github.com/nefarius/ViGEmBus) gamepad
+     driver unless it is already there (see [Gamepads](#gamepads));
    - records Fast Startup and the AC sleep and hibernate timeouts as they
      were (once, under `HKLM\SOFTWARE\Latch\Setup`, for `--uninstall`),
      then turns Fast Startup off (`HiberbootEnabled = 0`) and sets both
@@ -134,12 +136,37 @@ the shortcuts and the Apps entry; then, through one administrator prompt
 `LatchInput` task and `%ProgramFiles%\Latch\Input`, every
 Latch 4 or BroLink registration setup retires, and `%ProgramFiles%\Latch\Setup`,
 and it puts back Fast Startup and the AC sleep and hibernate timeouts
-recorded by the first setup. The network card's wake settings and the
+recorded by the first setup, and removes ViGEmBus if Latch's setup
+installed it (a ViGEmBus something else installed stays). The network card's wake settings and the
 virtual display's sizes stay, since they change nothing by themselves.
 The program, `host.toml` and the logs stay in `%LOCALAPPDATA%\Latch`;
 delete that folder to remove them. A message box says what was done.
 Running it again is harmless; if the prompt is declined, run it again to
 finish.
+
+## Gamepads
+
+A viewer's gamepads become virtual pads on the PC, through the ViGEmBus
+driver Sunshine and DS4Windows also use. Xbox
+pads (and any pad the viewer cannot name) arrive as Xbox 360 controllers,
+which every game reads through XInput; PlayStation pads arrive as
+DualShock 4 controllers, so games that support them show PlayStation
+buttons and set the light bar. Up to 8 pads at once; XInput itself has
+four slots, shared with any pad plugged into the PC. Rumble, the player
+LED and the light bar go back to the viewer's pad.
+
+Setup installs ViGEmBus 1.22.0, the project's last release, signed through
+Microsoft's hardware program: it downloads the release into
+`%ProgramFiles%\Latch\Setup`, runs it only if its SHA-256 is the one built
+into Latch, and runs it silently with restarts suppressed, so setup never
+restarts Windows. If the installer says a restart is still needed, the
+setup log says gamepads work after the next one. A ViGEmBus that is already
+installed is left as it is. A failure here leaves gamepads off and fails
+nothing else; the viewer's toolbar then says why the PC takes none.
+
+The pads are plugged in when a stream starts with a pad connected at the
+viewer (or when one is connected during it) and unplugged when the stream
+ends.
 
 ## Slow streams: the network, or the encoder
 

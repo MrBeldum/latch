@@ -4,6 +4,7 @@
 //! or GPU, so a whole session can be checked anywhere: known pixels arrive,
 //! and a key press shows up as a colour change the viewer can time.
 
+use crate::gamepad::{Feedback, FeedbackFn, PadKind, PadState, VirtualBus};
 use crate::input::{DisplayRect, Event, InputSink};
 use crate::pattern::{Motion, Pattern};
 use crate::software::{Bgra, CpuCapture, SoftwarePipeline};
@@ -108,4 +109,57 @@ impl InputSink for PatternInput {
     }
 
     fn release_all(&mut self) {}
+}
+
+/// What the test session's virtual pads hold: kind and newest state per slot.
+static PADS: Mutex<[Option<(PadKind, PadState)>; 16]> = Mutex::new([None; 16]);
+
+/// The test session's virtual pads, slot by slot.
+pub fn pads() -> [Option<(PadKind, PadState)>; 16] {
+    *PADS.lock()
+}
+
+/// Virtual pads that only remember their state, and rumble back what the
+/// triggers say: the large motor follows the right trigger, the small one
+/// the left, so a viewer can time a whole round trip.
+pub(crate) struct TestBus;
+
+pub(crate) struct TestPad {
+    slot: u8,
+    feedback: FeedbackFn,
+}
+
+impl Drop for TestPad {
+    fn drop(&mut self) {
+        PADS.lock()[self.slot as usize] = None;
+    }
+}
+
+impl VirtualBus for TestBus {
+    type Pad = TestPad;
+    const SLOTS: u8 = 16;
+
+    fn kinds(&self) -> &'static [PadKind] {
+        &[PadKind::Xbox, PadKind::PlayStation, PadKind::Generic]
+    }
+
+    fn plug(&mut self, slot: u8, kind: PadKind, feedback: FeedbackFn) -> anyhow::Result<TestPad> {
+        PADS.lock()[slot as usize] = Some((kind, PadState::default()));
+        Ok(TestPad { slot, feedback })
+    }
+
+    fn submit(&mut self, pad: &mut TestPad, state: &PadState) -> anyhow::Result<()> {
+        if let Some((_, s)) = PADS.lock()[pad.slot as usize].as_mut() {
+            *s = *state;
+        }
+        (pad.feedback)(
+            pad.slot,
+            Feedback {
+                large: state.right_trigger,
+                small: state.left_trigger,
+                ..Default::default()
+            },
+        );
+        Ok(())
+    }
 }

@@ -6,8 +6,10 @@
 //! messages and timers, one thread captures and sends video, one captures
 //! and sends audio. One thread for the whole server receives datagrams and
 //! applies input as it arrives, so a key press never waits behind a frame.
+//! A session with gamepads has one more thread, which sends their rumble.
 
 use crate::audio::{self, AudioCapture};
+use crate::gamepad::{self, FeedbackHub, SessionPads};
 use crate::input::{self, DisplayRect, InputSink};
 use crate::video::{self, Codec, VideoConfig, VideoInfo, VideoPipeline};
 use latch_proto::audio::AudioPacketizer;
@@ -261,6 +263,9 @@ impl Server {
             audio_problem: String::new(),
             input: None,
             input_problem: None,
+            pads: None,
+            pads_problem: String::new(),
+            feedback: Arc::new(FeedbackHub::default()),
             info: None,
             codec,
             req,
@@ -292,6 +297,12 @@ impl Server {
             }
             Err(e) => prepared.input_problem = Some(format!("{e:#}")),
         }
+        if prepared.req.gamepads {
+            match gamepad::open(prepared.feedback.feedback_fn()) {
+                Ok(pads) => prepared.pads = Some(pads),
+                Err(e) => prepared.pads_problem = format!("{e:#}"),
+            }
+        }
         Ok(prepared)
     }
 
@@ -305,6 +316,12 @@ impl Server {
         let info = prepared.info.take().expect("prepared has video info");
         let token: [u8; 16] = rand::random();
         let id: u32 = rand::random();
+        let pads = prepared.pads.take();
+        let (pad_slots, pad_kinds) = pads
+            .as_ref()
+            .map_or((0, Vec::new()), |p| (p.slots, p.kinds.clone()));
+        let feedback = prepared.feedback.clone();
+        feedback.start(id);
         let session = Arc::new(Session {
             id,
             token,
@@ -322,6 +339,13 @@ impl Server {
                 sink: prepared.input.take(),
                 display: info.display,
             }),
+            pads: Mutex::new(SessionPads {
+                receiver: Default::default(),
+                sink: pads.map(|p| p.sink),
+                slots: pad_slots,
+                failing: Default::default(),
+            }),
+            feedback,
             rtt: Mutex::new(RttEstimator::new()),
             rtt_low: Mutex::new(None),
             pace_kbps: AtomicU32::new(0),
@@ -374,6 +398,9 @@ impl Server {
             }),
             audio_problem: prepared.audio_problem.clone(),
             cursor: cursor_supported,
+            gamepads: pad_slots,
+            gamepad_kinds: pad_kinds,
+            gamepad_problem: prepared.pads_problem.clone(),
         };
         self.log(format!(
             "{} is watching: {}×{} at {} fps, {} kb/s, {}{}",
@@ -391,6 +418,22 @@ impl Server {
                 String::new()
             }
         ));
+        if prepared.req.gamepads && pad_slots == 0 {
+            self.log(format!("no gamepads: {}", prepared.pads_problem));
+        }
+        let pad_feedback = (pad_slots > 0).then(|| {
+            let server = self.clone();
+            let session = session.clone();
+            std::thread::Builder::new()
+                .name("stream-pads".into())
+                .spawn(move || {
+                    session.feedback.run(|datagram| {
+                        if let Some(addr) = *session.addr.lock() {
+                            let _ = server.udp.send_to(datagram, addr);
+                        }
+                    })
+                })
+        });
         let started = Instant::now();
         let reason = self.control(&session, tcp, accept, prepared.input_problem.take(), {
             let server = self.clone();
@@ -418,6 +461,11 @@ impl Server {
             if let Some(mut sink) = state.sink.take() {
                 sink.release_all();
             }
+        }
+        session.unplug_pads();
+        session.feedback.stop();
+        if let Some(Ok(thread)) = pad_feedback {
+            let _ = thread.join();
         }
         if let Some(undo) = prepared.undo.take() {
             undo();
@@ -673,6 +721,9 @@ pub struct Prepared {
     audio_problem: String,
     input: Option<Box<dyn InputSink>>,
     input_problem: Option<String>,
+    pads: Option<gamepad::Opened>,
+    pads_problem: String,
+    feedback: Arc<FeedbackHub>,
     info: Option<VideoInfo>,
     codec: Codec,
     req: StreamRequest,
@@ -693,6 +744,7 @@ impl Drop for Prepared {
         self.pipeline.take();
         self.audio.take();
         self.input.take();
+        self.pads.take();
         if let Some(undo) = self.undo.take() {
             undo();
         }
@@ -723,6 +775,8 @@ struct Session {
     finished_cv: Condvar,
     keyframe: AtomicBool,
     input: Mutex<InputState>,
+    pads: Mutex<SessionPads>,
+    feedback: Arc<FeedbackHub>,
     rtt: Mutex<RttEstimator>,
     /// The lowest round trip since the last viewer report.
     rtt_low: Mutex<Option<Duration>>,
@@ -775,12 +829,20 @@ impl Session {
         if let Some(mut sink) = input.sink.take() {
             sink.release_all();
         }
+        drop(input);
+        self.unplug_pads();
         let mut ended = self.ended.lock();
         if ended.is_none() {
             *ended = Some(End {
                 code,
                 message: message.into(),
             });
+        }
+    }
+
+    fn unplug_pads(&self) {
+        if let Some(mut sink) = self.pads.lock().sink.take() {
+            sink.unplug_all();
         }
     }
 
@@ -890,6 +952,44 @@ fn receive(server: Weak<Server>) {
                 };
                 wire::write_input_ack(&mut out, session.id, next);
                 let _ = server.udp.send_to(&out, from);
+            }
+            Datagram::Pad { updates, .. } => {
+                let mut acks = Vec::with_capacity(updates.count());
+                {
+                    let mut guard = session.pads.lock();
+                    if session.stopping() {
+                        continue;
+                    }
+                    let pads = &mut *guard;
+                    for u in updates.iter() {
+                        if u.slot >= pads.slots {
+                            continue;
+                        }
+                        if pads.receiver.accept(u.slot, u.seq) {
+                            if let Some(sink) = pads.sink.as_mut() {
+                                let failing = &mut pads.failing[u.slot as usize];
+                                match sink.update(u.slot, u.kind, &u.state) {
+                                    Ok(()) => *failing = false,
+                                    Err(e) if !*failing => {
+                                        *failing = true;
+                                        server.log(format!("gamepad {}: {e:#}", u.slot + 1));
+                                    }
+                                    Err(_) => {}
+                                }
+                            }
+                        }
+                        acks.extend(pads.receiver.ack(u.slot));
+                    }
+                }
+                if !acks.is_empty() {
+                    wire::write_pad_ack(&mut out, session.id, &acks);
+                    let _ = server.udp.send_to(&out, from);
+                }
+            }
+            Datagram::PadFeedbackAck { acks, .. } => {
+                for ack in acks.iter() {
+                    session.feedback.ack(ack);
+                }
             }
             Datagram::KeyframeRequest { last, .. } => {
                 let now = Instant::now();

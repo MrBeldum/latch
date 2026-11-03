@@ -113,9 +113,19 @@ pub struct StreamRequest {
     pub name: String,
     #[serde(default)]
     pub cursor: bool,
+    /// The viewer sends gamepads (`docs/PROTOCOL.md`, "Gamepads").
+    #[serde(default)]
+    pub gamepads: bool,
 }
 
 fn known_codecs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Codec>, D::Error> {
+    known(d)
+}
+
+/// A list of names, skipping the ones this version does not know.
+fn known<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(
+    d: D,
+) -> Result<Vec<T>, D::Error> {
     let names = Vec::<serde_json::Value>::deserialize(d)?;
     Ok(names
         .into_iter()
@@ -147,6 +157,16 @@ pub struct Accept {
     pub audio_problem: String,
     #[serde(default)]
     pub cursor: bool,
+    /// Gamepad slots the host emulates; 0 when it takes none.
+    #[serde(default)]
+    pub gamepads: u8,
+    /// The pad kinds the host emulates as themselves; others become Xbox
+    /// pads.
+    #[serde(default, deserialize_with = "known")]
+    pub gamepad_kinds: Vec<crate::gamepad::PadKind>,
+    /// Why the host takes no gamepads, when the viewer offered them.
+    #[serde(default)]
+    pub gamepad_problem: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -376,6 +396,35 @@ mod tests {
         }"#;
         let req_new: StreamRequest = serde_json::from_str(json_with_cursor).unwrap();
         assert!(req_new.cursor);
+        assert!(!req_new.gamepads);
+    }
+
+    #[test]
+    fn gamepads_are_negotiated_and_unknown_kinds_skipped() {
+        use crate::gamepad::PadKind;
+        let json = r#"{
+            "session": 42,
+            "token": "0123456789abcdef0123456789abcdef",
+            "codec": "hevc",
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "bitrate_kbps": 8000,
+            "encoder": "nvenc",
+            "audio": null,
+            "gamepads": 4,
+            "gamepad_kinds": ["xbox", "switch", "playstation"]
+        }"#;
+        let acc: Accept = serde_json::from_str(json).unwrap();
+        assert_eq!(acc.gamepads, 4);
+        assert_eq!(acc.gamepad_kinds, [PadKind::Xbox, PadKind::PlayStation]);
+        // A 5.0 host's Accept: no gamepads.
+        let old = json.replace(r#""gamepads": 4,"#, "").replace(
+            r#""gamepad_kinds": ["xbox", "switch", "playstation"]"#,
+            r#""cursor": false"#,
+        );
+        let acc: Accept = serde_json::from_str(&old).unwrap();
+        assert_eq!((acc.gamepads, acc.gamepad_kinds.len()), (0, 0));
     }
 
     #[test]

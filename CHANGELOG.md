@@ -73,6 +73,19 @@ GitHub release notes, so each version gets a heading of the form
   encoder never starve it, and `LATCH_MAC_DISPLAY` picks a display other
   than the main one. HEVC Main10 from P010 surfaces is in place for HDR.
 
+- Gamepads. Pads connected to the viewer (Xbox, DualSense, DualShock 4,
+  Switch Pro and others, on a Mac, Windows or Linux) reach the host's games
+  as virtual pads, and the game's rumble comes back to them. A Windows PC
+  makes Xbox 360 and DualShock 4 pads through the ViGEmBus driver, which
+  setup now installs (checksum-pinned, never restarting Windows) and
+  uninstall removes only if setup installed it; a Linux host makes Xbox 360
+  pads through `/dev/uinput` (see the Linux notes for the permission it
+  needs); a Mac host takes none. Each pad's whole state is sent when it
+  changes and again until the host has it, so a lost packet never leaves a
+  button held; on the PC a state reaches XInput well under a millisecond
+  after the viewer sends it. The stream toolbar shows the connected pads.
+  Hosts and viewers from before this negotiate no gamepads and work as
+  before.
 - One pointer while the mouse is captured. The Mac's arrow was hidden only
   by egui's cursor, which macOS applies when the pointer moves over the
   window; a captured pointer is held still, so the Mac's arrow could stay

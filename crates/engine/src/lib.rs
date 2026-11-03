@@ -1,7 +1,8 @@
 //! The host side of a Latch stream. [`server`] takes a session from the
 //! control service and runs it: [`video`] (capture and encode),
 //! [`audio`] (desktop sound), [`input`] (keyboard and mouse into the
-//! desktop) and [`display`] (the desktop's size), each with one
+//! desktop), [`gamepad`] (virtual gamepads) and [`display`] (the desktop's
+//! size), each with one
 //! implementation per platform in `mac/`, `windows/` and `linux/`.
 //! [`software`] is the CPU path (any BGRA source through `latch-codec`),
 //! [`pattern`] a synthetic desktop for tests and measurements.
@@ -11,6 +12,7 @@ pub mod audio;
 mod bitstream;
 mod congestion;
 pub mod display;
+pub mod gamepad;
 pub mod input;
 mod pacing;
 pub mod pattern;

@@ -4,6 +4,7 @@ pub mod app;
 pub mod clipboard;
 pub mod config;
 pub mod display;
+pub mod gamepads;
 pub mod handover;
 pub mod input;
 pub mod macos;

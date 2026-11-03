@@ -2,7 +2,8 @@
 //! `testmode.rs`) serves a `latch-stream` viewer over loopback, through
 //! the same HTTP upgrade the control service uses. Checks that the picture
 //! that arrives is the picture that was drawn, that video keeps flowing,
-//! and how long a key press takes to show up in a decoded frame.
+//! how long a key press takes to show up in a decoded frame, and that
+//! gamepads plug in, follow the viewer, rumble back and unplug.
 
 use latch_core::http::{self, Response};
 use latch_engine::pattern::{Motion, Pattern};
@@ -74,6 +75,14 @@ fn host() -> u16 {
 }
 
 fn connect(port: u16, cursor: bool) -> (Session, Arc<FrameSlot>, mpsc::Receiver<Event>) {
+    connect_with(port, cursor, false)
+}
+
+fn connect_with(
+    port: u16,
+    cursor: bool,
+    gamepads: bool,
+) -> (Session, Arc<FrameSlot>, mpsc::Receiver<Event>) {
     let frames = Arc::new(FrameSlot::default());
     let (tx, rx) = mpsc::channel();
     let session = Session::start(
@@ -91,6 +100,7 @@ fn connect(port: u16, cursor: bool) -> (Session, Arc<FrameSlot>, mpsc::Receiver<
             audio: false,
             name: "loopback test".into(),
             cursor,
+            gamepads,
         },
         frames.clone(),
         tx,
@@ -364,4 +374,61 @@ fn local_cursor_negotiated_and_host_omits_pointer_when_asked() {
         std::thread::sleep(Duration::from_millis(10));
     }
     std::thread::sleep(Duration::from_millis(300));
+}
+
+#[test]
+fn gamepads_plug_in_follow_rumble_back_and_unplug() {
+    use latch_proto::gamepad::{button, Feedback, PadKind, PadState};
+    std::env::set_var("LATCH_TEST_PATTERN", "still");
+    let port = host();
+    let (session, _frames, _events) = connect_with(port, false, true);
+    let input = session.input();
+    assert_eq!(input.pad_slots(), 16);
+    let (rumble_tx, rumble) = mpsc::channel::<(u8, Feedback)>();
+    let rumble_tx = std::sync::Mutex::new(rumble_tx);
+    session.on_pad_feedback(move |slot, f| {
+        let _ = rumble_tx.lock().unwrap().send((slot, f));
+    });
+    let wait_for = |what: &dyn Fn() -> bool| {
+        let start = Instant::now();
+        while !what() {
+            assert!(start.elapsed() < Duration::from_secs(5), "timed out");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        start.elapsed()
+    };
+    let pulled = PadState {
+        buttons: button::SOUTH | button::DPAD_LEFT,
+        left_x: -20_000,
+        right_trigger: 40_000,
+        left_trigger: 1_000,
+        ..Default::default()
+    };
+    input.pad(2, PadKind::PlayStation, pulled);
+    input.pad(0, PadKind::Xbox, PadState::default());
+    let arrived = wait_for(&|| {
+        let pads = latch_engine::testmode::pads();
+        pads[2] == Some((PadKind::PlayStation, pulled)) && pads[0].is_some()
+    });
+    // The test host rumbles back what the triggers say.
+    let start = Instant::now();
+    let (slot, f) = loop {
+        let (slot, f) = rumble.recv_timeout(Duration::from_secs(5)).unwrap();
+        if slot == 2 {
+            break (slot, f);
+        }
+    };
+    assert_eq!((slot, f.large, f.small), (2, 40_000, 1_000));
+    let round_trip = arrived + start.elapsed();
+    eprintln!("pad state arrived in {arrived:?}; rumble back after {round_trip:?}");
+    // A newer state replaces it; then the pad goes.
+    let released = PadState::default();
+    input.pad(2, PadKind::PlayStation, released);
+    wait_for(&|| latch_engine::testmode::pads()[2] == Some((PadKind::PlayStation, released)));
+    input.pad_gone(2);
+    wait_for(&|| latch_engine::testmode::pads()[2].is_none());
+    // Ending the session unplugs what is left.
+    session.stop();
+    wait_for(&|| session.finished());
+    wait_for(&|| latch_engine::testmode::pads().iter().all(Option::is_none));
 }
