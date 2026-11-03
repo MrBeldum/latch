@@ -180,6 +180,7 @@ fn a_bad_network_slows_the_picture_but_loses_no_key() {
             audio: false,
             name: "impaired test".into(),
             cursor: false,
+            gamepads: false,
         },
         frames.clone(),
         tx,

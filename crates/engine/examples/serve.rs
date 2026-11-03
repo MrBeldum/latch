@@ -4,7 +4,9 @@
 //!
 //!     serve [--bind 100.x.y.z] [--port 47860] [--telemetry]
 //!
-//! `LATCH_TEST_PATTERN=still|sweep|noise` streams the synthetic desktop.
+//! `LATCH_TEST_PATTERN=still|sweep|noise` streams the synthetic desktop;
+//! `LATCH_TEST_GAMEPADS=system` then still plugs viewers' gamepads into the
+//! platform (ViGEmBus, uinput) rather than test pads.
 
 use latch_core::http::{self, Response};
 use latch_engine::server::{Options, Server};
