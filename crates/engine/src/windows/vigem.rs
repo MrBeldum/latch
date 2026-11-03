@@ -311,6 +311,16 @@ impl VirtualBus for Bus {
             }
             _ => {}
         }
+        // A target refuses reports (ERROR_NO_MORE_ITEMS) until Windows has
+        // opened it, a few milliseconds after it is "ready": the first state
+        // must not be lost to that.
+        let started = std::time::Instant::now();
+        while let Err(e) = self.report(&target, &PadState::default()) {
+            if started.elapsed() > Duration::from_secs(1) {
+                return Err(e).context("the virtual pad never took a report");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let handle = self.handle.clone();
         target.notifications = Some(
             std::thread::Builder::new()
@@ -321,7 +331,14 @@ impl VirtualBus for Bus {
     }
 
     fn submit(&mut self, pad: &mut Target, state: &PadState) -> Result<()> {
-        let result = match pad.kind {
+        self.report(pad, state)
+            .context("ViGEmBus refused the pad's state")
+    }
+}
+
+impl Bus {
+    fn report(&self, pad: &Target, state: &PadState) -> windows::core::Result<()> {
+        match pad.kind {
             PadKind::PlayStation => {
                 let r = Submit {
                     size: std::mem::size_of::<Submit<10>>() as u32,
@@ -338,8 +355,7 @@ impl VirtualBus for Bus {
                 };
                 call::<_, ()>(&self.handle, &self.event, XUSB_SUBMIT_REPORT, &r, None)
             }
-        };
-        result.context("ViGEmBus refused the pad's state")
+        }
     }
 }
 

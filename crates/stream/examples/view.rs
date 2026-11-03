@@ -209,13 +209,15 @@ fn main() -> anyhow::Result<()> {
                     right_trigger: ((tick % 256) * 256) as u16,
                     ..Default::default()
                 };
+                // Stamped before sending, so the log never trails the pad.
+                let sent_us = wall_us();
                 for slot in 0..slots {
                     input.pad(slot, pad_kind, state);
                 }
                 if toggled != south {
                     south = toggled;
                     log.lock().push(serde_json::json!({
-                        "south": south, "wall_us": wall_us().to_string(),
+                        "south": south, "wall_us": sent_us.to_string(),
                     }));
                 }
                 tick += 1;
