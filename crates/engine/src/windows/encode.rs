@@ -336,7 +336,7 @@ impl Encoder {
         }
     }
     /// Rate control for a mean of `kbps`: CBR, capped at the same rate, with
-    /// a buffer of about a frame and a half. A driver's default buffer is
+    /// a buffer of about a frame. A driver's default buffer is
     /// often a second long, and lets a keyframe or a burst of motion run to
     /// many times the average: a burst a link that carries the bitrate
     /// delivers late, and loses to its queue.
@@ -512,7 +512,7 @@ impl Encoder {
             })
         }
     }
-    /// A new mean rate, with the rate buffer kept at a frame and a half of
+    /// A new mean rate, with the rate buffer kept at a frame of
     /// it. The buffer and cap are best effort; the mean is not.
     pub fn bitrate(&mut self, kbps: u32) -> Result<()> {
         if kbps == self.kbps {

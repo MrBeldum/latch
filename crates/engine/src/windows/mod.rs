@@ -136,7 +136,14 @@ impl MfPipeline {
     }
     fn next(&mut self, keyframe: bool, idle: Duration) -> Result<EncodedVideo> {
         if !self.ahead.is_empty() {
-            return self.collect();
+            if !keyframe {
+                return self.collect(true);
+            }
+            // A requested IDR must not sit behind an endlessly replenished
+            // queue. Discard the old outputs, then restart the reference chain.
+            while !self.ahead.is_empty() {
+                self.collect(false)?;
+            }
         }
         // Frames go out on the pacer's grid, so the time spent capturing,
         // converting and encoding one comes out of its interval.
@@ -185,7 +192,7 @@ impl MfPipeline {
                 if let VideoEncoder::Amf(encoder) = &mut self.encoder {
                     encoder.submit(&picture.texture, force)?;
                     self.ahead.push_back((self.last_capture, force));
-                    return self.collect();
+                    return self.collect(true);
                 }
                 let sample = self.sample(&picture)?;
                 let VideoEncoder::Mf(encoder) = &mut self.encoder else {
@@ -223,7 +230,7 @@ impl MfPipeline {
     /// the encoder busy and runs at what the GPU can do. A stream the
     /// encoder keeps up with never has a picture due before its output,
     /// so nothing waits behind anything.
-    fn collect(&mut self) -> Result<EncodedVideo> {
+    fn collect(&mut self, allow_ahead: bool) -> Result<EncodedVideo> {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             let VideoEncoder::Amf(encoder) = &mut self.encoder else {
@@ -243,7 +250,8 @@ impl MfPipeline {
                     captured,
                 });
             }
-            if self.ahead.len() < AHEAD
+            if allow_ahead
+                && self.ahead.len() < AHEAD
                 && !self.moved
                 && self.pacer.due().is_some_and(|due| due <= Instant::now())
             {
@@ -609,6 +617,27 @@ fn unavailable(error: &anyhow::Error, facility: &str) -> bool {
 mod test_decoder;
 #[cfg(test)]
 mod tests {
+    /// Run with a changing desktop to exercise the bounded AMF input queue.
+    #[test]
+    #[ignore]
+    fn hardware_pipeline_keyframes() -> anyhow::Result<()> {
+        use super::*;
+        let _runtime = Runtime::new(true)?;
+        let config = VideoConfig {
+            width: 1920,
+            height: 1080,
+            fps: 1000,
+            bitrate_kbps: 50_000,
+            codec: Codec::Hevc,
+        };
+        let mut pipeline = Pipeline::new(&config, true)?;
+        for i in 0..96 {
+            let force = i % 7 == 0;
+            let frame = pipeline.next(force, Duration::ZERO)?;
+            anyhow::ensure!(!force || frame.keyframe, "IDR request lost at frame {i}");
+        }
+        Ok(())
+    }
     use super::*;
     #[test]
     fn proxy_drop_waits_for_worker_resources() {

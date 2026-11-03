@@ -52,6 +52,12 @@ impl Variant {
     }
 }
 #[repr(C)]
+struct InterfaceTable {
+    acquire: RcFn,
+    release: RcFn,
+    query: usize,
+}
+#[repr(C)]
 struct Properties {
     acquire: RcFn,
     release: RcFn,
@@ -142,7 +148,7 @@ impl Drop for Object {
     fn drop(&mut self) {
         // SAFETY: Object adopts one reference from an AMF creation call.
         unsafe {
-            (self.table::<Properties>().release)(self.ptr());
+            (self.table::<InterfaceTable>().release)(self.ptr());
         }
     }
 }
@@ -435,6 +441,18 @@ impl Drop for Encoder {
 
 #[cfg(test)]
 mod tests {
+    #[repr(C)]
+    struct CapsTable {
+        properties: super::Properties,
+        acceleration: usize,
+        input: super::OutFn,
+    }
+    #[repr(C)]
+    struct IoCapsTable {
+        interface: super::InterfaceTable,
+        width: unsafe extern "system" fn(super::Ptr, *mut i32, *mut i32),
+        height: unsafe extern "system" fn(super::Ptr, *mut i32, *mut i32),
+    }
     #[test]
     fn variant_matches_win64_amf_abi() {
         assert_eq!(std::mem::size_of::<super::Variant>(), 24);
@@ -443,6 +461,8 @@ mod tests {
         assert_eq!(std::mem::offset_of!(super::ComponentTable, output), 23 * 8);
         assert_eq!(std::mem::offset_of!(super::BufferTable, native), 25 * 8);
         assert_eq!(std::mem::offset_of!(super::ComponentTable, caps), 26 * 8);
+        assert_eq!(std::mem::offset_of!(CapsTable, input), 14 * 8);
+        assert_eq!(std::mem::offset_of!(IoCapsTable, width), 3 * 8);
     }
 
     /// Run in the signed-in desktop on an AMD GPU: the encoder's own limits,
@@ -517,6 +537,16 @@ mod tests {
                     "caps",
                 )?;
                 let caps = Object::new(caps)?;
+                let mut input = null_mut();
+                check(
+                    (caps.table::<CapsTable>().input)(caps.ptr(), &mut input),
+                    "input caps",
+                )?;
+                let input = Object::new(input)?;
+                let (mut min_w, mut max_w, mut min_h, mut max_h) = (0, 0, 0, 0);
+                (input.table::<IoCapsTable>().width)(input.ptr(), &mut min_w, &mut max_w);
+                (input.table::<IoCapsTable>().height)(input.ptr(), &mut min_h, &mut max_h);
+                eprintln!("HEVC input: width={min_w}..{max_w}, height={min_h}..{max_h}");
                 let mut line = format!("{width}x{height} caps:");
                 for name in [
                     "HevcMaxThroughput",
