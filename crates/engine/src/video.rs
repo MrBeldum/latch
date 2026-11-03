@@ -179,8 +179,63 @@ pub fn limits(codec: Codec) -> Limits {
     }
     #[cfg(target_os = "macos")]
     return crate::mac::limits(codec);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    return crate::linux::limits(codec);
+    #[cfg(windows)]
     return Limits::level(codec);
+}
+
+/// Whether sessions in `codec` are encoded in hardware here, so that the
+/// software path's measured ceiling does not hold them. Only a Linux host
+/// knows per codec; elsewhere the ceiling holds whenever the host has one.
+pub fn hardware_encodes(codec: Codec) -> bool {
+    if crate::testmode::motion().is_some() {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    return crate::linux::hardware_encodes(codec);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = codec;
+        false
+    }
+}
+
+/// Whether `codec` can stream a `width` × `height` picture here: false
+/// where its only encoder does not take that size (VA-API HEVC on a size
+/// that is not a whole number of its coding blocks).
+pub fn takes(codec: Codec, width: u32, height: u32) -> bool {
+    if crate::testmode::motion().is_some() {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    return crate::linux::takes(codec, width, height);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (codec, width, height);
+        true
+    }
+}
+
+/// A pipeline error that says the session's codec cannot go on here (its
+/// only encoder does not take the desktop's new size, or failed to open):
+/// the session ends so that the viewer reconnects and negotiates another,
+/// instead of reopening the same one.
+#[derive(Debug)]
+pub struct Unencodable(pub String);
+
+impl std::fmt::Display for Unencodable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unencodable {}
+
+impl Unencodable {
+    pub fn is(error: &anyhow::Error) -> bool {
+        error.chain().any(|e| e.is::<Unencodable>())
+    }
 }
 
 /// What this machine can encode, best first.

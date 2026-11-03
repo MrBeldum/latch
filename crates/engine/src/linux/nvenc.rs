@@ -11,10 +11,11 @@
 //! a one-frame VBV, no B-frames, an infinite GOP with IDRs on request, and
 //! parameter sets before every IDR.
 
+use super::hardware::{unusable, Caps};
 use super::nv12;
 use crate::software::PictureEncoder;
 use crate::video::{Codec, VideoConfig};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use latch_codec::Yuv420;
 use libloading::Library;
 use std::ffi::{c_char, c_void, CStr};
@@ -95,6 +96,17 @@ const LOCK_BITSTREAM_VER: u32 = struct_version(2);
 const PIC_PARAMS_VER: u32 = struct_version(6) | (1 << 31);
 
 const SUCCESS: i32 = 0;
+/// Statuses that say this driver or GPU has no such encoder: no encode
+/// device, an unsupported or missing device, an API version it does not
+/// take, unimplemented. Out of memory (also what a GeForce card's session
+/// limit gives), invalid or unsupported parameters (a size it does not
+/// take) and the rest are for one open.
+const UNSUPPORTED: [Status; 7] = [1, 2, 3, 4, 5, 15, 22];
+const CAPS_PARAM_VER: u32 = struct_version(1);
+const CAPS_WIDTH_MAX: u32 = 16;
+const CAPS_HEIGHT_MAX: u32 = 17;
+const CAPS_MB_NUM_MAX: u32 = 31;
+const CAPS_MB_PER_SEC_MAX: u32 = 32;
 const DEVICE_CUDA: u32 = 1;
 const BUFFER_NV12: u32 = 0x1;
 const TUNING_ULTRA_LOW_LATENCY: u32 = 3;
@@ -445,6 +457,14 @@ struct PicParams {
 }
 
 type Status = i32;
+
+/// `NV_ENC_CAPS_PARAM`.
+#[repr(C)]
+struct CapsParam {
+    version: u32,
+    caps_to_query: u32,
+    reserved: [u32; 62],
+}
 type Encoder = Ptr;
 
 /// `NV_ENCODE_API_FUNCTION_LIST`, in the header's order.
@@ -459,7 +479,8 @@ struct FunctionList {
     get_encode_guids: Option<unsafe extern "C" fn(Encoder, *mut Guid, u32, *mut u32) -> Status>,
     get_input_format_count: Ptr,
     get_input_formats: Ptr,
-    get_encode_caps: Ptr,
+    get_encode_caps:
+        Option<unsafe extern "C" fn(Encoder, Guid, *mut CapsParam, *mut i32) -> Status>,
     get_encode_preset_count: Ptr,
     get_encode_preset_guids: Ptr,
     get_encode_preset_config: Ptr,
@@ -529,6 +550,8 @@ const _: () = {
     assert!(offset_of!(PicParams, picture_type) == 72 && size_of::<PicParams>() == 3360);
     assert!(offset_of!(FunctionList, get_encode_preset_config_ex) == 8 + 39 * 8);
     assert!(size_of::<FunctionList>() == 2552);
+    assert!(offset_of!(FunctionList, get_encode_caps) == 8 + 7 * 8);
+    assert!(size_of::<CapsParam>() == 256);
 };
 
 /// A zeroed C structure: every one used here is plain data, valid zeroed.
@@ -676,6 +699,7 @@ pub struct Nvenc {
     preset: Box<PresetConfig>,
     init: Box<InitializeParams>,
     device: String,
+    encode_guid: Guid,
 }
 // SAFETY: the session is used by one thread at a time, with its CUDA
 // context pushed for every call.
@@ -683,7 +707,7 @@ unsafe impl Send for Nvenc {}
 
 impl Nvenc {
     pub fn open(codec: Codec, width: u32, height: u32, config: &VideoConfig) -> Result<Self> {
-        let api = api()?;
+        let api = api().map_err(unusable)?;
         let (encode_guid, profile_guid) = match codec {
             Codec::H264Baseline => (CODEC_H264, PROFILE_H264_BASELINE),
             Codec::H264High => (CODEC_H264, PROFILE_H264_HIGH),
@@ -695,7 +719,9 @@ impl Nvenc {
         let mut name = [0 as c_char; 256];
         // SAFETY: plain out-parameters of the CUDA driver API.
         unsafe {
-            ensure!((api.cu_device_get)(&mut device, 0) == 0, "no CUDA device");
+            if (api.cu_device_get)(&mut device, 0) != 0 {
+                return Err(unusable(anyhow::anyhow!("no CUDA device")));
+            }
             (api.cu_device_get_name)(name.as_mut_ptr(), name.len() as i32, device);
             ensure!(
                 (api.cu_ctx_create)(&mut context, 0, device) == 0,
@@ -722,6 +748,7 @@ impl Nvenc {
             preset: zeroed(),
             init: zeroed(),
             device: device_name,
+            encode_guid,
         };
         this.start(encode_guid, profile_guid, config)?;
         Ok(this)
@@ -741,7 +768,43 @@ impl Nvenc {
                 }
             }
         };
-        anyhow::anyhow!("NVENC {what} failed (status {status}){detail}")
+        let error = anyhow::anyhow!("NVENC {what} failed (status {status}){detail}");
+        if UNSUPPORTED.contains(&status) {
+            unusable(error)
+        } else {
+            error
+        }
+    }
+
+    /// What this GPU's encoder for the session's codec takes.
+    pub fn caps(&self) -> Caps {
+        let query = |caps: u32| {
+            let mut param = zeroed::<CapsParam>();
+            param.version = CAPS_PARAM_VER;
+            param.caps_to_query = caps;
+            let mut value = 0;
+            // SAFETY: a live session; one value out.
+            let status = unsafe {
+                call!(
+                    self.api,
+                    get_encode_caps(self.encoder, self.encode_guid, &mut *param, &mut value)
+                )
+            };
+            u64::try_from(value).ok().filter(|_| status == SUCCESS)
+        };
+        let _current = Current::new(self.api, self.context).ok();
+        let side = |caps, unknown: u32| {
+            query(caps)
+                .filter(|&v| v > 0)
+                .map_or(unknown, |v| u32::try_from(v).unwrap_or(unknown))
+        };
+        Caps {
+            max_width: side(CAPS_WIDTH_MAX, Caps::UNKNOWN.max_width),
+            max_height: side(CAPS_HEIGHT_MAX, Caps::UNKNOWN.max_height),
+            max_pixels: query(CAPS_MB_NUM_MAX).unwrap_or(0) * 256,
+            max_pixel_rate: query(CAPS_MB_PER_SEC_MAX).unwrap_or(0) * 256,
+            ..Caps::UNKNOWN
+        }
     }
 
     fn start(&mut self, encode_guid: Guid, profile_guid: Guid, config: &VideoConfig) -> Result<()> {
@@ -769,7 +832,10 @@ impl Nvenc {
             );
             guids.truncate(count as usize);
             if !guids.contains(&encode_guid) {
-                bail!("this GPU has no {} encoder", self.codec.name());
+                return Err(unusable(anyhow::anyhow!(
+                    "this GPU has no {} encoder",
+                    self.codec.name()
+                )));
             }
             self.preset.version = PRESET_CONFIG_VER;
             self.preset.config.version = CONFIG_VER;

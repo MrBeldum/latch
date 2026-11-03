@@ -198,7 +198,22 @@ impl Server {
             ));
         }
         let encodable = video::encodable();
-        let Some(codec) = req.codecs.iter().copied().find(|c| encodable.contains(c)) else {
+        // Best first, of those this host encodes at the size it would send.
+        let candidates: Vec<Codec> = req
+            .codecs
+            .iter()
+            .copied()
+            .filter(|c| encodable.contains(c))
+            .filter(|&c| {
+                let (w, h, _) = video::limits(c).fit(
+                    even(req.width.clamp(64, control::MAX_SIDE)),
+                    even(req.height.clamp(64, control::MAX_SIDE)),
+                    1,
+                );
+                video::takes(c, w, h)
+            })
+            .collect();
+        let Some(&codec) = candidates.first() else {
             return Err(Refusal::new(
                 406,
                 format!(
@@ -217,7 +232,9 @@ impl Server {
         );
         // A host encoding in software, as it measured its CPU (or, until
         // then, conservatively): whatever the viewer fitted, or did not.
-        if let Some(ceiling) = crate::software::ceiling() {
+        if let Some(ceiling) =
+            crate::software::ceiling().filter(|_| !video::hardware_encodes(codec))
+        {
             (width, height, fps) = ceiling.fit(width, height, fps);
         }
         if (width, height, fps) != (req.width, req.height, req.fps) {
@@ -267,14 +284,36 @@ impl Server {
             peer,
             opening: Some(opening),
         };
-        let config = VideoConfig {
+        let mut config = VideoConfig {
             width: prepared.req.width,
             height: prepared.req.height,
             fps: prepared.req.fps,
             bitrate_kbps: prepared.req.bitrate_kbps,
             codec,
         };
-        let pipeline = video::open(&config)
+        let mut opened = video::open(&config);
+        // A codec whose only encoder will not open here gives way to the
+        // next the viewer takes, at the same size.
+        for &next in &candidates[1..] {
+            match &opened {
+                Err(e) if video::Unencodable::is(e) => {
+                    self.log(format!("{e:#}; trying {}", next.name()));
+                    config.codec = next;
+                    config.bitrate_kbps = config.bitrate_kbps.min(video::limits(next).max_kbps);
+                    if let Some(ceiling) =
+                        crate::software::ceiling().filter(|_| !video::hardware_encodes(next))
+                    {
+                        config.fps = ceiling.fit(config.width, config.height, config.fps).2;
+                    }
+                    prepared.req.fps = config.fps;
+                    prepared.req.bitrate_kbps = config.bitrate_kbps;
+                    prepared.codec = next;
+                    opened = video::open(&config);
+                }
+                _ => break,
+            }
+        }
+        let pipeline = opened
             .map_err(|e| Refusal::new(500, format!("could not capture the screen: {e:#}")))?;
         prepared.info = Some(pipeline.info());
         prepared.pipeline = Some((pipeline, config));
@@ -969,6 +1008,11 @@ fn encode_video(
                 if session.stopping() {
                     return;
                 }
+                if video::Unencodable::is(&e) {
+                    server.log(format!("video stopped: {e:#}"));
+                    session.end(end::ENCODER_FAILED, &unencodable(config.codec, &e));
+                    return;
+                }
                 server.log(format!("video stopped: {e:#}; starting it again"));
                 // Some capture APIs allow only one owner of an output.
                 drop(pipeline);
@@ -991,6 +1035,11 @@ fn encode_video(
                         Ok(p) => {
                             pipeline = p;
                             break;
+                        }
+                        Err(e) if video::Unencodable::is(&e) => {
+                            server.log(format!("video reopen failed: {e:#}"));
+                            session.end(end::ENCODER_FAILED, &unencodable(config.codec, &e));
+                            return;
                         }
                         Err(e) => {
                             server.log(format!("video reopen failed: {e:#}"));
@@ -1197,6 +1246,15 @@ fn send(udp: &UdpSocket, session: &Session, datagram: &[u8], to: SocketAddr) {
 
 fn even(v: u32) -> u32 {
     v & !1
+}
+
+/// Why a session ended for its codec: the viewer reconnects, and the host
+/// negotiates another.
+fn unencodable(codec: Codec, error: &anyhow::Error) -> String {
+    format!(
+        "The host's {} encoder cannot go on ({error:#}); reconnecting picks another codec.",
+        codec.name()
+    )
 }
 
 fn names(codecs: &[Codec]) -> String {

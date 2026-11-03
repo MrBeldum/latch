@@ -405,7 +405,11 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
         let size = (self.frame.width, self.frame.height);
         if self.encoder.is_none() || self.encoder_size != size {
             self.encoder = None;
-            self.encoder = Some((self.open)(size.0, size.1, &self.config)?);
+            let encoder = (self.open)(size.0, size.1, &self.config)?;
+            // At another size the encoder may be another (software where
+            // hardware does not take it).
+            self.describe = (encoder.name(), encoder.hardware(), encoder.codec());
+            self.encoder = Some(encoder);
             self.encoder_size = size;
         }
         if resized {

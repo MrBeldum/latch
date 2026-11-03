@@ -31,39 +31,77 @@ pub fn encodable() -> Vec<crate::video::Codec> {
     hardware::encodable()
 }
 
-/// X11 capture into the hardware encoder for `config.codec` when there is
-/// one, else into `latch-codec`. A hardware encoder that fails to open
-/// gives H.264 to `latch-codec` (Baseline, which every H.264 viewer
-/// decodes); for HEVC or AV1, which the viewer has been told, the session
-/// fails and the next one is not offered that codec.
-pub fn open_video(config: &VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>> {
-    use crate::software::SoftwarePipeline;
+/// What the encoder for `codec` takes: the hardware's limits when it has
+/// the codec, else the codec's level.
+pub fn limits(codec: crate::video::Codec) -> crate::video::Limits {
+    hardware::limits(codec).unwrap_or_else(|| crate::video::Limits::level(codec))
+}
+
+/// Whether a session in `codec` is encoded in hardware here.
+pub fn hardware_encodes(codec: crate::video::Codec) -> bool {
+    hardware::backend(codec).is_some()
+}
+
+/// Whether `codec` can stream `width` × `height`, and the desktop as it is
+/// now (which the session sends when it does not resize to the viewer).
+/// H.264 always can: the software encoder takes what hardware does not.
+pub fn takes(codec: crate::video::Codec, width: u32, height: u32) -> bool {
     use crate::video::Codec;
-    if let Some(backend) = hardware::backend(config.codec) {
-        let codec = config.codec;
-        let opened = SoftwarePipeline::with_encoder(
-            X11Capture::new()?,
-            config,
-            Box::new(move |width, height, config| {
-                hardware::open(backend, codec, width, height, config)
-            }),
-        );
-        match opened {
-            Ok(pipeline) => return Ok(Box::new(pipeline)),
-            Err(e) => {
-                hardware::failed(codec, &e);
-                if !matches!(codec, Codec::H264High | Codec::H264Baseline) {
-                    return Err(e.context(format!("open the {} encoder", codec.name())));
-                }
-            }
-        }
+    if matches!(codec, Codec::H264High | Codec::H264Baseline) {
+        return true;
     }
-    anyhow::ensure!(
-        matches!(config.codec, Codec::H264High | Codec::H264Baseline),
-        "this host has no {} encoder",
-        config.codec.name()
-    );
-    Ok(Box::new(SoftwarePipeline::new(X11Capture::new()?, config)?))
+    hardware::fits(codec, width, height)
+        && capture_size().map_or(true, |[w, h]| hardware::fits(codec, w, h))
+}
+
+/// X11 capture into the hardware encoder for `config.codec` when there is
+/// one that takes the desktop's size, else into `latch-codec`. H.264 goes
+/// to `latch-codec` (Baseline, which every H.264 viewer decodes) when the
+/// hardware encoder does not open, then or after a resize. HEVC or AV1,
+/// which the viewer has been told, have no such fallback: the error is
+/// [`Unencodable`](crate::video::Unencodable), and the next session
+/// negotiates another codec.
+pub fn open_video(config: &VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>> {
+    use crate::software::{LatchEncoder, PictureEncoder, SoftwarePipeline};
+    use crate::video::{Codec, Unencodable};
+    let codec = config.codec;
+    let h264 = matches!(codec, Codec::H264High | Codec::H264Baseline);
+    let Some(backend) = hardware::backend(codec) else {
+        anyhow::ensure!(
+            h264,
+            Unencodable(format!("this host has no {} encoder", codec.name()))
+        );
+        return Ok(Box::new(SoftwarePipeline::new(X11Capture::new()?, config)?));
+    };
+    // Opens the hardware encoder for each size the desktop takes; for
+    // H.264, the software one where that fails.
+    let open =
+        move |width, height, config: &VideoConfig| -> anyhow::Result<Box<dyn PictureEncoder>> {
+            let failure = if hardware::fits(codec, width, height) {
+                match hardware::open(backend, codec, width, height, config) {
+                    Ok(encoder) => return Ok(encoder),
+                    Err(e) => {
+                        hardware::failed(codec, &e);
+                        e
+                    }
+                }
+            } else {
+                anyhow::anyhow!(
+                    "the hardware {} encoder does not take {width} × {height}",
+                    codec.name()
+                )
+            };
+            if !h264 {
+                return Err(Unencodable(format!("{failure:#}")).into());
+            }
+            tracing::info!("{failure:#}; encoding H.264 in software");
+            Ok(Box::new(LatchEncoder::open(width, height, config)?))
+        };
+    Ok(Box::new(SoftwarePipeline::with_encoder(
+        X11Capture::new()?,
+        config,
+        Box::new(open),
+    )?))
 }
 pub fn open_audio() -> anyhow::Result<Box<dyn AudioCapture>> {
     Ok(Box::new(audio::PulseCapture::new()?))

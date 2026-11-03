@@ -1,21 +1,26 @@
 //! VA-API encoding (Intel's iHD and Mesa's AMD/Intel drivers) through
 //! `libva.so.2` and `libva-drm.so.2`, loaded when first asked for, on the
-//! first DRM render node whose driver encodes. Structures follow libva 2.x
-//! (`va.h`, `va_enc_h264.h`, `va_enc_hevc.h`), whose layout libva keeps
-//! stable; their sizes are checked at compile time.
+//! first DRM render node whose driver encodes the codec asked for (an
+//! Intel iGPU beside an AMD card, or NVIDIA's decode-only VA-API driver in
+//! front of an Intel one, may each have what the other lacks). Structures
+//! follow libva 2.x (`va.h`, `va_enc_h264.h`, `va_enc_hevc.h`), whose
+//! layout libva keeps stable; their sizes are checked at compile time.
 //!
 //! H.264 (Constrained Baseline or High) and HEVC Main, with the driver
 //! writing the parameter sets and slice headers (no packed headers): one
 //! slice, P-frames that refer to the frame before, IDRs on request, CBR
-//! with a one-frame HRD buffer. Pictures arrive as NV12 converted by the
-//! CPU. A driver that writes no parameter sets fails the probe in
+//! with a one-frame HRD buffer. HEVC parameters have no conformance window
+//! without packed headers, so HEVC codes only sizes in whole minimum
+//! coding blocks (8 pixels or more), and other sizes are not offered it.
+//! Pictures arrive as NV12 converted by the CPU. A driver that writes no parameter sets fails the probe in
 //! [`super::hardware`] and is not used. AV1 needs the application to
 //! write sequence and frame headers and is not offered.
 
+use super::hardware::{is_unusable, unusable, Caps};
 use super::nv12;
 use crate::software::PictureEncoder;
 use crate::video::{Codec, VideoConfig};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use latch_codec::Yuv420;
 use libloading::Library;
 use std::ffi::{c_char, c_int, c_uint, c_void, CStr};
@@ -37,6 +42,8 @@ const ENTRYPOINT_ENC_SLICE_LP: c_int = 8;
 const ATTRIB_RT_FORMAT: c_int = 0;
 const ATTRIB_RATE_CONTROL: c_int = 5;
 const ATTRIB_ENC_MAX_REF_FRAMES: c_int = 13;
+const ATTRIB_MAX_PICTURE_WIDTH: c_int = 18;
+const ATTRIB_MAX_PICTURE_HEIGHT: c_int = 19;
 const ATTRIB_ENC_HEVC_BLOCK_SIZES: c_int = 51;
 const ATTRIB_NOT_SUPPORTED: u32 = 0x8000_0000;
 const RT_FORMAT_YUV420: u32 = 0x1;
@@ -54,6 +61,16 @@ const MISC_HRD: u32 = 5;
 const H264_INVALID: u32 = 0x1;
 const H264_SHORT_TERM_REFERENCE: u32 = 0x8;
 const HEVC_INVALID: u32 = 0x1;
+const HEVC_RPS_ST_CURR_BEFORE: u32 = 0x10;
+/// Statuses that say a driver has no such encoder: a configuration that
+/// will never open, unlike a failed allocation or an unsupported size.
+const UNSUPPORTED: [Status; 5] = [
+    0x0a, // attribute not supported
+    0x0c, // profile
+    0x0d, // entry point
+    0x0e, // render target format
+    0x14, // unimplemented
+];
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -474,70 +491,74 @@ impl Device {
         }
         // SAFETY: vaErrorStr returns a static string for any status.
         let text = unsafe { CStr::from_ptr((self.api.vaErrorStr)(status)) };
-        bail!("VA-API {what}: {} ({status})", text.to_string_lossy())
+        let error = anyhow::anyhow!("VA-API {what}: {} ({status})", text.to_string_lossy());
+        Err(if UNSUPPORTED.contains(&status) {
+            unusable(error)
+        } else {
+            error
+        })
     }
 
     /// The render nodes in order, `$LATCH_VAAPI_DEVICE` first if set.
-    fn open() -> Result<Self> {
-        let api = api()?;
+    fn nodes() -> Vec<std::path::PathBuf> {
         let mut nodes: Vec<std::path::PathBuf> = std::env::var_os("LATCH_VAAPI_DEVICE")
             .map(Into::into)
             .into_iter()
             .collect();
         nodes.extend((128..136).map(|n| format!("/dev/dri/renderD{n}").into()));
-        let mut last = anyhow::anyhow!("no DRM render node");
-        for node in nodes {
-            let file = match std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&node)
-            {
-                Ok(file) => file,
-                Err(e) => {
-                    // A node that exists but cannot be opened (not in the
-                    // `render` group) is worth saying so.
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        last = anyhow::anyhow!("{}: {e}", node.display());
-                    }
-                    continue;
-                }
-            };
-            let fd = OwnedFd::from(file);
-            // SAFETY: `fd` stays open for as long as the display lives.
-            let display = unsafe { (api.get_display_drm)(fd.as_raw_fd()) };
-            if display.is_null() {
-                continue;
-            }
-            let (mut major, mut minor) = (0, 0);
-            // SAFETY: a display just returned by vaGetDisplayDRM.
-            let status = unsafe {
-                (api.vaSetErrorCallback)(display, Some(message), null_mut());
-                (api.vaSetInfoCallback)(display, Some(message), null_mut());
-                (api.vaInitialize)(display, &mut major, &mut minor)
-            };
-            if status != SUCCESS {
-                // SAFETY: as above; terminating also frees the display.
-                unsafe { (api.vaTerminate)(display) };
-                last = anyhow::anyhow!("{}: no VA-API driver (status {status})", node.display());
-                continue;
-            }
-            // SAFETY: initialized; the vendor string lives with the display.
-            let vendor = unsafe {
-                let s = (api.vaQueryVendorString)(display);
-                if s.is_null() {
-                    String::new()
-                } else {
-                    CStr::from_ptr(s).to_string_lossy().into_owned()
-                }
-            };
-            return Ok(Self {
-                api,
-                display,
-                _fd: fd,
-                vendor,
-            });
+        nodes
+    }
+
+    /// The driver on `node`, initialized; `None` when there is no such
+    /// node. A node this user may not open (not in the `render` group), or
+    /// whose driver does not initialize, will not open later either.
+    fn at(node: &std::path::Path) -> Result<Option<Self>> {
+        let api = api()?;
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(node)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(unusable(anyhow::anyhow!("{}: {e}", node.display()))),
+        };
+        let fd = OwnedFd::from(file);
+        // SAFETY: `fd` stays open for as long as the display lives.
+        let display = unsafe { (api.get_display_drm)(fd.as_raw_fd()) };
+        if display.is_null() {
+            return Ok(None);
         }
-        Err(last)
+        let (mut major, mut minor) = (0, 0);
+        // SAFETY: a display just returned by vaGetDisplayDRM.
+        let status = unsafe {
+            (api.vaSetErrorCallback)(display, Some(message), null_mut());
+            (api.vaSetInfoCallback)(display, Some(message), null_mut());
+            (api.vaInitialize)(display, &mut major, &mut minor)
+        };
+        if status != SUCCESS {
+            // SAFETY: as above; terminating also frees the display.
+            unsafe { (api.vaTerminate)(display) };
+            return Err(unusable(anyhow::anyhow!(
+                "{}: no VA-API driver (status {status})",
+                node.display()
+            )));
+        }
+        // SAFETY: initialized; the vendor string lives with the display.
+        let vendor = unsafe {
+            let s = (api.vaQueryVendorString)(display);
+            if s.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(s).to_string_lossy().into_owned()
+            }
+        };
+        Ok(Some(Self {
+            api,
+            display,
+            _fd: fd,
+            vendor,
+        }))
     }
 
     /// The encode entry point for `profile`, low-power first.
@@ -592,6 +613,12 @@ struct Blocks {
 }
 
 impl Blocks {
+    /// Pixels a side of the smallest coding block, which a coded picture's
+    /// sides are whole multiples of (8 at the least).
+    fn min_cb_size(&self) -> u32 {
+        1 << self.min_cb.max(3)
+    }
+
     /// The driver's own report when it gives one, else what drivers take:
     /// 64-sample trees on low-power hardware, 32 otherwise.
     fn from_attribute(value: Option<u32>, low_power: bool) -> Self {
@@ -635,6 +662,7 @@ pub struct Vaapi {
     kbps: u32,
     rate_changed: bool,
     blocks: Blocks,
+    caps: Caps,
     /// Frames since the last IDR, which recon surface is next, whether
     /// the other holds a reference.
     since_idr: u32,
@@ -644,28 +672,53 @@ pub struct Vaapi {
 }
 
 impl Vaapi {
+    /// On the first render node whose driver opens this encoder. The
+    /// failure is [`Unusable`](super::hardware::Unusable) only when it is
+    /// on every node that answered.
     pub fn open(codec: Codec, width: u32, height: u32, config: &VideoConfig) -> Result<Self> {
-        let device = Device::open()?;
+        let mut errors = Vec::new();
+        for node in Device::nodes() {
+            let opened = Device::at(&node).and_then(|device| match device {
+                Some(device) => Self::open_on(device, codec, width, height, config).map(Some),
+                None => Ok(None),
+            });
+            match opened {
+                Ok(Some(this)) => return Ok(this),
+                Ok(None) => {}
+                Err(e) => errors.push(e.context(node.display().to_string())),
+            }
+        }
+        if errors.is_empty() {
+            return Err(unusable(anyhow::anyhow!("no DRM render node")));
+        }
+        // One that may open another time says more than one that will not.
+        let at = errors.iter().position(|e| !is_unusable(e)).unwrap_or(0);
+        Err(errors.swap_remove(at))
+    }
+
+    fn open_on(
+        device: Device,
+        codec: Codec,
+        width: u32,
+        height: u32,
+        config: &VideoConfig,
+    ) -> Result<Self> {
+        let no = |what: String| Err(unusable(anyhow::anyhow!(what)));
         let profile = match codec {
             Codec::H264Baseline => PROFILE_H264_CONSTRAINED_BASELINE,
             Codec::H264High => PROFILE_H264_HIGH,
             Codec::Hevc => PROFILE_HEVC_MAIN,
-            Codec::Av1 => bail!("Latch does not encode AV1 through VA-API"),
+            Codec::Av1 => return no("Latch does not encode AV1 through VA-API".into()),
         };
-        if codec == Codec::Hevc {
-            // The sequence parameters have no conformance window.
-            ensure!(
-                width.is_multiple_of(8) && height.is_multiple_of(8),
-                "VA-API HEVC needs a size that is a multiple of 8"
-            );
-        }
-        let entrypoint = device
-            .entrypoint(profile)
-            .with_context(|| format!("{} encodes no {}", device.vendor, codec.name()))?;
+        let Some(entrypoint) = device.entrypoint(profile) else {
+            return no(format!("{} encodes no {}", device.vendor, codec.name()));
+        };
         let rt = device
             .attribute(profile, entrypoint, ATTRIB_RT_FORMAT)
             .unwrap_or(0);
-        ensure!(rt & RT_FORMAT_YUV420 != 0, "VA-API driver encodes no 4:2:0");
+        if rt & RT_FORMAT_YUV420 == 0 {
+            return no("VA-API driver encodes no 4:2:0".into());
+        }
         let rc = device
             .attribute(profile, entrypoint, ATTRIB_RATE_CONTROL)
             .unwrap_or(0);
@@ -674,17 +727,44 @@ impl Vaapi {
         } else if rc & RC_VBR != 0 {
             RC_VBR
         } else {
-            bail!("VA-API driver has no bitrate control for {}", codec.name());
+            return no(format!(
+                "VA-API driver has no bitrate control for {}",
+                codec.name()
+            ));
         };
         if let Some(refs) = device.attribute(profile, entrypoint, ATTRIB_ENC_MAX_REF_FRAMES) {
-            ensure!(
-                refs & 0xffff >= 1,
-                "VA-API driver allows no P-frame reference"
-            );
+            if refs & 0xffff < 1 {
+                return no("VA-API driver allows no P-frame reference".into());
+            }
         }
         let blocks = Blocks::from_attribute(
             device.attribute(profile, entrypoint, ATTRIB_ENC_HEVC_BLOCK_SIZES),
             entrypoint == ENTRYPOINT_ENC_SLICE_LP,
+        );
+        let side = |kind, unknown| {
+            device
+                .attribute(profile, entrypoint, kind)
+                .filter(|&v| v > 0)
+                .unwrap_or(unknown)
+        };
+        let caps = Caps {
+            max_width: side(ATTRIB_MAX_PICTURE_WIDTH, Caps::UNKNOWN.max_width),
+            max_height: side(ATTRIB_MAX_PICTURE_HEIGHT, Caps::UNKNOWN.max_height),
+            align: if codec == Codec::Hevc {
+                blocks.min_cb_size()
+            } else {
+                Caps::UNKNOWN.align
+            },
+            ..Caps::UNKNOWN
+        };
+        // The size's fault, not the driver's: another size opens.
+        ensure!(
+            caps.fits(width, height),
+            "VA-API {} takes up to {} × {} in multiples of {}, not {width} × {height}",
+            codec.name(),
+            caps.max_width,
+            caps.max_height,
+            caps.align
         );
         let api = device.api;
         let dpy = device.display;
@@ -713,6 +793,7 @@ impl Vaapi {
             kbps: config.bitrate_kbps.max(1),
             rate_changed: true,
             blocks,
+            caps,
             since_idr: 0,
             current: 0,
             reference: false,
@@ -779,6 +860,11 @@ impl Vaapi {
             )?;
         }
         Ok(this)
+    }
+
+    /// What this encoder takes, as its driver said.
+    pub fn caps(&self) -> Caps {
+        self.caps
     }
 
     /// The coded size: whole macroblocks for H.264, minimum coding blocks
@@ -946,7 +1032,7 @@ impl Vaapi {
         let poc = (self.since_idr * 2) as i32;
         if idr {
             let mut seq = zeroed::<SequenceH264>();
-            seq.level_idc = h264_level(self.width, self.height, self.fps, self.kbps);
+            seq.level_idc = h264_level(self.codec, self.width, self.height, self.fps, self.kbps);
             seq.intra_period = 1 << 15;
             seq.intra_idr_period = 1 << 15;
             seq.ip_period = 1;
@@ -1021,7 +1107,9 @@ impl Vaapi {
         if idr {
             let mut seq = zeroed::<SequenceHevc>();
             seq.general_profile_idc = 1;
-            seq.general_level_idc = hevc_level(self.width, self.height, self.fps);
+            let (level, high_tier) = hevc_level(self.width, self.height, self.fps, self.kbps);
+            seq.general_level_idc = level;
+            seq.general_tier_flag = u8::from(high_tier);
             seq.intra_period = 1 << 15;
             seq.intra_idr_period = 1 << 15;
             seq.ip_period = 1;
@@ -1049,10 +1137,13 @@ impl Vaapi {
         }
         let recon = self.recon[self.current];
         let previous = self.recon[1 - self.current];
+        // In the current picture's short-term set, before it in output
+        // order, as FFmpeg marks it: drivers that build the reference
+        // picture set from these flags see the one reference there is.
         let reference = PictureHevc {
             picture_id: previous,
             pic_order_cnt: poc - 1,
-            flags: 0,
+            flags: HEVC_RPS_ST_CURR_BEFORE,
             va_reserved: [0; 4],
         };
         let mut pic = zeroed::<PictureParameterHevc>();
@@ -1226,56 +1317,74 @@ impl Drop for Vaapi {
     }
 }
 
-/// The lowest H.264 level for this size, rate and bitrate (High's
-/// bitrate allowance), as `level_idc`.
-fn h264_level(width: u32, height: u32, fps: u32, kbps: u32) -> u8 {
+/// The lowest H.264 level for this size, rate and bitrate, as
+/// `level_idc`. A level allows MaxBR times 1250 bits a second for High
+/// and 1000 for Constrained Baseline (cpbBrVclFactor).
+fn h264_level(codec: Codec, width: u32, height: u32, fps: u32, kbps: u32) -> u8 {
+    let factor = if codec == Codec::H264High { 1250 } else { 1000 };
     let mbs = u64::from(width.div_ceil(16)) * u64::from(height.div_ceil(16));
-    for (id, mbps, max_fs, max_kbps) in [
-        (30, 40500, 1620, 12500),
-        (31, 108000, 3600, 17500),
-        (32, 216000, 5120, 25000),
-        (40, 245760, 8192, 25000),
-        (41, 245760, 8192, 62500),
-        (42, 522240, 8704, 62500),
-        (50, 589824, 22080, 168750),
-        (51, 983040, 36864, 300000),
-        (52, 2073600, 36864, 300000),
-        (60, 4177920, 139264, 300000),
-        (61, 8355840, 139264, 600000),
+    for (id, mbps, max_fs, max_br) in [
+        (30, 40500, 1620, 10000),
+        (31, 108000, 3600, 14000),
+        (32, 216000, 5120, 20000),
+        (40, 245760, 8192, 20000),
+        (41, 245760, 8192, 50000),
+        (42, 522240, 8704, 50000),
+        (50, 589824, 22080, 135000),
+        (51, 983040, 36864, 240000),
+        (52, 2073600, 36864, 240000),
+        (60, 4177920, 139264, 240000),
+        (61, 8355840, 139264, 480000),
     ] {
-        if mbs <= max_fs && mbs * u64::from(fps) <= mbps && kbps <= max_kbps {
+        if mbs <= max_fs
+            && mbs * u64::from(fps) <= mbps
+            && u64::from(kbps) * 1000 <= max_br * factor
+        {
             return id;
         }
     }
     62
 }
 
-/// The lowest HEVC Main-tier level for this size and rate, as
-/// `general_level_idc` (30 × the level).
-fn hevc_level(width: u32, height: u32, fps: u32) -> u8 {
+/// The lowest HEVC level for this size, rate and bitrate, as
+/// `general_level_idc` (30 × the level), and whether it is in the High
+/// tier: Main where its bitrate allows, else High (levels 4 and up), whose
+/// MaxBR is 2.5 to 4 times Main's.
+fn hevc_level(width: u32, height: u32, fps: u32, kbps: u32) -> (u8, bool) {
     let samples = u64::from(width) * u64::from(height);
-    for (idc, max_ps, max_sr) in [
-        (90, 552_960, 16_588_800),
-        (93, 983_040, 33_177_600),
-        (120, 2_228_224, 66_846_720),
-        (123, 2_228_224, 133_693_440),
-        (150, 8_912_896, 267_386_880),
-        (153, 8_912_896, 534_773_760),
-        (156, 8_912_896, 1_069_547_520),
-        (180, 35_651_584, 1_069_547_520),
-        (183, 35_651_584, 2_139_095_040),
+    let rate = samples * u64::from(fps);
+    let kbps = u64::from(kbps);
+    for (idc, max_ps, max_sr, main_br, high_br) in [
+        (90, 552_960, 16_588_800, 6_000, 0),
+        (93, 983_040, 33_177_600, 10_000, 0),
+        (120, 2_228_224, 66_846_720, 12_000, 30_000),
+        (123, 2_228_224, 133_693_440, 20_000, 50_000),
+        (150, 8_912_896, 267_386_880, 25_000, 100_000),
+        (153, 8_912_896, 534_773_760, 40_000, 160_000),
+        (156, 8_912_896, 1_069_547_520, 60_000, 240_000),
+        (180, 35_651_584, 1_069_547_520, 60_000, 240_000),
+        (183, 35_651_584, 2_139_095_040, 120_000, 480_000),
+        (186, 35_651_584, 4_278_190_080, 240_000, 800_000),
     ] {
-        if samples <= max_ps && samples * u64::from(fps) <= max_sr {
-            return idc;
+        if samples > max_ps || rate > max_sr {
+            continue;
+        }
+        if kbps <= main_br {
+            return (idc, false);
+        }
+        if kbps <= high_br {
+            return (idc, true);
         }
     }
-    186
+    (186, true)
 }
 
 /// Whether a VA-API driver initializes on some render node.
 #[cfg(test)]
 pub fn opens() -> bool {
-    Device::open().is_ok()
+    Device::nodes()
+        .iter()
+        .any(|node| matches!(Device::at(node), Ok(Some(_))))
 }
 
 /// Whether libva loads at all. Cheap; [`super::hardware`] then opens a
@@ -1290,16 +1399,24 @@ mod tests {
 
     #[test]
     fn levels_follow_size_rate_and_bitrate() {
-        assert_eq!(h264_level(1920, 1080, 60, 20_000), 42);
-        assert_eq!(h264_level(1920, 1080, 30, 20_000), 40);
-        assert_eq!(h264_level(2560, 1440, 60, 20_000), 51);
-        assert_eq!(h264_level(3840, 2160, 60, 50_000), 52);
-        assert_eq!(h264_level(3840, 2160, 120, 50_000), 60);
-        assert_eq!(h264_level(3840, 2160, 240, 50_000), 61);
-        assert_eq!(hevc_level(1920, 1080, 60), 123);
-        assert_eq!(hevc_level(3840, 2160, 60), 153);
-        assert_eq!(hevc_level(3840, 2160, 120), 156);
-        assert_eq!(hevc_level(7680, 4320, 60), 183);
+        let high = |w, h, fps, kbps| h264_level(Codec::H264High, w, h, fps, kbps);
+        assert_eq!(high(1920, 1080, 60, 20_000), 42);
+        assert_eq!(high(1920, 1080, 30, 20_000), 40);
+        assert_eq!(high(2560, 1440, 60, 20_000), 51);
+        assert_eq!(high(3840, 2160, 60, 50_000), 52);
+        assert_eq!(high(3840, 2160, 120, 50_000), 60);
+        assert_eq!(high(3840, 2160, 240, 50_000), 61);
+        // 60 Mb/s is within 4.2's 62.5 for High, past its 50 for Baseline.
+        assert_eq!(high(1920, 1080, 60, 60_000), 42);
+        assert_eq!(h264_level(Codec::H264Baseline, 1920, 1080, 60, 60_000), 50);
+        assert_eq!(hevc_level(1920, 1080, 60, 20_000), (123, false));
+        assert_eq!(hevc_level(3840, 2160, 60, 20_000), (153, false));
+        assert_eq!(hevc_level(3840, 2160, 120, 20_000), (156, false));
+        assert_eq!(hevc_level(7680, 4320, 60, 20_000), (183, false));
+        // 1080p60 at 50 and 100 Mb/s: 4.1's High tier, then 5's.
+        assert_eq!(hevc_level(1920, 1080, 60, 50_000), (123, true));
+        assert_eq!(hevc_level(1920, 1080, 60, 100_000), (150, true));
+        assert_eq!(hevc_level(3840, 2160, 60, 1_000_000), (186, true));
     }
 
     #[test]

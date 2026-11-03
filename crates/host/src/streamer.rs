@@ -50,7 +50,9 @@ pub fn encoder_description() -> &'static str {
 pub fn capacity(encoder: &str, streaming: bool) -> (u32, Vec<CodecCaps>) {
     static MEASURED: Mutex<Option<Measured>> = Mutex::new(None);
     static LOOKING: AtomicBool = AtomicBool::new(false);
-    let software = is_software(encoder);
+    // A Linux host always has the software path: Constrained Baseline,
+    // and H.264 at a size its hardware does not take.
+    let software = is_software(encoder) || cfg!(target_os = "linux");
     let size = capture_size().unwrap_or([1920, 1080]);
     let measured = MEASURED.lock().clone();
     let stale = measured
@@ -60,10 +62,10 @@ pub fn capacity(encoder: &str, streaming: bool) -> (u32, Vec<CodecCaps>) {
         let spawned = std::thread::Builder::new()
             .name("latch-capacity".into())
             .spawn(move || {
-                let codecs = latch_engine::video::encodable()
-                    .into_iter()
-                    .map(|codec| caps(codec, latch_engine::video::limits(codec)))
-                    .collect();
+                let encodable = latch_engine::video::encodable();
+                let split = encodable
+                    .iter()
+                    .any(|&c| latch_engine::video::hardware_encodes(c));
                 let ceiling = if software {
                     let fps = latch_engine::software::measure_fps(size[0], size[1], MEASURE_FOR);
                     Some(Ceiling {
@@ -75,6 +77,22 @@ pub fn capacity(encoder: &str, streaming: bool) -> (u32, Vec<CodecCaps>) {
                 } else {
                     None
                 };
+                // Where some codecs are hardware's (a Linux host with NVENC
+                // or VA-API) the software path's rate is its codecs' own,
+                // not a frame rate for every stream.
+                let codecs: Vec<CodecCaps> = encodable
+                    .into_iter()
+                    .map(|codec| {
+                        let mut limits = latch_engine::video::limits(codec);
+                        if let Some(c) = ceiling
+                            .filter(|_| split && !latch_engine::video::hardware_encodes(codec))
+                        {
+                            let rate = u64::from(c.fps) * u64::from(c.width) * u64::from(c.height);
+                            limits.max_pixel_rate = limits.max_pixel_rate.min(rate);
+                        }
+                        caps(codec, limits)
+                    })
+                    .collect();
                 tracing::info!(
                     "encoder capacity: {ceiling:?} in software (None: not measured), {codecs:?}"
                 );
@@ -86,6 +104,7 @@ pub fn capacity(encoder: &str, streaming: bool) -> (u32, Vec<CodecCaps>) {
                 *MEASURED.lock() = Some(Measured {
                     size,
                     software,
+                    split,
                     ceiling,
                     codecs,
                 });
@@ -106,7 +125,10 @@ pub fn capacity(encoder: &str, streaming: bool) -> (u32, Vec<CodecCaps>) {
             .unwrap_or(Ceiling::PROVISIONAL)
     });
     latch_engine::software::set_ceiling(ceiling);
-    let max_fps = ceiling.map_or(0, |c| c.fps_at(size[0], size[1]).max(1));
+    let split = measured.as_ref().is_some_and(|m| m.split);
+    let max_fps = ceiling
+        .filter(|_| !split)
+        .map_or(0, |c| c.fps_at(size[0], size[1]).max(1));
     (max_fps, measured.map(|m| m.codecs).unwrap_or_default())
 }
 
@@ -117,6 +139,9 @@ const MEASURE_FOR: Duration = Duration::from_millis(1500);
 struct Measured {
     size: [u32; 2],
     software: bool,
+    /// Some codecs are encoded in hardware: the software ceiling is in
+    /// the others' limits, and no frame rate holds every stream.
+    split: bool,
     ceiling: Option<Ceiling>,
     codecs: Vec<CodecCaps>,
 }
@@ -166,8 +191,18 @@ mod tests {
             latch_engine::software::ceiling(),
             Some(Ceiling::PROVISIONAL)
         );
-        assert_eq!(capacity("VideoToolbox HEVC", true).0, 0);
-        assert_eq!(latch_engine::software::ceiling(), None);
+        let (fps, _) = capacity("VideoToolbox HEVC", true);
+        if cfg!(target_os = "linux") {
+            // A Linux host's software path is always there to hold.
+            assert_eq!(fps, Ceiling::PROVISIONAL.fps_at(size[0], size[1]).max(1));
+            assert_eq!(
+                latch_engine::software::ceiling(),
+                Some(Ceiling::PROVISIONAL)
+            );
+        } else {
+            assert_eq!(fps, 0);
+            assert_eq!(latch_engine::software::ceiling(), None);
+        }
     }
 
     #[test]
