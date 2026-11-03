@@ -303,8 +303,8 @@ mod tests {
         let s = effective_for(&auto, (3024, 1964), 120);
         assert_eq!(
             (s.resolution, s.fps, s.bitrate_kbps),
-            (Resolution::Native, 120, 178_174),
-            "the display's size and refresh rate, a quarter bit a pixel"
+            (Resolution::Native, 120, 124_544),
+            "the display's size and refresh rate"
         );
         assert_eq!(
             effective_for(&auto, (1920, 1080), 60).bitrate_kbps,
@@ -356,8 +356,8 @@ mod tests {
             ((3840, 2160), 120)
         );
         assert_eq!(
-            cinematic.bitrate_kbps, 497_664,
-            "twice Balanced's bits a pixel"
+            cinematic.bitrate_kbps, 240_000,
+            "half again Balanced's 160 Mbps at 4K120"
         );
         let cinematic = effective_for(&with(Quality::Cinematic), (3024, 1964), 60);
         assert_eq!(cinematic.resolution.pixels((3024, 1964)), (3024, 1964));

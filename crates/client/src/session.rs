@@ -1726,7 +1726,7 @@ mod tests {
         // A 360 Hz monitor is asked for at 360 when nothing says otherwise.
         let p = plan(&settings, (1920, 1080), 360, &HostLimits::default());
         assert_eq!((p.width, p.height, p.fps), (1920, 1080, 360));
-        assert_eq!(p.bitrate_kbps, 186_624);
+        assert_eq!(p.bitrate_kbps, 97_979);
     }
 
     fn caps(codec: &str, max_side: u32, max_pixels: u64, max_kbps: u32) -> CodecCaps {

@@ -26,7 +26,7 @@ fn hint(q: Quality) -> &'static str {
     match q {
         Quality::Competitive => "1080p at this display's refresh rate, up to 360 fps: the most frames and the least delay.",
         Quality::Auto => "This display's own size at its own refresh rate. Only the PC's encoder and the network set limits; a relay or a long round trip never lowers the frame rate or the bitrate.",
-        Quality::Cinematic => "This display's size up to 4K, up to 120 fps, at twice Balanced's bitrate: the sharpest picture.",
+        Quality::Cinematic => "This display's size up to 4K, up to 120 fps, at half again Balanced's bitrate: the sharpest picture.",
         Quality::Custom => "Your own resolution, frame rate and bitrate, up to what the PC's encoder takes.",
     }
 }
@@ -217,7 +217,7 @@ mod tests {
             Resolution::Native,
             "the rest is what Balanced asked for"
         );
-        assert_eq!(s.bitrate_kbps, 74_649);
+        assert_eq!(s.bitrate_kbps, 61_967, "1080p144");
     }
 
     #[test]

@@ -111,7 +111,8 @@ pub enum Quality {
     /// 1080p at the display's refresh rate, up to 360: frames and latency
     /// first.
     Competitive,
-    /// This display's size up to 4K, up to 120 fps, at twice the bitrate.
+    /// This display's size up to 4K, up to 120 fps, at half again the
+    /// bitrate.
     Cinematic,
     /// The values in [`StreamSettings`], as set.
     Custom,
@@ -147,21 +148,41 @@ impl Quality {
         }
     }
 
-    /// The bitrate ceiling for `width` × `height` at `fps`: a quarter of
-    /// a bit a pixel (twice that for Cinematic), never under 50 Mbps.
+    /// The bitrate ceiling for `width` × `height` at `fps`: 40 Mbps for
+    /// 1080p at 60, growing as pixels to the ¾ and frame rate to the ½
+    /// (a larger or faster picture differs less from one frame to the
+    /// next, so needs fewer bits a pixel), half again for Cinematic. Never
+    /// under what 5.1 asked for (50 Mbps; Cinematic 100, 5.1's Sharp).
+    ///
+    /// GeForce NOW streams about 15 Mbps at 720p60, 25–35 at 1080p60,
+    /// 45–50 at 1440p120 and 75–100 at 4K. Balanced asks for 50, 50, 87
+    /// and 113–160: one to two times that, because Latch's encoders run
+    /// with a one-frame buffer, no B-frames and no look-ahead (the lowest
+    /// latency, not the fewest bits), may be H.264 where GeForce NOW uses
+    /// AV1 or HEVC, and mostly cross a LAN or a tailnet, not the internet.
+    ///
     /// A ceiling, not a target: the encoder spends less on a still
     /// picture, and the host's rate control comes down from it as soon as
-    /// the network does not carry it. None for Custom.
+    /// the network does not carry it. That needs the host's lowest rate
+    /// to be fixed, not a share of this ceiling (a tenth of 160 Mbps is
+    /// more than many paths carry). None for Custom.
     pub fn bitrate_kbps(self, width: u32, height: u32, fps: u32) -> Option<u32> {
-        let per_pixel = match self {
-            Quality::Auto | Quality::Competitive => 0.25,
-            Quality::Cinematic => 0.5,
+        let (scale, floor) = match self {
+            Quality::Auto | Quality::Competitive => (1.0, AUTO_FLOOR_KBPS),
+            Quality::Cinematic => (1.5, CINEMATIC_FLOOR_KBPS),
             Quality::Custom => return None,
         };
-        let kbps = f64::from(width) * f64::from(height) * f64::from(fps) * per_pixel / 1000.0;
-        Some((kbps as u32).clamp(AUTO_FLOOR_KBPS, latch_proto::control::MAX_BITRATE_KBPS))
+        let pixels = f64::from(width) * f64::from(height) / (1920.0 * 1080.0);
+        let rate = f64::from(fps) / 60.0;
+        let kbps = f64::from(BASE_KBPS) * scale * pixels.powf(0.75) * rate.sqrt();
+        Some((kbps as u32).clamp(floor, latch_proto::control::MAX_BITRATE_KBPS))
     }
 }
+
+/// Balanced's ceiling for 1080p at 60 fps.
+const BASE_KBPS: u32 = 40_000;
+/// What 5.1's Sharp asked for, and the least Cinematic asks for now.
+const CINEMATIC_FLOOR_KBPS: u32 = 100_000;
 
 /// The fewest frames a second a stream asks for.
 pub const MIN_FPS: u32 = 30;
