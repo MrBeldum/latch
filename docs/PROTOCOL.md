@@ -42,12 +42,19 @@ Content-Length: <n>
 | `protocol` | u32 | 1 |
 | `width`, `height` | u32 | picture size the viewer wants (even numbers) |
 | `fps` | u32 | frames per second wanted |
-| `bitrate_kbps` | u32 | video bitrate wanted |
-| `codecs` | [string] | what the viewer decodes, best first: `"av1"`, `"hevc"`, `"h264-high"`, `"h264-baseline"` |
+| `bitrate_kbps` | u32 | video bitrate wanted (a ceiling: the host's rate control comes down from it) |
+| `codecs` | [string] | what the viewer decodes, best first: `"av1"`, `"hevc"`, `"h264-high"`, `"h264-baseline"`; a name the host does not know is skipped |
 | `udp_port` | u16 | the viewer's media socket port |
 | `audio` | bool | send desktop audio |
 | `name` | string | the viewer's machine name, for the host's log |
 | `cursor` | bool | optional, default false; viewer can draw pointer locally and handle shape updates |
+
+A request is taken within 64 to 16384 pixels a side, 1 to 500 fps and
+500 kbps to 1 Gbps (`latch_proto::control::MAX_*`). The host then meets
+it with what the encoder for the codec it picked takes (see "Encoder
+limits"): a larger picture is scaled down in proportion before the desktop
+is sized for it, the frame rate is lowered to the codec level's pixel rate,
+and the bitrate to the level's ceiling. `Accept` says what was granted.
 
 The control service authorizes the caller exactly as for every other
 route. A refusal is an ordinary HTTP error with an `Ack` JSON body. On
@@ -258,6 +265,37 @@ version. A host that cannot speak the requested version answers 426 with
 an `Ack` naming the versions it speaks. `/v1/status` reports
 `streamer.protocol` (1 here; absent from Latch 4 hosts, which speak only
 GameStream).
+
+## Encoder limits (5.2, additive)
+
+`/v1/status` → `streamer.codecs` lists what each codec's encoder takes on
+that host, best first; it is empty from older hosts and until the host has
+looked (shortly after it starts), and a viewer then assumes nothing:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `codec` | string | wire name, as in `codecs` above |
+| `max_side` | u32 | longest side of a picture, in pixels |
+| `max_pixels` | u64 | largest picture, in pixels as coded: each side rounded up to 16 |
+| `max_pixel_rate` | u64 | pixels a second (picture size × frame rate) |
+| `max_kbps` | u32 | highest bitrate |
+
+The values start from the codec's top level (H.264 6.2, HEVC Main 6.2
+High tier, AV1 6.3 High tier: 8192 × 4352 pixels a picture, 4.28 billion
+a second, 800 Mbps, H.264 High 1 Gbps) and are lowered where the
+platform's encoder has a smaller limit it can be seen to have (macOS:
+VideoToolbox is tried at a ladder of sizes until one encodes in hardware).
+A picture is counted as coded, in whole 16-pixel blocks
+(`latch_proto::control::fit`, which host and viewer both use): an M3 Pro's
+H.264 takes 4096 × 2160 and fails 3776 × 2352, fewer pixels but more
+blocks.
+`streamer.max_fps`, when not 0, is the software encoder's frame rate on
+that CPU at `capture_size` (or 1920 × 1080), measured by the host rather
+than guessed; a viewer asking for fewer pixels scales it up in proportion.
+Until the measurement (taken when the host starts, about 1.5 s) ends, a
+host encoding in software reports 30 fps at 1080p, and it holds every
+request to what it reports, pixels a second, whatever the viewer asked:
+the frame rate comes down first, to 30, then the picture in proportion.
 
 ## Additive transport feedback (5.0.x compatible)
 
