@@ -58,7 +58,10 @@ GitHub release notes, so each version gets a heading of the form
   run on a GPU.
 - The software H.264 encoder writes its reconstruction in place, searches
   for scrolls only when enough of a band changed, and runs its analysis on
-  the slice workers; its output is unchanged.
+  the slice workers. Its output changes only where little of a band
+  changed: under 1/64 of its samples (was 1/256) the band is not searched
+  for a scroll, and under 1/16 not for a sideways one, which is most of
+  why a 1440p sweep went from 3.7 to 0.5 Mb/s.
 - One pointer while the mouse is captured. The Mac's arrow was hidden only
   by egui's cursor, which macOS applies when the pointer moves over the
   window; a captured pointer is held still, so the Mac's arrow could stay

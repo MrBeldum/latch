@@ -270,9 +270,17 @@ impl Encoder {
             ..EncodeTiming::default()
         };
         let idr = keyframe || self.source.is_none();
-        let unchanged = || match &dirty {
-            Some(d) => !d.contains(&true),
-            None => self.source.as_deref() == Some(picture),
+        // A hint can name a change that left the picture as it was (a
+        // cursor redrawn in place): what it names is compared, so a hint
+        // changes the work, never the access unit.
+        let unchanged = || match (&dirty, self.source.as_deref()) {
+            (Some(d), Some(source)) => {
+                !d.contains(&true)
+                    || (same_layout(source, picture)
+                        && macroblocks_equal(source, picture, |i| d[i]))
+            }
+            (Some(d), None) => !d.contains(&true),
+            (None, source) => source == Some(picture),
         };
         if !idr && self.quality.iter().all(|&q| q <= 18) && unchanged() {
             let result = self.encode_settled(out)?;
@@ -643,6 +651,28 @@ fn same_layout(a: &Yuv420, b: &Yuv420) -> bool {
 
 /// Copies the macroblocks `copy` picks (by index) from `src` into `dst`,
 /// padding included: runs of neighbours in a row as one copy per line.
+/// Whether `a` and `b` hold the same samples in every macroblock `which`
+/// names (raster order).
+fn macroblocks_equal(a: &Yuv420, b: &Yuv420, which: impl Fn(usize) -> bool) -> bool {
+    let (w, h) = (b.padded_width() / 16, b.padded_height() / 16);
+    (0..h).all(|my| {
+        (0..w).filter(|&mx| which(my * w + mx)).all(|mx| {
+            [
+                (&a.y, &b.y, b.y_stride, 16),
+                (&a.u, &b.u, b.c_stride, 8),
+                (&a.v, &b.v, b.c_stride, 8),
+            ]
+            .into_iter()
+            .all(|(ap, bp, stride, n)| {
+                (my * n..(my + 1) * n).all(|row| {
+                    let at = row * stride + mx * n;
+                    ap[at..at + n] == bp[at..at + n]
+                })
+            })
+        })
+    })
+}
+
 fn copy_macroblocks(dst: &mut Yuv420, src: &Yuv420, copy: impl Fn(usize) -> bool) {
     let (w, h) = (src.padded_width() / 16, src.padded_height() / 16);
     for my in 0..h {
@@ -874,6 +904,63 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A capture can report damage where nothing changed (an X cursor
+    /// whose serial moved on, redrawn as it was): a settled picture still
+    /// takes the all-skip shortcut, as it would without the report.
+    #[test]
+    fn damage_over_an_unchanged_picture_changes_nothing() {
+        let config = EncoderConfig {
+            width: 32,
+            height: 32,
+            fps: 60,
+            bitrate_kbps: 60,
+            threads: 1,
+        };
+        let mut hinted = Encoder::new(config.clone().with_frame_budget(0)).unwrap();
+        let mut plain = Encoder::new(config.with_frame_budget(0)).unwrap();
+        let mut picture = Yuv420::new(32, 32);
+        for (i, v) in picture.y.iter_mut().enumerate() {
+            *v = (i * 7 % 251) as u8;
+        }
+        picture.pad_edges();
+        let cursor = [Rect {
+            x: 3,
+            y: 3,
+            width: 12,
+            height: 12,
+        }];
+        let mut settled = 0;
+        for frame in 0..120 {
+            // Now and then a real change, then the cursor's report again.
+            let changed = [Rect {
+                x: 16,
+                y: 16,
+                width: 16,
+                height: 16,
+            }];
+            let hint: &[Rect] = if frame % 30 == 29 {
+                for row in 16..32 {
+                    let at = row * picture.y_stride + 16;
+                    picture.y[at..at + 16].fill((frame * 37 % 251) as u8);
+                }
+                picture.pad_edges();
+                &changed
+            } else {
+                &cursor
+            };
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            let ra = hinted.encode_changed(&picture, Some(hint), false, &mut a);
+            let rb = plain.encode(&picture, false, &mut b);
+            assert_eq!(ra, rb, "frame {frame}");
+            assert_eq!(a, b, "frame {frame}: the bitstream changed");
+            settled += usize::from(a.len() < 12);
+        }
+        assert!(
+            settled > 10,
+            "the picture settles: {settled} all-skip frames"
+        );
     }
 
     #[test]
