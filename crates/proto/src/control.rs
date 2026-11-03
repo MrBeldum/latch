@@ -16,6 +16,8 @@ pub const MAX_MESSAGE: usize = 65_536;
 pub enum Codec {
     #[serde(rename = "hevc")]
     Hevc,
+    #[serde(rename = "av1")]
+    Av1,
     #[serde(rename = "h264-high")]
     H264High,
     #[serde(rename = "h264-baseline")]
@@ -26,6 +28,7 @@ impl Codec {
     pub fn name(self) -> &'static str {
         match self {
             Codec::Hevc => "HEVC",
+            Codec::Av1 => "AV1",
             Codec::H264High | Codec::H264Baseline => "H.264",
         }
     }
