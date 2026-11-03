@@ -13,6 +13,7 @@
 //! within $\pm 1$ LSB.
 
 use crate::yuv::Yuv420;
+mod pool;
 mod simd;
 
 // BT.709 limited-range fixed-point coefficients scaled by 65536 (2^16):
@@ -86,6 +87,123 @@ pub fn bgra_to_yuv420_rows(
 ) {
     bgra_to_yuv420_rows_impl::<true>(src, width, height, stride, rows, dst);
 }
+
+/// A rectangle of pixels: columns `x..x + width`, rows `y..y + height`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Rect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Rect {
+    pub fn area(&self) -> u64 {
+        u64::from(self.width) * u64::from(self.height)
+    }
+}
+
+/// Converts the pixels of `rects` (widened to even edges and clipped to the
+/// picture) with up to `threads` threads, and pads the edges. The rest of
+/// `dst` must already hold the picture's conversion; a `dst` of another size
+/// is replaced and converted whole. An empty `rects` converts nothing.
+pub fn bgra_to_yuv420_rects(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    stride: usize,
+    rects: &[Rect],
+    threads: usize,
+    dst: &mut Yuv420,
+) {
+    let whole = [Rect {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    }];
+    let rects = if dst.width != width || dst.height != height {
+        *dst = Yuv420::new(width, height);
+        &whole[..]
+    } else {
+        rects
+    };
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 {
+        return;
+    }
+    // Columns and rows as even ranges inside the picture.
+    let spans: Vec<_> = rects
+        .iter()
+        .filter_map(|r| {
+            let x0 = (r.x as usize).min(w) & !1;
+            let x1 = ((r.x as usize + r.width as usize + 1) & !1).min(w);
+            let y0 = (r.y as usize).min(h) & !1;
+            let y1 = (r.y as usize + r.height as usize).min(h);
+            (x1 > x0 && y1 > y0).then_some((y0..y1, x0..x1))
+        })
+        .collect();
+    let rows: usize = spans
+        .iter()
+        .map(|(rows, cols)| rows.len() * cols.len())
+        .sum::<usize>()
+        / w;
+    // Waking a kept thread costs some microseconds: only for big areas.
+    let threads = threads.clamp(1, 16).min(rows / 64).max(1);
+    let (y_stride, c_stride) = (dst.y_stride, dst.c_stride);
+    let pairs = h.div_ceil(2);
+    let mut planes = Vec::with_capacity(threads);
+    let (mut y_rest, mut u_rest, mut v_rest) = (&mut dst.y[..], &mut dst.u[..], &mut dst.v[..]);
+    for i in 0..threads {
+        let (first, end) = (i * pairs / threads, (i + 1) * pairs / threads);
+        let n = end - first;
+        let (yn, cn) = (
+            (n * 2 * y_stride).min(y_rest.len()),
+            (n * c_stride).min(u_rest.len()).min(v_rest.len()),
+        );
+        let (y, y_next) = std::mem::take(&mut y_rest).split_at_mut(yn);
+        let (u, u_next) = std::mem::take(&mut u_rest).split_at_mut(cn);
+        let (v, v_next) = std::mem::take(&mut v_rest).split_at_mut(cn);
+        (y_rest, u_rest, v_rest) = (y_next, u_next, v_next);
+        planes.push(Planes {
+            y,
+            u,
+            v,
+            y_stride,
+            c_stride,
+            row0: first * 2,
+            rows: (first * 2)..(end * 2).min(h),
+        });
+    }
+    let run = |p: &mut Planes| {
+        for (rows, cols) in &spans {
+            let rows = rows.start.max(p.rows.start)..rows.end.min(p.rows.end);
+            if !rows.is_empty() {
+                convert::<true>(src, w, h, stride, rows, cols.clone(), p);
+            }
+        }
+    };
+    // Each band is its own: the locks are never contended.
+    let bands: Vec<_> = planes.into_iter().map(std::sync::Mutex::new).collect();
+    pool::run(bands.len(), &|i| {
+        run(&mut bands[i].lock().unwrap_or_else(|e| e.into_inner()))
+    });
+    drop(bands);
+    dst.pad_edges();
+}
+
+/// Rows `rows` of a picture's planes; `y` starts at luma row `row0`, `u` and
+/// `v` at chroma row `row0 / 2`.
+struct Planes<'a> {
+    y: &'a mut [u8],
+    u: &'a mut [u8],
+    v: &'a mut [u8],
+    y_stride: usize,
+    c_stride: usize,
+    row0: usize,
+    rows: std::ops::Range<usize>,
+}
+
 fn bgra_to_yuv420_rows_impl<const SIMD: bool>(
     src: &[u8],
     width: u32,
@@ -99,15 +217,50 @@ fn bgra_to_yuv420_rows_impl<const SIMD: bool>(
     if w == 0 || h == 0 {
         return;
     }
+    let (y_stride, c_stride) = (dst.y_stride, dst.c_stride);
+    let mut planes = Planes {
+        y: &mut dst.y,
+        u: &mut dst.u,
+        v: &mut dst.v,
+        y_stride,
+        c_stride,
+        row0: 0,
+        rows: 0..h,
+    };
+    convert::<SIMD>(
+        src,
+        w,
+        h,
+        stride,
+        rows.start as usize..rows.end as usize,
+        0..w,
+        &mut planes,
+    );
+}
 
-    let start_row = (rows.start as usize).min(h) & !1;
-    let end_row = (rows.end as usize).min(h);
-    let row_bytes = w * 4;
+/// Converts columns `cols` (even start) of rows `rows` of a `w × h` picture.
+fn convert<const SIMD: bool>(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    stride: usize,
+    rows: std::ops::Range<usize>,
+    cols: std::ops::Range<usize>,
+    dst: &mut Planes,
+) {
+    let start_row = rows.start.min(h) & !1;
+    let end_row = rows.end.min(h);
+    let x0 = cols.start & !1;
+    let cw = cols.end.min(w).saturating_sub(x0);
+    if cw == 0 {
+        return;
+    }
+    let row_bytes = cw * 4;
 
     for y in (start_row..end_row).step_by(2) {
-        let src_row0_start = y * stride;
+        let src_row0_start = y * stride + x0 * 4;
         let src_row1_start = if y + 1 < h {
-            (y + 1) * stride
+            (y + 1) * stride + x0 * 4
         } else {
             src_row0_start
         };
@@ -124,13 +277,19 @@ fn bgra_to_yuv420_rows_impl<const SIMD: bool>(
             row0
         };
 
-        let chroma_w = w.div_ceil(2);
-        let chroma_y = y / 2;
-        let u_dst = &mut dst.u[chroma_y * dst.c_stride..chroma_y * dst.c_stride + chroma_w];
-        let v_dst = &mut dst.v[chroma_y * dst.c_stride..chroma_y * dst.c_stride + chroma_w];
-        let (before, after) = dst.y.split_at_mut((y + 1) * dst.y_stride);
-        let y0 = &mut before[y * dst.y_stride..y * dst.y_stride + w];
-        let y1 = if has_row1 { &mut after[..w] } else { &mut [] };
+        let chroma_w = cw.div_ceil(2);
+        let ly = y - dst.row0;
+        let chroma_y = ly / 2;
+        let c0 = chroma_y * dst.c_stride + x0 / 2;
+        let u_dst = &mut dst.u[c0..c0 + chroma_w];
+        let v_dst = &mut dst.v[c0..c0 + chroma_w];
+        let (before, after) = dst.y.split_at_mut((ly + 1) * dst.y_stride);
+        let y0 = &mut before[ly * dst.y_stride + x0..ly * dst.y_stride + x0 + cw];
+        let y1 = if has_row1 {
+            &mut after[x0..x0 + cw]
+        } else {
+            &mut []
+        };
         let done = if SIMD {
             simd::rows(row0, row1, y0, y1, u_dst, v_dst)
         } else {
@@ -141,7 +300,7 @@ fn bgra_to_yuv420_rows_impl<const SIMD: bool>(
             convert_y_row(&row1[done * 4..], &mut y1[done..]);
         }
 
-        let pairs = w / 2;
+        let pairs = cw / 2;
         let mut row0_chunks = row0[done * 4..].chunks_exact(8);
         let mut row1_chunks = row1[done * 4..].chunks_exact(8);
 
@@ -172,8 +331,8 @@ fn bgra_to_yuv420_rows_impl<const SIMD: bool>(
             }
         }
 
-        if !w.is_multiple_of(2) {
-            let x = w - 1;
+        if !cw.is_multiple_of(2) {
+            let x = cw - 1;
             let off = x * 4;
             let b0 = row0[off] as i32;
             let g0 = row0[off + 1] as i32;
@@ -381,6 +540,63 @@ mod simd_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod rect_tests {
+    use super::*;
+    #[test]
+    fn rects_and_threads_match_a_whole_conversion() {
+        let (w, h) = (322u32, 270u32);
+        let stride = w as usize * 4 + 8;
+        let mut rng = 7u32;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            rng as u8
+        };
+        let old: Vec<u8> = (0..stride * h as usize).map(|_| next()).collect();
+        let mut new = old.clone();
+        let rects = [
+            Rect {
+                x: 3,
+                y: 5,
+                width: 40,
+                height: 33,
+            },
+            Rect {
+                x: 300,
+                y: 200,
+                width: 100,
+                height: 100,
+            },
+            Rect {
+                x: 0,
+                y: 129,
+                width: 322,
+                height: 140,
+            },
+        ];
+        for r in &rects {
+            for y in r.y..(r.y + r.height).min(h) {
+                for x in r.x..(r.x + r.width).min(w) {
+                    new[y as usize * stride + x as usize * 4] = next();
+                }
+            }
+        }
+        let mut expected = Yuv420::new(w, h);
+        bgra_to_yuv420(&new, w, h, stride, &mut expected);
+        for threads in [1, 3, 8] {
+            let mut actual = Yuv420::new(w, h);
+            bgra_to_yuv420(&old, w, h, stride, &mut actual);
+            bgra_to_yuv420_rects(&new, w, h, stride, &rects, threads, &mut actual);
+            assert_eq!(actual, expected, "{threads} threads");
+        }
+        let mut fresh = Yuv420::default();
+        bgra_to_yuv420_rects(&new, w, h, stride, &[], 4, &mut fresh);
+        assert_eq!(fresh, expected, "a new picture is converted whole");
     }
 }
 

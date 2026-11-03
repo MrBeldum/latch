@@ -86,6 +86,29 @@ GitHub release notes, so each version gets a heading of the form
   after the viewer sends it. The stream toolbar shows the connected pads.
   Hosts and viewers from before this negotiate no gamepads and work as
   before.
+- Linux host: only what changed on screen is read, converted and encoded.
+  X Damage rectangles are kept apart instead of merged into one box, only
+  those are read from the X server and converted to YUV (split across
+  cores), and the encoder skips the rest without comparing it.
+  Measurements: `docs/measurements/2026-11-03-linux-host/`.
+- Linux host: NVENC and VA-API hardware encoding (H.264, HEVC, and AV1 on
+  NVENC), loaded at run time and probed when the host starts, with
+  `latch-codec` as the fallback; `LATCH_LINUX_ENCODER` chooses. Each
+  encoder's limits come from its driver and are reported in
+  `streamer.codecs`; VA-API uses, for each codec, the first render node
+  that encodes it. Only failures that last give a codec up for the
+  process (a session limit or a size it does not take fail one open);
+  HEVC is not offered at sizes VA-API cannot code (1366 × 768), and a
+  resize to one ends the session for the viewer to reconnect with H.264.
+  Not yet run on a GPU.
+- The software H.264 encoder writes its reconstruction in place, searches
+  for scrolls only when enough of a band changed, and runs its analysis on
+  the slice workers. Its output changes only where little of a band
+  changed: under 1/64 of its samples (was 1/256) the band is not searched
+  for a scroll, and under 1/16 not for a sideways one, which is most of
+  why a 1440p sweep went from 3.7 to 0.5 Mb/s. Colour conversion keeps
+  its threads instead of starting them each frame (a whole 1080p frame:
+  1.35 to 1.06 ms on four Neoverse N1 cores).
 - One pointer while the mouse is captured. The Mac's arrow was hidden only
   by egui's cursor, which macOS applies when the pointer moves over the
   window; a captured pointer is held still, so the Mac's arrow could stay

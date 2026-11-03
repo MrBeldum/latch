@@ -23,6 +23,9 @@ pulseaudio = "0.3.2"
 # Gamepads through /dev/uinput; pure Rust ioctls.
 evdev = "0.13"
 futures = "0.3"
+# The GPU vendors' encoders (libva, libnvidia-encode) are opened at run
+# time, when present: nothing is linked.
+libloading = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.58"

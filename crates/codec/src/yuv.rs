@@ -43,6 +43,17 @@ impl Yuv420 {
         (self.height as usize).div_ceil(16) * 16
     }
 
+    /// Becomes a copy of `other`, reusing this picture's memory.
+    pub fn copy_from(&mut self, other: &Yuv420) {
+        self.width = other.width;
+        self.height = other.height;
+        self.y_stride = other.y_stride;
+        self.c_stride = other.c_stride;
+        self.y.clone_from(&other.y);
+        self.u.clone_from(&other.u);
+        self.v.clone_from(&other.v);
+    }
+
     /// Copies the last visible column and row of each plane into the
     /// padding.
     pub fn pad_edges(&mut self) {
