@@ -6,6 +6,15 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- Windows hardware HEVC is enabled by default. AMD HEVC can use the driver’s
+  AMF runtime directly, with Media Foundation fallback; hardware AV1 MFTs
+  are negotiated only after a keyframe probe. Windows honors requested
+  frame rates and bitrates beyond the former 240 fps/500 Mbps limits.
+- Virtual display setup adds missing high-refresh gaming modes and 8K
+  sizes, preserves existing XML, and checks monitor arrival after restart.
+  Hardware timing and driver mode-count limitations are documented in
+  `docs/measurements/2026-11-03/windows-host/`.
+
 - One pointer while the mouse is captured. The Mac's arrow was hidden only
   by egui's cursor, which macOS applies when the pointer moves over the
   window; a captured pointer is held still, so the Mac's arrow could stay

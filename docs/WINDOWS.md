@@ -163,50 +163,81 @@ audio sink, and restart Latch the same way.
 
 ## The video pipeline
 
-Desktop Duplication hands the engine each new picture of the desktop; the
-engine draws the cursor in, scales and converts it to NV12 on the GPU
-(Direct3D 11 video processor), and gives it to a Media Foundation encoder:
-the GPU's own (AMD, NVIDIA, Intel), else Microsoft's CPU encoder, else
-Latch's software encoder.
+Desktop Duplication supplies desktop textures; the engine scales and converts
+them to NV12 with the D3D11 video processor. Cursor composition, rotation and
+HDR-to-SDR conversion stay on the GPU. With no visible cursor on an unrotated
+SDR desktop, capture skips the shader pass. One retained desktop copy permits
+idle repeats after releasing the duplication frame; there is no CPU readback
+on hardware encoders. Four cached NV12 textures and their views are reused.
 
-- **Frame rate.** Frames are taken on a fixed grid 1% faster than the
-  stream's rate (`Pacer`, shared with macOS and Linux), so the time spent
-  capturing, converting and encoding a frame comes out of its interval
-  instead of adding to it. A static desktop is repeated every 100 ms.
-- **GPU work per frame.** The NV12 textures (a ring of four) and every view
-  of a texture are made once and reused, the cursor pass reuses its views,
-  and the Microsoft-encoder path reuses one CPU-readable staging texture
-  and copies the picture once, from the mapped surface into the encoder's
-  sample.
-- **Rate control.** Constant bit rate with the cap equal to the mean and a
-  buffer of 1.5 frames of bits (`bitrate / fps × 1.5`), so no frame runs
-  much past the average: a keyframe takes at most half a frame interval
-  more than a P-frame on a link that carries the bitrate, where the
-  drivers' default buffer (often about a second) lets keyframes and bursts
-  of motion run to many times it. When the host changes the bitrate the cap
-  and buffer move with it. No B-frames, an endless GOP, CABAC for H.264
-  High. Every property after the mean rate is best effort: a driver that
-  lacks it keeps its default (`RUST_LOG=latch_engine=debug` lists the ones
-  refused).
-- **Encoder events.** The GPU encoders are asynchronous; the engine polls
-  their events with 0.1 ms sleeps, never blocking in the driver.
+- **Cadence.** The shared pacer samples at the requested rate, 1% fast to
+  accommodate display clock drift. AcquireNextFrame returns on an update;
+  its 100 ms maximum timeout bounds idle waits, rather than limiting active
+  capture to 10 fps. A still desktop repeats every 100 ms. Keeping a VDD
+  duplication frame owned during encoding reduced throughput in the RX 6600
+  experiment, so the retained copy is released to DXGI immediately.
+- **HEVC by default.** Hardware HEVC is offered whenever the viewer decodes
+  it; `LATCH_WINDOWS_HEVC` is no longer needed. A real keyframe must pass
+  through the GPU's MFT before the codec is advertised. AMD uses direct AMF
+  HEVC when available, with Media Foundation as fallback. `LATCH_WINDOWS_ENCODER=mf`
+  forces MF for diagnostics. AMF is loaded from the system's `amfrt64.dll`
+  through Rust FFI; no vendor SDK library or native compilation is shipped.
+- **AV1.** The host enumerates AV1 hardware MFTs and offers AV1 only after a
+  trial keyframe. NV12 Main profile output uses low-overhead OBUs, with
+  sequence headers repeated at keyframes. The RX 6600 has no AV1 encoder
+  MFT, so AV1 is not advertised there. This path compiles and its framing
+  is tested, but needs an AV1-capable GPU and viewer for an end-to-end test.
+- **Latency and rate.** MF requests low-latency mode, CBR, no B-frames, the
+  longest GOP (infinite where supported), and one frame of VBV bits. AMF
+  uses ultra-low-latency usage, speed preset, CBR/HRD, no frame skipping,
+  infinite GOP, a one-frame VBV, and no pre-analysis/pre-encode. Only one
+  frame is outstanding. Driver refusals of optional settings are logged;
+  VBV is a request, not a guarantee on keyframe size. Bitrate updates retain
+  the same buffer duration. Windows no longer clamps requests to 240 fps
+  or 500 Mbps; MF's u32 bits/sec representation and the encoder's own
+  accepted configuration bound the target. Transport overhead reservation
+  and congestion adaptation still apply.
+- **Fallback.** H.264 High/Baseline keep the GPU MFT → Microsoft MFT →
+  Latch software path. An AMF runtime failure reopens MF HEVC and starts
+  with an IDR. A hardware-only codec that fails through MF ends the stream
+  and is withheld until restart; a stream never silently changes codec.
 
-### HEVC (off by default)
+### Virtual display modes
 
-HEVC is offered only when the environment variable `LATCH_WINDOWS_HEVC=1`
-is set for `latch-host.exe` (for a service started at logon, set it as a
-user environment variable and restart Latch Host), and only after the
-GPU's HEVC encoder (Main profile, low latency, no B-frames, endless GOP,
-the same buffer rules) has encoded a keyframe in a trial when the first
-viewer connects. Every keyframe carries VPS, SPS and PPS in band before the
-slice, which is what the Mac's VideoToolbox decoder needs to start. The
-flag exists because this path has not run on every vendor's hardware; with
-it off nothing about H.264 changes.
+Setup fills missing refresh rates on existing 1080p/1440p entries:
+60/90/120/144/165/240/360 Hz. Other known sizes retain 60/120 Hz, including
+new 7680×4320 and 7680×2160 entries. Custom modes and other XML settings
+are preserved. Exact resolution/refresh matches win; otherwise the selector
+uses the lowest sufficient refresh, then the highest available. There is
+no fixed 240→120 mapping in the selector.
 
-If the HEVC encoder fails (at the trial, when a stream opens, or while it
-runs) the engine stops offering HEVC until it restarts, and the next viewer
-gets H.264. The stream that was running ends rather than switching
-codecs mid-stream, as the viewer decodes only what it was told.
+The installed VDD 11.30.4.434 accepted 98 mode combinations on the test PC,
+but the full cross-product prevented monitor creation. This is why setup
+seeds high refresh at the two gaming sizes instead of every combination.
+More modes can be supplied in the driver's XML; Latch enumerates them
+without a refresh whitelist. Advertising every possible size/rate at once,
+and adding arbitrary requested modes on demand, remain unresolved with this
+driver. Setup rolls back a rejected mode list when the active MTT monitor
+disappears after restart.
+
+If the driver's settings folder is writable by ordinary users, setup leaves
+it untouched and writes the preserved XML under `%ProgramFiles%\Latch\Display`,
+then sets the driver's `VDDPATH` registry value. This maintains setup's
+protection against elevated writes through symlinks/junctions. Repeated
+setup does not write or restart when all requested modes are already listed.
+
+### RX 6600 reference/HDR probes
+
+The hardware test `hardware_capabilities` runs only when explicitly requested
+in the interactive desktop. MF HEVC exposes LTR buffer/mark/use values;
+H.264 accepts their setters but rejects their reads; neither result proves reference recovery. `IsModifiable` returns E_NOTIMPL, so it is not a
+reliable capability test on this AMD MFT. Gradual intra-refresh reads are
+rejected. Main10 output-type negotiation succeeds. These probes do not prove
+reference recovery or HDR encoding: neither is implemented here. AMF's
+published HEVC API has LTR and intra-refresh properties, but their behavior
+on this GPU still needs a dedicated recovery test.
+
+Measurements and reproduction commands: [Windows hardware measurements](measurements/2026-11-03/windows-host/README.md).
 
 ## What the service does
 

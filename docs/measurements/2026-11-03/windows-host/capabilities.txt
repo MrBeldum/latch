@@ -1,0 +1,146 @@
+current \\.\DISPLAY11 800x600@60
+mode 3024x1964@60
+mode 3024x1964@120
+mode 2560x1662@60
+mode 2560x1662@120
+mode 1920x1248@60
+mode 1920x1248@120
+mode 3456x2234@60
+mode 3456x2234@120
+mode 2560x1600@60
+mode 2560x1600@120
+H264High: 2 hardware MFTs
+mode 2880x1800@60
+GPU BGRA→NV12 1920x1080: p50=0.152ms p95=0.153ms
+mode 2880x1800@120
+H264High LTRBufferControl set=Ok(())
+GPU BGRA→NV12 2560x1440: p50=0.266ms p95=0.267ms
+mode 1920x1200@60
+H264High LTRBufferControl: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Err(Error { code: HRESULT(0x80040314), message: "" })
+mode 1920x1200@120
+H264High MarkLTRFrame set=Ok(())
+mode 800x600@60
+H264High MarkLTRFrame: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Err(Error { code: HRESULT(0x80040314), message: "" })
+mode 800x600@120
+H264High UseLTRFrame set=Ok(())
+mode 1280x720@60
+H264High UseLTRFrame: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Err(Error { code: HRESULT(0x80040314), message: "" })
+mode 1280x720@120
+H264High GradualIntraRefresh set=Err(Error { code: HRESULT(0x80070057), message: "The parameter is incorrect." })
+mode 1366x768@60
+H264High GradualIntraRefresh: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Err(Error { code: HRESULT(0x80040314), message: "" })
+mode 1366x768@120
+mode 1920x1080@60
+mode 1920x1080@120
+mode 1920x1080@90
+mode 1920x1080@144
+mode 1920x1080@165
+mode 1920x1080@240
+mode 1920x1080@360
+mode 2560x1440@60
+mode 2560x1440@120
+AMDh264Encoder
+mode 2560x1440@90
+mode 2560x1440@144
+mode 2560x1440@165
+mode 2560x1440@240
+mode 2560x1440@360
+mode 3840x2160@60
+mode 3840x2160@120
+mode 6016x3384@60
+mode 6016x3384@120
+mode 5120x2880@60
+mode 5120x2880@120
+mode 4480x2520@60
+mode 4480x2520@120
+mode 5120x2160@60
+mode 5120x2160@120
+GPU BGRA→NV12 3840x2160: p50=0.591ms p95=0.593ms
+mode 4096x2304@60
+mode 4096x2304@120
+mode 5120x1440@60
+mode 5120x1440@120
+mode 3840x1620@60
+mode 3840x1620@120
+mode 3840x1600@60
+mode 3840x1600@120
+mode 3072x1920@60
+mode 3072x1920@120
+mode 2880x1864@60
+mode 2880x1864@120
+mode 3440x1440@60
+mode 3440x1440@120
+mode 2560x1664@60
+mode 2560x1664@120
+mode 2560x1656@60
+mode 2560x1656@120
+mode 2560x1654@60
+mode 2560x1654@120
+mode 3840x1080@60
+mode 3840x1080@120
+mode 2304x1440@60
+mode 2304x1440@120
+mode 2560x1080@60
+mode 2560x1080@120
+mode 2560x1072@60
+mode 2560x1072@120
+mode 2560x1066@60
+mode 2560x1066@120
+mode 1920x1246@60
+mode 1920x1246@120
+mode 1920x1242@60
+mode 1920x1242@120
+mode 1920x1240@60
+mode 1920x1240@120
+mode 2560x720@60
+mode 2560x720@120
+mode 1920x810@60
+mode 1920x810@120
+mode 1920x804@60
+mode 1920x804@120
+mode 1920x800@60
+mode 1920x800@120
+mode 1920x540@60
+mode 1920x540@120
+mode 1600x900@60
+mode 1600x900@120
+mode 960x540@60
+mode 960x540@120
+mode 7680x4320@60
+mode 7680x4320@120
+mode 7680x2160@60
+mode 7680x2160@120
+H264High LTRBufferControl set=Ok(())
+H264High LTRBufferControl: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Err(Error { code: HRESULT(0x80040314), message: "" })
+H264High MarkLTRFrame set=Ok(())
+H264High MarkLTRFrame: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Err(Error { code: HRESULT(0x80040314), message: "" })
+H264High UseLTRFrame set=Ok(())
+H264High UseLTRFrame: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Err(Error { code: HRESULT(0x80040314), message: "" })
+H264High GradualIntraRefresh set=Err(Error { code: HRESULT(0x80070057), message: "The parameter is incorrect." })
+H264High GradualIntraRefresh: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Err(Error { code: HRESULT(0x80040314), message: "" })
+AMDh264Encoder
+H264High proven: true
+Hevc: 2 hardware MFTs
+Hevc LTRBufferControl set=Ok(())
+Hevc LTRBufferControl: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Ok(VARIANT { type: 19, value: 0 })
+Hevc MarkLTRFrame set=Ok(())
+Hevc MarkLTRFrame: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Ok(VARIANT { type: 19, value: 4294967295 })
+Hevc UseLTRFrame set=Ok(())
+Hevc UseLTRFrame: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Ok(VARIANT { type: 19, value: 0 })
+Hevc GradualIntraRefresh set=Err(Error { code: HRESULT(0x80070057), message: "The parameter is incorrect." })
+Hevc GradualIntraRefresh: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Err(Error { code: HRESULT(0x80040314), message: "" })
+HEVC Main10 output test: Ok(())
+AMDh265Encoder
+Hevc LTRBufferControl set=Ok(())
+Hevc LTRBufferControl: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Ok(VARIANT { type: 19, value: 0 })
+Hevc MarkLTRFrame set=Ok(())
+Hevc MarkLTRFrame: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Ok(VARIANT { type: 19, value: 4294967295 })
+Hevc UseLTRFrame set=Ok(())
+Hevc UseLTRFrame: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Ok(VARIANT { type: 19, value: 0 })
+Hevc GradualIntraRefresh set=Err(Error { code: HRESULT(0x80070057), message: "The parameter is incorrect." })
+Hevc GradualIntraRefresh: supported=Ok(()) modifiable=HRESULT(0x80004001) get=Err(Error { code: HRESULT(0x80040314), message: "" })
+HEVC Main10 output test: Ok(())
+AMDh265Encoder
+Hevc proven: true
+Av1: 0 hardware MFTs
+Av1 proven: false

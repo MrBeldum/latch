@@ -1,0 +1,8 @@
+
+running 3 tests
+test windows::capture::timing_tests::hardware_conversion_timing ... ok
+test windows::display::tests::hardware_display_modes ... ok
+test windows::encode::hardware_tests::hardware_capabilities ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out; finished in 1.61s
+

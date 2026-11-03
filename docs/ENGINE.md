@@ -56,7 +56,7 @@ KeyframeRequest on loss ──────────────────�
 | Host | Capture | Encode |
 | --- | --- | --- |
 | macOS | ScreenCaptureKit, NV12 IOSurface at the stream size, cursor included | VideoToolbox (HEVC, H.264 High, or Constrained Baseline), real time, no frame reordering |
-| Windows | DXGI Desktop Duplication, BGRA texture; cursor drawn in; Direct3D 11 video processor to NV12 at the stream size | Media Foundation H.264 encoder (the GPU's MFT, else Microsoft's), or HEVC from the GPU's MFT when `LATCH_WINDOWS_HEVC=1` ([WINDOWS.md](WINDOWS.md#the-video-pipeline)); `latch-codec` if neither works |
+| Windows | DXGI Desktop Duplication, BGRA texture; cursor drawn in; Direct3D 11 video processor to NV12 at the stream size | AMF HEVC on AMD, or the GPU's Media Foundation HEVC/AV1/H.264 encoder (Microsoft's CPU encoder for H.264 if needed) ([WINDOWS.md](WINDOWS.md#the-video-pipeline)); `latch-codec` if neither works |
 | Linux (X11) | MIT-SHM `GetImage` through `x11rb`, cursor from XFixes | `latch-codec` software encoder, threads by slice |
 
 | Viewer | Decode |
