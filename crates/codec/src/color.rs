@@ -13,6 +13,7 @@
 //! within $\pm 1$ LSB.
 
 use crate::yuv::Yuv420;
+mod pool;
 mod simd;
 
 // BT.709 limited-range fixed-point coefficients scaled by 65536 (2^16):
@@ -147,7 +148,7 @@ pub fn bgra_to_yuv420_rects(
         .map(|(rows, cols)| rows.len() * cols.len())
         .sum::<usize>()
         / w;
-    // A thread costs tens of microseconds to start: only for big areas.
+    // Waking a kept thread costs some microseconds: only for big areas.
     let threads = threads.clamp(1, 16).min(rows / 64).max(1);
     let (y_stride, c_stride) = (dst.y_stride, dst.c_stride);
     let pairs = h.div_ceil(2);
@@ -182,13 +183,12 @@ pub fn bgra_to_yuv420_rects(
             }
         }
     };
-    let (mine, others) = planes.split_first_mut().expect("at least one band");
-    std::thread::scope(|scope| {
-        for p in others {
-            scope.spawn(|| run(p));
-        }
-        run(mine);
+    // Each band is its own: the locks are never contended.
+    let bands: Vec<_> = planes.into_iter().map(std::sync::Mutex::new).collect();
+    pool::run(bands.len(), &|i| {
+        run(&mut bands[i].lock().unwrap_or_else(|e| e.into_inner()))
     });
+    drop(bands);
     dst.pad_edges();
 }
 
