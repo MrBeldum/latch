@@ -1065,6 +1065,7 @@ fn av1_offer_is_additive_and_unknown_codecs_still_fall_through() {
         audio: false,
         name: String::new(),
         cursor: false,
+        gamepads: false,
     })
     .unwrap();
     assert_eq!(request["codecs"][0], "av1");
