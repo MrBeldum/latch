@@ -1,11 +1,19 @@
 //! Coded audio frames in, sound out. Decoding (`lpcm-rice`, lossless, a few
 //! microseconds a frame) happens on the stream's receive thread; the OS
 //! pulls from a ring buffer on its own thread, resampled to whatever rate
-//! the output device runs at and spread over its channels. If the buffer
+//! the output device runs at and mixed onto its speakers. If the buffer
 //! grows past [`MAX_QUEUED_MS`] the oldest audio is dropped: latency matters
-//! more than never skipping. Below that, playback speed is trimmed a hair to
-//! hold the preroll's worth queued as the two machines' clocks drift. What
-//! the output side found is kept, so "no sound" comes with its reason.
+//! more than never skipping.
+//!
+//! How much is kept queued is measured, not fixed. The mixer watches the
+//! least audio left just before each device pull (the slack) and trims
+//! playback speed by at most 0.2 % to hold that low point at a small
+//! margin: as low as this network's jitter, the host's capture bursts and
+//! the device's pull size allow, and no lower. A real underrun (not the
+//! host going quiet) widens the margin, which then narrows again slowly.
+//! The receive thread measures arrival jitter so that starting, and
+//! starting again after a gap, waits for about the right cushion at once.
+//! What the output side found is kept, so "no sound" comes with its reason.
 
 use anyhow::{bail, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -16,16 +24,34 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Queued sound beyond this is cut back to [`KEEP_MS`]. Low, so sound stays
-/// close to the picture; a Wi-Fi hiccup longer than this is a click.
+/// Queued sound beyond this is cut back to the mixer's target. Low, so
+/// sound stays close to the picture; a Wi-Fi hiccup longer than this is a
+/// click.
 const MAX_QUEUED_MS: usize = 120;
-const KEEP_MS: usize = 50;
-const MAX_CHANNELS: usize = 8;
-/// Most playback is sped up or slowed down to hold the preroll's worth
-/// queued while the host's and this device's clocks drift apart: 0.2 %, a
-/// pitch change too small to hear and ten times the drift of two ordinary
-/// sound clocks.
+const MAX_CHANNELS: usize = latch_codec::audio::MAX_CHANNELS;
+/// Most playback is sped up or slowed down to steer the queue while the
+/// host's and this device's clocks drift apart: 0.2 %, a pitch change too
+/// small to hear and ten times the drift of two ordinary sound clocks.
 const MAX_TRIM: f64 = 0.002;
+/// The slack error that gets the whole trim.
+const TRIM_FULL_MS: f64 = 4.0;
+/// The slack the mixer steers for at least, and at most after underruns;
+/// each underrun widens it by [`MARGIN_MS`].
+const MARGIN_MS: f64 = 2.0;
+const MAX_MARGIN_MS: f64 = 40.0;
+/// How fast a margin widened by an underrun narrows again.
+const MARGIN_DECAY_MS_PER_S: f64 = 0.1;
+/// How fast the remembered low point of the slack forgets a dip.
+const RELEASE_MS_PER_S: f64 = 0.25;
+/// Arrival jitter assumed until some has been measured.
+const DEFAULT_JITTER_MS: f64 = 10.0;
+/// A queue empty for longer than this before sound came back was the host
+/// going quiet (it sends nothing for silence), not an underrun.
+const PAUSE: Duration = Duration::from_millis(100);
+/// The device buffer asked for, when the device says what it allows: a
+/// pull this small every few ms instead of ~10 ms ones. `LATCH_AUDIO_BUFFER`
+/// (frames, or `default`) overrides it, for measurements.
+const DEVICE_BUFFER_MS: f64 = 2.5;
 /// How soon a missing or refusing output device is tried again.
 const OUTPUT_RETRY: Duration = Duration::from_secs(1);
 
@@ -42,10 +68,53 @@ pub enum Output {
     Failed(String),
 }
 
+/// What the receive thread and the device's mixer tell each other, and
+/// the stats line reads.
+#[derive(Debug, Default)]
+struct Link {
+    /// Arrival jitter the player measured, µs; 0 until it has.
+    jitter_us: AtomicU32,
+    /// The most audio that arrived at one moment lately, µs.
+    burst_us: AtomicU32,
+    /// The cushion the mixer waits for before playing, µs.
+    target_us: AtomicU32,
+    /// Queued audio at the device's pulls, smoothed, µs.
+    queued_us: AtomicU32,
+    /// The device's own delay after a pull, µs.
+    device_us: AtomicU32,
+    /// The margin the mixer keeps, µs.
+    margin_us: AtomicU32,
+    underruns: AtomicU64,
+}
+
+impl Link {
+    fn publish(&self, (jitter, burst): (f64, f64)) {
+        self.jitter_us
+            .store((jitter * 1e6).max(1.0) as u32, Ordering::Relaxed);
+        self.burst_us.store((burst * 1e6) as u32, Ordering::Relaxed);
+    }
+}
+
+/// Where the time between a packet arriving and its sound leaving the
+/// speaker goes, as the stats line shows it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Latency {
+    /// Queued, waiting for the device: the jitter buffer.
+    pub queued_ms: f32,
+    /// The device's buffer and hardware after a pull.
+    pub device_ms: f32,
+    /// Arrival jitter over the last few seconds.
+    pub jitter_ms: f32,
+    pub underruns: u64,
+}
+
 pub struct Player {
     channels: usize,
+    rate: u32,
     samples_per_frame: usize,
     pcm: Vec<i16>,
+    link: Arc<Link>,
+    arrivals: Arrivals,
     /// The last frame played, faded out in place of a lost one.
     last: Vec<f32>,
     /// Interleaved samples at the stream's rate and channel count.
@@ -59,7 +128,6 @@ pub struct Player {
     pulled: Arc<AtomicU64>,
     gain: Arc<AtomicU32>,
     max_queued: usize,
-    keep: usize,
     packets: u64,
     lost: u64,
     undecodable: u64,
@@ -94,22 +162,27 @@ impl Player {
         let (stop, stopped) = mpsc::channel();
         let output = Arc::new(Mutex::new(Output::Opening));
         let pulled = Arc::new(AtomicU64::new(0));
+        let link = Arc::new(Link::default());
         output_thread(
             sample_rate,
             channels as u16,
-            queue.clone(),
+            Shared {
+                queue: queue.clone(),
+                output: output.clone(),
+                pulled: pulled.clone(),
+                gain: gain.clone(),
+                link: link.clone(),
+            },
             stopped,
-            output.clone(),
-            pulled.clone(),
-            gain.clone(),
         );
         let per_ms = sample_rate as usize * channels / 1000;
-        // Whole frames only: dropping half a frame would swap the channels.
-        let keep = per_ms * KEEP_MS / channels * channels;
         Ok(Self {
             channels,
+            rate: sample_rate,
             samples_per_frame,
             pcm: Vec::with_capacity(samples_per_frame * channels),
+            link,
+            arrivals: Arrivals::default(),
             last: Vec::new(),
             queue,
             _output_thread: stop,
@@ -117,7 +190,6 @@ impl Player {
             pulled,
             gain,
             max_queued: per_ms * MAX_QUEUED_MS,
-            keep,
             packets: 0,
             lost: 0,
             undecodable: 0,
@@ -137,6 +209,10 @@ impl Player {
     /// the last one is repeated, fading, so a gap is a dip rather than a
     /// click.
     pub fn push(&mut self, packet: &[u8]) {
+        self.push_at(packet, Instant::now());
+    }
+
+    fn push_at(&mut self, packet: &[u8], now: Instant) {
         if packet.is_empty() {
             self.lost += 1;
             if self.last.is_empty() {
@@ -146,19 +222,31 @@ impl Player {
             for (i, s) in self.last.iter_mut().enumerate() {
                 *s *= 0.5 * (1.0 - i as f32 / n);
             }
+            self.arrived(now);
             self.queue_samples();
             return;
         }
-        if let Err(e) = latch_codec::audio::decode(packet, &mut self.pcm) {
-            self.undecodable += 1;
-            if self.undecodable == 1 {
-                tracing::warn!("audio: undecodable frame ({e})");
+        match latch_codec::audio::decode_channels(packet, &mut self.pcm) {
+            Ok(channels) if channels == self.channels => {}
+            Ok(channels) => {
+                self.undecodable += 1;
+                if self.undecodable == 1 {
+                    tracing::warn!(
+                        "audio: a {channels}-channel frame in a {}-channel stream",
+                        self.channels
+                    );
+                }
+                return;
             }
-            return;
+            Err(e) => {
+                self.undecodable += 1;
+                if self.undecodable == 1 {
+                    tracing::warn!("audio: undecodable frame ({e})");
+                }
+                return;
+            }
         }
-        if !self.pcm.len().is_multiple_of(self.channels)
-            || self.pcm.len() / self.channels > self.samples_per_frame * 4
-        {
+        if self.pcm.len() / self.channels > self.samples_per_frame * 4 {
             self.undecodable += 1;
             return;
         }
@@ -166,15 +254,39 @@ impl Player {
         self.last.clear();
         self.last
             .extend(self.pcm.iter().map(|&v| f32::from(v) / 32768.0));
+        self.arrived(now);
         self.queue_samples();
+    }
+
+    /// Notes `last` arriving now, for the jitter estimate.
+    fn arrived(&mut self, now: Instant) {
+        let secs = (self.last.len() / self.channels) as f64 / f64::from(self.rate);
+        if let Some(measured) = self.arrivals.note(now, secs) {
+            self.link.publish(measured);
+        }
     }
 
     fn queue_samples(&mut self) {
         let mut q = self.queue.lock();
         q.extend(&self.last);
         if q.len() > self.max_queued {
-            let drop = q.len() - self.keep;
+            // Back to the mixer's cushion, in whole frames: dropping half a
+            // frame would swap the channels.
+            let target = self.link.target_us.load(Ordering::Relaxed) as usize;
+            let keep = (target * self.rate as usize / 1_000_000).max(1) * self.channels;
+            let drop = q.len().saturating_sub(keep);
             q.drain(..drop);
+        }
+    }
+
+    /// Where the delay after arrival goes.
+    pub fn latency(&self) -> Latency {
+        let ms = |v: &AtomicU32| v.load(Ordering::Relaxed) as f32 / 1000.0;
+        Latency {
+            queued_ms: ms(&self.link.queued_us),
+            device_ms: ms(&self.link.device_us),
+            jitter_ms: ms(&self.link.jitter_us),
+            underruns: self.link.underruns.load(Ordering::Relaxed),
         }
     }
 
@@ -215,32 +327,119 @@ fn phrase(output: &Output, packets: u64, lost: u64, pulled: u64) -> String {
     }
 }
 
-/// cpal streams are not `Send` everywhere, so the output stream lives on a
-/// thread of its own for as long as the player does, opened again on the
-/// current default device when the one it played on goes away.
-fn output_thread(
-    source_rate: u32,
-    source_channels: u16,
+/// Arrival jitter: how late frames come against the host's own cadence
+/// (each frame's media time after the first), as the spread between the
+/// earliest and the latest over the last few seconds; and the burst, how
+/// much audio typically comes at one moment (a capture period's frames
+/// leave together; the median, so that late packets bunching up behind a
+/// loss count as jitter, not as bursts). A host that went quiet starts it
+/// over: it sends nothing for silence.
+#[derive(Default)]
+struct Arrivals {
+    origin: Option<Instant>,
+    media: f64,
+    last: Option<Instant>,
+    /// Audio that has come since the moment the current burst began.
+    burst: f64,
+    /// (min, max, median burst) of each finished half-second block,
+    /// newest last.
+    blocks: VecDeque<(f64, f64, f64)>,
+    block: Option<(Instant, f64, f64)>,
+    bursts: Vec<f64>,
+}
+
+impl Arrivals {
+    const BLOCK: Duration = Duration::from_millis(500);
+    const BLOCKS: usize = 8;
+
+    /// Frames this close together came at one moment.
+    const TOGETHER: Duration = Duration::from_millis(1);
+
+    /// Notes a frame of `secs` arriving at `now`; the jitter and the burst
+    /// so far, in seconds, once there is enough to tell.
+    fn note(&mut self, now: Instant, secs: f64) -> Option<(f64, f64)> {
+        if self
+            .last
+            .is_some_and(|t| now.saturating_duration_since(t) > PAUSE)
+        {
+            self.origin = None;
+            self.blocks.clear();
+            self.block = None;
+            self.bursts.clear();
+            self.burst = 0.0;
+        }
+        if self
+            .last
+            .is_none_or(|t| now.saturating_duration_since(t) > Self::TOGETHER)
+        {
+            if self.burst > 0.0 {
+                self.bursts.push(self.burst);
+            }
+            self.burst = 0.0;
+        }
+        self.burst += secs;
+        self.last = Some(now);
+        let origin = *self.origin.get_or_insert_with(|| {
+            self.media = 0.0;
+            now
+        });
+        let offset = now.saturating_duration_since(origin).as_secs_f64() - self.media;
+        self.media += secs;
+        let (start, min, max) = self.block.get_or_insert((now, offset, offset));
+        *min = min.min(offset);
+        *max = max.max(offset);
+        if now.saturating_duration_since(*start) < Self::BLOCK || self.bursts.is_empty() {
+            return None;
+        }
+        self.bursts.sort_by(f64::total_cmp);
+        let burst = self.bursts[self.bursts.len() / 2];
+        self.bursts.clear();
+        self.blocks.push_back((*min, *max, burst));
+        self.block = None;
+        if self.blocks.len() > Self::BLOCKS {
+            self.blocks.pop_front();
+        }
+        let low = self.blocks.iter().map(|b| b.0).fold(f64::MAX, f64::min);
+        let high = self.blocks.iter().map(|b| b.1).fold(f64::MIN, f64::max);
+        let burst = self.blocks.iter().map(|b| b.2).fold(0.0, f64::max);
+        Some((high - low, burst))
+    }
+}
+
+/// What the player shares with the output thread and its mixers.
+#[derive(Clone)]
+struct Shared {
     queue: Arc<Mutex<VecDeque<f32>>>,
-    stop: mpsc::Receiver<()>,
     output: Arc<Mutex<Output>>,
     pulled: Arc<AtomicU64>,
     gain: Arc<AtomicU32>,
-) {
+    link: Arc<Link>,
+}
+
+/// The channel count to ask a host for: the default output device's 5.1 or
+/// 7.1 when it has one, else stereo.
+pub fn output_channels() -> u32 {
+    let channels = cpal::default_host()
+        .default_output_device()
+        .and_then(|d| d.default_output_config().ok())
+        .map_or(2, |c| c.channels());
+    match channels {
+        8.. => 8,
+        6 | 7 => 6,
+        _ => 2,
+    }
+}
+
+/// cpal streams are not `Send` everywhere, so the output stream lives on a
+/// thread of its own for as long as the player does, opened again on the
+/// current default device when the one it played on goes away.
+fn output_thread(source_rate: u32, source_channels: u16, shared: Shared, stop: mpsc::Receiver<()>) {
     std::thread::Builder::new()
         .name("audio-out".into())
         .spawn(move || {
             let rebuild = Arc::new(AtomicBool::new(false));
             keep_open(&stop, &rebuild, OUTPUT_RETRY, || {
-                open_output(
-                    source_rate,
-                    source_channels,
-                    &queue,
-                    &output,
-                    &pulled,
-                    &rebuild,
-                    &gain,
-                )
+                open_output(source_rate, source_channels, &shared, &rebuild)
             });
         })
         .expect("spawn audio thread");
@@ -306,17 +505,16 @@ fn on_output_error(
 
 /// Opens the default output device at its own rate, channel count and
 /// sample format, and [`Mixer`] converts; asking a device for 48 kHz stereo
-/// f32 it does not offer was silence with the reason only in the log.
-#[allow(clippy::too_many_arguments)]
+/// f32 it does not offer was silence with the reason only in the log. Asks
+/// for a small buffer where the device allows one, and takes its default
+/// where that fails.
 fn open_output(
     source_rate: u32,
     source_channels: u16,
-    queue: &Arc<Mutex<VecDeque<f32>>>,
-    output: &Arc<Mutex<Output>>,
-    pulled: &Arc<AtomicU64>,
+    shared: &Shared,
     rebuild: &Arc<AtomicBool>,
-    gain: &Arc<AtomicU32>,
 ) -> Option<cpal::Stream> {
+    let output = &shared.output;
     let fail = |why: String| {
         let mut state = output.lock();
         // Tried again every second: say it once.
@@ -346,22 +544,19 @@ fn open_output(
     };
     let rate = supported.sample_rate().max(8_000);
     let channels = supported.channels().max(1);
-    let config = cpal::StreamConfig {
-        channels,
-        sample_rate: rate,
-        buffer_size: cpal::BufferSize::Default,
-    };
+    let small = buffer_frames(rate, supported.buffer_size());
     let mixer = || {
         Mixer::new(
             source_rate,
             source_channels as usize,
             rate,
             channels as usize,
-            queue.clone(),
-            pulled.clone(),
-            source_rate as usize * source_channels as usize * 40 / 1000,
-            gain.clone(),
+            shared.queue.clone(),
+            shared.pulled.clone(),
+            None,
+            shared.gain.clone(),
         )
+        .linked(shared.link.clone())
     };
     let err_fn = {
         let (output, rebuild) = (output.clone(), rebuild.clone());
@@ -373,71 +568,87 @@ fn open_output(
             })
         }
     };
-    let stream = match supported.sample_format() {
-        cpal::SampleFormat::F32 => {
-            let mut m = mixer();
-            device.build_output_stream(
-                config,
-                move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                    m.device_delay = device_delay(info);
-                    m.fill(out)
-                },
-                err_fn.clone(),
-                None,
-            )
-        }
-        cpal::SampleFormat::I16 => {
-            let mut m = mixer();
-            device.build_output_stream(
-                config,
-                move |out: &mut [i16], info: &cpal::OutputCallbackInfo| {
-                    m.device_delay = device_delay(info);
-                    m.fill_i16(out)
-                },
-                err_fn.clone(),
-                None,
-            )
-        }
-        cpal::SampleFormat::I32 => {
-            let mut m = mixer();
-            device.build_output_stream(
-                config,
-                move |out: &mut [i32], info: &cpal::OutputCallbackInfo| {
-                    m.device_delay = device_delay(info);
-                    m.fill_i32(out)
-                },
-                err_fn.clone(),
-                None,
-            )
-        }
-        other => {
-            // Most leftover formats still accept f32 or i16.
-            let mut m = mixer();
-            match device.build_output_stream(
-                config,
-                move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                    m.device_delay = device_delay(info);
-                    m.fill(out)
-                },
-                err_fn.clone(),
-                None,
-            ) {
-                Ok(s) => Ok(s),
-                Err(e) => {
-                    tracing::warn!("audio output: {other} as f32 failed ({e}); trying i16");
-                    let mut m = mixer();
-                    device.build_output_stream(
-                        config,
-                        move |out: &mut [i16], info: &cpal::OutputCallbackInfo| {
-                            m.device_delay = device_delay(info);
-                            m.fill_i16(out)
-                        },
-                        err_fn.clone(),
-                        None,
-                    )
+    let build = |buffer_size: cpal::BufferSize| {
+        let config = cpal::StreamConfig {
+            channels,
+            sample_rate: rate,
+            buffer_size,
+        };
+        match supported.sample_format() {
+            cpal::SampleFormat::F32 => {
+                let mut m = mixer();
+                device.build_output_stream(
+                    config,
+                    move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                        m.device_delay = device_delay(info);
+                        m.fill(out)
+                    },
+                    err_fn.clone(),
+                    None,
+                )
+            }
+            cpal::SampleFormat::I16 => {
+                let mut m = mixer();
+                device.build_output_stream(
+                    config,
+                    move |out: &mut [i16], info: &cpal::OutputCallbackInfo| {
+                        m.device_delay = device_delay(info);
+                        m.fill_i16(out)
+                    },
+                    err_fn.clone(),
+                    None,
+                )
+            }
+            cpal::SampleFormat::I32 => {
+                let mut m = mixer();
+                device.build_output_stream(
+                    config,
+                    move |out: &mut [i32], info: &cpal::OutputCallbackInfo| {
+                        m.device_delay = device_delay(info);
+                        m.fill_i32(out)
+                    },
+                    err_fn.clone(),
+                    None,
+                )
+            }
+            other => {
+                // Most leftover formats still accept f32 or i16.
+                let mut m = mixer();
+                match device.build_output_stream(
+                    config,
+                    move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                        m.device_delay = device_delay(info);
+                        m.fill(out)
+                    },
+                    err_fn.clone(),
+                    None,
+                ) {
+                    Ok(s) => Ok(s),
+                    Err(e) => {
+                        tracing::warn!("audio output: {other} as f32 failed ({e}); trying i16");
+                        let mut m = mixer();
+                        device.build_output_stream(
+                            config,
+                            move |out: &mut [i16], info: &cpal::OutputCallbackInfo| {
+                                m.device_delay = device_delay(info);
+                                m.fill_i16(out)
+                            },
+                            err_fn.clone(),
+                            None,
+                        )
+                    }
                 }
             }
         }
+    };
+    let stream = match small {
+        Some(frames) => build(cpal::BufferSize::Fixed(frames)).or_else(|e| {
+            tracing::info!(
+                "audio output: {name} refused a {frames}-frame buffer ({e}); using its own"
+            );
+            build(cpal::BufferSize::Default)
+        }),
+        None => build(cpal::BufferSize::Default),
     };
     let stream = match stream {
         Ok(s) => s,
@@ -452,13 +663,38 @@ fn open_output(
         fail(format!("{name} would not start: {e}"));
         return None;
     }
-    tracing::info!("audio: playing on {name} at {rate} Hz, {channels} channels");
+    tracing::info!(
+        "audio: playing on {name} at {rate} Hz, {channels} channels, {} buffer",
+        small.map_or("default".into(), |f| format!("{f}-frame"))
+    );
     *output.lock() = Output::Playing {
         device: name,
         rate,
         channels,
     };
     Some(stream)
+}
+
+/// The small device buffer to ask for, in frames, if the device says which
+/// sizes it takes (or the environment asks for one).
+fn buffer_frames(rate: u32, range: &cpal::SupportedBufferSize) -> Option<u32> {
+    let wanted = match std::env::var("LATCH_AUDIO_BUFFER") {
+        Ok(v) if v == "default" => return None,
+        Ok(v) => v.parse().ok(),
+        Err(_) => None,
+    };
+    match range {
+        cpal::SupportedBufferSize::Range { min, max } => {
+            let frames = wanted.unwrap_or((f64::from(rate) * DEVICE_BUFFER_MS / 1000.0) as u32);
+            Some(frames.clamp(*min, *max))
+        }
+        // WASAPI's shared mode takes any size (it pulls at its own period
+        // whatever is asked; a smaller ring is less delay).
+        cpal::SupportedBufferSize::Unknown if cfg!(windows) || wanted.is_some() => {
+            Some(wanted.unwrap_or((f64::from(rate) * DEVICE_BUFFER_MS / 1000.0) as u32))
+        }
+        cpal::SupportedBufferSize::Unknown => None,
+    }
 }
 
 /// How long after this callback its first frame reaches the speaker.
@@ -479,29 +715,42 @@ pub fn take_probe() -> Vec<f32> {
 }
 
 /// Pulls stream frames from the queue for the device: linear
-/// interpolation between rates, left and right onto whatever channels the
-/// device has (the mean onto a mono one), silence when the queue is empty.
+/// interpolation between rates, the stream's channels mixed onto the
+/// device's speakers ([`latch_codec::audio::mix_matrix`]: 5.1 into
+/// stereo headphones, stereo onto the front of a 5.1 set), silence when
+/// the queue is empty, and the queue steered as the module says.
 struct Mixer {
     queue: Arc<Mutex<VecDeque<f32>>>,
     pulled: Arc<AtomicU64>,
     gain: Arc<AtomicU32>,
+    link: Arc<Link>,
     src_channels: usize,
     out_channels: usize,
+    /// `mix[out][in]`.
+    mix: Vec<Vec<f32>>,
     /// Source frames per output frame: 48000 / 44100 ≈ 1.088.
     step: f64,
     out_rate: f64,
-    /// Queued samples, smoothed over about a second.
-    level: f64,
+    /// Source samples per millisecond.
+    per_ms: f64,
     /// How far from `prev` towards `next` the output is; a whole frame or
     /// more means it is time to pull.
     pos: f64,
     prev: [f32; MAX_CHANNELS],
     next: [f32; MAX_CHANNELS],
-    /// Source samples that must be queued before the first audible frame,
-    /// and again after the queue runs dry, so a late packet is not a click
-    /// of silence. Zero in tests.
-    preroll: usize,
+    /// A fixed cushion (source samples) instead of the measured one, and no
+    /// steering; `Some(0)` in tests plays whatever is queued.
+    fixed: Option<usize>,
     started: bool,
+    /// The least slack seen lately, source samples: dips are taken at once
+    /// and forgotten at [`RELEASE_MS_PER_S`].
+    low: f64,
+    margin_ms: f64,
+    /// Queued source samples, smoothed, for the stats.
+    level: f64,
+    last_pull: Option<Instant>,
+    /// When the queue ran dry, until sound comes back.
+    dry_at: Option<Instant>,
     scratch: Vec<f32>,
     /// From the device's callback timestamps.
     device_delay: Duration,
@@ -518,56 +767,133 @@ impl Mixer {
         out_channels: usize,
         queue: Arc<Mutex<VecDeque<f32>>>,
         pulled: Arc<AtomicU64>,
-        preroll: usize,
+        fixed: Option<usize>,
         gain: Arc<AtomicU32>,
     ) -> Self {
+        let src_channels = src_channels.clamp(1, MAX_CHANNELS);
+        let out_channels = out_channels.max(1);
+        let mask = latch_codec::audio::speaker_mask(src_channels);
         Self {
             queue,
             pulled,
             gain,
-            src_channels: src_channels.clamp(1, MAX_CHANNELS),
-            out_channels: out_channels.max(1),
+            link: Arc::default(),
+            src_channels,
+            out_channels,
+            mix: latch_codec::audio::mix_matrix(src_channels, mask, out_channels),
             step: src_rate.max(1) as f64 / out_rate.max(1) as f64,
             out_rate: out_rate.max(1) as f64,
-            level: 0.0,
+            per_ms: src_rate.max(1) as f64 * src_channels as f64 / 1000.0,
             pos: 1.0,
             prev: [0.0; MAX_CHANNELS],
             next: [0.0; MAX_CHANNELS],
-            preroll,
+            fixed,
             started: false,
+            low: 0.0,
+            margin_ms: MARGIN_MS,
+            level: 0.0,
+            last_pull: None,
+            dry_at: None,
             scratch: Vec::new(),
             device_delay: Duration::ZERO,
             probe_quiet: std::env::var_os("LATCH_AUDIO_PROBE").map(|_| 0),
         }
     }
 
+    fn linked(mut self, link: Arc<Link>) -> Self {
+        self.link = link;
+        self
+    }
+
+    /// The measured jitter, and the slack to steer the low point to: the
+    /// margin, plus whatever of a burst the jitter does not already spread
+    /// over every phase of the device's pulls. (With less jitter than a
+    /// burst, the clocks' drift slides arrivals past pulls now and then,
+    /// and each time the low point drops by a burst at once.)
+    fn plan_ms(&self) -> (f64, f64) {
+        let jitter = match self.link.jitter_us.load(Ordering::Relaxed) {
+            0 => DEFAULT_JITTER_MS,
+            us => f64::from(us) / 1000.0,
+        };
+        let burst = f64::from(self.link.burst_us.load(Ordering::Relaxed)) / 1000.0;
+        (jitter, self.margin_ms + (burst - jitter).max(0.0))
+    }
+
+    /// Source samples to have queued before playing: this pull's need,
+    /// the measured jitter and the slack.
+    fn cushion(&self, need: usize) -> usize {
+        if let Some(fixed) = self.fixed {
+            return fixed;
+        }
+        let (jitter, slack) = self.plan_ms();
+        let samples = need + ((jitter + slack) * self.per_ms) as usize;
+        samples.div_ceil(self.src_channels) * self.src_channels
+    }
+
     fn fill(&mut self, out: &mut [f32]) {
+        self.fill_at(out, Instant::now());
+    }
+
+    fn fill_at(&mut self, out: &mut [f32], now: Instant) {
+        let frames_out = out.len() / self.out_channels;
+        // Source samples this pull takes, the interpolation's one ahead
+        // included.
+        let need = ((frames_out as f64 * self.step).ceil() as usize + 1) * self.src_channels;
+        let dt = self
+            .last_pull
+            .map_or(0.0, |t| now.saturating_duration_since(t).as_secs_f64());
+        self.last_pull = Some(now);
+        let steer = self.fixed.is_none();
+        if steer {
+            self.margin_ms = (self.margin_ms - MARGIN_DECAY_MS_PER_S * dt).max(MARGIN_MS);
+        }
         let mut q = self.queue.lock();
         if !self.started {
-            if q.len() < self.preroll {
+            if let Some(dry) = self.dry_at.filter(|_| !q.is_empty()) {
+                // Sound came back: soon means it was late, not paused.
+                let gap = now.saturating_duration_since(dry);
+                if steer && gap < PAUSE {
+                    self.margin_ms = (self.margin_ms + MARGIN_MS).min(MAX_MARGIN_MS);
+                    self.link.underruns.fetch_add(1, Ordering::Relaxed);
+                }
+                self.dry_at = None;
+            }
+            let cushion = self.cushion(need);
+            if q.len() < cushion {
                 drop(q);
                 out.fill(0.0);
                 return;
             }
             self.started = true;
-            if self.preroll > 0 {
-                // Out of silence, start from the newest preroll's worth: a
+            if cushion > 0 {
+                // Out of silence, start from the newest cushion's worth: a
                 // backlog a stall left behind would stay as added delay.
-                let excess = (q.len() - self.preroll) / self.src_channels * self.src_channels;
+                let excess = (q.len() - cushion) / self.src_channels * self.src_channels;
                 q.drain(..excess);
             }
+            self.low = q.len() as f64 - need as f64;
             self.level = q.len() as f64;
         }
-        // Steer towards keeping the preroll queued, so clock drift neither
-        // grows the delay until the overrun cut nor drains it into a gap.
-        // Packets arrive in bursts: steer by the average over a second.
-        let step = if self.preroll == 0 {
-            self.step
+        // Steer the low point of the slack to the margin, so clock drift
+        // neither grows the delay nor drains it into a gap, and the delay
+        // is no more than this path's jitter needs.
+        let step = if steer {
+            let slack = q.len() as f64 - need as f64;
+            self.low = slack.min(self.low + RELEASE_MS_PER_S * dt * self.per_ms);
+            let error = (self.low / self.per_ms - self.plan_ms().1) / TRIM_FULL_MS;
+            self.level += (q.len() as f64 - self.level) * dt.min(1.0);
+            let us = |samples: f64| (samples / self.per_ms * 1000.0).max(0.0) as u32;
+            let link = &self.link;
+            link.queued_us.store(us(self.level), Ordering::Relaxed);
+            link.target_us
+                .store(us(self.cushion(need) as f64), Ordering::Relaxed);
+            link.margin_us
+                .store((self.margin_ms * 1000.0) as u32, Ordering::Relaxed);
+            link.device_us
+                .store(self.device_delay.as_micros() as u32, Ordering::Relaxed);
+            self.step * (1.0 + (MAX_TRIM * error).clamp(-MAX_TRIM, MAX_TRIM))
         } else {
-            let frames = (out.len() / self.out_channels) as f64;
-            self.level += (q.len() as f64 - self.level) * (frames / self.out_rate).min(1.0);
-            let error = self.level / self.preroll as f64 - 1.0;
-            self.step * (1.0 + (2.0 * MAX_TRIM * error).clamp(-MAX_TRIM, MAX_TRIM))
+            self.step
         };
         let gain = f32::from_bits(self.gain.load(Ordering::Relaxed));
         let wall = std::time::SystemTime::now()
@@ -584,28 +910,24 @@ impl Mixer {
                     for c in 0..self.src_channels {
                         self.next[c] = q.pop_front().unwrap_or(0.0);
                     }
-                } else {
+                } else if self.started {
                     // Ran dry: rebuild the cushion before playing on, or
                     // every later jitter spike would click too.
                     self.started = false;
+                    self.dry_at = Some(now);
                 }
             }
             let t = self.pos as f32;
-            let sample = |c: usize| self.prev[c] + (self.next[c] - self.prev[c]) * t;
-            for (c, o) in frame.iter_mut().enumerate() {
-                let sample = if self.out_channels == 1 && self.src_channels > 1 {
-                    (0..self.src_channels).map(sample).sum::<f32>() / self.src_channels as f32
-                } else if c < self.src_channels {
-                    sample(c)
-                } else if self.src_channels == 1 {
-                    sample(0)
-                } else {
-                    0.0
-                };
-                *o = sample * gain;
+            let mut src = [0.0f32; MAX_CHANNELS];
+            for (c, s) in src.iter_mut().enumerate().take(self.src_channels) {
+                *s = self.prev[c] + (self.next[c] - self.prev[c]) * t;
+            }
+            for (o, row) in frame.iter_mut().zip(&self.mix) {
+                let mixed: f32 = row.iter().zip(&src).map(|(w, s)| w * s).sum();
+                *o = mixed * gain;
             }
             if let Some(quiet) = &mut self.probe_quiet {
-                let level = sample(0).abs();
+                let level = src[0].abs();
                 if level > 0.2 && *quiet as f64 >= self.out_rate / 10.0 {
                     let at =
                         wall.as_nanos() + frames as u128 * 1_000_000_000 / self.out_rate as u128;
@@ -846,7 +1168,7 @@ mod tests {
             1,
             queue.clone(),
             pulled.clone(),
-            0,
+            Some(0),
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
         );
         let mut out = vec![9.0f32; 8];
@@ -870,7 +1192,7 @@ mod tests {
             6,
             queue,
             Arc::new(AtomicU64::new(0)),
-            0,
+            Some(0),
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
         );
         let mut out = vec![9.0f32; 6 * 10];
@@ -878,17 +1200,30 @@ mod tests {
         assert_eq!(&out[6 * 9..], &[0.25, -0.25, 0.0, 0.0, 0.0, 0.0]);
     }
 
-    /// Plays a constant 0.5 for `secs` from a host whose clock runs `ppm`
-    /// fast, sending 10 ms of stereo every 10 ms of its time with up to
-    /// 10 ms of random delay, into a 48 kHz stereo device that pulls 512
-    /// frames per callback, with the player's preroll and overrun cut.
-    /// Returns the samples that were not 0.5 after sound began (gaps), the
-    /// overrun cuts, and the mean queued audio in ms over the last minute.
-    fn long_session(ppm: f64, secs: u64) -> (u64, u64, f64) {
-        const CALLBACK: usize = 512;
+    /// A path for [`long_session`].
+    struct Path {
+        /// The host's clock against this device's.
+        ppm: f64,
+        /// Audio per packet, and how often the host's capture hands it
+        /// over (several packets at once when it is longer).
+        frame_ms: f64,
+        capture_ms: f64,
+        /// Network delay: a base and a uniformly random extra up to this.
+        jitter_ms: f64,
+        /// Device frames per pull.
+        callback: usize,
+    }
+
+    /// Plays a constant 0.5 for `secs` through `path` into a 48 kHz stereo
+    /// device, with the player's jitter estimate, adaptive cushion and
+    /// overrun cut, on simulated time. Returns the samples that were not
+    /// 0.5 after sound began (gaps), the overrun cuts, and the mean queued
+    /// audio plus the pull size in ms over the last minute: the delay the
+    /// buffer adds.
+    fn long_session(path: &Path, secs: u64) -> (u64, u64, f64) {
         let per_ms = 48 * 2;
         let queue: Arc<Mutex<VecDeque<f32>>> = Arc::default();
-        let preroll = per_ms * 40;
+        let link = Arc::new(Link::default());
         let mut m = Mixer::new(
             48_000,
             2,
@@ -896,9 +1231,11 @@ mod tests {
             2,
             queue.clone(),
             Arc::default(),
-            preroll,
+            None,
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
-        );
+        )
+        .linked(link.clone());
+        let mut arrivals = Arrivals::default();
         let mut rng = 0x9e37_79b9_7f4a_7c15u64;
         let mut random = move || {
             rng ^= rng << 13;
@@ -906,28 +1243,38 @@ mod tests {
             rng ^= rng << 17;
             (rng >> 11) as f64 / (1u64 << 53) as f64
         };
-        let send_every = 0.010 / (1.0 + ppm * 1e-6);
-        let (mut sent, mut arrival, mut next_callback) = (0.0f64, 0.0f64, 0.0f64);
-        let mut out = vec![0.0f32; CALLBACK * 2];
+        let base = Instant::now();
+        let at = |t: f64| base + Duration::from_secs_f64(t);
+        let scale = 1.0 / (1.0 + path.ppm * 1e-6);
+        let per_capture = (path.capture_ms / path.frame_ms).round().max(1.0) as u64;
+        let frame_samples = (48.0 * path.frame_ms) as usize * 2;
+        let (mut packet, mut arrival, mut next_callback) = (0u64, 0.0f64, 0.0f64);
+        let mut out = vec![0.0f32; path.callback * 2];
         let (mut gaps, mut cuts, mut sounding) = (0u64, 0u64, false);
         let (mut depth_sum, mut depth_n) = (0.0f64, 0u64);
         let end = secs as f64;
         while next_callback < end {
-            // In order, as the receiver hands packets to the player.
-            arrival = arrival.max(sent + 0.005 + 0.010 * random());
+            // Leaves the host when its capture period ends; in order, as the
+            // receiver hands packets to the player.
+            let captured = (packet / per_capture + 1) as f64 * path.capture_ms / 1000.0 * scale;
+            arrival = arrival.max(captured + 0.005 + path.jitter_ms / 1000.0 * random());
             if arrival <= next_callback {
+                if let Some(measured) = arrivals.note(at(arrival), path.frame_ms / 1000.0) {
+                    link.publish(measured);
+                }
                 let mut q = queue.lock();
-                q.extend(std::iter::repeat_n(0.5f32, 480 * 2));
+                q.extend(std::iter::repeat_n(0.5f32, frame_samples));
                 if q.len() > per_ms * MAX_QUEUED_MS {
-                    let drop = q.len() - per_ms * KEEP_MS;
+                    let keep = link.target_us.load(Ordering::Relaxed) as usize * 48 / 1000 * 2;
+                    let drop = q.len() - keep;
                     q.drain(..drop);
                     cuts += 1;
                 }
-                sent += send_every;
+                packet += 1;
                 continue;
             }
             let before = queue.lock().len();
-            m.fill(&mut out);
+            m.fill_at(&mut out, at(next_callback));
             let after = queue.lock().len();
             for &s in &out {
                 if s == 0.5 {
@@ -937,24 +1284,62 @@ mod tests {
                 }
             }
             if next_callback >= end - 60.0 {
-                depth_sum += (before + after) as f64 / 2.0 / per_ms as f64;
+                // A sample queued at a pull leaves at the pull's end.
+                depth_sum +=
+                    (before + after) as f64 / 2.0 / per_ms as f64 + path.callback as f64 / 48.0;
                 depth_n += 1;
             }
-            next_callback += CALLBACK as f64 / 48_000.0;
+            next_callback += path.callback as f64 / 48_000.0;
         }
         (gaps, cuts, depth_sum / depth_n.max(1) as f64)
     }
 
     #[test]
     fn audio_latency_stays_bounded_over_a_long_session_with_clock_drift() {
+        // 5.1.0's case: 10 ms frames, up to 10 ms of random delay and
+        // 512-frame pulls held 40 ms queued (about 45 ms with the pull).
         for ppm in [-300.0, 0.0, 300.0] {
-            let (gaps, cuts, ms) = long_session(ppm, 30 * 60);
-            eprintln!("{ppm:+} ppm: {gaps} gap samples, {cuts} cuts, {ms:.1} ms queued");
+            let path = Path {
+                ppm,
+                frame_ms: 10.0,
+                capture_ms: 10.0,
+                jitter_ms: 10.0,
+                callback: 512,
+            };
+            let (gaps, cuts, ms) = long_session(&path, 30 * 60);
+            eprintln!("{ppm:+} ppm: {gaps} gap samples, {cuts} cuts, {ms:.1} ms buffered");
             assert_eq!((gaps, cuts), (0, 0), "{ppm:+} ppm");
             assert!(
-                (25.0..=45.0).contains(&ms),
-                "{ppm:+} ppm: {ms:.1} ms queued"
+                (10.0..=36.0).contains(&ms),
+                "{ppm:+} ppm: {ms:.1} ms buffered"
             );
+        }
+    }
+
+    #[test]
+    fn a_quiet_path_with_small_pulls_buffers_a_few_milliseconds() {
+        // A LAN with 1 ms of jitter into 120-frame pulls: 5 ms frames from
+        // 5 ms capture periods, and from WASAPI's usual 10 ms ones (two
+        // frames at once).
+        for (capture_ms, most) in [(5.0, 14.0), (10.0, 20.0)] {
+            for ppm in [-300.0, -20.0, 300.0] {
+                let path = Path {
+                    ppm,
+                    frame_ms: 5.0,
+                    capture_ms,
+                    jitter_ms: 1.0,
+                    callback: 120,
+                };
+                let (gaps, cuts, ms) = long_session(&path, 10 * 60);
+                eprintln!(
+                    "{capture_ms} ms capture, {ppm:+} ppm: {gaps} gap samples, {cuts} cuts, {ms:.1} ms buffered"
+                );
+                assert_eq!((gaps, cuts), (0, 0), "{capture_ms} ms, {ppm:+} ppm");
+                assert!(
+                    ms <= most,
+                    "{capture_ms} ms, {ppm:+} ppm: {ms:.1} ms buffered"
+                );
+            }
         }
     }
 
@@ -970,7 +1355,7 @@ mod tests {
             2,
             queue.clone(),
             Arc::default(),
-            8,
+            Some(8),
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
         );
         let mut out = vec![9.0f32; 8];
@@ -990,7 +1375,7 @@ mod tests {
             2,
             queue.clone(),
             Arc::default(),
-            8,
+            Some(8),
             Arc::new(AtomicU32::new(1.0f32.to_bits())),
         );
         queue.lock().extend([0.5; 8]);
@@ -1022,7 +1407,7 @@ mod tests {
             2,
             queue.clone(),
             Arc::new(AtomicU64::new(0)),
-            0,
+            Some(0),
             gain.clone(),
         );
         let mut out = vec![0.0f32; 20];

@@ -257,9 +257,13 @@ fn main() -> anyhow::Result<()> {
         }
         let s = session.stats();
         let probe = latch_stream::audio::take_probe();
-        if !probe.is_empty() {
-            let mean = probe.iter().sum::<f32>() / probe.len() as f32;
-            eprintln!("        audio clicks: {} at {mean:.1} ms", probe.len());
+        let a = s.audio_latency;
+        if !probe.is_empty() || a.queued_ms > 0.0 {
+            let mean = probe.iter().sum::<f32>() / probe.len().max(1) as f32;
+            eprintln!(
+                "        audio: queued {:.1} ms, device {:.1} ms, jitter {:.1} ms, {} underruns; {} clicks at {mean:.1} ms",
+                a.queued_ms, a.device_ms, a.jitter_ms, a.underruns, probe.len()
+            );
         }
         clicks.extend(probe.iter().map(|&ms| f64::from(ms)));
         eprintln!(

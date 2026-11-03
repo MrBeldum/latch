@@ -47,6 +47,14 @@ pub struct StreamRequest {
     pub name: String,
     #[serde(default)]
     pub cursor: bool,
+    /// Most audio channels the viewer plays (6 for 5.1, 8 for 7.1); absent
+    /// or below 3 means stereo, all an older viewer decodes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub audio_channels: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn known_codecs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Codec>, D::Error> {

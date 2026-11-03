@@ -126,12 +126,8 @@ pub fn open_audio() -> Option<anyhow::Result<Box<dyn crate::audio::AudioCapture>
         },
         _ => return Some(Err(anyhow::anyhow!("LATCH_TEST_AUDIO: unknown {spec:?}"))),
     };
-    let wall = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
     Some(Ok(Box::new(Clicks {
         start: Instant::now(),
-        wall_ns: wall.as_nanos() as u64,
         produced: 0,
         period: crate::audio::RATE as u64 * u64::from(period_ms) / 1000,
         pending: std::collections::VecDeque::new(),
@@ -144,8 +140,6 @@ const CLICK_NS: u64 = 1_000_000;
 
 struct Clicks {
     start: Instant,
-    /// The wall clock at `start`, in ns since the Unix epoch.
-    wall_ns: u64,
     /// Samples per channel made so far.
     produced: u64,
     /// Samples per channel per device period.
@@ -171,8 +165,17 @@ impl crate::audio::AudioCapture for Clicks {
                 return Ok(false);
             }
             std::thread::sleep(due.saturating_duration_since(now));
+            // The wall clock read now, not once at the start: a clock step
+            // (NTP) must move the clicks as it moves the viewer's probe.
+            let wall = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let wall_at_due =
+                wall - Instant::now().saturating_duration_since(due).as_nanos() as u64;
             for k in self.produced..self.produced + self.period {
-                let at = self.wall_ns + k * 1_000_000_000 / RATE as u64;
+                let before_due = (self.produced + self.period - k) * 1_000_000_000 / RATE as u64;
+                let at = wall_at_due - before_due;
                 let v = if at % CLICK_EVERY_NS < CLICK_NS {
                     16_000
                 } else {

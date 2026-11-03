@@ -21,6 +21,7 @@ fn request(name: &str) -> StreamRequest {
         audio: false,
         name: name.into(),
         cursor: false,
+        audio_channels: 0,
     }
 }
 

@@ -396,7 +396,7 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
         audio: Some(AudioFormat {
             rate: audio::RATE,
             channels: 2,
-            frame_samples: AUDIO_FRAME as u32,
+            frame_samples: audio::FRAME as u32,
             codec: "lpcm-rice".into(),
         }),
         audio_problem: String::new(),
@@ -459,9 +459,8 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
     let mut buf = [0; 4096];
     let mut packets = 0u32;
     let mut parity = 0;
-    let mut previous_pts = None;
     let mut decoded = Vec::new();
-    while packets < 8 || parity < 2 {
+    while packets < 4 || parity < 1 {
         let n = udp.recv(&mut buf).unwrap();
         assert!(
             n <= latch_proto::MAX_DATAGRAM,
@@ -472,25 +471,29 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
                 parity += 1;
             } else {
                 latch_codec::audio::decode(packet.payload, &mut decoded).unwrap();
-                assert_eq!(decoded.len(), AUDIO_FRAME * audio::CHANNELS);
-                let mut state = 1 + packets / 2;
+                // One 5 ms frame, one packet.
+                assert_eq!(decoded.len(), audio::FRAME * audio::CHANNELS);
+                let mut state = 1 + packets;
                 let expected: Vec<i16> = (0..audio::FRAME * audio::CHANNELS)
                     .map(|_| {
                         state = state.wrapping_mul(1664525).wrapping_add(1013904223);
                         (state >> 16) as i16
                     })
                     .collect();
-                let offset = (packets as usize % 2) * AUDIO_FRAME * audio::CHANNELS;
-                assert_eq!(
-                    decoded,
-                    expected[offset..offset + AUDIO_FRAME * audio::CHANNELS]
-                );
-                if packets % 2 == 1 {
-                    assert_eq!(packet.pts.wrapping_sub(previous_pts.unwrap()), 5000);
-                }
-                previous_pts = Some(packet.pts);
+                assert_eq!(decoded, expected);
                 packets += 1;
             }
         }
+    }
+}
+
+#[test]
+fn audio_packets_split_the_frame_evenly_and_always_fit() {
+    for (channels, samples) in [(1, 240), (2, 240), (6, 80), (8, 60)] {
+        assert_eq!(audio_packet_samples(channels), samples, "{channels} ch");
+        assert_eq!(audio::FRAME % samples, 0);
+        assert!(
+            latch_codec::audio::max_coded_len(channels, samples) <= latch_proto::audio::MAX_PAYLOAD
+        );
     }
 }

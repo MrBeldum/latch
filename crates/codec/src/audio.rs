@@ -787,6 +787,121 @@ pub fn decode_channels(data: &[u8], pcm: &mut Vec<i16>) -> Result<usize, AudioEr
     Ok(channels)
 }
 
+/// WAVEFORMATEXTENSIBLE speaker bits of Latch's channel layouts: mono,
+/// stereo, 2.1… 5.1 (back) and 7.1, in WAVE order. Zero for counts with no
+/// conventional layout.
+pub fn speaker_mask(channels: usize) -> u32 {
+    match channels {
+        1 => 0x4,
+        2 => 0x3,
+        3 => 0x7,
+        4 => 0x33,
+        5 => 0x37,
+        6 => 0x3f,
+        7 => 0x70f,
+        8 => 0x63f,
+        _ => 0,
+    }
+}
+
+/// Weights taking `from` channels, whose speakers are the set bits of
+/// `mask` in ascending order, onto Latch's `to` channels: `rows[out][in]`.
+///
+/// * Into stereo (and mono, their mean): centre and back-centre at −3 dB on
+///   both sides, LFE at −6 dB, everything on one side at −3 dB to that side.
+/// * Into 5.1 and 7.1: each speaker to its own channel; heights and the
+///   wide fronts fold into the nearest ear-level channel; into 5.1, side
+///   and back surrounds share the surround pair (−3 dB each when both
+///   exist).
+/// * The same count with no known mask passes straight through; anything
+///   else gets the stereo mix on its first two channels.
+pub fn mix_matrix(from: usize, mask: u32, to: usize) -> Vec<Vec<f32>> {
+    let from = from.max(1);
+    let to = to.max(1);
+    let mask = if mask.count_ones() as usize == from {
+        mask
+    } else {
+        speaker_mask(from)
+    };
+    let mut rows = vec![vec![0.0; from]; to];
+    if from == to && mask == speaker_mask(from) {
+        for (c, row) in rows.iter_mut().enumerate() {
+            row[c] = 1.0;
+        }
+        return rows;
+    }
+    if mask == 0 || (from == 1 && to > 1) {
+        if from == to {
+            for (c, row) in rows.iter_mut().enumerate() {
+                row[c] = 1.0;
+            }
+        } else if from == 1 {
+            // Mono plays on both ears (and the centre is left alone).
+            rows[0][0] = 1.0;
+            rows[1][0] = 1.0;
+        } else {
+            let w = 1.0 / from as f32;
+            for row in rows.iter_mut().take(2.min(to)) {
+                row.fill(w);
+            }
+        }
+        return rows;
+    }
+    let bits: Vec<u32> = (0..32).filter(|bit| mask & (1 << bit) != 0).collect();
+    let h = std::f32::consts::FRAC_1_SQRT_2;
+    let stereo = |bit: u32| -> [f32; 2] {
+        match bit {
+            0 => [1.0, 0.0], // front left/right
+            1 => [0.0, 1.0],
+            3 => [0.5, 0.5], // LFE
+            4 | 6 | 9 | 12 | 15 => [h, 0.0],
+            5 | 7 | 10 | 14 | 17 => [0.0, h],
+            _ => [h, h], // centre, back centre and height centres
+        }
+    };
+    if to == 6 || to == 8 {
+        let both_surrounds = mask & 0x30 != 0 && mask & 0x600 != 0;
+        let fold = if to == 6 && both_surrounds { h } else { 1.0 };
+        for (i, &bit) in bits.iter().enumerate() {
+            let (s4, s5) = if to == 8 { (6, 7) } else { (4, 5) };
+            let targets: &[(usize, f32)] = match bit {
+                0 | 6 => &[(0, 1.0)],
+                1 | 7 => &[(1, 1.0)],
+                2 => &[(2, 1.0)],
+                3 => &[(3, 1.0)],
+                4 => &[(4, fold)],
+                5 => &[(5, fold)],
+                8 => &[(4, h), (5, h)],
+                9 => &[(s4, fold)],
+                10 => &[(s5, fold)],
+                12 => &[(0, h)],
+                14 => &[(1, h)],
+                11 | 13 => &[(2, h)],
+                15 => &[(4, h)],
+                17 => &[(5, h)],
+                16 => &[(4, 0.5), (5, 0.5)],
+                _ => &[],
+            };
+            for &(o, w) in targets {
+                rows[o][i] += w;
+            }
+        }
+        return rows;
+    }
+    let pairs: Vec<[f32; 2]> = bits.iter().map(|&b| stereo(b)).collect();
+    if to == 1 {
+        for (i, p) in pairs.iter().enumerate() {
+            rows[0][i] = (p[0] + p[1]) / 2.0;
+        }
+    } else {
+        for (i, p) in pairs.iter().enumerate() {
+            rows[0][i] = p[0];
+            rows[1][i] = p[1];
+        }
+    }
+    rows
+}
+
 #[cfg(test)]
 mod transport_bounds {
     #[test]
@@ -826,5 +941,60 @@ mod transport_bounds {
                 assert_eq!(decoded, pcm);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod layouts {
+    use super::*;
+
+    fn apply(rows: &[Vec<f32>], input: &[f32]) -> Vec<f32> {
+        rows.iter()
+            .map(|row| row.iter().zip(input).map(|(w, s)| w * s).sum())
+            .collect()
+    }
+
+    #[test]
+    fn each_layout_maps_to_its_own_speakers() {
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        for c in 1..=MAX_CHANNELS {
+            let rows = mix_matrix(c, speaker_mask(c), c);
+            for (i, row) in rows.iter().enumerate() {
+                for (j, w) in row.iter().enumerate() {
+                    assert_eq!(*w, if i == j { 1.0 } else { 0.0 }, "{c} ch");
+                }
+            }
+        }
+        // 7.1 into 5.1: sides and backs share the surround pair.
+        let rows = mix_matrix(8, 0x63f, 6);
+        let mut sl = [0.0; 8];
+        sl[6] = 1.0;
+        assert_eq!(apply(&rows, &sl), [0.0, 0.0, 0.0, 0.0, h, 0.0]);
+        // 5.1 with side surrounds into 7.1 keeps them at the sides.
+        let rows = mix_matrix(6, 0x60f, 8);
+        let mut sr = [0.0; 6];
+        sr[5] = 1.0;
+        assert_eq!(apply(&rows, &sr), [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        // ... and into 5.1 at full level, since nothing shares the pair.
+        let rows = mix_matrix(6, 0x60f, 6);
+        assert_eq!(apply(&rows, &sr), [0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        // 5.1 into stereo and mono.
+        let rows = mix_matrix(6, 0x3f, 2);
+        assert_eq!(apply(&rows, &[0.0, 0.0, 1.0, 0.0, 0.0, 0.0]), [h, h]);
+        assert_eq!(apply(&rows, &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]), [0.5, 0.5]);
+        assert_eq!(apply(&rows, &[0.0, 0.0, 0.0, 0.0, 1.0, 0.0]), [h, 0.0]);
+        let rows = mix_matrix(2, 0x3, 1);
+        assert_eq!(apply(&rows, &[1.0, 0.0]), [0.5]);
+        // Stereo onto a 5.1 device: left and right only; mono onto both.
+        let rows = mix_matrix(2, 0x3, 6);
+        assert_eq!(
+            apply(&rows, &[0.25, -0.25]),
+            [0.25, -0.25, 0.0, 0.0, 0.0, 0.0]
+        );
+        let rows = mix_matrix(1, 0x4, 2);
+        assert_eq!(apply(&rows, &[0.5]), [0.5, 0.5]);
+        // Sixteen unknown channels: their mean on both ears.
+        let rows = mix_matrix(16, 0, 2);
+        assert_eq!(apply(&rows, &[1.0; 16]), [1.0, 1.0]);
     }
 }

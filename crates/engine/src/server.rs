@@ -48,9 +48,13 @@ const KEYFRAME_GAP: Duration = Duration::from_millis(50);
 const TAKEOVER_WAIT: Duration = Duration::from_secs(30);
 const VIDEO_RECOVERY_WINDOW: Duration = Duration::from_secs(60);
 const VIDEO_RECOVERIES: usize = 3;
-/// Capture supplies 10 ms; each coded packet carries 5 ms to fit the MTU,
-/// including the parity packet's extra two length bytes.
-const AUDIO_FRAME: usize = 240;
+/// Samples per channel in one audio packet: the capture's 5 ms frame when
+/// its worst case fits a datagram (stereo: 965 of 1 182 bytes), else the
+/// frame split evenly into parts that do (5.1: 80, 7.1: 60).
+fn audio_packet_samples(channels: usize) -> usize {
+    let fits = latch_codec::audio::frame_samples_within(channels, latch_proto::audio::MAX_PAYLOAD);
+    audio::FRAME / audio::FRAME.div_ceil(fits.max(1))
+}
 
 /// Readies the desktop for a session (for example, sizes it to the
 /// viewer); returns what undoes that when the session ends.
@@ -253,7 +257,8 @@ impl Server {
         prepared.info = Some(pipeline.info());
         prepared.pipeline = Some((pipeline, config));
         if prepared.req.audio {
-            match audio::open() {
+            let channels = (prepared.req.audio_channels as usize).clamp(2, audio::MAX_CHANNELS);
+            match audio::open_with(audio::Layout::UpTo(channels)) {
                 Ok(capture) => prepared.audio = Some(capture),
                 Err(e) => prepared.audio_problem = format!("{e:#}"),
             }
@@ -340,10 +345,10 @@ impl Server {
             fps: config.fps,
             bitrate_kbps: config.bitrate_kbps,
             encoder: info.encoder.clone(),
-            audio: audio.as_ref().map(|_| AudioFormat {
+            audio: audio.as_ref().map(|capture| AudioFormat {
                 rate: audio::RATE,
-                channels: audio::CHANNELS as u32,
-                frame_samples: AUDIO_FRAME as u32,
+                channels: capture.channels() as u32,
+                frame_samples: audio_packet_samples(capture.channels()) as u32,
                 codec: "lpcm-rice".into(),
             }),
             audio_problem: prepared.audio_problem.clone(),
@@ -382,7 +387,10 @@ impl Server {
                     let session = session.clone();
                     std::thread::Builder::new()
                         .name("stream-audio".into())
-                        .spawn(move || send_audio(&server, &session, capture, audio::open))
+                        .spawn(move || {
+                            let layout = audio::Layout::Exactly(capture.channels());
+                            send_audio(&server, &session, capture, || audio::open_with(layout))
+                        })
                 });
                 (video.ok(), audio.and_then(Result::ok))
             }
@@ -1070,7 +1078,10 @@ fn send_audio(
 ) {
     crate::priority::media_thread();
     let mut packetizer = AudioPacketizer::new(session.id);
-    let mut pcm = [0i16; audio::FRAME * audio::CHANNELS];
+    let channels = capture.channels();
+    let samples = audio_packet_samples(channels);
+    let packet_us = (samples as u64 * 1_000_000 / u64::from(audio::RATE)) as u32;
+    let mut pcm = Vec::with_capacity(audio::FRAME * channels);
     let mut coded = Vec::with_capacity(2048);
     let mut capture = Some(capture);
     let mut backoff = Duration::from_millis(100);
@@ -1100,7 +1111,7 @@ fn send_audio(
         match capture
             .as_mut()
             .expect("open audio")
-            .read(&mut pcm, Duration::from_millis(100))
+            .read_frame(&mut pcm, Duration::from_millis(100))
         {
             Ok(true) => {
                 if problem {
@@ -1122,22 +1133,21 @@ fn send_audio(
         let Some(addr) = *session.addr.lock() else {
             continue;
         };
+        if pcm.len() != audio::FRAME * channels {
+            // A capture that changed its layout under a running session.
+            continue;
+        }
         let pts = server.now_us() as u32;
-        for (i, half) in pcm
-            .as_chunks::<{ AUDIO_FRAME * audio::CHANNELS }>()
-            .0
-            .iter()
-            .enumerate()
-        {
+        for (i, part) in pcm.chunks(samples * channels).enumerate() {
             coded.clear();
-            latch_codec::audio::encode(half, &mut coded);
-            let pts = pts.wrapping_add((i as u32) * 5_000);
-            // 240 samples always fit (lpcm-rice's worst case is 965 bytes);
-            // a refusal would mean the codec changed underneath.
+            latch_codec::audio::encode_channels(part, channels, &mut coded);
+            let pts = pts.wrapping_add(i as u32 * packet_us);
+            // Packets are sized so lpcm-rice's worst case fits; a refusal
+            // would mean the codec changed underneath.
             let fits = packetizer.packetize(pts, &coded, |datagram| {
                 send(&server.udp, session, datagram, addr);
             });
-            debug_assert!(fits, "a coded 5 ms audio frame outgrew a datagram");
+            debug_assert!(fits, "a coded audio frame outgrew a datagram");
         }
     }
 }

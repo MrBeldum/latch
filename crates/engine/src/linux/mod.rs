@@ -27,8 +27,8 @@ pub fn open_video(config: &VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>
         config,
     )?))
 }
-pub fn open_audio() -> anyhow::Result<Box<dyn AudioCapture>> {
-    Ok(Box::new(audio::PulseCapture::new()?))
+pub fn open_audio(layout: crate::audio::Layout) -> anyhow::Result<Box<dyn AudioCapture>> {
+    Ok(Box::new(audio::PulseCapture::new(layout)?))
 }
 pub fn open_input() -> anyhow::Result<Box<dyn InputSink>> {
     Ok(Box::new(input::X11Input::new()?))

@@ -134,6 +134,9 @@ pub struct Stats {
     /// Where sound goes ("audio → MacBook Pro Speakers"), or why it does
     /// not; empty until the first second of video.
     pub audio: String,
+    /// Where the delay between an audio packet arriving and its sound
+    /// leaving the speaker goes.
+    pub audio_latency: crate::audio::Latency,
     /// Persistent video diagnosis, even while the transport is connected.
     pub video_problem: Option<String>,
     pub applied_bitrate_kbps: u32,
@@ -545,6 +548,12 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         audio: settings.audio,
         name: settings.name.clone(),
         cursor: settings.cursor,
+        // 5.1 or 7.1 when this machine's speakers have them; stereo is the
+        // field's absence, which every host understands.
+        audio_channels: match settings.audio.then(crate::audio::output_channels) {
+            Some(n) if n > 2 => n,
+            _ => 0,
+        },
     };
     let body = serde_json::to_vec(&request).unwrap_or_default();
     let host = SocketAddr::new(server.address, server.port);
@@ -1066,6 +1075,7 @@ fn receive(
                 s.rtt_ms = rtt.srtt().map_or(0, |d| d.as_millis() as u32);
                 s.rtt_var_ms = rtt.rttvar().as_millis() as u32;
                 if let Some(p) = &player {
+                    s.audio_latency = p.latency();
                     let problem = inner.host_audio_problem.lock();
                     s.audio = if problem.is_empty() {
                         p.describe()
