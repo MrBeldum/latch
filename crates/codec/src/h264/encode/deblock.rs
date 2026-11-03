@@ -71,7 +71,7 @@ pub(super) fn filter(p: &mut super::worker::Rows, mbs: &[Mb]) {
                     let x = mx * 16 + if vertical { edge * 4 } else { 0 };
                     let y = my * 16 + if vertical { 0 } else { edge * 4 };
                     loopfilter::luma(
-                        &mut p.y,
+                        p.y,
                         p.y_stride,
                         y * p.y_stride + x,
                         vertical,
@@ -80,8 +80,8 @@ pub(super) fn filter(p: &mut super::worker::Rows, mbs: &[Mb]) {
                     if edge % 2 == 0 {
                         let chroma = edge_config(cqp);
                         loopfilter::chroma(
-                            &mut p.u,
-                            &mut p.v,
+                            p.u,
+                            p.v,
                             p.c_stride,
                             y / 2 * p.c_stride + x / 2,
                             vertical,

@@ -266,7 +266,7 @@ fn copy_mc(
             .unwrap_or(0);
         let d = y * dst.y_stride + x;
         predict::copy_subpel_16x16(
-            &mut dst.y,
+            dst.y,
             dst.y_stride,
             d,
             plane1,
@@ -903,7 +903,7 @@ pub(super) fn encode(job: Job) -> Band {
         // A single DC trial avoids evaluating every intra mode for an obvious temporal match.
         let try_intra = job.idr || job.effort < 2 || inter_cost > lambda * 128;
         let intra_cost = if try_intra {
-            let intra_trial = predict::intra_plane(&rec.y, rec.y_stride, x, y, 16, 2, false);
+            let intra_trial = predict::intra_plane(rec.y, rec.y_stride, x, y, 16, 2, false);
             let mut intra_cost = 0;
             for yy in 0..16 {
                 if !job.idr && intra_cost + lambda * 24 >= inter_cost {
@@ -949,7 +949,7 @@ pub(super) fn encode(job: Job) -> Band {
                 {
                     continue;
                 }
-                let p = predict::intra_plane(&rec.y, rec.y_stride, x, y, 16, mode, false);
+                let p = predict::intra_plane(rec.y, rec.y_stride, x, y, 16, mode, false);
                 let mut cost = lambda * 8;
                 for i in 0..16 {
                     if cost >= best16.0 {
@@ -991,7 +991,7 @@ pub(super) fn encode(job: Job) -> Band {
                     &job.source.y,
                     job.source.y_stride,
                     so,
-                    &rec.y,
+                    rec.y,
                     rec.y_stride,
                     x + bx,
                     y + by,
