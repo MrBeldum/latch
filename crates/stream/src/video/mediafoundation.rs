@@ -539,7 +539,7 @@ impl Gpu {
             }),
         );
         shared.pictures = shared.pictures.wrapping_add(1);
-        if shared.pictures % SAMPLE_EVERY == 0 {
+        if shared.pictures.is_multiple_of(SAMPLE_EVERY) {
             let staging = self.staging(desc)?;
             self.context
                 .CopySubresourceRegion(&staging, 0, 0, 0, 0, texture, subresource, None);
