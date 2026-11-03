@@ -61,6 +61,9 @@ pub(super) struct Encoder {
     config: VideoConfig,
     depth: Depth,
     index: i64,
+    /// Discard output until an IDR submitted at or after this boundary.
+    recovery: Option<i64>,
+    forced: Option<i64>,
 }
 
 impl Encoder {
@@ -167,6 +170,8 @@ impl Encoder {
             },
             depth,
             index: 0,
+            recovery: None,
+            forced: None,
         };
         // SAFETY: the session is live and each property receives the documented CF value type.
         unsafe {
@@ -271,6 +276,17 @@ impl Encoder {
         if kbps == self.config.bitrate_kbps {
             return Ok(());
         }
+        if self.config.bitrate_kbps != 0 {
+            // Finish old-rate work before changing properties. Discard its output:
+            // the new reference chain starts at a fresh IDR at the new rate.
+            check(
+                unsafe { VTCompressionSessionCompleteFrames(self.session.0, INVALID_TIME) },
+                "complete pictures before bitrate change",
+            )?;
+            self.request_keyframe();
+            self.recovery = Some(self.index);
+            self.forced = None;
+        }
         let rate = number(i64::from(kbps) * 1000);
         let bytes = number(i64::from(kbps) * 1000 * 3 / 16);
         let seconds = number(1);
@@ -325,6 +341,7 @@ impl Encoder {
         let wake = self.output.wake.lock().take();
         *self = Self::open(&self.config, false, self.depth)?;
         *self.output.wake.lock() = wake;
+        self.request_keyframe();
         Ok(())
     }
     #[cfg(test)]
@@ -342,18 +359,19 @@ impl Encoder {
             },
             "complete picture",
         )?;
-        let mut out = self.output.output.lock();
-        let at = out.done.iter().position(|(i, ..)| *i == index);
-        let frame = at
-            .and_then(|at| out.done.remove(at))
-            .and_then(|(.., frame)| frame);
-        out.done.retain(|(i, ..)| *i > index);
-        frame.transpose()
+        while let Some((i, _, frame)) = self.collect(Duration::ZERO) {
+            if i == index {
+                return frame.transpose();
+            }
+        }
+        Ok(None)
     }
     /// Hands one picture to the encoder without waiting for it to come out.
     pub fn submit(&mut self, image: Ref, captured: Instant, keyframe: bool) -> Result<i64> {
         let index = self.index;
         self.index += 1;
+        let recovery_keyframe = self.recovery.is_some() && self.forced.is_none();
+        let keyframe = keyframe || recovery_keyframe;
         self.output
             .output
             .lock()
@@ -388,19 +406,57 @@ impl Encoder {
                 .retain(|(i, _)| *i != index);
             return Err(error);
         }
+        if recovery_keyframe {
+            self.forced = Some(index);
+        }
         Ok(index)
     }
-    /// The oldest frame that has come out, waiting up to `wait` for one.
-    pub fn collect(&self, wait: Duration) -> Option<Done> {
+    /// Repeated requests while an IDR is pending share the same boundary.
+    pub fn request_keyframe(&mut self) {
+        if self.recovery.is_none() {
+            self.recovery = Some(self.index);
+            self.forced = None;
+        }
+    }
+    pub fn needs_keyframe(&self) -> bool {
+        self.recovery.is_some()
+    }
+    /// The oldest usable output. During recovery, nothing before the fresh
+    /// IDR may leave: those P-frames can reference pictures the viewer lost.
+    pub fn collect(&mut self, wait: Duration) -> Option<Done> {
         let deadline = Instant::now() + wait;
-        let mut out = self.output.output.lock();
         loop {
-            if let Some(done) = out.done.pop_front() {
-                return Some(done);
+            let done = {
+                let mut out = self.output.output.lock();
+                while out.done.is_empty() {
+                    if wait.is_zero()
+                        || self.output.ready.wait_until(&mut out, deadline).timed_out()
+                    {
+                        break;
+                    }
+                }
+                out.done.pop_front()
+            }?;
+            if let Some(boundary) = self.recovery {
+                if done.0 < boundary {
+                    continue;
+                }
+                match &done.2 {
+                    Some(Ok(frame)) if frame.keyframe => {
+                        self.recovery = None;
+                        self.forced = None;
+                    }
+                    Some(Err(_)) => return Some(done),
+                    _ => {
+                        if self.forced.is_some_and(|index| done.0 >= index) {
+                            // The forced picture was dropped or was not an IDR.
+                            self.forced = None;
+                        }
+                        continue;
+                    }
+                }
             }
-            if wait.is_zero() || self.output.ready.wait_until(&mut out, deadline).timed_out() {
-                return out.done.pop_front();
-            }
+            return Some(done);
         }
     }
     /// How many submitted frames have not come out yet.

@@ -1022,3 +1022,135 @@ fn main10_iosurface_roundtrip() {
     assert!(psnr > 40.0, "Main10 luma PSNR {psnr:.2}");
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn recovery_skips_queued_pictures_and_coalesces_retries() {
+    let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    for codec in [Codec::Hevc, Codec::H264High] {
+        let mut encoder = Encoder::create(
+            &VideoConfig {
+                width: WIDTH as u32,
+                height: HEIGHT as u32,
+                fps: FPS,
+                bitrate_kbps: 10_000,
+                codec,
+            },
+            true,
+        )
+        .unwrap();
+        let image = surface();
+        fill(&image, &pattern(0));
+        encoder.encode(image.0, Instant::now(), true).unwrap();
+        for _ in 0..2 {
+            encoder.submit(image.0, Instant::now(), false).unwrap();
+        }
+        // Both callbacks may already be queued when next(true) arrives.
+        check(
+            unsafe { VTCompressionSessionCompleteFrames(encoder.session.0, INVALID_TIME) },
+            "drain test pictures",
+        )
+        .unwrap();
+        encoder.request_keyframe();
+        assert!(encoder.collect(Duration::ZERO).is_none());
+        let idr = encoder.submit(image.0, Instant::now(), false).unwrap();
+        encoder.request_keyframe(); // The server retries while that IDR is pending.
+        let (index, _, frame) = encoder.collect(Duration::from_secs(2)).unwrap();
+        assert_eq!(index, idr);
+        assert!(frame.unwrap().unwrap().keyframe);
+        assert!(!encoder.needs_keyframe());
+        encoder.submit(image.0, Instant::now(), false).unwrap();
+        assert!(
+            !encoder
+                .collect(Duration::from_secs(2))
+                .unwrap()
+                .2
+                .unwrap()
+                .unwrap()
+                .keyframe
+        );
+    }
+}
+
+#[test]
+fn a_dropped_recovery_idr_is_retried_before_any_p_frame_leaves() {
+    let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let mut encoder = Encoder::create(
+        &VideoConfig {
+            width: WIDTH as u32,
+            height: HEIGHT as u32,
+            fps: FPS,
+            bitrate_kbps: 10_000,
+            codec: Codec::Hevc,
+        },
+        true,
+    )
+    .unwrap();
+    let image = surface();
+    fill(&image, &pattern(0));
+    encoder.request_keyframe();
+    encoder.submit(image.0, Instant::now(), false).unwrap();
+    check(
+        unsafe { VTCompressionSessionCompleteFrames(encoder.session.0, INVALID_TIME) },
+        "drain test IDR",
+    )
+    .unwrap();
+    // Deterministically simulate VideoToolbox dropping the forced picture.
+    encoder.output.output.lock().done.front_mut().unwrap().2 = None;
+    assert!(encoder.collect(Duration::ZERO).is_none());
+    assert!(encoder.needs_keyframe());
+    encoder.submit(image.0, Instant::now(), false).unwrap();
+    assert!(
+        encoder
+            .collect(Duration::from_secs(2))
+            .unwrap()
+            .2
+            .unwrap()
+            .unwrap()
+            .keyframe
+    );
+    assert!(!encoder.needs_keyframe());
+}
+
+#[test]
+fn bitrate_change_discards_old_output_and_starts_with_one_new_idr() {
+    let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    for codec in [Codec::Hevc, Codec::H264High] {
+        let mut encoder = Encoder::create(
+            &VideoConfig {
+                width: WIDTH as u32,
+                height: HEIGHT as u32,
+                fps: FPS,
+                bitrate_kbps: 10_000,
+                codec,
+            },
+            true,
+        )
+        .unwrap();
+        let image = surface();
+        fill(&image, &pattern(0));
+        encoder.encode(image.0, Instant::now(), true).unwrap();
+        for _ in 0..2 {
+            encoder.submit(image.0, Instant::now(), false).unwrap();
+        }
+        encoder.bitrate(5_000).unwrap();
+        assert!(encoder.collect(Duration::ZERO).is_none());
+        let idr = encoder.submit(image.0, Instant::now(), false).unwrap();
+        let (index, _, frame) = encoder.collect(Duration::from_secs(2)).unwrap();
+        assert_eq!(index, idr);
+        assert!(frame.unwrap().unwrap().keyframe);
+        encoder.bitrate(5_000).unwrap(); // An unchanged rate does not reset recovery.
+        encoder.submit(image.0, Instant::now(), false).unwrap();
+        assert!(
+            !encoder
+                .collect(Duration::from_secs(2))
+                .unwrap()
+                .2
+                .unwrap()
+                .unwrap()
+                .keyframe
+        );
+    }
+}
+
+#[path = "quality.rs"]
+mod quality;

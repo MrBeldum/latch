@@ -45,7 +45,6 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
         config: config.clone(),
         generation: 0,
         sent: None,
-        keyframe: true,
         pacer: Pacer::new(config.fps),
         pending: None,
         checked: Instant::now(),
@@ -89,8 +88,6 @@ struct Video {
     config: VideoConfig,
     generation: u64,
     sent: Option<Instant>,
-    /// The next picture submitted must be a keyframe.
-    keyframe: bool,
     pacer: Pacer,
     pending: Option<EncodedVideo>,
     checked: Instant,
@@ -109,7 +106,7 @@ impl Video {
         self.capture = Capture::video(self.request)?;
         self.wake();
         self.generation = 0;
-        self.keyframe = true;
+        self.encoder.request_keyframe();
         Ok(())
     }
     /// A hardware session that failed is replaced in software; a software
@@ -121,7 +118,7 @@ impl Video {
         tracing::warn!(%error, "VideoToolbox hardware encode failed; continuing in software");
         self.encoder.software()?;
         self.wake();
-        self.keyframe = true;
+        self.encoder.request_keyframe();
         Ok(())
     }
 }
@@ -147,7 +144,9 @@ impl VideoPipeline for Video {
         if let Some(frame) = self.pending.take() {
             return Ok(frame);
         }
-        self.keyframe |= keyframe;
+        if keyframe {
+            self.encoder.request_keyframe();
+        }
         let interval = self.pacer.interval();
         if self.checked.elapsed() >= GEOMETRY_CHECK {
             self.checked = Instant::now();
@@ -169,7 +168,7 @@ impl VideoPipeline for Video {
                     Some(Err(error)) => self.recover(error)?,
                     // A real-time encoder may drop under load; the next
                     // picture carries any keyframe that one was.
-                    None => self.keyframe = true,
+                    None => self.encoder.request_keyframe(),
                 }
                 continue;
             }
@@ -184,7 +183,9 @@ impl VideoPipeline for Video {
             // A new picture or a keyframe goes at the pacer's next slot; an
             // idle repeat once `idle` has passed since the last frame.
             let ready_at = match self.sent {
-                Some(sent) if !self.keyframe && !changed => sent + idle.max(interval),
+                Some(sent) if !self.encoder.needs_keyframe() && !changed => {
+                    sent + idle.max(interval)
+                }
                 _ => self.pacer.due().unwrap_or(now),
             };
             let room = self.encoder.in_flight() < IN_FLIGHT;
@@ -197,11 +198,11 @@ impl VideoPipeline for Video {
                     self.generation = state.generation;
                     drop(state);
                     self.pacer.taken(now);
-                    let keyframe = std::mem::take(&mut self.keyframe) || self.sent.is_none();
+                    let keyframe = self.sent.is_none();
                     self.sent = Some(now);
                     if let Err(error) = self.encoder.submit(image.0, captured, keyframe) {
                         self.recover(error)?;
-                        self.keyframe = true;
+                        self.encoder.request_keyframe();
                     }
                     continue;
                 }
@@ -221,8 +222,13 @@ impl VideoPipeline for Video {
         }
     }
     fn set_bitrate(&mut self, kbps: u32) {
+        if kbps > 0 && kbps != self.config.bitrate_kbps {
+            self.pending = None;
+        }
         match self.encoder.bitrate(kbps) {
-            Ok(()) => self.config.bitrate_kbps = kbps,
+            Ok(()) => {
+                self.config.bitrate_kbps = kbps;
+            }
             Err(error) => tracing::warn!(%error, "update VideoToolbox bitrate"),
         }
     }

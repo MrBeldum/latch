@@ -6,6 +6,10 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- Mac host keyframe requests discard queued pictures until the requested
+  IDR, coalesce retries, and clear on output. Bitrate changes start a fresh
+  reference chain after draining old-rate work.
+
 - A Mac host keeps up with fast streams. VideoToolbox no longer uses its
   low-latency rate control, which doubled each frame's encode time,
   dropped frames and sent a fifth of the asked-for bitrate; and a frame

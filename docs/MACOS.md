@@ -275,6 +275,13 @@ VideoToolbox encodes that surface; only compressed bytes reach Latch.
 - **10-bit.** HEVC Main10 from P010 (`x420`) surfaces works and is tested
   with synthetic surfaces; nothing asks for it until HDR does.
 
+A requested keyframe is the next picture returned to the server. Queued
+pre-request frames are discarded until the fresh IDR, so they cannot delay
+loss recovery or make the server request another IDR. Retries share that
+request until the IDR leaves. Bitrate changes complete old submissions
+before changing properties, discard their output and start a fresh IDR;
+an unchanged rate leaves the reference chain alone.
+
 ### Measured limits (M3 Pro)
 
 `cargo test --release -p latch-engine --lib realtime_benchmark -- --ignored --nocapture`
