@@ -1,5 +1,6 @@
 //! Native viewer measurement, using the application's renderer and present settings.
 //! present [host] --port 47882 --width 1920 --height 1080 --fps 120 --seconds 15
+//! present --replay stream.hevc --codec hevc --width 3840 --height 2160 --fps 60 [--cpu]
 use latch_stream::{Event, FrameSlot, Session, Settings};
 use std::{
     sync::{mpsc, Arc},
@@ -81,6 +82,61 @@ impl Drop for Viewer {
         eprintln!("render_summary decoded={} rendered={} decode_to_render_ms_p50={:.3} p95={:.3} p99={:.3}", self.frames.seq(), times.len(), percentile(0.5), percentile(0.95), percentile(0.99));
     }
 }
+/// Split a replay file into access units: at H.264/HEVC access unit
+/// delimiters, or at AV1 temporal delimiters (which are dropped, as in
+/// ISOBMFF samples). A file without delimiters is one access unit, so a
+/// single IDR replays as before. The first unit must be a keyframe.
+fn access_units(codec: latch_stream::Codec, bytes: &[u8]) -> Vec<&[u8]> {
+    let mut starts = Vec::new();
+    if codec == latch_stream::Codec::Av1 {
+        let mut units = Vec::new();
+        let (mut at, mut unit) = (0, 0);
+        while at < bytes.len() {
+            let header = bytes[at];
+            let mut end = at + 1 + usize::from(header & 4 != 0);
+            let mut size = 0usize;
+            for i in 0..8 {
+                let Some(&byte) = bytes.get(end) else {
+                    return vec![bytes];
+                };
+                end += 1;
+                size |= usize::from(byte & 127) << (i * 7);
+                if byte & 128 == 0 {
+                    break;
+                }
+            }
+            end += size;
+            if (header >> 3) & 15 == 2 {
+                if at > unit {
+                    units.push(&bytes[unit..at]);
+                }
+                unit = end;
+            }
+            at = end;
+        }
+        if bytes.len() > unit {
+            units.push(&bytes[unit.min(bytes.len())..]);
+        }
+        return units;
+    }
+    for i in 0..bytes.len().saturating_sub(4) {
+        if bytes[i..i + 3] == [0, 0, 1] {
+            let delimiter = match codec {
+                latch_stream::Codec::Hevc => (bytes[i + 3] >> 1) & 63 == 35,
+                _ => bytes[i + 3] & 31 == 9,
+            };
+            if delimiter {
+                starts.push(if i > 0 && bytes[i - 1] == 0 { i - 1 } else { i });
+            }
+        }
+    }
+    if starts.first() != Some(&0) {
+        starts.insert(0, 0);
+    }
+    starts.push(bytes.len());
+    starts.windows(2).map(|w| &bytes[w[0]..w[1]]).collect()
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -125,7 +181,15 @@ fn main() -> anyhow::Result<()> {
         "Latch present measurement",
         options,
         Box::new(move |cc| {
-            latch_client::video::install(cc.wgpu_render_state.as_ref().unwrap());
+            let render_state = cc.wgpu_render_state.as_ref().unwrap();
+            let adapter = render_state.adapter.get_info();
+            eprintln!("renderer {:?} {}", adapter.backend, adapter.name);
+            latch_client::video::install(render_state);
+            // `--cpu`: copy every picture through the CPU, as before zero-copy.
+            #[cfg(windows)]
+            if args.iter().any(|a| a == "--cpu") {
+                latch_stream::video::render_on_d3d12(None);
+            }
             let frames = Arc::new(FrameSlot::default());
             frames.measure_render();
             let (tx, events) = mpsc::channel();
@@ -152,12 +216,16 @@ fn main() -> anyhow::Result<()> {
                             return Vec::new();
                         }
                     };
+                    let units = access_units(codec, &bytes);
                     let interval = Duration::from_secs_f64(1.0 / f64::from(fps));
                     let mut next = Instant::now();
                     let mut times = Vec::new();
-                    while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    for (index, unit) in units.iter().enumerate().cycle() {
+                        if done.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
                         let start = Instant::now();
-                        match decoder.decode(&bytes, true, slot.spare()) {
+                        match decoder.decode(unit, index == 0, slot.spare()) {
                             Ok(Some(mut frame)) => {
                                 times.push(start.elapsed().as_secs_f64() * 1000.0);
                                 frame.decoded_at = Some(Instant::now());

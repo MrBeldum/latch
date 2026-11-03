@@ -2,7 +2,7 @@
 //! interleaved UV) and a shader that does the BT.709 conversion.
 
 use egui_wgpu::wgpu;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use egui_wgpu::wgpu::hal;
 use latch_stream::video::PixelFormat;
 use latch_stream::{Frame, FrameSlot};
@@ -150,6 +150,15 @@ fn warn_native_fallback(reason: &str) {
     }
 }
 
+/// A decoder's shared texture opened on the window's D3D12 device, kept
+/// for as long as the decoder keeps reusing it.
+#[cfg(windows)]
+struct Imported {
+    id: u64,
+    _texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+}
+
 #[cfg(target_os = "macos")]
 struct InFlightFrame {
     _frame: Frame,
@@ -284,6 +293,16 @@ pub struct Resources {
     in_flight_ring: std::collections::VecDeque<InFlightFrame>,
     #[cfg(target_os = "macos")]
     frame_counter: u64,
+    #[cfg(windows)]
+    imported: Vec<Imported>,
+    /// The bind group of the shared texture last drawn, while frames come
+    /// that way.
+    #[cfg(windows)]
+    shown: Option<wgpu::BindGroup>,
+    /// Frames whose shared textures the GPU may still be reading; the newest
+    /// is the one on screen.
+    #[cfg(windows)]
+    in_flight: std::collections::VecDeque<Frame>,
 }
 
 impl Resources {
@@ -382,6 +401,12 @@ impl Resources {
             in_flight_ring: std::collections::VecDeque::with_capacity(4),
             #[cfg(target_os = "macos")]
             frame_counter: 0,
+            #[cfg(windows)]
+            imported: Vec::new(),
+            #[cfg(windows)]
+            shown: None,
+            #[cfg(windows)]
+            in_flight: std::collections::VecDeque::with_capacity(2),
         }
     }
 
@@ -389,6 +414,10 @@ impl Resources {
         #[cfg(target_os = "macos")]
         if let Some(in_flight) = self.in_flight_ring.back() {
             return Some(&in_flight.bind_group);
+        }
+        #[cfg(windows)]
+        if let Some(shown) = &self.shown {
+            return Some(shown);
         }
         self.planes.as_ref().map(|p| &p.bind_group)
     }
@@ -482,8 +511,146 @@ impl Resources {
                 }
             }
         }
+        #[cfg(windows)]
+        if frame.native.is_some() {
+            match self.upload_d3d12(device, queue, frame) {
+                Ok(()) => slot.rendered(decoded_at),
+                Err(reason) => {
+                    // The picture never left the GPU, so there is nothing
+                    // to draw it from; later ones come through the CPU.
+                    tracing::warn!("D3D12 cannot open decoded pictures ({reason}); copying them");
+                    latch_stream::video::render_on_d3d12(None);
+                }
+            }
+            return;
+        }
         self.upload_cpu(device, queue, frame, slot);
         slot.rendered(decoded_at);
+    }
+
+    /// Draw a decoder's shared texture where it is: open it on the window's
+    /// D3D12 device the first time it comes, then just bind it.
+    #[cfg(windows)]
+    fn upload_d3d12(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frame: Frame,
+    ) -> Result<(), String> {
+        let surface = frame
+            .native
+            .as_ref()
+            .ok_or("frame has no shared texture")?
+            .surface();
+        let id = surface.id();
+        let bind_group = match self.imported.iter().find(|i| i.id == id) {
+            Some(imported) => imported.bind_group.clone(),
+            None => {
+                let (width, height) = surface.size();
+                // SAFETY: The raw device is only used to open the resource,
+                // which wgpu then owns like any texture it made.
+                let resource = unsafe {
+                    device.as_hal::<hal::api::Dx12, _, _>(|d| {
+                        d.map(|d| surface.open(d.raw_device()))
+                    })
+                }
+                .ok_or("the window does not draw with D3D12")?
+                .map_err(|e| format!("{e:#}"))?;
+                let size = wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                };
+                // SAFETY: An NV12 texture of exactly this size, one mip and
+                // one sample, as `SharedSurface` creates it.
+                let texture = unsafe {
+                    let raw = hal::dx12::Device::texture_from_raw(
+                        resource,
+                        wgpu::TextureFormat::NV12,
+                        wgpu::TextureDimension::D2,
+                        size,
+                        1,
+                        1,
+                    );
+                    device.create_texture_from_hal::<hal::api::Dx12>(
+                        raw,
+                        &wgpu::TextureDescriptor {
+                            label: Some("latch shared picture"),
+                            size,
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::NV12,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                            view_formats: &[],
+                        },
+                    )
+                };
+                let plane = |format, aspect| {
+                    texture.create_view(&wgpu::TextureViewDescriptor {
+                        format: Some(format),
+                        aspect,
+                        ..Default::default()
+                    })
+                };
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("latch video shared"),
+                    layout: &self.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&plane(
+                                wgpu::TextureFormat::R8Unorm,
+                                wgpu::TextureAspect::Plane0,
+                            )),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&plane(
+                                wgpu::TextureFormat::Rg8Unorm,
+                                wgpu::TextureAspect::Plane1,
+                            )),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.uniforms.as_entire_binding(),
+                        },
+                    ],
+                });
+                // A decoder keeps a handful; more than this are from one
+                // that has gone (a new stream, a new size).
+                if self.imported.len() >= 8 {
+                    self.imported.remove(0);
+                }
+                self.imported.push(Imported {
+                    id,
+                    _texture: texture,
+                    bind_group: bind_group.clone(),
+                });
+                bind_group
+            }
+        };
+        let u = Uniforms {
+            full_range: frame.full_range as u32,
+            srgb_target: self.srgb_target as u32,
+            p010: 0,
+            _pad: 0,
+        };
+        queue.write_buffer(&self.uniforms, 0, &u.bytes());
+        self.shown = Some(bind_group);
+        self.in_flight.push_back(frame);
+        if self.in_flight.len() > 1 {
+            if let Some(old) = self.in_flight.pop_front() {
+                // Submitted before this prepare call; the decoder may reuse
+                // its texture once that work is done.
+                queue.on_submitted_work_done(move || drop(old));
+            }
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -705,6 +872,13 @@ impl Resources {
         while let Some(old) = self.in_flight_ring.pop_front() {
             queue.on_submitted_work_done(move || drop(old));
         }
+        #[cfg(windows)]
+        {
+            self.shown = None;
+            while let Some(old) = self.in_flight.pop_front() {
+                queue.on_submitted_work_done(move || drop(old));
+            }
+        }
         let srgb = self.srgb_target;
         let planes = self.planes(device, frame.width, frame.height, frame.format);
         let write = |tex: &wgpu::Texture, data: &[u8], stride: usize, w: u32, h: u32| {
@@ -795,6 +969,24 @@ impl egui_wgpu::CallbackTrait for Paint {
 pub fn install(render_state: &egui_wgpu::RenderState) {
     let res = Resources::new(&render_state.device, render_state.target_format);
     render_state.renderer.write().callback_resources.insert(res);
+    // Hardware-decoded pictures can stay on the GPU when this window draws
+    // with D3D12 and can sample NV12 planes; decoders then run on its adapter.
+    #[cfg(windows)]
+    if render_state
+        .device
+        .features()
+        .contains(wgpu::Features::TEXTURE_FORMAT_NV12)
+    {
+        // SAFETY: Only reads the device's adapter LUID.
+        let adapter = unsafe {
+            render_state
+                .device
+                .as_hal::<hal::api::Dx12, _, _>(|d| d.map(|d| d.raw_device().GetAdapterLuid()))
+        };
+        if adapter.is_some() {
+            latch_stream::video::render_on_d3d12(adapter);
+        }
+    }
 }
 
 #[cfg(test)]

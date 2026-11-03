@@ -2,14 +2,31 @@
 //! can create and move the decoder from a UI thread with any apartment.
 use anyhow::{bail, ensure, Context, Result};
 use latch_proto::control::Codec;
-use std::{cell::RefCell, mem::ManuallyDrop, sync::mpsc, thread};
+use parking_lot::Mutex;
+use std::{
+    cell::RefCell,
+    mem::ManuallyDrop,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Arc,
+    },
+    thread,
+};
 use windows::{
     core::{Interface, VARIANT},
     Win32::{
-        Foundation::HMODULE,
-        Graphics::{Direct3D::*, Direct3D11::*, Dxgi::Common::*},
+        Foundation::{CloseHandle, HANDLE, HMODULE, LUID, WAIT_OBJECT_0},
+        Graphics::{
+            Direct3D::*,
+            Direct3D11::*,
+            Direct3D12::{ID3D12Device, ID3D12Resource},
+            Dxgi::{Common::*, *},
+        },
         Media::MediaFoundation::*,
-        System::Com::*,
+        System::{
+            Com::*,
+            Threading::{CreateEventW, WaitForSingleObject},
+        },
     },
 };
 
@@ -20,6 +37,70 @@ pub struct DecodedNv12 {
     pub y_stride: usize,
     pub uv: Vec<u8>,
     pub uv_stride: usize,
+    /// The picture left on the GPU instead of in `y` and `uv`, and whether
+    /// the decoder's latest sample of the stream was black.
+    pub shared: Option<(Arc<SharedSurface>, bool)>,
+}
+
+/// Set by [`super::render_on_d3d12`]; read when a decoder starts.
+pub(super) static RENDER_ADAPTER: Mutex<Option<LUID>> = Mutex::new(None);
+
+/// Shared textures per decoder: the one being drawn, one waiting in the
+/// frame slot, one the GPU may still be reading, and the one being filled.
+/// When all are taken the picture goes through the CPU instead.
+const SURFACES: usize = 6;
+/// Every this many pictures, one also goes to the CPU (asynchronously) so
+/// the session can still tell a black picture from a missing one.
+const SAMPLE_EVERY: u32 = 15;
+
+/// A shareable D3D11 NV12 texture holding one decoded picture, cropped to
+/// the visible size (rounded down to even).
+pub struct SharedSurface {
+    texture: ID3D11Texture2D,
+    handle: HANDLE,
+    id: u64,
+    width: u32,
+    height: u32,
+}
+// SAFETY: The texture is only kept alive here (D3D11 resources are
+// free-threaded) and the handle is a kernel handle, closed once on drop.
+unsafe impl Send for SharedSurface {}
+unsafe impl Sync for SharedSurface {}
+impl std::fmt::Debug for SharedSurface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedSurface")
+            .field("id", &self.id)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish()
+    }
+}
+impl SharedSurface {
+    /// Unique for the life of the process, so a renderer can cache what it
+    /// opened by it.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+    /// Open this texture on a D3D12 device on the same adapter.
+    pub fn open(&self, device: &ID3D12Device) -> Result<ID3D12Resource> {
+        let mut resource: Option<ID3D12Resource> = None;
+        // SAFETY: The handle stays open for as long as `self`; D3D12 takes
+        // its own reference to the resource.
+        unsafe { device.OpenSharedHandle(self.handle, &mut resource) }
+            .context("open shared decoder texture on D3D12")?;
+        resource.context("D3D12 returned no shared texture")
+    }
+}
+impl Drop for SharedSurface {
+    fn drop(&mut self) {
+        // SAFETY: Created by CreateSharedHandle and closed only here.
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
 }
 struct Request {
     bytes: Vec<u8>,
@@ -44,10 +125,13 @@ impl MfDecoder {
         thread::Builder::new()
             .name("latch-mf-decode".into())
             .spawn(move || {
+                let adapter = *RENDER_ADAPTER.lock();
                 let initialized = (|| {
                     let runtime = Runtime::new()?;
-                    let decoder = State::new(codec, true, width, height)
-                        .or_else(|_| State::new(codec, false, width, height))?;
+                    let decoder = State::new(codec, true, adapter, width, height).or_else(|e| {
+                        tracing::warn!("Media Foundation DXVA: {e:#}; trying without it");
+                        State::new(codec, false, None, width, height)
+                    })?;
                     Ok::<_, anyhow::Error>((runtime, decoder))
                 })();
                 let (_runtime, mut decoder) = match initialized {
@@ -125,7 +209,7 @@ pub fn supported() -> Vec<Codec> {
         .into_iter()
         .filter_map(|(codec, bytes)| {
             let result: Result<()> = (|| {
-                let mut state = State::new(codec, true, 256, 256)?;
+                let mut state = State::new(codec, true, None, 256, 256)?;
                 for _ in 0..10 {
                     if state.decode(bytes)?.is_some() {
                         ensure!(state.dxva_used, "decoder returned CPU samples");
@@ -206,16 +290,51 @@ struct Gpu {
     context: ID3D11DeviceContext,
     _manager: IMFDXGIDeviceManager,
     staging: RefCell<Option<ID3D11Texture2D>>,
+    shared: Option<Shared>,
+}
+/// Zero-copy output: each picture is copied, on the GPU, into a free
+/// [`SharedSurface`], and the worker waits for that copy before replying.
+struct Shared {
+    context: ID3D11DeviceContext4,
+    fence: ID3D11Fence,
+    value: u64,
+    event: HANDLE,
+    surfaces: Vec<Arc<SharedSurface>>,
+    pictures: u32,
+    /// The visible area of the picture copied to `staging` with the previous
+    /// sample, for the next picture to scan.
+    sampled: Option<Layout>,
+    black: bool,
+    busy: bool,
+}
+impl Drop for Shared {
+    fn drop(&mut self) {
+        // SAFETY: Created by CreateEventW and closed only here.
+        unsafe {
+            let _ = CloseHandle(self.event);
+        }
+    }
 }
 impl Gpu {
-    fn new(transform: &IMFTransform) -> Result<Self> {
+    fn new(transform: &IMFTransform, share: Option<LUID>) -> Result<Self> {
         let (mut device, mut context, mut manager, mut token) = (None, None, None, 0);
+        // The renderer's adapter, so that it can open what is decoded here.
+        let adapter: Option<IDXGIAdapter> = share.and_then(|luid| {
+            // SAFETY: Plain factory creation and lookup; both return owned interfaces.
+            unsafe { CreateDXGIFactory1::<IDXGIFactory4>().and_then(|f| f.EnumAdapterByLuid(luid)) }
+                .inspect_err(|e| tracing::warn!("renderer adapter: {e}; decoding to the CPU"))
+                .ok()
+        });
         // SAFETY: All interfaces are owned by the decoder worker. The device's
         // immediate context is protected because the MFT may use driver threads.
         unsafe {
             D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
+                adapter.as_ref(),
+                if adapter.is_some() {
+                    D3D_DRIVER_TYPE_UNKNOWN
+                } else {
+                    D3D_DRIVER_TYPE_HARDWARE
+                },
                 HMODULE::default(),
                 D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                 None,
@@ -244,15 +363,22 @@ impl Gpu {
             transform
                 .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)
                 .context("configure decoder DXVA manager")?;
+            let shared = match adapter {
+                Some(_) => Shared::new(&device, &context)
+                    .inspect_err(|e| tracing::warn!("{e:#}; decoding to the CPU"))
+                    .ok(),
+                None => None,
+            };
             Ok(Self {
                 device,
                 context,
                 _manager: manager,
                 staging: RefCell::new(None),
+                shared,
             })
         }
     }
-    fn read(&self, buffer: &IMFDXGIBuffer, layout: Layout) -> Result<DecodedNv12> {
+    fn read(&mut self, buffer: &IMFDXGIBuffer, layout: Layout) -> Result<DecodedNv12> {
         let mut resource = std::ptr::null_mut();
         // SAFETY: GetResource writes an owned texture interface reference. It is
         // adopted immediately, and its subresource is copied before releasing it.
@@ -271,13 +397,55 @@ impl Gpu {
                     && layout.coded_height <= desc.Height,
                 "invalid DXVA NV12 texture dimensions"
             );
-            desc.MipLevels = 1;
-            desc.ArraySize = 1;
-            desc.Usage = D3D11_USAGE_STAGING;
-            desc.BindFlags = 0;
-            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
-            desc.MiscFlags = 0;
-            let mut cached = self.staging.borrow_mut();
+            if self.shared.is_some() && RENDER_ADAPTER.lock().is_none() {
+                self.shared = None;
+            }
+            // The renderer has no ten-bit planar format to open P010 with.
+            if desc.Format == DXGI_FORMAT_NV12 {
+                if let Some(mut shared) = self.shared.take() {
+                    match self.share(&mut shared, &texture, subresource, &desc, layout) {
+                        Ok(Some(picture)) => {
+                            self.shared = Some(shared);
+                            return Ok(picture);
+                        }
+                        Ok(None) => {
+                            if !std::mem::replace(&mut shared.busy, true) {
+                                tracing::debug!("every shared decoder texture is in use");
+                            }
+                            self.shared = Some(shared);
+                        }
+                        Err(e) => tracing::warn!("{e:#}; decoding to the CPU"),
+                    }
+                }
+            }
+            let staging = self.staging(&desc)?;
+            self.context
+                .CopySubresourceRegion(&staging, 0, 0, 0, 0, &texture, subresource, None);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            self.context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .context("map DXVA output")?;
+            let bytes = std::slice::from_raw_parts(
+                mapped.pData.cast::<u8>(),
+                mapped.RowPitch as usize * desc.Height as usize * 3 / 2,
+            );
+            let result = layout.copy(bytes, mapped.RowPitch as usize, desc.Height as usize);
+            self.context.Unmap(&staging, 0);
+            result
+        }
+    }
+    /// A CPU-readable texture like `desc`, kept between pictures.
+    fn staging(&self, desc: &D3D11_TEXTURE2D_DESC) -> Result<ID3D11Texture2D> {
+        let mut desc = *desc;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+        desc.MiscFlags = 0;
+        let mut cached = self.staging.borrow_mut();
+        // SAFETY: Descriptor queries and creation on the worker's device.
+        unsafe {
             let matches = cached.as_ref().is_some_and(|texture| {
                 let mut old = D3D11_TEXTURE2D_DESC::default();
                 texture.GetDesc(&mut old);
@@ -290,20 +458,182 @@ impl Gpu {
                     .context("allocate DXVA staging texture")?;
                 *cached = staging;
             }
-            let staging = cached.as_ref().context("missing decoder staging texture")?;
-            self.context
-                .CopySubresourceRegion(staging, 0, 0, 0, 0, &texture, subresource, None);
+        }
+        cached.clone().context("missing decoder staging texture")
+    }
+    /// Copy the visible picture into a free shared texture and wait for the
+    /// copy. `None` when every shared texture is still in use.
+    ///
+    /// # Safety
+    /// `texture` and `subresource` are the decoder's current output.
+    unsafe fn share(
+        &self,
+        shared: &mut Shared,
+        texture: &ID3D11Texture2D,
+        subresource: u32,
+        desc: &D3D11_TEXTURE2D_DESC,
+        layout: Layout,
+    ) -> Result<Option<DecodedNv12>> {
+        // The copy sampled with the previous picture finished before that
+        // picture's fence, so this map does not wait for the GPU.
+        if let Some(sampled) = shared.sampled.take() {
+            let staging = self.staging(desc)?;
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             self.context
-                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-                .context("map DXVA output")?;
-            let bytes = std::slice::from_raw_parts(
-                mapped.pData.cast::<u8>(),
-                mapped.RowPitch as usize * desc.Height as usize * 3 / 2,
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .context("map sampled DXVA output")?;
+            let (pitch, rows) = (mapped.RowPitch as usize, desc.Height as usize);
+            let bytes = std::slice::from_raw_parts(mapped.pData.cast::<u8>(), pitch * rows * 3 / 2);
+            let (left, top) = (sampled.left as usize, sampled.top as usize);
+            shared.black = super::planes_black(
+                (&bytes[(top * pitch + left).min(bytes.len())..], pitch),
+                (
+                    &bytes[((rows + top / 2) * pitch + left).min(bytes.len())..],
+                    pitch,
+                ),
+                (sampled.width, sampled.height),
+                super::PixelFormat::Nv12,
+                false,
             );
-            let result = layout.copy(bytes, mapped.RowPitch as usize, desc.Height as usize);
-            self.context.Unmap(staging, 0);
-            result
+            self.context.Unmap(&staging, 0);
+        }
+        // NV12 copies start and end on even pixels.
+        let (left, top) = (layout.left & !1, layout.top & !1);
+        let width = layout.width.min(desc.Width - left) & !1;
+        let height = layout.height.min(desc.Height - top) & !1;
+        ensure!(width > 0 && height > 0, "empty decoded picture");
+        shared
+            .surfaces
+            .retain(|s| s.size() == (width, height) || Arc::strong_count(s) > 1);
+        let surface = match shared
+            .surfaces
+            .iter()
+            .find(|s| s.size() == (width, height) && Arc::strong_count(s) == 1)
+        {
+            Some(surface) => surface.clone(),
+            None if shared.surfaces.len() < SURFACES => {
+                let surface = Arc::new(SharedSurface::new(&self.device, width, height)?);
+                shared.surfaces.push(surface.clone());
+                surface
+            }
+            None => return Ok(None),
+        };
+        shared.busy = false;
+        self.context.CopySubresourceRegion(
+            &surface.texture,
+            0,
+            0,
+            0,
+            0,
+            texture,
+            subresource,
+            Some(&D3D11_BOX {
+                left,
+                top,
+                front: 0,
+                right: left + width,
+                bottom: top + height,
+                back: 1,
+            }),
+        );
+        shared.pictures = shared.pictures.wrapping_add(1);
+        if shared.pictures % SAMPLE_EVERY == 0 {
+            let staging = self.staging(desc)?;
+            self.context
+                .CopySubresourceRegion(&staging, 0, 0, 0, 0, texture, subresource, None);
+            shared.sampled = Some(layout);
+        }
+        shared.value += 1;
+        shared.context.Signal(&shared.fence, shared.value)?;
+        self.context.Flush();
+        shared
+            .fence
+            .SetEventOnCompletion(shared.value, shared.event)
+            .context("decoder fence event")?;
+        ensure!(
+            WaitForSingleObject(shared.event, 2000) == WAIT_OBJECT_0,
+            "decoder copy did not finish"
+        );
+        Ok(Some(DecodedNv12 {
+            width: layout.width,
+            height: layout.height,
+            y: Vec::new(),
+            y_stride: 0,
+            uv: Vec::new(),
+            uv_stride: 0,
+            shared: Some((surface, shared.black)),
+        }))
+    }
+}
+impl Shared {
+    fn new(device: &ID3D11Device, context: &ID3D11DeviceContext) -> Result<Self> {
+        // SAFETY: Interface queries and creation on the worker's device.
+        unsafe {
+            let context = context
+                .cast::<ID3D11DeviceContext4>()
+                .context("D3D11.4 context for decoder fences")?;
+            let mut fence: Option<ID3D11Fence> = None;
+            device
+                .cast::<ID3D11Device5>()
+                .context("D3D11.5 device for decoder fences")?
+                .CreateFence(0, D3D11_FENCE_FLAG_NONE, &mut fence)
+                .context("create decoder fence")?;
+            Ok(Self {
+                context,
+                fence: fence.context("missing decoder fence")?,
+                value: 0,
+                event: CreateEventW(None, false, false, None).context("decoder fence event")?,
+                surfaces: Vec::new(),
+                pictures: 0,
+                sampled: None,
+                black: false,
+                busy: false,
+            })
+        }
+    }
+}
+impl SharedSurface {
+    fn new(device: &ID3D11Device, width: u32, height: u32) -> Result<Self> {
+        static IDS: AtomicU64 = AtomicU64::new(1);
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_NV12,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: (D3D11_RESOURCE_MISC_SHARED.0 | D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0)
+                as u32,
+        };
+        let mut texture = None;
+        // SAFETY: Creation on the worker's device; the handle is owned by the
+        // returned surface.
+        unsafe {
+            device
+                .CreateTexture2D(&desc, None, Some(&mut texture))
+                .context("allocate shared decoder texture")?;
+            let texture: ID3D11Texture2D = texture.context("missing shared decoder texture")?;
+            let handle = texture
+                .cast::<IDXGIResource1>()?
+                .CreateSharedHandle(
+                    None,
+                    (DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE).0,
+                    None,
+                )
+                .context("share decoder texture")?;
+            Ok(Self {
+                texture: texture,
+                handle,
+                id: IDS.fetch_add(1, Ordering::Relaxed),
+                width,
+                height,
+            })
         }
     }
 }
@@ -434,6 +764,7 @@ impl Layout {
             y_stride: width,
             uv,
             uv_stride: uv_width,
+            shared: None,
         })
     }
 }
@@ -453,7 +784,15 @@ impl State {
             "Media Foundation (software)"
         }
     }
-    fn new(codec: Codec, dxva: bool, width: u32, height: u32) -> Result<Self> {
+    /// `share`: the renderer's adapter, to decode on it and hand pictures
+    /// over as [`SharedSurface`]s.
+    fn new(
+        codec: Codec,
+        dxva: bool,
+        share: Option<LUID>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
         // SAFETY: This runs only in the initialized decoder MTA.
         unsafe {
             let subtype = match codec {
@@ -475,7 +814,7 @@ impl State {
                 }
             }
             let gpu = if dxva {
-                Some(Gpu::new(&transform)?)
+                Some(Gpu::new(&transform, share)?)
             } else {
                 None
             };
@@ -644,7 +983,7 @@ impl State {
                 let picture = if let Ok(dxgi) = buffer.cast::<IMFDXGIBuffer>() {
                     self.dxva_used = true;
                     self.gpu
-                        .as_ref()
+                        .as_mut()
                         .context("DXVA sample without a D3D11 device")?
                         .read(&dxgi, layout)?
                 } else if let Ok(buffer2d) = buffer.cast::<IMF2DBuffer2>() {

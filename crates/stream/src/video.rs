@@ -61,6 +61,35 @@ impl NativeFrame {
     }
 }
 
+/// A decoded picture that stays on the GPU: a shareable D3D11 NV12 texture
+/// the renderer opens on its own D3D12 device (see
+/// [`render_on_d3d12`]). The decoder reuses the texture once every clone
+/// of this frame is gone, so a renderer keeps one until the GPU work that
+/// reads it has finished.
+#[cfg(windows)]
+#[derive(Clone, Debug)]
+pub struct NativeFrame {
+    surface: std::sync::Arc<mediafoundation::SharedSurface>,
+    black: bool,
+}
+
+#[cfg(windows)]
+impl NativeFrame {
+    pub fn surface(&self) -> &mediafoundation::SharedSurface {
+        &self.surface
+    }
+}
+
+/// The adapter a Windows renderer draws with, when it can open shared
+/// D3D11 textures on D3D12. Decoders created afterwards run on that adapter
+/// and hand their pictures over without leaving the GPU; until then (and in
+/// the headless tools) they copy each picture to the CPU.
+/// `None` stops it again, for decoders already running too.
+#[cfg(windows)]
+pub fn render_on_d3d12(adapter: Option<windows::Win32::Foundation::LUID>) {
+    *mediafoundation::RENDER_ADAPTER.lock() = adapter;
+}
+
 /// Decoder output precision. P010 retains Main10 samples for a future HDR
 /// compositor; choosing it does not negotiate HDR or change transfer functions.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -90,7 +119,7 @@ pub struct Frame {
     pub format: PixelFormat,
     /// Viewer clock, immediately after decode, before health checks or rendering.
     pub decoded_at: Option<std::time::Instant>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub native: Option<NativeFrame>,
 }
 
@@ -120,7 +149,7 @@ impl Frame {
         self.y.extend_from_slice(y);
         self.uv.clear();
         self.uv.extend_from_slice(uv);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
             self.native = None;
         }
@@ -214,47 +243,71 @@ impl Frame {
     /// Check visible NV12 pixels, excluding row padding. A completely black
     /// capture can still be a valid, successfully decoded video stream.
     pub fn is_black(&self) -> bool {
+        // A picture on the GPU was sampled by its decoder (see
+        // `mediafoundation::Shared`); reading it back here would undo the
+        // point of keeping it there.
+        #[cfg(windows)]
+        if let Some(native) = &self.native {
+            return native.black;
+        }
         self.with_planes(|y, y_stride, uv, uv_stride| {
-            let bytes = self.format.bytes_per_sample();
-            let width = self.width as usize * bytes;
-            let height = self.height as usize;
-            let chroma_width = (self.width as usize).div_ceil(2) * 2 * bytes;
-            let chroma_height = height.div_ceil(2);
-            if width == 0
-                || height == 0
-                || y_stride < width
-                || uv_stride < chroma_width
-                || y.len() < y_stride.saturating_mul(height)
-                || uv.len() < uv_stride.saturating_mul(chroma_height)
-            {
-                return false;
-            }
-            let black = if self.full_range { 1 } else { 17 };
-            // Whole-row reductions rather than a short-circuiting `all`: the
-            // compiler turns a max or min over a row into vector instructions,
-            // and the scan still stops at the first row with a visible pixel.
-            // A black frame is every row, sixty times a second.
-            let max = |row: &[u8]| {
-                row.iter()
-                    .skip(bytes - 1)
-                    .step_by(bytes)
-                    .fold(0, |m, &v| m.max(v))
-            };
-            let min = |row: &[u8]| {
-                row.iter()
-                    .skip(bytes - 1)
-                    .step_by(bytes)
-                    .fold(u8::MAX, |m, &v| m.min(v))
-            };
-            y.chunks(y_stride)
-                .take(height)
-                .all(|row| max(&row[..width]) <= black)
-                && uv.chunks(uv_stride).take(chroma_height).all(|row| {
-                    let row = &row[..chroma_width];
-                    min(row) >= 127 && max(row) <= 129
-                })
+            planes_black(
+                (y, y_stride),
+                (uv, uv_stride),
+                (self.width, self.height),
+                self.format,
+                self.full_range,
+            )
         })
     }
+}
+
+/// [`Frame::is_black`] over borrowed planes.
+pub(crate) fn planes_black(
+    (y, y_stride): (&[u8], usize),
+    (uv, uv_stride): (&[u8], usize),
+    (width, height): (u32, u32),
+    format: PixelFormat,
+    full_range: bool,
+) -> bool {
+    let bytes = format.bytes_per_sample();
+    let chroma_width = (width as usize).div_ceil(2) * 2 * bytes;
+    let width = width as usize * bytes;
+    let height = height as usize;
+    let chroma_height = height.div_ceil(2);
+    if width == 0
+        || height == 0
+        || y_stride < width
+        || uv_stride < chroma_width
+        || y.len() < y_stride.saturating_mul(height)
+        || uv.len() < uv_stride.saturating_mul(chroma_height)
+    {
+        return false;
+    }
+    let black = if full_range { 1 } else { 17 };
+    // Whole-row reductions rather than a short-circuiting `all`: the
+    // compiler turns a max or min over a row into vector instructions,
+    // and the scan still stops at the first row with a visible pixel.
+    // A black frame is every row, sixty times a second.
+    let max = |row: &[u8]| {
+        row.iter()
+            .skip(bytes - 1)
+            .step_by(bytes)
+            .fold(0, |m, &v| m.max(v))
+    };
+    let min = |row: &[u8]| {
+        row.iter()
+            .skip(bytes - 1)
+            .step_by(bytes)
+            .fold(u8::MAX, |m, &v| m.min(v))
+    };
+    y.chunks(y_stride)
+        .take(height)
+        .all(|row| max(&row[..width]) <= black)
+        && uv.chunks(uv_stride).take(chroma_height).all(|row| {
+            let row = &row[..chroma_width];
+            min(row) >= 127 && max(row) <= 129
+        })
 }
 
 /// The newest decoded frame, replaced rather than queued: a renderer that
@@ -313,6 +366,13 @@ impl FrameSlot {
 
     /// A drawn frame's buffers, for the decoder to fill again.
     pub fn recycle(&self, frame: Frame) {
+        // A spare is for its CPU buffers; a GPU picture held here would keep
+        // the decoder from reusing it.
+        #[cfg(any(target_os = "macos", windows))]
+        let frame = Frame {
+            native: None,
+            ..frame
+        };
         let mut spare = self.spare.lock();
         if spare.len() < SPARES {
             spare.push(frame);
@@ -538,6 +598,9 @@ impl Decoder for MediaFoundation {
             full_range: false,
             decoded_at: None,
             format: PixelFormat::Nv12,
+            native: d
+                .shared
+                .map(|(surface, black)| NativeFrame { surface, black }),
         }))
     }
 

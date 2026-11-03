@@ -43,10 +43,33 @@ pub fn native_options() -> eframe::NativeOptions {
             let mut desc = descriptor(adapter);
             desc.required_limits.max_texture_dimension_2d =
                 adapter.limits().max_texture_dimension_2d;
-            desc.required_features |=
-                adapter.features() & egui_wgpu::wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+            desc.required_features |= adapter.features()
+                & (egui_wgpu::wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
+                    | egui_wgpu::wgpu::Features::TEXTURE_FORMAT_NV12);
             desc
         });
+        // Decoded pictures stay on the GPU only when the window draws with
+        // D3D12 (see `video::install`), so among adapters of the same kind
+        // that one wins; wgpu's own choice would be Vulkan.
+        #[cfg(windows)]
+        {
+            use egui_wgpu::wgpu::{Backend, DeviceType};
+            setup.native_adapter_selector = Some(std::sync::Arc::new(|adapters, surface| {
+                adapters
+                    .iter()
+                    .filter(|a| surface.is_none_or(|s| a.is_surface_supported(s)))
+                    .max_by_key(|a| {
+                        let info = a.get_info();
+                        (
+                            info.device_type == DeviceType::DiscreteGpu,
+                            info.device_type == DeviceType::IntegratedGpu,
+                            info.backend == Backend::Dx12,
+                        )
+                    })
+                    .cloned()
+                    .ok_or_else(|| "no graphics adapter can draw this window".into())
+            }));
+        }
     }
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
