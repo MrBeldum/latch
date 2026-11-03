@@ -753,6 +753,7 @@ if (Test-Path -LiteralPath $inputDir) {{
     Start-Sleep -Milliseconds 500
     try {{ Assert-ProtectedTree $inputDir; Remove-Item -LiteralPath $inputDir -Recurse -Force -ErrorAction Stop }} catch {{ Write-Output "  input helper folder: $_"; $setupFailed = $true }}
 }}
+{vdd}
 foreach ($empty in @($latchDir, 'HKLM:\SOFTWARE\Latch')) {{
     if ((Test-Path -LiteralPath $empty) -and -not (Get-ChildItem -LiteralPath $empty -Force)) {{ Remove-Item -LiteralPath $empty -Force }}
 }}
@@ -762,6 +763,7 @@ exit 0
 "#,
         protection = include_str!("../../../scripts/setup-protection.ps1"),
         retire = crate::legacy::retire_windows_ps(),
+        vdd = crate::virtual_display::uninstall_ps(),
         task = START_TASK,
         input_task = INPUT_TASK,
         key = SAVED_KEY,
@@ -946,6 +948,15 @@ mod tests {
             assert!(setup.contains(&pair) && m.contains(&pair), "{pair}");
         }
         assert!(m.contains("Join-Path $latchDir 'Setup'"));
+        // A virtual display setup pointed at Latch's protected copy is
+        // pointed back, and the copy goes, before the empty folders do.
+        let vdd = m.find("Pointing the virtual display back").unwrap();
+        assert!(vdd > m.find("$latchDir = ").unwrap());
+        assert!(vdd < m.find("foreach ($empty in").unwrap());
+        assert!(m.contains("-Name VDDPATH -Value $vddPrevious"));
+        assert!(m.contains("Remove-Item -LiteralPath $vddOurs -Recurse"));
+        let s = crate::virtual_display::setup_ps();
+        assert!(s.contains("-Name 'PreviousVddPath' -Value $vddPrevious"));
         assert!(!m.contains("LOCALAPPDATA") && !m.contains("HKCU"));
         assert!(m.contains("exit 1") && m.ends_with("exit 0\n"));
 

@@ -16,7 +16,10 @@ pub const DEVICE: &str = "Virtual Display Driver";
 /// Where the driver reads its settings unless the registry points elsewhere.
 pub const DEFAULT_DIR: &str = r"C:\VirtualDisplayDriver";
 pub const SETTINGS: &str = "vdd_settings.xml";
-const REG_KEY: &str = r"HKLM:\SOFTWARE\MikeTheTech\VirtualDisplayDriver";
+pub(crate) const REG_KEY: &str = r"HKLM:\SOFTWARE\MikeTheTech\VirtualDisplayDriver";
+/// Where setup records the driver's `VDDPATH` from before it pointed it at
+/// Latch's protected copy, so uninstall can put it back.
+pub(crate) const RECORD_KEY: &str = r"HKLM:\SOFTWARE\Latch\Display";
 /// Common display timings; custom timings in the driver's file are preserved.
 pub const REFRESH_RATES: [u32; 7] = [60, 90, 120, 144, 165, 240, 360];
 const LARGE_MODES: &[(u32, u32)] = &[(7680, 4320), (7680, 2160)];
@@ -146,6 +149,13 @@ pub fn setup_ps() -> String {
     if ($vddRelocated) {{
         if (-not (Test-Path -LiteralPath '{reg}')) {{ New-Item -Path '{reg}' -Force | Out-Null }}
         New-ItemProperty -Path '{reg}' -Name 'VDDPATH' -Value $vddDir -PropertyType String -Force | Out-Null
+        # The first relocation only: a later run would record Latch's own folder.
+        if (-not (Test-Path -LiteralPath '{record}')) {{
+            New-Item -Path '{record}' -Force | Out-Null
+            $vddPrevious = 'absent'
+            if ($vddOldPath) {{ $vddPrevious = $vddOldPath }}
+            New-ItemProperty -Path '{record}' -Name 'PreviousVddPath' -Value $vddPrevious -PropertyType String -Force | Out-Null
+        }}
     }}
     Write-Output "  updated $($vddMissing.Count) resolutions to $vddFile; restarting the virtual display"
     foreach ($d in $vddDevices) {{ pnputil /restart-device $d.InstanceId | Out-Null }}
@@ -170,6 +180,36 @@ pub fn setup_ps() -> String {
         device = DEVICE,
         settings = SETTINGS,
         reg = REG_KEY,
+        record = RECORD_KEY,
+    )
+}
+
+/// Uninstall's part: if setup pointed the driver at Latch's protected copy,
+/// point it back where it was, restart it so it rereads its settings, and
+/// remove the copy. Expects `$latchDir`, `$setupFailed` and
+/// `Assert-ProtectedTree` from the uninstall script.
+#[cfg(any(windows, test))]
+pub(crate) fn uninstall_ps() -> String {
+    format!(
+        r#"Step "Pointing the virtual display back at its own settings"
+$vddOurs = Join-Path $latchDir 'Display'
+$vddNow = (Get-ItemProperty '{reg}' -ErrorAction SilentlyContinue).VDDPATH
+if ($vddNow -and ($vddNow.TrimEnd('') -ieq $vddOurs)) {{
+    $vddPrevious = (Get-ItemProperty '{record}' -ErrorAction SilentlyContinue).PreviousVddPath
+    if ($vddPrevious -and $vddPrevious -ne 'absent') {{ Set-ItemProperty -Path '{reg}' -Name VDDPATH -Value $vddPrevious }}
+    else {{ Remove-ItemProperty -Path '{reg}' -Name VDDPATH -ErrorAction SilentlyContinue }}
+    foreach ($d in @(Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | Where-Object {{ $_.FriendlyName -eq '{device}' -and $_.Status -eq 'OK' }})) {{
+        pnputil /restart-device $d.InstanceId | Out-Null
+    }}
+}}
+if (Test-Path -LiteralPath $vddOurs) {{
+    try {{ Assert-ProtectedTree $vddOurs; Remove-Item -LiteralPath $vddOurs -Recurse -Force -ErrorAction Stop }} catch {{ Write-Output "  display settings folder: $_"; $setupFailed = $true }}
+}}
+if (Test-Path -LiteralPath '{record}') {{ Remove-Item -LiteralPath '{record}' -Force }}
+"#,
+        reg = REG_KEY,
+        record = RECORD_KEY,
+        device = DEVICE,
     )
 }
 
