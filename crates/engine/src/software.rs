@@ -1,5 +1,7 @@
-//! The CPU path: any source of BGRA pictures, converted and encoded by
-//! `latch-codec`. Linux always takes it; Windows falls back to it.
+//! The CPU path: any source of BGRA pictures, converted on the CPU and
+//! encoded by `latch-codec` or by a hardware encoder that takes pictures
+//! from memory (VA-API, NVENC on Linux). Linux always takes it; Windows
+//! falls back to it.
 
 use crate::input::DisplayRect;
 use crate::video::{Codec, EncodedVideo, Pacer, VideoConfig, VideoInfo, VideoPipeline};
@@ -58,7 +60,69 @@ pub struct SoftwareTimings {
     pub encode: Duration,
 }
 
-/// [`CpuCapture`] → [`latch_codec::color`] → [`latch_codec::h264::Encoder`].
+/// Turns converted pictures into access units.
+pub trait PictureEncoder: Send {
+    /// For people: "Latch software H.264", "NVENC HEVC (NVIDIA GeForce …)".
+    fn name(&self) -> String;
+    fn hardware(&self) -> bool;
+    fn codec(&self) -> Codec;
+    /// Appends one Annex B access unit for `picture` (parameter sets in
+    /// band before every keyframe) to `out`. Returns whether it is a
+    /// keyframe, which it is when asked.
+    fn encode(
+        &mut self,
+        picture: &Yuv420,
+        keyframe: bool,
+        out: &mut Vec<u8>,
+    ) -> anyhow::Result<bool>;
+    /// From the next frame.
+    fn set_bitrate(&mut self, kbps: u32);
+}
+
+/// Opens an encoder for pictures of `width × height` and `config`'s rate.
+pub type OpenEncoder =
+    Box<dyn FnMut(u32, u32, &VideoConfig) -> anyhow::Result<Box<dyn PictureEncoder>> + Send>;
+
+/// `latch-codec`'s H.264 Constrained Baseline encoder.
+pub struct LatchEncoder(Encoder);
+
+impl LatchEncoder {
+    pub fn open(width: u32, height: u32, config: &VideoConfig) -> anyhow::Result<Self> {
+        Ok(Self(Encoder::new(EncoderConfig {
+            width,
+            height,
+            fps: config.fps,
+            bitrate_kbps: config.bitrate_kbps,
+            threads: std::thread::available_parallelism().map_or(1, |n| n.get().min(4)),
+        })?))
+    }
+}
+
+impl PictureEncoder for LatchEncoder {
+    fn name(&self) -> String {
+        "Latch software H.264".into()
+    }
+    fn hardware(&self) -> bool {
+        false
+    }
+    fn codec(&self) -> Codec {
+        Codec::H264Baseline
+    }
+    fn encode(
+        &mut self,
+        picture: &Yuv420,
+        keyframe: bool,
+        out: &mut Vec<u8>,
+    ) -> anyhow::Result<bool> {
+        Ok(self.0.encode(picture, keyframe, out)?.keyframe)
+    }
+    fn set_bitrate(&mut self, kbps: u32) {
+        self.0.set_bitrate(kbps);
+    }
+}
+
+/// [`CpuCapture`] → [`latch_codec::color`] → a [`PictureEncoder`]
+/// (`latch-codec` unless [`SoftwarePipeline::with_encoder`] says otherwise).
 /// Sends the source's own size (no scaling); repeats the last picture as
 /// an all-skip frame when idle; re-creates the encoder if the source's size
 /// changes.
@@ -67,7 +131,12 @@ pub struct SoftwarePipeline<C: CpuCapture> {
     config: VideoConfig,
     frame: Bgra,
     picture: Yuv420,
-    encoder: Option<Encoder>,
+    encoder: Option<Box<dyn PictureEncoder>>,
+    /// The size `encoder` was opened for.
+    encoder_size: (u32, u32),
+    open: OpenEncoder,
+    /// The encoder's name, whether it is hardware, and its codec.
+    describe: (String, bool, Codec),
     pacer: Pacer,
     last_sent: Option<Instant>,
     captured: Instant,
@@ -90,12 +159,34 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
             frame: Bgra::default(),
             picture: Yuv420::default(),
             encoder: None,
+            encoder_size: (0, 0),
+            open: Box::new(|width, height, config| {
+                Ok(Box::new(LatchEncoder::open(width, height, config)?))
+            }),
+            describe: ("Latch software H.264".into(), false, Codec::H264Baseline),
             pacer: Pacer::new(config.fps),
             last_sent: None,
             captured: Instant::now(),
             timings: SoftwareTimings::default(),
             threads: std::thread::available_parallelism().map_or(1, |n| n.get().min(4)),
         })
+    }
+
+    /// Encodes with what `open` opens instead: opened here, for the
+    /// capture's present size, so that a failure shows before streaming.
+    pub fn with_encoder(
+        capture: C,
+        config: &VideoConfig,
+        mut open: OpenEncoder,
+    ) -> anyhow::Result<Self> {
+        let (width, height) = capture.size();
+        let encoder = open(width, height, config)?;
+        let mut this = Self::new(capture, config)?;
+        this.describe = (encoder.name(), encoder.hardware(), encoder.codec());
+        this.encoder = Some(encoder);
+        this.encoder_size = (width, height);
+        this.open = open;
+        Ok(this)
     }
 
     pub fn timings(&self) -> SoftwareTimings {
@@ -173,10 +264,11 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
         } else {
             (self.frame.width, self.frame.height)
         };
+        let (name, hardware, codec) = &self.describe;
         VideoInfo {
-            encoder: format!("Latch software H.264 ({})", self.capture.name()),
-            hardware: false,
-            codec: Codec::H264Baseline,
+            encoder: format!("{name} ({})", self.capture.name()),
+            hardware: *hardware,
+            codec: *codec,
             width,
             height,
             display: self.capture.display(),
@@ -187,14 +279,13 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
         let changed = self.acquire(keyframe, idle)?;
         let resized =
             (self.picture.width, self.picture.height) != (self.frame.width, self.frame.height);
-        if resized || self.encoder.is_none() {
-            self.encoder = Some(Encoder::new(EncoderConfig {
-                width: self.frame.width,
-                height: self.frame.height,
-                fps: self.config.fps,
-                bitrate_kbps: self.config.bitrate_kbps,
-                threads: self.threads,
-            })?);
+        let size = (self.frame.width, self.frame.height);
+        if self.encoder.is_none() || self.encoder_size != size {
+            self.encoder = None;
+            self.encoder = Some((self.open)(size.0, size.1, &self.config)?);
+            self.encoder_size = size;
+        }
+        if resized {
             self.picture = Yuv420::new(self.frame.width, self.frame.height);
         }
         let started = Instant::now();
@@ -224,7 +315,7 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
         }
         let mut data = Vec::new();
         let started = Instant::now();
-        let info = self
+        let sent_keyframe = self
             .encoder
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("encoder unavailable"))?
@@ -233,7 +324,7 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
         self.last_sent = Some(self.captured);
         Ok(EncodedVideo {
             data,
-            keyframe: info.keyframe,
+            keyframe: sent_keyframe,
             captured: self.captured,
         })
     }
@@ -353,7 +444,6 @@ mod tests {
         assert!(validate_size(15, 16).is_err());
     }
     #[test]
-    #[ignore = "requires the parallel latch-codec encoder and color implementation"]
     fn encodes_repeats_keyframes_and_resizes() {
         let mut p = pipeline();
         assert!(p.next(false, Duration::ZERO).unwrap().keyframe);
@@ -364,5 +454,64 @@ mod tests {
         p.capture.changed = true;
         assert!(p.next(false, Duration::ZERO).unwrap().keyframe);
         assert_eq!(p.info().width, 32);
+    }
+
+    struct Counting {
+        kbps: u32,
+    }
+    impl PictureEncoder for Counting {
+        fn name(&self) -> String {
+            "Counting HEVC".into()
+        }
+        fn hardware(&self) -> bool {
+            true
+        }
+        fn codec(&self) -> Codec {
+            Codec::Hevc
+        }
+        fn encode(
+            &mut self,
+            p: &Yuv420,
+            keyframe: bool,
+            out: &mut Vec<u8>,
+        ) -> anyhow::Result<bool> {
+            out.extend_from_slice(&[0, 0, 0, 1, p.width as u8, self.kbps as u8]);
+            Ok(keyframe)
+        }
+        fn set_bitrate(&mut self, kbps: u32) {
+            self.kbps = kbps;
+        }
+    }
+    #[test]
+    fn a_hardware_encoder_opens_up_front_and_again_on_resize() {
+        let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = opened.clone();
+        let p = pipeline();
+        let mut p = SoftwarePipeline::with_encoder(
+            p.capture,
+            &p.config,
+            Box::new(move |w, h, config| {
+                log.lock().unwrap().push((w, h));
+                Ok(Box::new(Counting {
+                    kbps: config.bitrate_kbps,
+                }))
+            }),
+        )
+        .unwrap();
+        let info = p.info();
+        assert_eq!(info.encoder, "Counting HEVC (fake)");
+        assert!(info.hardware);
+        assert_eq!(info.codec, Codec::Hevc);
+        assert_eq!(*opened.lock().unwrap(), [(16, 16)]);
+        let first = p.next(true, Duration::ZERO).unwrap();
+        assert!(first.keyframe);
+        assert_eq!(first.data, [0, 0, 0, 1, 16, 232]);
+        p.set_bitrate(7);
+        assert!(!p.next(false, Duration::ZERO).unwrap().keyframe);
+        p.capture.size = (32, 16);
+        p.capture.changed = true;
+        let resized = p.next(false, Duration::ZERO).unwrap();
+        assert!(resized.keyframe, "a new size starts with a keyframe");
+        assert_eq!(*opened.lock().unwrap(), [(16, 16), (32, 16)]);
     }
 }

@@ -137,7 +137,7 @@ pub fn encodable() -> Vec<Codec> {
     #[cfg(windows)]
     return crate::windows::encodable();
     #[cfg(target_os = "linux")]
-    return vec![Codec::H264Baseline];
+    return crate::linux::encodable();
 }
 
 /// Opens this platform's pipeline for `config`.

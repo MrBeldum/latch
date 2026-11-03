@@ -21,6 +21,9 @@ x11rb = { version = "0.13", features = ["shm", "xfixes", "randr", "xtest", "dama
 libc = "0.2"
 pulseaudio = "0.3.2"
 futures = "0.3"
+# The GPU vendors' encoders (libva, libnvidia-encode) are opened at run
+# time, when present: nothing is linked.
+libloading = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.58"

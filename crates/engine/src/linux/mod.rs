@@ -4,7 +4,11 @@
 mod audio;
 mod capture;
 mod display;
+mod hardware;
 mod input;
+mod nv12;
+mod nvenc;
+mod vaapi;
 
 use crate::audio::AudioCapture;
 use crate::input::InputSink;
@@ -21,11 +25,45 @@ pub fn capture_size() -> anyhow::Result<[u32; 2]> {
     Ok([root.width_in_pixels.into(), root.height_in_pixels.into()])
 }
 
+/// What this host encodes: hardware codecs found by [`hardware`], and
+/// `latch-codec`'s Constrained Baseline.
+pub fn encodable() -> Vec<crate::video::Codec> {
+    hardware::encodable()
+}
+
+/// X11 capture into the hardware encoder for `config.codec` when there is
+/// one, else into `latch-codec`. A hardware encoder that fails to open
+/// gives H.264 to `latch-codec` (Baseline, which every H.264 viewer
+/// decodes); for HEVC or AV1, which the viewer has been told, the session
+/// fails and the next one is not offered that codec.
 pub fn open_video(config: &VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>> {
-    Ok(Box::new(crate::software::SoftwarePipeline::new(
-        X11Capture::new()?,
-        config,
-    )?))
+    use crate::software::SoftwarePipeline;
+    use crate::video::Codec;
+    if let Some(backend) = hardware::backend(config.codec) {
+        let codec = config.codec;
+        let opened = SoftwarePipeline::with_encoder(
+            X11Capture::new()?,
+            config,
+            Box::new(move |width, height, config| {
+                hardware::open(backend, codec, width, height, config)
+            }),
+        );
+        match opened {
+            Ok(pipeline) => return Ok(Box::new(pipeline)),
+            Err(e) => {
+                hardware::failed(codec, &e);
+                if !matches!(codec, Codec::H264High | Codec::H264Baseline) {
+                    return Err(e.context(format!("open the {} encoder", codec.name())));
+                }
+            }
+        }
+    }
+    anyhow::ensure!(
+        matches!(config.codec, Codec::H264High | Codec::H264Baseline),
+        "this host has no {} encoder",
+        config.codec.name()
+    );
+    Ok(Box::new(SoftwarePipeline::new(X11Capture::new()?, config)?))
 }
 pub fn open_audio() -> anyhow::Result<Box<dyn AudioCapture>> {
     Ok(Box::new(audio::PulseCapture::new()?))
