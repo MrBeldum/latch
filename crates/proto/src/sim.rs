@@ -64,6 +64,12 @@ impl Link {
         self.bottleneck = (kbps > 0).then_some((kbps, queue));
     }
 
+    /// Serialization backlog at `now`, excluding propagation and jitter.
+    pub fn queue_delay(&self, now: Instant) -> Duration {
+        self.serialized_until
+            .map_or(Duration::ZERO, |at| at.saturating_duration_since(now))
+    }
+
     fn random(&mut self) -> f64 {
         self.seed ^= self.seed >> 12;
         self.seed ^= self.seed << 25;
