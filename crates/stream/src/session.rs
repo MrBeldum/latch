@@ -269,6 +269,9 @@ struct Inner {
     pad_slots: AtomicU32,
     pad_problem: Mutex<String>,
     pad_feedback: Mutex<Option<FeedbackFn>>,
+    /// Pads' newest states from before the host accepted, sent once it has.
+    /// Locked after `link`, never before.
+    pending_pads: Mutex<[Option<(PadKind, PadState)>; latch_proto::gamepad::MAX_PADS]>,
 }
 
 #[derive(Default)]
@@ -390,23 +393,33 @@ impl Input {
     }
 
     /// The pad in `slot` looks like this now. Sent at once, then again until
-    /// the host has it; a slot the host does not take is ignored.
+    /// the host has it; before the host has accepted, kept until it has. A
+    /// slot the host does not take is ignored.
     pub fn pad(&self, slot: u8, kind: PadKind, state: PadState) {
-        if !self.connected() || slot >= self.pad_slots() {
-            return;
-        }
-        if let Some(link) = self.inner.link.lock().as_mut() {
-            link.pads.update(slot, kind, state);
-            link.flush(Instant::now());
-        }
+        self.set_pad(slot, Some((kind, state)));
     }
 
     /// The pad in `slot` went away.
     pub fn pad_gone(&self, slot: u8) {
-        if let Some(link) = self.inner.link.lock().as_mut() {
-            link.pads.remove(slot);
-            link.flush(Instant::now());
+        self.set_pad(slot, None);
+    }
+
+    fn set_pad(&self, slot: u8, pad: Option<(PadKind, PadState)>) {
+        let mut link = self.inner.link.lock();
+        let Some(link) = link.as_mut() else {
+            if let Some(p) = self.inner.pending_pads.lock().get_mut(slot as usize) {
+                *p = pad;
+            }
+            return;
+        };
+        if slot >= self.pad_slots() {
+            return;
         }
+        match pad {
+            Some((kind, state)) => link.pads.update(slot, kind, state),
+            None => link.pads.remove(slot),
+        }
+        link.flush(Instant::now());
     }
 }
 
@@ -445,6 +458,7 @@ impl Session {
             pad_slots: AtomicU32::new(0),
             pad_problem: Mutex::new(String::new()),
             pad_feedback: Mutex::new(None),
+            pending_pads: Mutex::new([None; latch_proto::gamepad::MAX_PADS]),
         });
         let worker = inner.clone();
         let spawned = std::thread::Builder::new()
@@ -721,13 +735,28 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         Ok(u) => u,
         Err(e) => return fail("connecting", format!("{e}")),
     };
-    *inner.link.lock() = Some(Link {
-        udp: send_udp,
-        host: media,
-        sender: InputSender::new(accept.session),
-        pads: PadSender::new(accept.session),
-        buf: Vec::with_capacity(latch_proto::MAX_DATAGRAM),
-    });
+    {
+        let mut link = Link {
+            udp: send_udp,
+            host: media,
+            sender: InputSender::new(accept.session),
+            pads: PadSender::new(accept.session),
+            buf: Vec::with_capacity(latch_proto::MAX_DATAGRAM),
+        };
+        let taken = inner.pad_slots.load(Ordering::Acquire);
+        let mut guard = inner.link.lock();
+        let pending = std::mem::replace(
+            &mut *inner.pending_pads.lock(),
+            [None; latch_proto::gamepad::MAX_PADS],
+        );
+        for (slot, pad) in pending.into_iter().enumerate() {
+            if let Some((kind, state)) = pad.filter(|_| (slot as u32) < taken) {
+                link.pads.update(slot as u8, kind, state);
+            }
+        }
+        link.flush(Instant::now());
+        *guard = Some(link);
+    }
     inner.heard();
     let receiver = {
         let inner = inner.clone();
@@ -1576,6 +1605,7 @@ mod tests {
             pad_slots: AtomicU32::new(0),
             pad_problem: Mutex::new(String::new()),
             pad_feedback: Mutex::new(None),
+            pending_pads: Mutex::new([None; latch_proto::gamepad::MAX_PADS]),
             done: Mutex::new(false),
             done_cv: Condvar::new(),
         });

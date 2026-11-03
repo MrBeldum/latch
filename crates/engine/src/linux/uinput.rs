@@ -70,6 +70,9 @@ fn device(slot: u8) -> Result<VirtualDevice> {
     let mut builder = VirtualDevice::builder()?
         .name(name)
         .input_id(InputId::new(BusType::BUS_USB, 0x045e, 0x028e, 0x0114))
+        // So a viewer on this machine does not take it for a real pad
+        // (`crates/stream/src/gamepad/linux.rs`).
+        .with_phys(c"latch-virtual-gamepad")?
         .with_keys(&keys)?
         .with_ff(&ff)?
         .with_ff_effects_max(16);

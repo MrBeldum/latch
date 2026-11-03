@@ -1030,6 +1030,7 @@ impl View {
                                             self.volume_controls(ui, live);
                                         });
                                     }
+                                    pads_tag(ui, live);
                                 }
                                 if ui::ghost_button(ui, "Stream settings").clicked() {
                                     self.held.release_all(&live.input);
@@ -2271,6 +2272,43 @@ fn question(ctx: &egui::Context, id: &str, bar: Rect, w: f32, add: impl FnOnce(&
         });
 }
 
+/// The gamepads this machine sends, when there are any: how many, and on
+/// hover which, or why the host takes none.
+fn pads_tag(ui: &mut egui::Ui, live: &Live) {
+    let pads = live.pads.connected();
+    if pads.is_empty() {
+        return;
+    }
+    let problem = live.session.pad_problem();
+    let taken = live.input.pad_slots();
+    let tone = if !problem.is_empty() {
+        Tone::Warning
+    } else if !live.session.connected() {
+        Tone::Accent
+    } else {
+        Tone::Success
+    };
+    let label = match pads.len() {
+        1 => "1 gamepad".to_string(),
+        n => format!("{n} gamepads"),
+    };
+    let mut lines: Vec<String> = pads
+        .iter()
+        .map(|p| {
+            let note = if problem.is_empty() && live.session.connected() && p.slot >= taken {
+                format!(" — {} takes only {taken}", live.pc)
+            } else {
+                String::new()
+            };
+            format!("{}. {} ({}){note}", p.slot + 1, p.name, p.kind.name())
+        })
+        .collect();
+    if !problem.is_empty() {
+        lines.push(format!("Not sent to {}: {problem}", live.pc));
+    }
+    ui::tag(ui, Some(tone), &label).on_hover_text(lines.join("\n"));
+}
+
 /// A short vertical hairline between groups of toolbar controls.
 fn toolbar_rule(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(1.0, 16.0), egui::Sense::hover());
@@ -2579,6 +2617,7 @@ pub(crate) mod tests {
         );
         let ip: std::net::Ipv4Addr = "100.64.0.10".parse().unwrap();
         let input = session.input();
+        let pads = crate::gamepads::Link::new(&session, input.clone());
         Live {
             generation: 0,
             pc: "Gaming-PC".into(),
@@ -2596,6 +2635,7 @@ pub(crate) mod tests {
             path,
             clipboard: crate::clipboard::Sync::spawn(ip, ctx.clone()),
             shortcuts: Default::default(),
+            pads,
         }
     }
 
