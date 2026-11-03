@@ -370,8 +370,15 @@ P010 decoder outputs are accepted; P010 is reduced to SDR eight-bit output.
 Baseline retains the first-ten-access-unit fallback to `latch-codec`. Modern
 codecs have no pure-Rust software fallback.
 
-Decoded D3D11 surfaces currently cross a cached staging texture and CPU
-planes into wgpu; D3D11/D3D12 shared-texture/fence import is still outstanding.
+The client prefers D3D12 on otherwise equivalent adapters. NV12 pictures
+are GPU-copied into a bounded shared D3D11 texture pool, fenced before
+publication, and opened as D3D12/wgpu plane views. The renderer keeps each
+surface until its GPU reads finish. Every fifteenth picture is also sampled
+through staging for black-screen detection; that sample is scanned on the
+next picture. This is a GPU copy, without per-frame CPU readback/upload,
+rather than direct import of decoder-owned surfaces. P010, headless tools,
+odd picture dimensions, an exhausted pool or unsupported sharing retain
+cached staging readback and CPU upload. A failed import disables sharing.
 The renderer requests `AutoNoVsync`, latency 1 and repaints on decoded frames.
 See [viewer measurements](measurements/2026-11-03/viewer/README.md) for
 interactive-session tests, throughput limits and timing definitions.

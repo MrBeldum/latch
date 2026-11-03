@@ -11,7 +11,8 @@ GitHub release notes, so each version gets a heading of the form
 - Decode AV1 through VideoToolbox on supported Macs, with selectable P010
   Main10 output and IOSurface-to-Metal rendering.
 - Enumerate Windows Media Foundation decoders with D3D11/DXVA and accept
-  NV12/P010 output; GPU-to-wgpu readback remains.
+  NV12/P010 output; import shared NV12 textures into D3D12/wgpu with
+  fenced GPU copies and CPU-readback fallback.
 - Retain native surfaces until GPU work completes; add a native present
   measurement example and decode-to-render timestamps.
 

@@ -1,0 +1,4 @@
+decodable [Av1, Hevc, H264High, H264Baseline]
+decoder Media Foundation (DXVA)
+decode_summary frames=178 p50_ms=1.568 p95_ms=2.445
+render_summary decoded=178 rendered=178 decode_to_render_ms_p50=0.220 p95=0.591 p99=1.374

@@ -62,7 +62,7 @@ KeyframeRequest on loss ──────────────────�
 | Viewer | Decode |
 | --- | --- |
 | macOS | VideoToolbox (hardware-probed AV1, HEVC or H.264), IOSurface → Metal; NV12 by default, selectable P010 |
-| Windows | Media Foundation + D3D11/DXVA for hardware-probed AV1, HEVC and H.264 High; Baseline with `latch-codec` fallback. Staging readback → wgpu upload |
+| Windows | Media Foundation + D3D11/DXVA for hardware-probed AV1, HEVC and H.264 High; Baseline with `latch-codec` fallback. Shared NV12 D3D11 texture → D3D12/wgpu; staging readback when unavailable |
 | Linux | `latch-codec` |
 
 The viewer lists what it decodes; the host picks the first it can encode.
@@ -80,6 +80,12 @@ Main10 input is supported by the platform decoders. Mac callers can choose
 P010 with `new_decoder_with_format`; its two 16-bit Metal planes retain ten
 bits. The normal session still requests NV12/SDR. Windows accepts NV12 or
 P010 MFT output, reducing P010 to eight bits for the current SDR renderer.
+With a D3D12 renderer on the same adapter, NV12 pictures use a bounded pool
+of shared D3D11 textures opened as wgpu plane views. A D3D11 fence completes
+the GPU copy before publication; the renderer retains each surface through
+GPU completion before the decoder can reuse it. Headless tools, P010, odd
+picture sizes, pool exhaustion and unsupported sharing use staging readback.
+A failed import disables sharing for subsequent pictures.
 Neither path negotiates HDR, tone maps, or changes the display's colour mode.
 
 The client requests `AutoNoVsync` and maximum frame latency 1, wakes egui on
