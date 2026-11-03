@@ -276,7 +276,7 @@ looked (shortly after it starts), and a viewer then assumes nothing:
 | --- | --- | --- |
 | `codec` | string | wire name, as in `codecs` above |
 | `max_side` | u32 | longest side of a picture, in pixels |
-| `max_pixels` | u64 | largest picture, in pixels |
+| `max_pixels` | u64 | largest picture, in pixels as coded: each side rounded up to 16 |
 | `max_pixel_rate` | u64 | pixels a second (picture size × frame rate) |
 | `max_kbps` | u32 | highest bitrate |
 
@@ -285,9 +285,17 @@ High tier, AV1 6.3 High tier: 8192 × 4352 pixels a picture, 4.28 billion
 a second, 800 Mbps, H.264 High 1 Gbps) and are lowered where the
 platform's encoder has a smaller limit it can be seen to have (macOS:
 VideoToolbox is tried at a ladder of sizes until one encodes in hardware).
+A picture is counted as coded, in whole 16-pixel blocks
+(`latch_proto::control::fit`, which host and viewer both use): an M3 Pro's
+H.264 takes 4096 × 2160 and fails 3776 × 2352, fewer pixels but more
+blocks.
 `streamer.max_fps`, when not 0, is the software encoder's frame rate on
 that CPU at `capture_size` (or 1920 × 1080), measured by the host rather
 than guessed; a viewer asking for fewer pixels scales it up in proportion.
+Until the measurement (taken when the host starts, about 1.5 s) ends, a
+host encoding in software reports 30 fps at 1080p, and it holds every
+request to what it reports, pixels a second, whatever the viewer asked:
+the frame rate comes down first, to 30, then the picture in proportion.
 
 ## Additive transport feedback (5.0.x compatible)
 

@@ -71,7 +71,9 @@ viewers as `streamer.codecs`; see `docs/PROTOCOL.md`, "Encoder limits").
 Latch adds no ceiling of its own beyond the request range (16384 pixels a
 side, 500 fps, 1 Gbps): the codec's top level, the encoder's own limit
 where it has one (VideoToolbox, found by trying), and on the software path
-the frame rate this CPU was measured to encode (`software::measure_fps`).
+the frame rate this CPU was measured to encode (`software::measure_fps`,
+held by the server through `software::ceiling`, 30 fps at 1080p until
+measured). Sizes are counted in coded 16-pixel blocks.
 `latch-codec` decodes Constrained Baseline only, so a host asked for
 `h264-baseline` configures its hardware encoder for that profile. A
 Windows viewer asks for Constrained Baseline only, so that when Media

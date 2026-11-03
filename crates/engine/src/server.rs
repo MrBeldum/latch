@@ -210,11 +210,16 @@ impl Server {
         // What the encoder for that codec takes here, before the desktop is
         // sized for it: a larger request is scaled down in proportion.
         let limits = video::limits(codec);
-        let (width, height, fps) = limits.fit(
+        let (mut width, mut height, mut fps) = limits.fit(
             even(req.width.clamp(64, control::MAX_SIDE)),
             even(req.height.clamp(64, control::MAX_SIDE)),
             req.fps.clamp(1, control::MAX_FPS),
         );
+        // A host encoding in software, as it measured its CPU (or, until
+        // then, conservatively): whatever the viewer fitted, or did not.
+        if let Some(ceiling) = crate::software::ceiling() {
+            (width, height, fps) = ceiling.fit(width, height, fps);
+        }
         if (width, height, fps) != (req.width, req.height, req.fps) {
             self.log(format!(
                 "{} × {} at {} fps is past what {} encodes here; streaming {width} × {height} at {fps} fps",
