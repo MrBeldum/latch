@@ -1,0 +1,45 @@
+
+running 1 test
+latch_engine-17af6b37c18aa0e1.exe : HEVC input: width=128..8192,
+height=128..4352
+At C:\Users\Daniel\dev\latch-gfn-a\a3-run.ps1:16 char:1
++ & $exe --ignored --nocapture hardware_amf --test-threads=1 *> "$d\a3- ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (HEVC input: wid...eight=128..
+   4352:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+1920x1080 caps: HevcMaxThroughput=3626903 HevcRequestedThroughput=2166514
+HevcMaxBitrate=1000000000 HevcMaxLevel=186 HevcNumOfHwInstances=1
+HevcNumOfStreams=16 HevcMaxReferenceFrames=16
+1920x1080 still depth=1: 301 fps, submit->output p50=2.82ms p95=5.11ms
+1920x1080 still depth=2: 362 fps, submit->output p50=4.55ms p95=7.60ms
+1920x1080 noise depth=1: 300 fps, submit->output p50=2.82ms p95=5.27ms
+1920x1080 noise depth=2: 413 fps, submit->output p50=4.53ms p95=7.30ms
+HEVC input: width=128..8192, height=128..4352
+2560x1440 caps: HevcMaxThroughput=3626903 HevcRequestedThroughput=2894400
+HevcMaxBitrate=1000000000 HevcMaxLevel=186 HevcNumOfHwInstances=1
+HevcNumOfStreams=16 HevcMaxReferenceFrames=16
+2560x1440 still depth=1: 205 fps, submit->output p50=4.61ms p95=5.53ms
+2560x1440 still depth=2: 228 fps, submit->output p50=9.48ms p95=9.61ms
+2560x1440 noise depth=1: 204 fps, submit->output p50=4.59ms p95=5.61ms
+2560x1440 noise depth=2: 233 fps, submit->output p50=7.82ms p95=9.43ms
+HEVC input: width=128..8192, height=128..4352
+3840x2160 caps: HevcMaxThroughput=3626903 HevcRequestedThroughput=3091714
+HevcMaxBitrate=1000000000 HevcMaxLevel=186 HevcNumOfHwInstances=1
+HevcNumOfStreams=16 HevcMaxReferenceFrames=16
+3840x2160 still depth=1: 100 fps, submit->output p50=9.94ms p95=10.03ms
+3840x2160 still depth=2: 110 fps, submit->output p50=18.38ms p95=18.47ms
+3840x2160 noise depth=1: 101 fps, submit->output p50=9.94ms p95=10.03ms
+3840x2160 noise depth=2: 108 fps, submit->output p50=18.42ms p95=18.51ms
+LTR frames (bytes, idr, marked, referenced): [(131042, true, 0, 0),
+(55296, false, -1, 0), (47165, false, -1, 0), (44290, false, -1, 0),
+(43679, false, -1, 0), (43596, false, -1, 0), (23632, false, -1, 1),
+(61600, false, -1, 0)]
+intra refresh frames (bytes, idr): [(131822, true), (13293, false),
+(36235, false), (23592, false), (29075, false), (24400, false), (27936,
+false), (25224, false)]
+Main10: 594 bytes, idr=true, SPS general_profile_idc=Some(2)
+test windows::amf::tests::hardware_amf ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 66 filtered out; finished in 33.82s

@@ -35,7 +35,18 @@ fn main() -> anyhow::Result<()> {
     let server = Server::bind(
         port,
         Options {
-            prepare: None,
+            prepare: args.iter().any(|a| a == "--prepare-display").then(|| {
+                Box::new(|req: &StreamRequest| {
+                    let previous = latch_engine::display::prepare(req.width, req.height, req.fps)?;
+                    Ok(previous.map(|previous| {
+                        Box::new(move || {
+                            if let Err(e) = latch_engine::display::restore(&previous) {
+                                eprintln!("restore display: {e:#}");
+                            }
+                        }) as Box<dyn FnOnce() + Send>
+                    }))
+                }) as latch_engine::server::Prepare
+            }),
             log: Box::new(|line| eprintln!("{line}")),
         },
     )?;

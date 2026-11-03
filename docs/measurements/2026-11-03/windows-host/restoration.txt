@@ -1,0 +1,39 @@
+Microsoft PnP Utility
+
+Restarting device:         ROOT\DISPLAY\0000
+Device restarted successfully.
+
+
+Algorithm       Hash                                                                   Path
+---------       ----                                                                   ----
+SHA256          A720F0A1BA5C740EEAE0CDD055A9E30754DA56B0DF049768454314641EB5591B       C:\Virtu...
+
+LocalAddress  : 0.0.0.0
+OwningProcess : 6084
+
+
+Id        : 6084
+Path      : C:\Users\Daniel\AppData\Local\Latch\latch-host.exe
+SessionId : 1
+
+
+Id        : 42824
+Path      : C:\Program Files\Latch\Input\latch-host.exe
+SessionId : 1
+
+
+
+0
+current \\.\DISPLAY28 800x600@60
+mode 3024x1964@60
+mode 3024x1964@120
+DXGI capture only 1920x1080@240: 223.0 updates/s
+DXGI capture only 2560x1440@240: 191.0 updates/s
+DXGI capture only 3840x2160@120: 107.5 updates/s
+0
+remaining A tasks: 0
+
+LocalAddress OwningProcess
+------------ -------------
+0.0.0.0               6084
+A720F0A1BA5C740EEAE0CDD055A9E30754DA56B0DF049768454314641EB5591B

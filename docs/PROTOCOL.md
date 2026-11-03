@@ -160,7 +160,7 @@ frame in units of 0.1 ms (saturating).
 | Offset | Size | Field |
 | --- | --- | --- |
 | 8 | 4 | `frame` — frame number, +1 per encoded frame, wraps |
-| 12 | 4 | `frame_len` — bytes in the whole encoded frame (Annex B) |
+| 12 | 4 | `frame_len` — bytes in the whole encoded frame (Annex B for H.264/HEVC, low-overhead OBUs for AV1) |
 | 16 | 2 | `shard` — index of this shard in its block: data shards first, then parity |
 | 18 | 1 | `block` — index of the FEC block |
 | 19 | 1 | `blocks` — FEC blocks in the frame |
@@ -338,3 +338,10 @@ whole frame precede parity computation and transmission. Clean paths bypass
 send pacing; loss/queue pressure enables the bounded wire-byte token bucket.
 See [ENGINE.md](ENGINE.md#decisions) for the retained consumer controller,
 transport telemetry, audio latency bounds and platform pipeline choices.
+
+AV1 is additive in protocol 1: old hosts skip its unknown codec name in an
+ordered offer and can select the following HEVC/H.264 entry. Hosts send AV1
+only if the viewer explicitly offers it and a hardware encoder has produced
+a trial keyframe. AV1 frames carry low-overhead OBUs with a sequence header
+before each keyframe; no UDP header or control message changes. Current
+viewers do not offer AV1 until their decoder workstream adds support.

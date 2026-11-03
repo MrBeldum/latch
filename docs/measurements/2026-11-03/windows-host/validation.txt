@@ -1,0 +1,24 @@
+Mac:
+  cargo fmt --all -- --check: PASS
+  cargo clippy --locked --workspace --all-targets -- -D warnings: PASS
+  cargo test --locked --workspace --all-targets: PASS
+  bash scripts/audit-native.sh: PASS
+  cargo build --locked --release -p latch-stream --example view: PASS
+Windows (assigned checkout, CARGO_INCREMENTAL=0, CARGO_BUILD_JOBS=1 or 2):
+  cargo clippy --locked --workspace --all-targets -- -D warnings: PASS
+  cargo test --locked --workspace --all-targets: PASS before final preset ordering/test-only capture probe
+  cargo test --locked -p latch-engine --lib: PASS after final preset ordering/capture probe (61 passed, 7 ignored)
+  cargo build --locked --release -p latch-engine --examples: PASS
+  hardware_amf: PASS (interactive, explicit ignored test)
+  hardware_pipeline_keyframes: PASS (interactive, latest configuration)
+  hardware_capture_rate: PASS (interactive, no pacing/encoding)
+  hardware_display_modes: PASS (interactive)
+  generated setup repeat: no write or restart
+  scripts/test-virtual-display.ps1: PASS (preservation, idempotence, rollback)
+Initial compiler attempts hit Rust 1.98 ICEs/STATUS_ACCESS_VIOLATION;
+retries with incremental compilation disabled and fewer jobs passed.
+No toolchain change was made. PowerShell 5 logs may wrap native stderr in
+NativeCommandError records even when the native process exits successfully.
+Final production binary includes the preset-order correction; the later
+capture-rate diagnostic is cfg(test) only, and the final source also has a
+comment-formatting change. No production behavior changed after measurement.

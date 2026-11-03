@@ -290,15 +290,9 @@ impl Sequence {
     }
 }
 
-/// How many frames' worth of bits the rate controller's buffer holds, in
-/// percent. The buffer bounds how far one frame may run over the average:
-/// at the target rate a frame of a full buffer takes `percent / 100` frame
-/// intervals to send, so that is also the worst serialization delay a frame
-/// adds on a link that carries the bitrate. One frame is the strictest and
-/// leaves a keyframe at the size of a P-frame, smearing it; 1.5 lets a
-/// keyframe or a scene change take half a frame interval more than average
-/// (8 ms at 60 fps) and no more.
-pub const VBV_PERCENT: u64 = 150;
+/// One frame of bits, with a small driver buffer minimum. The driver may
+/// round up or reject the request; this is a target, not a bitstream guarantee.
+pub const VBV_PERCENT: u64 = 100;
 
 /// The least buffer a driver is asked for, bits.
 const VBV_MIN: u64 = 16_000;
@@ -493,13 +487,119 @@ mod tests {
     }
 
     #[test]
-    fn the_rate_buffer_is_a_frame_and_a_half_of_bits() {
+    fn the_rate_buffer_is_one_frame_of_bits() {
         // 20 Mb/s at 60 fps: 333 333 bits a frame.
-        assert_eq!(vbv_bits(20_000, 60), 500_000);
-        assert_eq!(vbv_bits(8_000, 30), 400_000);
+        assert_eq!(vbv_bits(20_000, 60), 333_333);
+        assert_eq!(vbv_bits(8_000, 30), 266_666);
         // Never below what a driver will take, never past u32.
         assert_eq!(vbv_bits(500, 240), VBV_MIN as u32);
         assert_eq!(vbv_bits(u32::MAX, 1), u32::MAX);
-        assert_eq!(vbv_bits(1000, 0), 1_500_000);
+        assert_eq!(vbv_bits(1000, 0), 1_000_000);
+    }
+}
+/// AV1 MFT output is a low-overhead OBU temporal unit, not an Annex B NAL
+/// access unit. Keep the sequence header available at every random access point.
+#[derive(Default)]
+pub struct Av1Sequence {
+    header: Vec<u8>,
+}
+impl Av1Sequence {
+    pub fn assemble(
+        &mut self,
+        data: &[u8],
+        keyframe: bool,
+        header: impl FnOnce() -> Option<Vec<u8>>,
+    ) -> Result<(Vec<u8>, bool)> {
+        let units = av1_obus(data)?;
+        let in_band = units.iter().find(|(kind, _)| *kind == 1);
+        if let Some((_, bytes)) = in_band {
+            self.header = bytes.to_vec();
+        } else if keyframe {
+            if let Some(header) = header() {
+                // av1C has a four-byte configuration record before configOBUs.
+                let header = if header.first() == Some(&0x81) {
+                    header.get(4..).context("short av1C header")?
+                } else {
+                    &header
+                };
+                if let Some((_, bytes)) = av1_obus(header)?.iter().find(|(kind, _)| *kind == 1) {
+                    self.header = bytes.to_vec();
+                }
+            }
+        }
+        if !keyframe {
+            return Ok((data.to_vec(), false));
+        }
+        ensure!(
+            !self.header.is_empty(),
+            "AV1 keyframe has no sequence header"
+        );
+        let mut out = Vec::with_capacity(data.len() + self.header.len());
+        // A temporal delimiter, if supplied, must remain first.
+        for (_, bytes) in units.iter().filter(|(kind, _)| *kind == 2) {
+            out.extend_from_slice(bytes);
+        }
+        out.extend_from_slice(&self.header);
+        for (_, bytes) in units.iter().filter(|(kind, _)| *kind != 1 && *kind != 2) {
+            out.extend_from_slice(bytes);
+        }
+        Ok((out, true))
+    }
+}
+fn av1_obus(mut data: &[u8]) -> Result<Vec<(u8, &[u8])>> {
+    let mut units = Vec::new();
+    while !data.is_empty() {
+        let first = data[0];
+        ensure!(first & 0x83 == 2, "invalid low-overhead AV1 OBU header");
+        let mut at = 1 + usize::from(first & 4 != 0);
+        ensure!(data.len() > at, "truncated AV1 OBU extension/size");
+        let mut size = 0u64;
+        let mut complete = false;
+        for shift in (0..56).step_by(7) {
+            let byte = *data.get(at).context("truncated AV1 OBU size")?;
+            at += 1;
+            size |= u64::from(byte & 127) << shift;
+            if byte & 128 == 0 {
+                complete = true;
+                break;
+            }
+        }
+        ensure!(complete, "AV1 OBU size exceeds eight bytes");
+        let end = at
+            .checked_add(usize::try_from(size)?)
+            .context("AV1 OBU size overflow")?;
+        let bytes = data.get(..end).context("truncated AV1 OBU payload")?;
+        units.push(((first >> 3) & 15, bytes));
+        data = &data[end..];
+    }
+    Ok(units)
+}
+
+#[cfg(test)]
+mod av1_tests {
+    use super::*;
+    #[test]
+    fn av1_headers_are_in_band_and_malformed_sizes_are_rejected() -> Result<()> {
+        let mut seq = Av1Sequence::default();
+        let key = [0x12, 0, 0x32, 1, 0x55];
+        assert!(seq.assemble(&key, true, || None).is_err());
+        let config = [0x81, 0, 0, 0, 0x0a, 1, 0x66];
+        let (out, keyframe) = seq.assemble(&key, true, || Some(config.to_vec()))?;
+        assert!(keyframe);
+        assert_eq!(out, [0x12, 0, 0x0a, 1, 0x66, 0x32, 1, 0x55]);
+        assert_eq!(seq.assemble(&key, true, || None)?.0, out);
+        assert_eq!(
+            seq.assemble(&[0x32, 1, 0x77], false, || panic!())?.0,
+            [0x32, 1, 0x77]
+        );
+        for bad in [
+            &[0x0a][..],
+            &[0x0a, 5, 1],
+            &[0x08, 0],
+            &[0x0a, 128, 128, 128, 128, 128, 128, 128, 128],
+        ] {
+            assert!(av1_obus(bad).is_err());
+        }
+        Ok(())
     }
 }
