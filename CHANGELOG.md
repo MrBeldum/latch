@@ -6,6 +6,19 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- A Mac host keeps up with fast streams. VideoToolbox no longer uses its
+  low-latency rate control, which doubled each frame's encode time,
+  dropped frames and sent a fifth of the asked-for bitrate; and a frame
+  is handed to the encoder without waiting for the one before, so the
+  media engine overlaps them. Synthetic 1080p HEVC on an M3 Pro: 240 fps
+  where 110 was the ceiling, about 5 ms a frame instead of 9.4; the
+  14" MacBook Pro's own 3024×1964 at 120 fps where 31–43 came out.
+  ScreenCaptureKit takes every refresh of a display as fast as the
+  stream (ProMotion included) instead of a gap of exactly one frame that
+  timing jitter could halve, keeps more surfaces so two frames in the
+  encoder never starve it, and `LATCH_MAC_DISPLAY` picks a display other
+  than the main one. HEVC Main10 from P010 surfaces is in place for HDR.
+
 - One pointer while the mouse is captured. The Mac's arrow was hidden only
   by egui's cursor, which macOS applies when the pointer moves over the
   window; a captured pointer is held still, so the Mac's arrow could stay

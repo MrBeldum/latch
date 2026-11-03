@@ -242,6 +242,72 @@ router](https://tailscale.com/kb/1019/subnets) on the PC's network (a NAS,
 a Raspberry Pi, or a router that runs Tailscale) is the alternative. Use
 **Test wake** while the PC is on to find out which situation you are in.
 
+## Sharing this Mac: the video pipeline
+
+ScreenCaptureKit renders the display straight into an IOSurface at the
+stream's size (it scales, with bars where the shapes differ), and
+VideoToolbox encodes that surface; only compressed bytes reach Latch.
+
+- **Which display.** The main one, or the one whose CGDirectDisplayID is
+  in `LATCH_MAC_DISPLAY` in the host's environment. The stream request
+  does not name a display yet.
+- **How often.** Every refresh of a display no faster than the stream
+  (a ProMotion panel reports no fixed rate and gets every refresh too);
+  for a slower stream, every k-th refresh with half a refresh of slack,
+  since a gap of exactly 1/fps lets timing jitter skip every other one.
+  The frame grid then takes the stream's rate from what arrives.
+- **Surfaces.** Five, so the two frames in the encoder and the newest
+  picture never leave the window server without one to draw into.
+- **Encoder settings.** Hardware required (software only if it fails),
+  real time, no frame reordering, `MaxFrameDelayCount` 0, speed over
+  quality, the stream's rate as `ExpectedFrameRate` and (macOS 15+)
+  `MaximumRealTimeFrameRate`, no periodic keyframes, BT.709 tags.
+  Bitrate is whatever the server asks for; VideoToolbox took 1 Gbps.
+- **No low-latency rate control.** `EnableLowLatencyRateControl` sounds
+  right but is built for calls: on an M3 Pro it made a 1080p frame take
+  9.4 ms instead of 4.7, dropped frames (45 of 60 fps at 1080p60), and
+  sent a fifth of the bitrate asked for.
+- **Two frames in flight.** A frame goes to the encoder without waiting
+  for the one before, and leaves the moment it is done, so the media
+  engine overlaps them. A stream whose interval is shorter than one
+  frame's encode time (240 fps at 1080p, 120 at 3024×1964) keeps its
+  rate; a slower one sees no difference.
+- **10-bit.** HEVC Main10 from P010 (`x420`) surfaces works and is tested
+  with synthetic surfaces; nothing asks for it until HDR does.
+
+### Measured limits (M3 Pro)
+
+`cargo test --release -p latch-engine --lib realtime_benchmark -- --ignored --nocapture`
+submits a moving synthetic picture from prefilled IOSurfaces on the
+stream's grid, as capture does, and times each frame from submission to
+the encoder's output. `LATCH_VT_BENCH=hevc:1920x1080@240:80000,...`
+picks the cases, `LATCH_VT_IN_FLIGHT=1` measures one frame at a time.
+Two runs on 2026-11-03, the Mac busy with other builds:
+
+| Case | 5.1 p50 / p95 ms | 5.1 fps | Now p50 / p95 ms | Now fps |
+| --- | --- | --- | --- | --- |
+| HEVC 1080p60, 50 Mbps | 9.8–10.5 / 13–44 | 51–61 | 4.9–5.3 / 8.1–8.3 | 60.7 |
+| HEVC 1080p120, 50 Mbps | 9.3–9.7 / 12–14 | 99–105 | 4.7–4.8 / 8.0–8.3 | 121 |
+| HEVC 1080p240, 80 Mbps | 8.7–9.8 / 9–20 | 86–114 | 4.2–4.6 / 6.2–6.6 | 241–242 |
+| HEVC 3024×1964@120, 100 Mbps | 22.9–23.6 / 24–90 | 31–43 | 11.2–11.8 / 17 | 120 |
+| H.264 High 1080p240, 80 Mbps | 8.4–9.6 / 10–92 | 40–116 | 10.0 / 11.2 | 192 |
+| H.264 High 3024×1964@120 | 27–33 / 60–65 | 28–32 | 27–28 / 29–32 | 70–72 |
+| Baseline 1080p240, 80 Mbps | 8.3–9.3 / 10–43 | 73–115 | 9.7 / 10.6–10.7 | 191–197 |
+
+H.264 runs out of encoder at about 195 fps at 1080p and 72 at
+3024×1964; asked for more, its frames queue behind each other (hence
+~10 ms and ~27 ms). HEVC is the codec for fast or large streams. 4K60
+HEVC takes 14 ms a frame.
+
+Keyframes stay large. VideoToolbox holds P-frames to `DataRateLimits`
+but not keyframes: an IDR is 20–40× a P-frame at 1080p (0.8–1.3 MB).
+Nothing found bounds the IDR alone. `ConstantBitRate` and the macOS 26
+VBV keys pad P-frames and leave the IDR as it was, `MinAllowedFrameQP`
+takes effect only at a keyframe and then holds for the whole GOP (every
+P-frame capped too), and `BaseFrameQP` works only under the low-latency
+rate control above. So a lost frame is best answered without an IDR
+(reference invalidation), and the IDR that remains is paced on the wire.
+
 ## Permissions
 
 - **Local network**: macOS 15 may ask; allow it so the wake broadcast can
