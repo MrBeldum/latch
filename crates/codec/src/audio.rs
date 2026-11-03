@@ -1,4 +1,5 @@
-//! `lpcm-rice`: a lossless code for short frames of 16-bit stereo PCM.
+//! `lpcm-rice`: a lossless code for short frames of 16-bit PCM, stereo
+//! (version 1) or 1 to 8 channels (version 2).
 //!
 //! Each frame is coded on its own (a lost packet loses nothing else). The
 //! format is defined in this module's documentation by the implementer and
@@ -54,14 +55,35 @@
 //!    - If `q >= 15`: coded as 15 zeros, followed by a `0` bit, followed by
 //!      a full 32-bit unsigned integer holding `u`.
 //! 3. Subframe bitstreams are byte-aligned after each channel.
+//!
+//! ## Version 2: any channel count
+//!
+//! ```text
+//! byte 0: Version (bits 7..4) = 2 | Channels - 1 (bits 3..0, 0..=7)
+//! bytes 1..2: Sample Count per channel (u16 LE)
+//! byte 3: Pair Modes: bits 2p+1..2p are the stereo mode of pair p
+//! ```
+//!
+//! Channels are in WAVE order (5.1: FL FR FC LFE BL BR; 7.1: FL FR FC LFE
+//! BL BR SL SR). Each pair `(2p, 2p + 1)` is transformed exactly as a
+//! version 1 frame's two channels, with its own mode; an odd last channel
+//! is coded on its own, and mode bits for pairs that do not exist are 0.
+//! One subframe per channel follows, in channel order, as above.
+//!
+//! Every frame of either version is at most [`max_coded_len`] bytes: when
+//! the coded frame would be longer, the encoder sends every channel
+//! verbatim and independent instead.
 
 /// Samples per channel in Latch's 10 ms frame at 48 kHz.
 pub const FRAME_SAMPLES: usize = 480;
 pub const CHANNELS: usize = 2;
+/// Most channels one frame may hold (7.1).
+pub const MAX_CHANNELS: usize = 8;
 /// Most samples per channel one frame may hold.
 pub const MAX_SAMPLES: usize = 4096;
 
 const PROTOCOL_VERSION: u8 = 1;
+const PROTOCOL_VERSION_N: u8 = 2;
 
 const MODE_INDEPENDENT: u8 = 0;
 const MODE_LEFT_SIDE: u8 = 1;
@@ -499,26 +521,10 @@ fn decode_channel(reader: &mut BitReader, n: usize, dst: &mut [i32]) -> Result<(
     }
 }
 
-/// Codes interleaved stereo `pcm` (an even number of samples, at most
-/// `2 * MAX_SAMPLES`), appending to `out`
-pub fn encode(pcm: &[i16], out: &mut Vec<u8>) {
-    let n = (pcm.len() / 2).min(MAX_SAMPLES);
-    if n == 0 {
-        // Empty frame
-        out.push((PROTOCOL_VERSION << 4) | MODE_INDEPENDENT);
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.push(SUBFRAME_SILENCE << 5);
-        out.push(SUBFRAME_SILENCE << 5);
-        return;
-    }
-
-    let mut l = Vec::with_capacity(n);
-    let mut r = Vec::with_capacity(n);
-    for i in 0..n {
-        l.push(pcm[2 * i] as i32);
-        r.push(pcm[2 * i + 1] as i32);
-    }
-
+/// Picks the pair coding with the smallest estimated residual for one
+/// channel pair and returns it with the two transformed channels.
+fn decorrelate(l: &[i32], r: &[i32]) -> (u8, Vec<i32>, Vec<i32>) {
+    let n = l.len();
     // Evaluate stereo modes and pick the one with lowest estimated residual entropy
     let mut mode = MODE_INDEPENDENT;
     let mut best_diff = 0u64;
@@ -562,8 +568,8 @@ pub fn encode(pcm: &[i16], out: &mut Vec<u8>) {
 
     match mode {
         MODE_INDEPENDENT => {
-            ch0.extend_from_slice(&l);
-            ch1.extend_from_slice(&r);
+            ch0.extend_from_slice(l);
+            ch1.extend_from_slice(r);
         }
         MODE_LEFT_SIDE => {
             for i in 0..n {
@@ -587,6 +593,72 @@ pub fn encode(pcm: &[i16], out: &mut Vec<u8>) {
         }
         _ => unreachable!(),
     }
+    (mode, ch0, ch1)
+}
+
+/// Undoes [`decorrelate`] for one sample of a pair: (left, right).
+#[inline(always)]
+fn correlate(mode: u8, ch0: i32, ch1: i32) -> (i16, i16) {
+    match mode {
+        MODE_LEFT_SIDE => (ch0 as i16, ch0.wrapping_sub(ch1) as i16),
+        MODE_RIGHT_SIDE => (ch0.wrapping_add(ch1) as i16, ch0 as i16),
+        MODE_MID_SIDE => {
+            let right = ch0.wrapping_sub(ch1 >> 1) as i16;
+            (right.wrapping_add(ch1 as i16), right)
+        }
+        _ => (ch0 as i16, ch1 as i16),
+    }
+}
+
+/// The most bytes [`encode_channels`] produces for `n` samples per channel:
+/// every channel verbatim behind its header. Hosts size frames with it so
+/// that every frame fits one datagram whatever the sound is.
+pub fn max_coded_len(channels: usize, n: usize) -> usize {
+    let header = if channels == CHANNELS { 3 } else { 4 };
+    header + channels * (1 + 2 * n)
+}
+
+/// The most samples per channel whose worst case fits `max_payload` bytes.
+pub fn frame_samples_within(channels: usize, max_payload: usize) -> usize {
+    let channels = channels.clamp(1, MAX_CHANNELS);
+    let header = max_coded_len(channels, 0);
+    (max_payload.saturating_sub(header) / channels / 2).min(MAX_SAMPLES)
+}
+
+/// Codes interleaved stereo `pcm` (an even number of samples, at most
+/// `2 * MAX_SAMPLES`), appending to `out`
+pub fn encode(pcm: &[i16], out: &mut Vec<u8>) {
+    encode_channels(pcm, CHANNELS, out);
+}
+
+/// Codes interleaved `pcm` of `channels` (1..=[`MAX_CHANNELS`]) channels,
+/// at most `MAX_SAMPLES` per channel, appending to `out`. Stereo is coded
+/// as version 1, which every Latch viewer decodes; any other channel count
+/// as version 2.
+pub fn encode_channels(pcm: &[i16], channels: usize, out: &mut Vec<u8>) {
+    let channels = channels.clamp(1, MAX_CHANNELS);
+    if channels != CHANNELS {
+        encode_v2(pcm, channels, out);
+        return;
+    }
+    let start = out.len();
+    let n = (pcm.len() / 2).min(MAX_SAMPLES);
+    if n == 0 {
+        // Empty frame
+        out.push((PROTOCOL_VERSION << 4) | MODE_INDEPENDENT);
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.push(SUBFRAME_SILENCE << 5);
+        out.push(SUBFRAME_SILENCE << 5);
+        return;
+    }
+
+    let mut l = Vec::with_capacity(n);
+    let mut r = Vec::with_capacity(n);
+    for i in 0..n {
+        l.push(pcm[2 * i] as i32);
+        r.push(pcm[2 * i + 1] as i32);
+    }
+    let (mode, ch0, ch1) = decorrelate(&l, &r);
 
     // Frame header
     out.push((PROTOCOL_VERSION << 4) | (mode & 0x03));
@@ -596,21 +668,65 @@ pub fn encode(pcm: &[i16], out: &mut Vec<u8>) {
     encode_channel(&ch0, out);
     encode_channel(&ch1, out);
     // Side channels can exceed i16; independent verbatim is a hard wire bound.
-    if out.len() > 3 + 2 * (1 + 2 * n) {
-        out.clear();
+    if out.len() - start > max_coded_len(CHANNELS, n) {
+        out.truncate(start);
         out.push(PROTOCOL_VERSION << 4);
         out.extend_from_slice(&(n as u16).to_le_bytes());
         for channel in 0..2 {
             out.push(SUBFRAME_VERBATIM << 5);
-            for pair in pcm.as_chunks::<2>().0 {
+            for pair in pcm[..2 * n].as_chunks::<2>().0 {
                 out.extend_from_slice(&pair[channel].to_le_bytes());
             }
         }
     }
 }
 
-/// Decodes one frame into `pcm` (cleared first), interleaved stereo.
+/// Version 2: any channel count, each channel pair `(0, 1), (2, 3), …`
+/// coded as version 1 codes its one pair, an odd last channel on its own.
+fn encode_v2(pcm: &[i16], channels: usize, out: &mut Vec<u8>) {
+    let start = out.len();
+    let n = (pcm.len() / channels).min(MAX_SAMPLES);
+    let header = |out: &mut Vec<u8>, modes: u8| {
+        out.push((PROTOCOL_VERSION_N << 4) | (channels as u8 - 1));
+        out.extend_from_slice(&(n as u16).to_le_bytes());
+        out.push(modes);
+    };
+    let plane = |c: usize| -> Vec<i32> { (0..n).map(|i| pcm[i * channels + c] as i32).collect() };
+    let mut modes = 0u8;
+    let mut coded = Vec::with_capacity(channels);
+    for pair in 0..channels / 2 {
+        let (mode, ch0, ch1) = decorrelate(&plane(2 * pair), &plane(2 * pair + 1));
+        modes |= mode << (2 * pair);
+        coded.push(ch0);
+        coded.push(ch1);
+    }
+    if channels % 2 == 1 {
+        coded.push(plane(channels - 1));
+    }
+    header(out, modes);
+    for channel in &coded {
+        encode_channel(channel, out);
+    }
+    if out.len() - start > max_coded_len(channels, n) {
+        out.truncate(start);
+        header(out, 0);
+        for c in 0..channels {
+            out.push(SUBFRAME_VERBATIM << 5);
+            for i in 0..n {
+                out.extend_from_slice(&pcm[i * channels + c].to_le_bytes());
+            }
+        }
+    }
+}
+
+/// Decodes one frame into `pcm` (cleared first), interleaved.
 pub fn decode(data: &[u8], pcm: &mut Vec<i16>) -> Result<(), AudioError> {
+    decode_channels(data, pcm).map(drop)
+}
+
+/// Decodes one frame of either version into `pcm` (cleared first),
+/// interleaved, and returns its channel count.
+pub fn decode_channels(data: &[u8], pcm: &mut Vec<i16>) -> Result<usize, AudioError> {
     pcm.clear();
 
     if data.len() < 3 {
@@ -619,65 +735,56 @@ pub fn decode(data: &[u8], pcm: &mut Vec<i16>) -> Result<(), AudioError> {
 
     let header_byte = data[0];
     let version = header_byte >> 4;
-    if version != PROTOCOL_VERSION {
-        return Err(AudioError::Invalid("unsupported protocol version"));
-    }
-
-    let mode = header_byte & 0x03;
+    let (channels, modes, body) = match version {
+        PROTOCOL_VERSION => (CHANNELS, header_byte & 0x03, &data[3..]),
+        PROTOCOL_VERSION_N => {
+            if data.len() < 4 {
+                return Err(AudioError::Truncated);
+            }
+            let channels = usize::from(header_byte & 0x0f) + 1;
+            if channels > MAX_CHANNELS {
+                return Err(AudioError::Invalid("too many channels"));
+            }
+            if data[3].checked_shr(2 * (channels / 2) as u32).unwrap_or(0) != 0 {
+                return Err(AudioError::Invalid("pair mode for a missing pair"));
+            }
+            (channels, data[3], &data[4..])
+        }
+        _ => return Err(AudioError::Invalid("unsupported protocol version")),
+    };
     let n = u16::from_le_bytes([data[1], data[2]]) as usize;
     if n > MAX_SAMPLES {
         return Err(AudioError::Invalid("sample count exceeds MAX_SAMPLES"));
     }
 
     if n == 0 {
-        return Ok(());
+        return Ok(channels);
     }
 
-    let mut ch0 = vec![0i32; n];
-    let mut ch1 = vec![0i32; n];
-
-    let mut reader = BitReader::new(&data[3..]);
-    decode_channel(&mut reader, n, &mut ch0)?;
-    decode_channel(&mut reader, n, &mut ch1)?;
-
-    pcm.reserve(2 * n);
-    match mode {
-        MODE_INDEPENDENT => {
-            for i in 0..n {
-                pcm.push(ch0[i] as i16);
-                pcm.push(ch1[i] as i16);
-            }
-        }
-        MODE_LEFT_SIDE => {
-            for i in 0..n {
-                let left = ch0[i] as i16;
-                let right = ch0[i].wrapping_sub(ch1[i]) as i16;
-                pcm.push(left);
-                pcm.push(right);
-            }
-        }
-        MODE_RIGHT_SIDE => {
-            for i in 0..n {
-                let right = ch0[i] as i16;
-                let left = ch0[i].wrapping_add(ch1[i]) as i16;
-                pcm.push(left);
-                pcm.push(right);
-            }
-        }
-        MODE_MID_SIDE => {
-            for i in 0..n {
-                let mid = ch0[i];
-                let side = ch1[i];
-                let right = mid.wrapping_sub(side >> 1) as i16;
-                let left = right.wrapping_add(side as i16);
-                pcm.push(left);
-                pcm.push(right);
-            }
-        }
-        _ => return Err(AudioError::Invalid("unknown stereo mode")),
+    let mut planes = vec![0i32; channels * n];
+    let mut reader = BitReader::new(body);
+    for plane in planes.chunks_mut(n) {
+        decode_channel(&mut reader, n, plane)?;
     }
 
-    Ok(())
+    pcm.resize(channels * n, 0);
+    for pair in 0..channels / 2 {
+        let mode = (modes >> (2 * pair)) & 0x03;
+        let (ch0, ch1) = planes[2 * pair * n..].split_at(n);
+        for i in 0..n {
+            let (left, right) = correlate(mode, ch0[i], ch1[i]);
+            pcm[i * channels + 2 * pair] = left;
+            pcm[i * channels + 2 * pair + 1] = right;
+        }
+    }
+    if channels % 2 == 1 {
+        let last = &planes[(channels - 1) * n..];
+        for i in 0..n {
+            pcm[i * channels + channels - 1] = last[i] as i16;
+        }
+    }
+
+    Ok(channels)
 }
 
 #[cfg(test)]
