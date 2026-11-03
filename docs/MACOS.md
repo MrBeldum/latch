@@ -128,6 +128,7 @@ the Mac cursor's position is sent 1:1 instead and nothing is captured.
 | **PC** (or **Mac**, **Machine**) | Sleep…, Restart…, Shut down…, each asking first, when the machine's owner allows them; Sleep only on a Windows PC, the one kind a wake packet can bring back. **Update Latch Host…** for a PC whose host is older than 3.1 |
 | **Stream settings** | The same controls as Settings: quality profile, resolution, frame rate, bitrate and codec. **Apply and reconnect** restarts the session with them in a second or two; Escape or the close button leaves them as they were |
 | **Disconnect** | End the session |
+| **2 gamepads** | Shown while gamepads are connected to this Mac; hover for which, and whether the host takes them (green), or why not (amber) |
 
 On a narrow window everything but **Stream settings** and **Disconnect**
 folds into one **More** menu.
@@ -140,6 +141,16 @@ Command. While the stream has the keys, ⌘Q, ⌘H and ⌘+/⌘−/⌘0 go to th
 too (⌘Q closes the PC's window, not Latch): quit or hide Latch from the menu
 bar or the Dock, after **Disconnect**, or while the toolbar or a panel has
 the focus. ⌘Tab and ⌘Space stay on the Mac.
+
+### Gamepads
+
+Gamepads connected to the Mac (Xbox Wireless, DualSense, DualShock 4,
+Switch Pro and other MFi pads, over USB or Bluetooth) go to the host as
+they are: a Windows PC gets an Xbox 360 pad for an Xbox pad and a
+DualShock 4 for a PlayStation one, a Linux host an Xbox 360 pad for each.
+The game's rumble comes back to the pad, on each handle and, on pads that
+have them, the triggers. macOS gives gamepads to the frontmost app only,
+so keep the stream's window in front. A Mac host takes no gamepads.
 
 ### Clipboard
 
@@ -251,6 +262,111 @@ and only if the PC's router forwards UDP 9 to the PC. A [Tailscale subnet
 router](https://tailscale.com/kb/1019/subnets) on the PC's network (a NAS,
 a Raspberry Pi, or a router that runs Tailscale) is the alternative. Use
 **Test wake** while the PC is on to find out which situation you are in.
+
+## Sharing this Mac: the video pipeline
+
+ScreenCaptureKit renders the display straight into an IOSurface at the
+stream's size (it scales, with bars where the shapes differ), and
+VideoToolbox encodes that surface; only compressed bytes reach Latch.
+
+- **Which display.** The main one, or the one whose CGDirectDisplayID is
+  in `LATCH_MAC_DISPLAY` in the host's environment. The stream request
+  does not name a display yet.
+- **How often.** Every refresh of a display no faster than the stream
+  (a ProMotion panel reports no fixed rate and gets every refresh too);
+  for a slower stream, every k-th refresh with half a refresh of slack,
+  since a gap of exactly 1/fps lets timing jitter skip every other one.
+  The frame grid then takes the stream's rate from what arrives.
+- **Surfaces.** Five, so the two frames in the encoder and the newest
+  picture never leave the window server without one to draw into.
+- **Encoder settings.** Hardware required (software only if it fails),
+  real time, no frame reordering, `MaxFrameDelayCount` 0, the stream's
+  rate as `ExpectedFrameRate` and (macOS 15+)
+  `MaximumRealTimeFrameRate`, no periodic keyframes, BT.709 tags.
+  Bitrate is whatever the server asks for; VideoToolbox took 1 Gbps.
+  For 8-bit hardware HEVC through 248,832,000 pixels/second (1080p120),
+  `PrioritizeEncodingSpeedOverQuality` is false; above that budget, and
+  for H.264, Main10 and software, it is true. This M3 Pro crossover
+  restores HEVC quality while retaining the fast path at 240 fps and
+  3024×1964@120. Other chips may have a different crossover.
+- **No low-latency rate control.** `EnableLowLatencyRateControl` sounds
+  right but is built for calls: on an M3 Pro it made a 1080p frame take
+  9.4 ms instead of 4.7, dropped frames (45 of 60 fps at 1080p60), and
+  sent a fifth of the bitrate asked for.
+- **Two frames in flight.** A frame goes to the encoder without waiting
+  for the one before, and leaves the moment it is done, so the media
+  engine overlaps them. A stream whose interval is shorter than one
+  frame's encode time (240 fps at 1080p, 120 at 3024×1964) keeps its
+  rate; a slower one sees no difference.
+- **10-bit.** HEVC Main10 from P010 (`x420`) surfaces works and is tested
+  with synthetic surfaces; nothing asks for it until HDR does.
+
+A requested keyframe is the next picture returned to the server. Queued
+pre-request frames are discarded until the fresh IDR, so they cannot delay
+loss recovery or make the server request another IDR. Retries share that
+request until the IDR leaves. A bitrate change first completes the
+pictures already in the encoder, so every later picture is encoded at the
+new rate (on an M3 Pro the first one after a 20 → 1 Mbps cut came out at
+half the size). The completed old-rate pictures still leave, in order:
+later P-frames reference them, and dropping them would cost an IDR at
+every step of a ramp.
+
+### Measured limits (M3 Pro)
+
+`cargo test --release -p latch-engine --lib realtime_benchmark -- --ignored --nocapture`
+submits a moving synthetic picture from prefilled IOSurfaces on the
+stream's grid, as capture does, and times each frame from submission to
+the encoder's output. `LATCH_VT_BENCH=hevc:1920x1080@240:80000,...`
+picks the cases, `LATCH_VT_IN_FLIGHT=1` measures one frame at a time.
+Two runs on 2026-11-03, the Mac busy with other builds:
+
+| Case | 5.1 p50 / p95 ms | 5.1 fps | Now p50 / p95 ms | Now fps |
+| --- | --- | --- | --- | --- |
+| HEVC 1080p60, 50 Mbps | 9.8–10.5 / 13–44 | 51–61 | 4.9–5.3 / 8.1–8.3 | 60.7 |
+| HEVC 1080p120, 50 Mbps | 9.3–9.7 / 12–14 | 99–105 | 4.7–4.8 / 8.0–8.3 | 121 |
+| HEVC 1080p240, 80 Mbps | 8.7–9.8 / 9–20 | 86–114 | 4.2–4.6 / 6.2–6.6 | 241–242 |
+| HEVC 3024×1964@120, 100 Mbps | 22.9–23.6 / 24–90 | 31–43 | 11.2–11.8 / 17 | 120 |
+| H.264 High 1080p240, 80 Mbps | 8.4–9.6 / 10–92 | 40–116 | 10.0 / 11.2 | 192 |
+| H.264 High 3024×1964@120 | 27–33 / 60–65 | 28–32 | 27–28 / 29–32 | 70–72 |
+| Baseline 1080p240, 80 Mbps | 8.3–9.3 / 10–43 | 73–115 | 9.7 / 10.6–10.7 | 191–197 |
+
+H.264 runs out of encoder at about 195 fps at 1080p and 72 at
+3024×1964; asked for more, its frames queue behind each other (hence
+~10 ms and ~27 ms). HEVC is the codec for fast or large streams. 4K60
+HEVC takes 14 ms a frame.
+The table predates HEVC's quality path: up to 1080p120 an HEVC frame
+now takes about 7 ms (p95 8–9 ms), still inside a 120 Hz frame.
+
+Picture quality, from the paced synthetic matrix in
+[measurements/2026-11-03/mac-host](measurements/2026-11-03/mac-host/README.md)
+(medians of three, FFmpeg PSNR against the exact source pictures, a
+forced IDR every second; 5.1 → the speed hint alone → now):
+
+| Case | PSNR dB | IDR max kB |
+| --- | --- | --- |
+| HEVC 1080p60, 20 Mbps, moving | 40.61 → 34.72 → 42.41 | 925 → 830 → 1329 |
+| HEVC 1080p60, 20 Mbps, still | 42.32 → 38.69 → 43.32 | 925 → 1018 → 1279 |
+| HEVC 1080p120, 50 Mbps, moving | 44.27 → 40.72 → 47.70 | 1021 → 1215 → 1970 |
+| HEVC 1080p240, 80 Mbps, moving | 44.17 → 39.36 → 39.36 | 925 → 1066 → 1066 |
+| HEVC 3024×1964@120, 100 Mbps, moving | 43.70 → 36.18 → 36.18 | 2524 → 2794 → 2794 |
+| H.264 High 1080p60, 20 Mbps, still | 43.18 → 39.33 → 39.33 | 925 → 844 → 844 |
+| H.264 High 1080p120, 50 Mbps, still | 45.18 → 42.92 → 42.92 | 1031 → 1254 → 1254 |
+
+5.1's figures at 240 fps and 3024×1964 come from the 26–45 fps it
+managed there. H.264 ignores `PrioritizeEncodingSpeedOverQuality` (its
+output is bit-identical either way). It trails 5.1 by up to 4.5 dB
+on some cases and gains a little on others; the low-latency rate control
+gets 1 dB back at 1080p60/20 but doubles the encode time, so H.264 stays
+as it is. HEVC's quality path buys its PSNR with larger IDRs.
+
+Keyframes stay large. VideoToolbox holds P-frames to `DataRateLimits`
+but not keyframes: an IDR is 20–40× a P-frame at 1080p (0.8–2 MB).
+Nothing found bounds the IDR alone. `ConstantBitRate` and the macOS 26
+VBV keys pad P-frames and leave the IDR as it was, `MinAllowedFrameQP`
+takes effect only at a keyframe and then holds for the whole GOP (every
+P-frame capped too), and `BaseFrameQP` works only under the low-latency
+rate control above. So a lost frame is best answered without an IDR
+(reference invalidation), and the IDR that remains is paced on the wire.
 
 ## Permissions
 

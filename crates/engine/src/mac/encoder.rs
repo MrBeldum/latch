@@ -1,30 +1,80 @@
 //! VideoToolbox consumes the capture's IOSurface directly; only compressed bytes cross into Rust.
+//!
+//! Frames are submitted without waiting for the one before: the media engine
+//! overlaps them, so a stream whose frame interval is shorter than one
+//! frame's encode time still runs at its rate (1080p HEVC at 240 fps,
+//! 3024x1964 at 120 on an M3 Pro), and each frame leaves as soon as it is done.
 
 use super::ffi::*;
 use crate::video::{Codec, EncodedVideo, VideoConfig};
 use anyhow::{bail, ensure, Result};
-use parking_lot::Mutex;
-use std::{ffi::c_void, ptr, time::Instant};
+use parking_lot::{Condvar, Mutex};
+use std::{
+    collections::VecDeque,
+    ffi::c_void,
+    ptr,
+    time::{Duration, Instant},
+};
 
+/// The picture depth a session encodes: what the capture hands over, and
+/// what the stream carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Depth {
+    /// NV12 in, 8-bit H.264 or HEVC Main out.
+    Eight,
+    /// P010 in, HEVC Main10 out.
+    #[allow(dead_code)]
+    Ten,
+}
+impl Depth {
+    pub fn pixel_format(self) -> u32 {
+        match self {
+            Depth::Eight => NV12,
+            Depth::Ten => P010,
+        }
+    }
+}
+
+/// One frame out of the encoder: its index, when it came out, and the frame
+/// (`None` when the encoder dropped it).
+pub type Done = (i64, Instant, Option<Result<EncodedVideo>>);
+/// The callback's side of a session: capture times of the frames still in
+/// the encoder, by index, and what came out, oldest first.
 struct Output {
-    captured: Instant,
     hevc: bool,
-    frame: Option<Result<EncodedVideo>>,
+    pending: VecDeque<(i64, Instant)>,
+    done: VecDeque<Done>,
+}
+type Wake = Box<dyn Fn() + Send + Sync>;
+struct Callback {
+    output: Mutex<Output>,
+    ready: Condvar,
+    /// Also called when a frame comes out, after `output` is unlocked, so a
+    /// caller can wait for a frame and a picture on one condition.
+    wake: Mutex<Option<Wake>>,
 }
 
 pub(super) struct Encoder {
     session: Owned,
-    output: Box<Mutex<Output>>,
+    output: Box<Callback>,
     pub hardware: bool,
     config: VideoConfig,
+    depth: Depth,
     index: i64,
+    /// Discard output until an IDR submitted at or after this boundary.
+    recovery: Option<i64>,
+    forced: Option<i64>,
 }
 
 impl Encoder {
-    pub fn new(config: &VideoConfig) -> Result<Self> {
-        Self::create(config, true)
+    pub fn new(config: &VideoConfig, depth: Depth) -> Result<Self> {
+        Self::open(config, true, depth)
     }
+    #[cfg(test)]
     fn create(config: &VideoConfig, allow_hardware: bool) -> Result<Self> {
+        Self::open(config, allow_hardware, Depth::Eight)
+    }
+    fn open(config: &VideoConfig, allow_hardware: bool, depth: Depth) -> Result<Self> {
         ensure!(
             config.width > 0
                 && config.height > 0
@@ -38,41 +88,45 @@ impl Encoder {
             (1..=latch_proto::control::MAX_FPS).contains(&config.fps) && config.bitrate_kbps > 0,
             "invalid frame rate or bitrate"
         );
-        let mut output = Box::new(Mutex::new(Output {
-            captured: Instant::now(),
-            hevc: config.codec == Codec::Hevc,
-            frame: None,
-        }));
+        ensure!(
+            depth == Depth::Eight || config.codec == Codec::Hevc,
+            "10-bit video needs HEVC"
+        );
+        let mut output = Box::new(Callback {
+            output: Mutex::new(Output {
+                hevc: config.codec == Codec::Hevc,
+                pending: VecDeque::new(),
+                done: VecDeque::new(),
+            }),
+            ready: Condvar::new(),
+            wake: Mutex::new(None),
+        });
         let mut session = ptr::null();
         let mut last_status = 0;
         let mut required_hardware = false;
         // SAFETY: all specification values are framework constants; the boxed callback state stays
         // at a stable address until invalidate has drained callbacks in Drop.
         unsafe {
-            for (hardware, low_latency) in [(true, true), (true, false), (false, false)] {
+            // Not EnableLowLatencyRateControl: on Apple Silicon it doubles a
+            // frame's encode time (1080p 4.7 -> 9.4 ms), drops frames (45 of
+            // 60 fps) and sends a fifth of the asked-for bitrate.
+            for hardware in [true, false] {
                 if hardware && !allow_hardware {
                     continue;
                 }
-                let mut entries = if hardware {
-                    vec![(
+                let spec = dictionary(&[if hardware {
+                    (
                         kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
                         kCFBooleanTrue,
-                    )]
+                    )
                 } else {
                     // Omitting RequireHardware alone can select the same failing
                     // hardware encoder again. Explicitly disable it for this retry.
-                    vec![(
+                    (
                         kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
                         kCFBooleanFalse,
-                    )]
-                };
-                if low_latency {
-                    entries.push((
-                        kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
-                        kCFBooleanTrue,
-                    ));
-                }
-                let spec = dictionary(&entries);
+                    )
+                }]);
                 last_status = VTCompressionSessionCreate(
                     ptr::null(),
                     config.width as i32,
@@ -86,12 +140,12 @@ impl Encoder {
                     ptr::null(),
                     ptr::null(),
                     encoded,
-                    (&mut *output as *mut Mutex<Output>).cast(),
+                    (&mut *output as *mut Callback).cast(),
                     &mut session,
                 );
                 #[cfg(test)]
                 eprintln!(
-                    "create {:?} hardware={hardware} low_latency={low_latency}: {last_status}",
+                    "create {:?} {depth:?} hardware={hardware}: {last_status}",
                     config.codec
                 );
                 if last_status == 0 && !session.is_null() {
@@ -114,7 +168,10 @@ impl Encoder {
                 bitrate_kbps: 0,
                 ..config.clone()
             },
+            depth,
             index: 0,
+            recovery: None,
+            forced: None,
         };
         // SAFETY: the session is live and each property receives the documented CF value type.
         unsafe {
@@ -123,21 +180,34 @@ impl Encoder {
                 kVTCompressionPropertyKey_AllowFrameReordering,
                 kCFBooleanFalse,
             )?;
+            // On M3 Pro the quality path restores 7 dB at 1080p120 while
+            // keeping pace. Above that pixel rate it misses frames (190/240
+            // at 1080p, 70/120 at 3024x1964), so retain the fast path there.
+            let quality = required_hardware
+                && config.codec == Codec::Hevc
+                && depth == Depth::Eight
+                && u64::from(config.width) * u64::from(config.height)
+                    <= 1920 * 1080 * 120 / u64::from(config.fps);
             let _ = VTSessionSetProperty(
                 encoder.session.0,
                 kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
-                kCFBooleanTrue,
+                if quality {
+                    kCFBooleanFalse
+                } else {
+                    kCFBooleanTrue
+                },
             );
             let _ = VTSessionSetProperty(
                 encoder.session.0,
                 kVTCompressionPropertyKey_MaxFrameDelayCount,
                 number(0).0,
             );
-            let profile = match config.codec {
-                Codec::Hevc => kVTProfileLevel_HEVC_Main_AutoLevel,
-                Codec::H264High => kVTProfileLevel_H264_High_AutoLevel,
-                Codec::H264Baseline => kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel,
-                Codec::Av1 => anyhow::bail!("VideoToolbox does not encode AV1"),
+            let profile = match (config.codec, depth) {
+                (Codec::Hevc, Depth::Ten) => kVTProfileLevel_HEVC_Main10_AutoLevel,
+                (Codec::Hevc, Depth::Eight) => kVTProfileLevel_HEVC_Main_AutoLevel,
+                (Codec::H264High, _) => kVTProfileLevel_H264_High_AutoLevel,
+                (Codec::H264Baseline, _) => kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel,
+                (Codec::Av1, _) => anyhow::bail!("VideoToolbox does not encode AV1"),
             };
             if let Err(error) = encoder.set(kVTCompressionPropertyKey_ProfileLevel, profile) {
                 if config.codec != Codec::H264Baseline {
@@ -157,25 +227,16 @@ impl Encoder {
                 kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
                 float_number(0.0).0,
             );
-            let _ = VTSessionSetProperty(
-                encoder.session.0,
-                kVTCompressionPropertyKey_ColorPrimaries,
-                kCVImageBufferColorPrimaries_ITU_R_709_2,
-            );
-            let _ = VTSessionSetProperty(
-                encoder.session.0,
-                kVTCompressionPropertyKey_TransferFunction,
-                kCVImageBufferTransferFunction_ITU_R_709_2,
-            );
-            let _ = VTSessionSetProperty(
-                encoder.session.0,
-                kVTCompressionPropertyKey_YCbCrMatrix,
-                kCVImageBufferYCbCrMatrix_ITU_R_709_2,
-            );
             encoder.set(
                 kVTCompressionPropertyKey_ExpectedFrameRate,
                 number(config.fps as i64).0,
             )?;
+            // macOS 15+: the most frames a second this session can be handed,
+            // which keeps the media engine clocked for it (a few per cent
+            // faster at 240 fps).
+            if let Some(key) = optional(c"kVTCompressionPropertyKey_MaximumRealTimeFrameRate") {
+                let _ = VTSessionSetProperty(encoder.session.0, key, number(config.fps as i64).0);
+            }
             // The viewer converts as BT.709 limited range, and the Windows
             // encoder says so in the stream; untagged, other decoders guess.
             // Tags only: VideoToolbox does not convert the pixels.
@@ -209,11 +270,6 @@ impl Encoder {
                 ptr::null(),
                 &mut hardware,
             );
-            #[cfg(test)]
-            eprintln!(
-                "hardware property status={hw_status} null={}",
-                hardware.is_null()
-            );
             if hw_status == 0 && !hardware.is_null() {
                 let value = Owned(hardware);
                 encoder.hardware = CFBooleanGetValue(value.0);
@@ -229,12 +285,20 @@ impl Encoder {
         )
     }
     pub fn bitrate(&mut self, kbps: u32) -> Result<()> {
-        self.set_bitrate(kbps)
-    }
-    pub fn set_bitrate(&mut self, kbps: u32) -> Result<()> {
         ensure!(kbps > 0, "bitrate must be positive");
         if kbps == self.config.bitrate_kbps {
             return Ok(());
+        }
+        if self.config.bitrate_kbps != 0 {
+            // Finish old-rate work first, so every picture submitted after
+            // this encodes at the new rate. What already came out still
+            // leaves, in order: later P-frames reference it, and dropping it
+            // would cost an IDR at every step of a ramp.
+            // SAFETY: the live session owns all outstanding submissions.
+            check(
+                unsafe { VTCompressionSessionCompleteFrames(self.session.0, INVALID_TIME) },
+                "complete pictures before bitrate change",
+            )?;
         }
         let rate = number(i64::from(kbps) * 1000);
         let bytes = number(i64::from(kbps) * 1000 * 3 / 16);
@@ -242,6 +306,8 @@ impl Encoder {
         // SAFETY: CFArray retains the two numeric values; set copies or retains its argument.
         unsafe {
             self.set(kVTCompressionPropertyKey_AverageBitRate, rate.0)?;
+            // VideoToolbox holds P-frames to this but not keyframes, which
+            // come out 20-40x a P-frame whatever is set here (see MACOS.md).
             let limits = Owned::new(CFArrayCreate(
                 ptr::null(),
                 [bytes.0, seconds.0].as_ptr(),
@@ -271,7 +337,7 @@ impl Encoder {
             bitrate_kbps: 20_000,
             codec,
         };
-        let Ok(mut encoder) = Self::new(&config) else {
+        let Ok(mut encoder) = Self::new(&config, Depth::Eight) else {
             return false;
         };
         if !encoder.hardware {
@@ -301,6 +367,7 @@ impl Encoder {
         let encoded = encoder.encode(image.0, Instant::now(), true);
         matches!(encoded, Ok(Some(_))) && encoder.hardware
     }
+    /// Encodes one picture and waits for it.
     pub fn encode(
         &mut self,
         image: Ref,
@@ -310,19 +377,25 @@ impl Encoder {
         match self.encode_once(image, captured, keyframe) {
             Err(error) if self.hardware => {
                 tracing::warn!(%error, "VideoToolbox hardware encode failed; retrying in software");
-                self.software_retry(image, captured)
+                self.software()?;
+                self.encode_once(image, captured, true)
             }
             result => result,
         }
     }
-    fn software_retry(&mut self, image: Ref, captured: Instant) -> Result<Option<EncodedVideo>> {
-        // Destroy the failed session before selecting the replacement. Both its
-        // callback state and this call's retained image stay alive during invalidation.
+    /// Replaces a failed hardware session with a software one; frames still
+    /// in the old session are lost, so the next frame must be a keyframe.
+    pub fn software(&mut self) -> Result<()> {
+        // Destroy the failed session before selecting the replacement. Its
+        // callback state stays alive until the old encoder is dropped below.
         unsafe {
             VTCompressionSessionInvalidate(self.session.0);
         }
-        *self = Self::create(&self.config, false)?;
-        self.encode_once(image, captured, true)
+        let wake = self.output.wake.lock().take();
+        *self = Self::open(&self.config, false, self.depth)?;
+        *self.output.wake.lock() = wake;
+        self.request_keyframe();
+        Ok(())
     }
     fn encode_once(
         &mut self,
@@ -330,13 +403,35 @@ impl Encoder {
         captured: Instant,
         keyframe: bool,
     ) -> Result<Option<EncodedVideo>> {
-        {
-            let mut out = self.output.lock();
-            out.captured = captured;
-            out.frame = None;
+        let index = self.submit(image, captured, keyframe)?;
+        // SAFETY: the session is live; this returns once every frame up to index has called back.
+        check(
+            unsafe {
+                VTCompressionSessionCompleteFrames(self.session.0, time(index, self.config.fps))
+            },
+            "complete picture",
+        )?;
+        while let Some((i, _, frame)) = self.collect(Duration::ZERO) {
+            if i == index {
+                return frame.transpose();
+            }
         }
-        // SAFETY: capture retains image throughout this call.
-        unsafe {
+        Ok(None)
+    }
+    /// Hands one picture to the encoder without waiting for it to come out.
+    pub fn submit(&mut self, image: Ref, captured: Instant, keyframe: bool) -> Result<i64> {
+        let index = self.index;
+        self.index += 1;
+        let recovery_keyframe = self.recovery.is_some() && self.forced.is_none();
+        let keyframe = keyframe || recovery_keyframe;
+        self.output
+            .output
+            .lock()
+            .pending
+            .push_back((index, captured));
+        // SAFETY: the caller retains image until this returns; VideoToolbox retains it while
+        // encoding. The frame refcon carries only the index, never a pointer.
+        let status = unsafe {
             let options = dictionary(&[(
                 kVTEncodeFrameOptionKey_ForceKeyFrame,
                 if keyframe {
@@ -345,50 +440,132 @@ impl Encoder {
                     kCFBooleanFalse
                 },
             )]);
-            check(
-                VTCompressionSessionEncodeFrame(
-                    self.session.0,
-                    image,
-                    time(self.index, self.config.fps),
-                    time(1, self.config.fps),
-                    options.0,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                ),
-                "encode picture",
-            )?;
-            check(
-                VTCompressionSessionCompleteFrames(
-                    self.session.0,
-                    time(self.index, self.config.fps),
-                ),
-                "complete picture",
-            )?;
+            VTCompressionSessionEncodeFrame(
+                self.session.0,
+                image,
+                time(index, self.config.fps),
+                time(1, self.config.fps),
+                options.0,
+                index as *mut c_void,
+                ptr::null_mut(),
+            )
+        };
+        if let Err(error) = check(status, "encode picture") {
+            self.output
+                .output
+                .lock()
+                .pending
+                .retain(|(i, _)| *i != index);
+            return Err(error);
         }
-        self.index += 1;
-        self.output.lock().frame.take().transpose()
+        if recovery_keyframe {
+            self.forced = Some(index);
+        }
+        Ok(index)
+    }
+    /// Repeated requests while an IDR is pending share the same boundary.
+    pub fn request_keyframe(&mut self) {
+        if self.recovery.is_none() {
+            self.recovery = Some(self.index);
+            self.forced = None;
+        }
+    }
+    pub fn needs_keyframe(&self) -> bool {
+        self.recovery.is_some()
+    }
+    /// The oldest usable output. During recovery, nothing before the fresh
+    /// IDR may leave: those P-frames can reference pictures the viewer lost.
+    pub fn collect(&mut self, wait: Duration) -> Option<Done> {
+        let deadline = Instant::now() + wait;
+        loop {
+            let done = {
+                let mut out = self.output.output.lock();
+                while out.done.is_empty() {
+                    if wait.is_zero()
+                        || self.output.ready.wait_until(&mut out, deadline).timed_out()
+                    {
+                        break;
+                    }
+                }
+                out.done.pop_front()
+            }?;
+            if let Some(boundary) = self.recovery {
+                if done.0 < boundary {
+                    continue;
+                }
+                match &done.2 {
+                    Some(Ok(frame)) if frame.keyframe => {
+                        self.recovery = None;
+                        self.forced = None;
+                    }
+                    Some(Err(_)) => return Some(done),
+                    _ => {
+                        if self.forced.is_some_and(|index| done.0 >= index) {
+                            // The forced picture was dropped or was not an IDR.
+                            self.forced = None;
+                        }
+                        continue;
+                    }
+                }
+            }
+            return Some(done);
+        }
+    }
+    /// How many submitted frames have not come out yet.
+    pub fn in_flight(&self) -> usize {
+        self.output.output.lock().pending.len()
+    }
+    /// Called (on VideoToolbox's thread) whenever a frame comes out.
+    pub fn on_output(&self, wake: impl Fn() + Send + Sync + 'static) {
+        *self.output.wake.lock() = Some(Box::new(wake));
     }
 }
 impl Drop for Encoder {
     fn drop(&mut self) {
-        // SAFETY: invalidation prevents any callback from outliving the boxed output state.
-        unsafe { VTCompressionSessionInvalidate(self.session.0) }
+        // SAFETY: completing every pending frame, then invalidating, leaves no
+        // callback that could outlive the boxed output state.
+        unsafe {
+            VTCompressionSessionCompleteFrames(self.session.0, INVALID_TIME);
+            VTCompressionSessionInvalidate(self.session.0);
+        }
     }
 }
 unsafe extern "C" fn encoded(
     context: *mut c_void,
-    _: *mut c_void,
+    frame: *mut c_void,
     status: i32,
     _: u32,
     sample: Ref,
 ) {
-    // SAFETY: context points to the session's stable boxed Mutex until invalidation completes.
-    let out = unsafe { &*context.cast::<Mutex<Output>>() };
-    let mut out = out.lock();
-    out.frame = callback_frame(status, sample.is_null(), || {
-        // SAFETY: the callback's sample and all of its borrowed data stay live for this scope.
-        unsafe { annex_b(sample, out.hevc, out.captured) }
-    });
+    // SAFETY: context points to the session's stable boxed state until invalidation completes.
+    let callback = unsafe { &*context.cast::<Callback>() };
+    let index = frame as i64;
+    {
+        let mut out = callback.output.lock();
+        // Frames come out in order; any older one still listed was dropped
+        // without a callback.
+        let mut captured = None;
+        while let Some(&(i, at)) = out.pending.front() {
+            if i > index {
+                break;
+            }
+            out.pending.pop_front();
+            if i == index {
+                captured = Some(at);
+            }
+        }
+        let captured = captured.unwrap_or_else(Instant::now);
+        let hevc = out.hevc;
+        let frame = callback_frame(status, sample.is_null(), || {
+            // SAFETY: the callback's sample and all of its borrowed data stay live for this scope.
+            unsafe { annex_b(sample, hevc, captured) }
+        });
+        out.done.push_back((index, Instant::now(), frame));
+    }
+    callback.ready.notify_all();
+    if let Some(wake) = &*callback.wake.lock() {
+        wake();
+    }
 }
 
 fn callback_frame(

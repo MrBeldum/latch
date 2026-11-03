@@ -48,6 +48,7 @@ Content-Length: <n>
 | `audio` | bool | send desktop audio |
 | `name` | string | the viewer's machine name, for the host's log |
 | `cursor` | bool | optional, default false; viewer can draw pointer locally and handle shape updates |
+| `gamepads` | bool | optional, default false; the viewer sends gamepads (see [Gamepads](#gamepads-912)) |
 
 A request is taken within 64 to 16384 pixels a side, 1 to 500 fps and
 500 kbps to 1 Gbps (`latch_proto::control::MAX_*`). The host then meets
@@ -96,6 +97,9 @@ type byte and the payload and is at most 65 536. Payloads are JSON objects.
 | `audio` | object or null | `{"rate": 48000, "channels": 2, "frame_samples": 240, "codec": "lpcm-rice"}`; null when there is none |
 | `audio_problem` | string | why there is no audio, when `audio` is null |
 | `cursor` | bool | optional, default false; host supports omitting pointer from video and sending shape updates |
+| `gamepads` | u8 | optional, default 0; gamepad slots the host emulates (0: none, so the viewer sends none) |
+| `gamepad_kinds` | [string] | optional; the pad kinds the host emulates as themselves, of `"xbox"`, `"playstation"`, `"generic"`; unknown names are skipped |
+| `gamepad_problem` | string | optional; why the host takes no gamepads although the viewer offered them |
 
 Either side sends `Keepalive` when it has sent nothing for one second. A
 connection that has been silent for ten seconds is dead. The session ends
@@ -135,6 +139,10 @@ not match its kind is dropped without an answer.
 | 6 | `KeyframeRequest` | viewer → host |
 | 7 | `Ping` | both |
 | 8 | `Pong` | both |
+| 9 | `Pad` | viewer → host |
+| 10 | `PadAck` | host → viewer |
+| 11 | `PadFeedback` | host → viewer |
+| 12 | `PadFeedbackAck` | viewer → host |
 
 ### Hello (1)
 
@@ -160,7 +168,7 @@ frame in units of 0.1 ms (saturating).
 | Offset | Size | Field |
 | --- | --- | --- |
 | 8 | 4 | `frame` — frame number, +1 per encoded frame, wraps |
-| 12 | 4 | `frame_len` — bytes in the whole encoded frame (Annex B) |
+| 12 | 4 | `frame_len` — bytes in the whole encoded frame (Annex B for H.264/HEVC, low-overhead OBUs for AV1) |
 | 16 | 2 | `shard` — index of this shard in its block: data shards first, then parity |
 | 18 | 1 | `block` — index of the FEC block |
 | 19 | 1 | `blocks` — FEC blocks in the frame |
@@ -258,6 +266,58 @@ two viewer reports tells a filling queue from the path's base), and each
 keeps a smoothed round trip and its variance. No clocks are compared
 across machines.
 
+### Gamepads (9–12)
+
+Only after a `StreamRequest` with `gamepads` true and an `Accept` with
+`gamepads` above 0; an older host never sees these kinds (and would drop
+them as unknown). A pad is a state, not a stream of events: each datagram
+carries whole snapshots, and the newest replaces every older one.
+
+`Pad` (9): `u8 count` (1–16) at offset 8, then `count` snapshots, at most
+one per slot:
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 1 | `slot`, 0–15, below the `Accept`'s `gamepads` |
+| 1 | 1 | `kind`: 0 gone (unplugged), 1 Xbox, 2 PlayStation, 3 generic |
+| 2 | 1 | `flags`: bit 0 motion follows, bit 1 touch follows; others 0 |
+| 3 | 1 | reserved, 0 |
+| 4 | 4 | `seq` — the slot's snapshot number, +1 per new snapshot, from 1 |
+| 8 | 4 | `buttons`, by position on an Xbox-layout pad: bit 0 south (A, Cross), 1 east, 2 west, 3 north, 4 left shoulder, 5 right shoulder, 6 back (View, Share, Create), 7 start (Menu, Options), 8 guide (Xbox, PS), 9 left stick, 10 right stick, 11–14 d-pad up, down, left, right, 15 misc (Share, Mute, Capture), 16 touchpad click, 17–20 paddles 1–4 |
+| 12 | 8 | `i16` left x, left y, right x, right y; right and up positive |
+| 20 | 4 | `u16` left trigger, right trigger; 0 released, 65535 fully pulled |
+| 24 | 12 | if motion: `i16` gyro x, y, z in 1/16 °/s and accelerometer x, y, z in 1/8192 g (x right, y up, z towards the player) |
+| … | 10 | if touch: two fingers, each `u8` (bit 7 down, bits 0–6 finger id), `u16 x`, `u16 y` across the pad from the top left, 0–65535 |
+
+The first snapshot of a slot with a kind plugs a pad in; one with kind 0
+unplugs it. A host that cannot emulate `kind` emulates an Xbox pad. When
+the session ends the host unplugs every pad.
+
+`PadAck` (10) and `PadFeedbackAck` (12): `u8 count` (1–16), then `count`
+× (`u8 slot`, `u32 seq`): the newest snapshot of that slot the sender has
+applied. `PadAck` answers every `Pad` at once, for each slot in it.
+
+`PadFeedback` (11): `u8 count` (1–16), then `count` × 20 bytes:
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 1 | `slot` |
+| 1 | 1 | `flags`: bit 0 the light colour is set |
+| 2 | 1 | `player`: the number the host's system gave the pad, 1–8; 0 unknown |
+| 3 | 1 | reserved, 0 |
+| 4 | 4 | `seq` — per slot, as in `Pad` |
+| 8 | 8 | `u16` large (low-frequency) motor, small (high-frequency) motor, left trigger motor, right trigger motor; 0 off to 65535 |
+| 16 | 3 | light bar red, green, blue |
+| 19 | 1 | reserved, 0 |
+
+Reliability is the same in both directions. The sender sends a new
+snapshot at once and, while any slot's newest snapshot is unacknowledged,
+sends the newest snapshot of every such slot again every 10 ms. The
+receiver applies a snapshot only if its `seq` is newer than the last it
+applied for that slot (serial-number order), so a late or repeated
+datagram never moves a stick back or restarts a rumble that stopped. The
+viewer answers every `PadFeedback` with a `PadFeedbackAck`.
+
 ## Versioning
 
 `protocol` in `StreamRequest` and the upgrade token's `/1` name the
@@ -284,7 +344,8 @@ The values start from the codec's top level (H.264 6.2, HEVC Main 6.2
 High tier, AV1 6.3 High tier: 8192 × 4352 pixels a picture, 4.28 billion
 a second, 800 Mbps, H.264 High 1 Gbps) and are lowered where the
 platform's encoder has a smaller limit it can be seen to have (macOS:
-VideoToolbox is tried at a ladder of sizes until one encodes in hardware).
+VideoToolbox is tried at a ladder of sizes until one encodes in hardware;
+Linux: NVENC and VA-API say theirs).
 A picture is counted as coded, in whole 16-pixel blocks
 (`latch_proto::control::fit`, which host and viewer both use): an M3 Pro's
 H.264 takes 4096 × 2160 and fails 3776 × 2352, fewer pixels but more
@@ -292,6 +353,8 @@ blocks.
 `streamer.max_fps`, when not 0, is the software encoder's frame rate on
 that CPU at `capture_size` (or 1920 × 1080), measured by the host rather
 than guessed; a viewer asking for fewer pixels scales it up in proportion.
+A Linux host whose hardware encodes some codecs reports 0 here and puts
+the software rate in the other codecs' `max_pixel_rate` instead.
 Until the measurement (taken when the host starts, about 1.5 s) ends, a
 host encoding in software reports 30 fps at 1080p, and it holds every
 request to what it reports, pixels a second, whatever the viewer asked:
@@ -349,6 +412,13 @@ capped at 30%. Data shards precede parity computation and transmission; a
 completed frame is handed to decode immediately, including mid-receive-batch.
 Protocol 1 datagrams remain at most 1200 bytes. No MTU or socket-offload
 capability is advertised by this change.
+
+AV1 is additive in protocol 1: old hosts skip its unknown codec name in an
+ordered offer and can select the following HEVC/H.264 entry. Hosts send AV1
+only if the viewer explicitly offers it and a hardware encoder has produced
+a trial keyframe. AV1 frames carry low-overhead OBUs with a sequence header
+before each keyframe; no UDP header or control message changes. Current
+viewers do not offer AV1 until their decoder workstream adds support.
 
 ## Proposal: reference-frame invalidation (not implemented)
 

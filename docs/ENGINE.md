@@ -41,6 +41,8 @@ reassemble ─▶ decode ─▶ FrameSlot ─▶ wgpu
                       ◀── Audio + parity ───  loopback capture ─▶ lpcm-rice
 cpal ◀─ jitter buffer ◀─ decode
 Input (redundant until acked) ──────────────▶ inject (SendInput / CGEvent / XTest)
+Pad snapshots (newest, until acked) ────────▶ virtual pads (ViGEmBus / uinput)
+                      ◀── PadFeedback ──────  the game's rumble and lights
 KeyframeRequest on loss ────────────────────▶ next frame is IDR
 ```
 
@@ -55,9 +57,9 @@ KeyframeRequest on loss ──────────────────�
 
 | Host | Capture | Encode |
 | --- | --- | --- |
-| macOS | ScreenCaptureKit, NV12 IOSurface at the stream size, cursor included | VideoToolbox (HEVC, H.264 High, or Constrained Baseline), real time, no frame reordering |
-| Windows | DXGI Desktop Duplication, BGRA texture; cursor drawn in; Direct3D 11 video processor to NV12 at the stream size | Media Foundation H.264 encoder (the GPU's MFT, else Microsoft's), or HEVC from the GPU's MFT when `LATCH_WINDOWS_HEVC=1` ([WINDOWS.md](WINDOWS.md#the-video-pipeline)); `latch-codec` if neither works |
-| Linux (X11) | MIT-SHM `GetImage` through `x11rb`, cursor from XFixes | `latch-codec` software encoder, threads by slice |
+| macOS | ScreenCaptureKit, NV12 IOSurface at the stream size and up to the display's refresh, cursor included | VideoToolbox (HEVC, H.264 High, or Constrained Baseline; HEVC Main10 from P010 plumbed), real time, no frame reordering, two frames in flight ([MACOS.md](MACOS.md#sharing-this-mac-the-video-pipeline)) |
+| Windows | DXGI Desktop Duplication, BGRA texture; cursor drawn in; Direct3D 11 video processor to NV12 at the stream size | AMF HEVC on AMD, or the GPU's Media Foundation HEVC/AV1/H.264 encoder (Microsoft's CPU encoder for H.264 if needed) ([WINDOWS.md](WINDOWS.md#the-video-pipeline)); `latch-codec` if neither works |
+| Linux (X11) | MIT-SHM `GetImage` through `x11rb` of only the rectangles X Damage reports, cursor from XFixes | NVENC or VA-API from NV12 the CPU converts, when a probe at start finds one ([below](#linux-hardware-encoding)); else `latch-codec`, threads by slice |
 
 | Viewer | Decode |
 | --- | --- |
@@ -70,10 +72,12 @@ then fits the request to that encoder (`video::Limits`, reported to
 viewers as `streamer.codecs`; see `docs/PROTOCOL.md`, "Encoder limits").
 Latch adds no ceiling of its own beyond the request range (16384 pixels a
 side, 500 fps, 1 Gbps): the codec's top level, the encoder's own limit
-where it has one (VideoToolbox, found by trying), and on the software path
-the frame rate this CPU was measured to encode (`software::measure_fps`,
-held by the server through `software::ceiling`, 30 fps at 1080p until
-measured). Sizes are counted in coded 16-pixel blocks.
+where it has one (VideoToolbox, found by trying; NVENC and VA-API, as
+their drivers say), and on the software path the frame rate this CPU was
+measured to encode (`software::measure_fps`, held by the server through
+`software::ceiling`, 30 fps at 1080p until measured; on a Linux host
+whose hardware has some codecs, only the others are held, and the rate is
+in their `max_pixel_rate` rather than `max_fps`). Sizes are counted in coded 16-pixel blocks.
 `latch-codec` decodes Constrained Baseline only, so a host asked for
 `h264-baseline` configures its hardware encoder for that profile. A
 Windows viewer asks for Constrained Baseline only, so that when Media
@@ -95,7 +99,63 @@ its interval on the wire. Its hot loops (colour conversion, SAD, residual
 reconstruction, deblocking) use NEON or SSE/AVX2 through `std::arch`, and
 a governor keeps each frame's encode under 65% of the frame interval by
 trading search effort, not frames, so a slow or busy host still sends
-every frame it was asked for.
+every frame it was asked for. The Linux host hands it what X Damage says
+changed: only those rectangles are read from the X server and converted
+(split across cores), and outside them macroblocks are skipped without
+being compared; the bitstream is the one a full comparison gives.
+
+### Linux hardware encoding
+
+`latch-engine/src/linux/{nvenc,vaapi,hardware}.rs`. Both are loaded with
+`libloading` when first needed; nothing is linked, and the structures
+mirror the vendors' headers (sizes, offsets, bit positions, GUIDs and
+version words checked against nvEncodeAPI.h 12.0 and libva 2.x).
+
+* **NVENC** (`libnvidia-encode.so.1`, `libcuda.so.1`): H.264 Baseline or
+  High, HEVC Main, AV1 Main; preset P1 with ultra-low-latency tuning, CBR
+  with a one-frame VBV, no B-frames, an infinite GOP with IDRs (and
+  parameter sets) on request, BT.709 VUI; bitrate changes by
+  reconfiguration.
+* **VA-API** (`libva.so.2`, `libva-drm.so.2`, for each codec the first
+  render node whose driver opens its encoder, so an Intel iGPU and an AMD
+  card each give what they have): H.264 Constrained Baseline or High and
+  HEVC Main, the low-power entry point first, driver-written headers, one
+  reference (marked `RPS_ST_CURR_BEFORE` for HEVC, as FFmpeg does), CBR
+  with a one-frame HRD, the level from size, rate and bitrate (HEVC's High
+  tier where Main's bitrate is too low). Without packed headers HEVC has
+  no conformance window, so it codes only sizes in whole minimum coding
+  blocks (8 pixels or the driver's): 1366 × 768 or 1600 × 900 are not
+  offered HEVC. AV1 is not offered: VA-API leaves its headers to the
+  application. The host's user must be able to open the node (the
+  `render` group on Ubuntu); the log says so when it cannot.
+
+Each backend and codec is probed once per process, on the host's
+capacity thread when its service starts (open, an IDR that must carry its
+parameter sets, a P-frame), and what it takes is asked of the driver then
+(NVENC's maximum width, height, macroblocks and macroblock rate; VA-API's
+maximum picture size and HEVC block sizes); anything missing or failing
+leaves `latch-codec`. `LATCH_LINUX_ENCODER=auto` (default) `| software |
+nvenc | vaapi` chooses; under `auto` a viewer that asks for Constrained
+Baseline keeps `latch-codec`, whose output that decoder is tested
+against, and hardware Baseline is not probed. A codec is given up for the
+process only when an open fails in a way that lasts (no such profile or
+entry point, a driver that does not initialize, a node the user may not
+open, NVENC's device and version errors); a GeForce card's session limit,
+memory or a size the encoder does not take fail only that open. H.264
+then encodes in `latch-codec`, for that session or that size; a codec
+that will not open when a session starts gives way to the next one the
+viewer takes, and one that cannot go on after the desktop is resized
+(`video::Unencodable`) ends the session as `ENCODER_FAILED`, which the
+viewer reconnects from to negotiate another. Neither backend has run on a
+GPU yet: the Linux host used for testing has libva and a virtio render
+node its user may not open, so only the fallback has run.
+
+**Wayland** is not captured. It takes the ScreenCast portal (D-Bus, which
+pure Rust can speak) and a PipeWire stream, whose Rust bindings are
+generated from and compiled against libpipewire's C headers, outside the
+boundary above; the portal also asks a person to approve each session,
+which an unattended host cannot. Under a Wayland session only Xwayland
+windows are seen.
 
 ### Audio
 
@@ -104,6 +164,33 @@ every frame it was asked for.
 Silence costs a few bytes a frame and a desktop's sound about 0.5–1 Mbps;
 coding it costs microseconds. The decoded samples are exactly the
 captured ones, which lets tests check audio bit for bit. Opus is gone.
+
+### Gamepads
+
+A viewer that offers gamepads gets as many slots as the host can emulate
+(`Accept.gamepads`) and sends each pad's whole state whenever it changes;
+the host plugs a virtual pad in on a slot's first state, applies only the
+newest state of each slot, and unplugs every pad when the session ends.
+Rumble and light-bar colours come back the same way ([PROTOCOL.md](PROTOCOL.md#gamepads-912)).
+
+| Host | Virtual pads |
+| --- | --- |
+| Windows | ViGEmBus (installed by setup, [WINDOWS.md](WINDOWS.md#gamepads)), spoken to through `DeviceIoControl`: Xbox 360 pads (XInput) and DualShock 4 pads, up to 8; rumble, the player LED and the light bar come back from the driver's notifications |
+| Linux | `/dev/uinput` devices identical to what `xpad` makes for an Xbox 360 pad, up to 16, with `FF_RUMBLE`; needs write access to `/dev/uinput` ([deploy/native/README.md](../deploy/native/README.md#gamepads)) |
+| macOS | none: a Mac cannot add a gamepad without a driver, so `Accept` says why in `gamepad_problem` |
+
+| Viewer | Reading pads |
+| --- | --- |
+| macOS | GameController (Xbox, DualSense, DualShock 4, Switch Pro, MFi), value-changed handlers on Latch's own dispatch queue; rumble through Core Haptics, an engine per handle and trigger motor |
+| Windows | Windows.Gaming.Input polled every millisecond: `Gamepad` (with trigger motors), and Sony pads as `RawGameController` in their DirectInput layout |
+| Linux | evdev, a thread per pad blocked in `read`; `FF_RUMBLE`; the host's own virtual pads are skipped |
+
+A pad keeps its slot while it is connected, across streams. A test-pattern
+host (`LATCH_TEST_PATTERN`) plugs pads into an in-memory bus that rumbles
+back each pad's triggers, unless `LATCH_TEST_GAMEPADS=system` sends them to
+the platform's own. None of this compiles C: ViGEmBus's IOCTL layouts are
+declared in Rust from its MIT-licensed headers, and evdev/uinput are ioctls
+through `libc`.
 
 ## Decisions
 
@@ -155,7 +242,8 @@ captured ones, which lets tests check audio bit for bit. Opus is gone.
 * **Display sizing** stays where it was: a Linux desktop that follows its
   viewer is resized by the engine (`xrandr` semantics through RandR) or by
   the owner's prep command; Windows sets the virtual display's mode; macOS
-  captures the main display and lets ScreenCaptureKit scale it.
+  captures the main display (or `LATCH_MAC_DISPLAY`) and lets
+  ScreenCaptureKit scale it.
 
 ## Compatibility
 
@@ -166,6 +254,11 @@ A Latch 5 viewer that finds a Latch 4 host (no `streamer.protocol` in
 machine to update. A Latch 4 viewer finds no GameStream port on a Latch 5
 host and offers its own update. Pairing data, Sunshine's configuration and
 the engine folders of Latch 4 are removed by Latch 5's setup.
+
+Gamepads are negotiated inside protocol 1: a viewer before them never
+asks (`StreamRequest.gamepads` defaults to false), and a host before them
+never answers with slots (`Accept.gamepads` defaults to 0), so neither side
+ever sends datagram kinds 9–12 to a peer that does not know them.
 
 ## Evidence
 

@@ -1,0 +1,122 @@
+[
+  {
+    "capture_to_encode_ms": {
+      "p50": 2.9473,
+      "p95": 3.0475
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      120,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 117.96813484064396
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 2.8956,
+      "p95": 3.0915999999999997
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      240,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 214.5840553817456
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 2.9199,
+      "p95": 3.1487
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      360,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 209.7796577115802
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 2.9911999999999996,
+      "p95": 3.121
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      60,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 59.571146319248626
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 4.706799999999999,
+      "p95": 4.8063
+    },
+    "codec": "hevc",
+    "config": [
+      2560,
+      1440,
+      120,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 118.18025641686751
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 4.7004,
+      "p95": 4.934
+    },
+    "codec": "hevc",
+    "config": [
+      2560,
+      1440,
+      240,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 149.54237452208264
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 9.7006,
+      "p95": 10.0929
+    },
+    "codec": "hevc",
+    "config": [
+      3840,
+      2160,
+      120,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 85.73756875591143
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 9.731200000000001,
+      "p95": 9.9374
+    },
+    "codec": "hevc",
+    "config": [
+      3840,
+      2160,
+      60,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 58.85118399189277
+  }
+]

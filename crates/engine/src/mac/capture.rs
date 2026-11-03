@@ -111,8 +111,41 @@ unsafe impl Send for Capture {}
 struct Selection(Retained<SCDisplay>);
 // SAFETY: SCDisplay is immutable shareable-content metadata; retaining it across callback queues is valid.
 unsafe impl Send for Selection {}
+/// What a video capture asks ScreenCaptureKit for.
+#[derive(Debug, Clone, Copy)]
+pub struct Request {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    /// A CGDirectDisplayID; the main display when `None` or gone.
+    pub display: Option<u32>,
+    /// NV12 or P010 (see `encoder::Depth`).
+    pub pixel_format: u32,
+}
 impl Capture {
-    pub fn new(width: u32, height: u32, fps: u32, audio: bool) -> Result<Self> {
+    pub fn video(request: Request) -> Result<Self> {
+        Self::new(request, false)
+    }
+    pub fn audio() -> Result<Self> {
+        Self::new(
+            Request {
+                width: 2,
+                height: 2,
+                fps: 1,
+                display: None,
+                pixel_format: NV12,
+            },
+            true,
+        )
+    }
+    fn new(request: Request, audio: bool) -> Result<Self> {
+        let Request {
+            width,
+            height,
+            fps,
+            display: wanted,
+            pixel_format,
+        } = request;
         permission()?;
         let (tx, rx) = mpsc::sync_channel(1);
         let completion = RcBlock::new(
@@ -131,9 +164,14 @@ impl Capture {
                         if displays.count() == 0 {
                             Err(PERMISSION.to_string())
                         } else {
-                            (0..displays.count())
-                                .map(|i| displays.objectAtIndex(i))
-                                .find(|d| d.displayID() == CGMainDisplayID())
+                            let find = |id: u32| {
+                                (0..displays.count())
+                                    .map(|i| displays.objectAtIndex(i))
+                                    .find(|d| d.displayID() == id)
+                            };
+                            wanted
+                                .and_then(find)
+                                .or_else(|| find(CGMainDisplayID()))
                                 .or_else(|| {
                                     (displays.count() > 0).then(|| displays.objectAtIndex(0))
                                 })
@@ -170,13 +208,20 @@ impl Capture {
             let config = SCStreamConfiguration::new();
             config.setWidth(width as usize);
             config.setHeight(height as usize);
-            config.setMinimumFrameInterval(time(1, fps));
-            // Queue depth 3 is the minimum required by ScreenCaptureKit to prevent frame
-            // drops: 1 surface is rendered by WindowServer compositor, 1 is queued/in transit,
-            // and 1 is consumed by this application/encoder. Setting depth to 2 starves the
-            // buffer pool under load.
-            config.setQueueDepth(3);
-            config.setPixelFormat(NV12);
+            let interval = frame_interval(fps, refresh(id));
+            config.setMinimumFrameInterval(CMTime {
+                value: (interval * 1e6) as i64,
+                timescale: 1_000_000,
+                flags: objc2_core_media::CMTimeFlags(1),
+                epoch: 0,
+            });
+            // The surfaces SCK renders into. VideoToolbox holds up to two
+            // while they encode (see encoder.rs), the pipeline the newest,
+            // and the window server needs two more to render the next
+            // refresh into without waiting. More surfaces add memory, not
+            // delay: each picture is delivered as soon as it is drawn.
+            config.setQueueDepth(5);
+            config.setPixelFormat(pixel_format);
             config.setShowsCursor(true);
             config.setScalesToFit(true);
             config.setPreservesAspectRatio(true);
@@ -253,6 +298,32 @@ impl Capture {
     /// the old fit, while input would still map to the old geometry.
     pub fn moved(&self) -> bool {
         moved(self.id, self.display)
+    }
+}
+/// The shortest gap SCK may leave between two pictures, in seconds. A
+/// stream as fast as the display, or one whose refresh is not known
+/// (ProMotion reports none), takes every refresh. A slower one takes every
+/// k-th, with half a refresh of slack so timing jitter never skips one,
+/// which a gap of exactly 1/fps does.
+fn frame_interval(fps: u32, refresh: f64) -> f64 {
+    let fps = f64::from(fps.max(1));
+    if refresh.is_nan() || refresh <= 0.0 || fps * 1.05 >= refresh {
+        return 0.0;
+    }
+    let every = (refresh / fps).floor().max(1.0);
+    (every - 0.5) / refresh
+}
+/// The display's refresh rate in Hz; zero when it has no fixed one.
+fn refresh(id: u32) -> f64 {
+    // SAFETY: the copied mode is released after its rate is read.
+    unsafe {
+        let mode = CGDisplayCopyDisplayMode(id);
+        if mode.is_null() {
+            return 0.0;
+        }
+        let rate = CGDisplayModeGetRefreshRate(mode);
+        CGDisplayModeRelease(mode);
+        rate
     }
 }
 fn moved(id: u32, display: DisplayRect) -> bool {
@@ -427,6 +498,24 @@ unsafe fn audio_sample(sample: Ref, state: &mut State) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn frame_interval_never_throttles_below_the_display_or_the_stream() {
+        // As fast as the display, or a display of unknown rate: every refresh.
+        assert_eq!(frame_interval(120, 120.0), 0.0);
+        assert_eq!(frame_interval(240, 120.0), 0.0);
+        assert_eq!(frame_interval(60, 0.0), 0.0);
+        assert_eq!(frame_interval(118, 120.0), 0.0);
+        // Every second refresh of a 120 Hz display, with half a refresh to spare.
+        let gap = frame_interval(60, 120.0);
+        assert!(gap > 1.0 / 120.0 && gap < 2.0 / 120.0, "{gap}");
+        // Not a divisor: every refresh, and the pacer takes 100 of them.
+        assert!(frame_interval(100, 120.0) < 1.0 / 120.0);
+        assert!(frame_interval(30, 144.0) < 4.0 / 144.0);
+        assert!(frame_interval(30, 144.0) > 3.0 / 144.0);
+        // SAFETY: reads the main display's ID and mode only.
+        let main = refresh(unsafe { CGMainDisplayID() });
+        assert!(main >= 0.0);
+    }
     #[test]
     fn display_bounds_are_stable_until_the_display_changes() {
         // SAFETY: reads the main display's ID only.

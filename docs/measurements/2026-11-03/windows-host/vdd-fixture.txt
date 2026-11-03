@@ -1,0 +1,7 @@
+Listing virtual display resolutions and refresh rates
+  updated 26 resolutions to C:\Program Files\LatchVddSelftest-e6e0fcf33fd9411d99e5034b065f032e\vdd_settings.xml; restarting the virtual display
+Listing virtual display resolutions and refresh rates
+  every resolution and refresh rate is listed already
+Listing virtual display resolutions and refresh rates
+  updated 1 resolutions to C:\Program Files\LatchVddSelftest-e6e0fcf33fd9411d99e5034b065f032e\vdd_settings.xml; restarting the virtual display
+PASS: refresh upgrade, custom timing preservation, idempotence, rollback

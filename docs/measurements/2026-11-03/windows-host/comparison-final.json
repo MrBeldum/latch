@@ -1,0 +1,191 @@
+[
+  {
+    "requested": [
+      1920,
+      1080,
+      60
+    ],
+    "label": "1080p60",
+    "before": {
+      "fps": 60.08973248799642,
+      "host_ms": 4.4244444370269775,
+      "rtt_ms": 158.66666666666666,
+      "mean_loss_pct": 0.0,
+      "encoder": "Media Foundation HEVC (AMDh265Encoder)"
+    },
+    "after": {
+      "requested": [
+        1920,
+        1080,
+        60
+      ],
+      "fps": 59.78636678059896,
+      "host_ms": 2.985069433848063,
+      "rtt_ms": 163.83333333333334,
+      "loss_pct": 0.0,
+      "encoder": "AMF HEVC (AMD)"
+    }
+  },
+  {
+    "requested": [
+      1920,
+      1080,
+      120
+    ],
+    "label": "1080p120",
+    "before": {
+      "fps": 113.82738367716472,
+      "host_ms": 4.928477843602498,
+      "rtt_ms": 163.16666666666666,
+      "mean_loss_pct": 0.244140625,
+      "encoder": "Media Foundation HEVC (AMDh265Encoder)"
+    },
+    "after": {
+      "requested": [
+        1920,
+        1080,
+        120
+      ],
+      "fps": 118.85044225056966,
+      "host_ms": 3.024186372756958,
+      "rtt_ms": 168.16666666666666,
+      "loss_pct": 0.0,
+      "encoder": "AMF HEVC (AMD)"
+    }
+  },
+  {
+    "requested": [
+      1920,
+      1080,
+      240
+    ],
+    "label": "1080p240",
+    "before": {
+      "fps": 115.30707295735677,
+      "host_ms": 4.408888975779216,
+      "rtt_ms": 154.33333333333334,
+      "mean_loss_pct": 0.0,
+      "encoder": "Media Foundation HEVC (AMDh265Encoder)"
+    },
+    "after": {
+      "requested": [
+        1920,
+        1080,
+        240
+      ],
+      "fps": 217.3388671875,
+      "host_ms": 2.9950114091237388,
+      "rtt_ms": 166.16666666666666,
+      "loss_pct": 0.0,
+      "encoder": "AMF HEVC (AMD)"
+    }
+  },
+  {
+    "requested": [
+      2560,
+      1440,
+      120
+    ],
+    "label": "1440p120",
+    "before": {
+      "fps": 100.8853874206543,
+      "host_ms": 5.820523023605347,
+      "rtt_ms": 169.5,
+      "mean_loss_pct": 0.0,
+      "encoder": "Media Foundation HEVC (AMDh265Encoder)"
+    },
+    "after": {
+      "requested": [
+        2560,
+        1440,
+        120
+      ],
+      "fps": 102.12389167149861,
+      "host_ms": 4.758142391840617,
+      "rtt_ms": 169.83333333333334,
+      "loss_pct": 0.9580291906992594,
+      "encoder": "AMF HEVC (AMD)"
+    }
+  },
+  {
+    "requested": [
+      2560,
+      1440,
+      240
+    ],
+    "label": "1440p240",
+    "before": {
+      "fps": 115.71536000569661,
+      "host_ms": 7.535024722417195,
+      "rtt_ms": 169.5,
+      "mean_loss_pct": 0.0,
+      "encoder": "Media Foundation HEVC (AMDh265Encoder)"
+    },
+    "after": {
+      "requested": [
+        2560,
+        1440,
+        240
+      ],
+      "fps": 213.43051401774088,
+      "host_ms": 4.730439980824788,
+      "rtt_ms": 172.0,
+      "loss_pct": 0.0,
+      "encoder": "AMF HEVC (AMD)"
+    }
+  },
+  {
+    "requested": [
+      3840,
+      2160,
+      60
+    ],
+    "label": "4K60",
+    "before": {
+      "fps": 61.11585807800293,
+      "host_ms": 13.739791711171469,
+      "rtt_ms": 171.66666666666666,
+      "mean_loss_pct": 0.0,
+      "encoder": "Media Foundation HEVC (AMDh265Encoder)"
+    },
+    "after": {
+      "requested": [
+        3840,
+        2160,
+        60
+      ],
+      "fps": 59.1105047861735,
+      "host_ms": 9.751845041910807,
+      "rtt_ms": 171.83333333333334,
+      "loss_pct": 0.0,
+      "encoder": "AMF HEVC (AMD)"
+    }
+  },
+  {
+    "requested": [
+      3840,
+      2160,
+      120
+    ],
+    "label": "4K120",
+    "before": {
+      "fps": 76.2846565246582,
+      "host_ms": 13.07315762837728,
+      "rtt_ms": 158.16666666666666,
+      "mean_loss_pct": 0.0,
+      "encoder": "Media Foundation HEVC (AMDh265Encoder)"
+    },
+    "after": {
+      "requested": [
+        3840,
+        2160,
+        120
+      ],
+      "fps": 96.19191884994507,
+      "host_ms": 9.999168078104654,
+      "rtt_ms": 168.33333333333334,
+      "loss_pct": 1.669595718383789,
+      "encoder": "AMF HEVC (AMD)"
+    }
+  }
+]

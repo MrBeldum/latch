@@ -774,6 +774,9 @@ fn test_6_control_messages_roundtrip_and_errors() {
             }),
             audio_problem: "".into(),
             cursor: true,
+            gamepads: 4,
+            gamepad_kinds: vec![latch_proto::gamepad::PadKind::Xbox],
+            gamepad_problem: String::new(),
         }),
         Message::End(End {
             code: end::CAPTURE_FAILED,
@@ -1046,4 +1049,33 @@ fn startup_grace_bounds_silence_and_allows_a_healthy_idr_to_finish() {
         Some(Reassembled::Frame(_))
     ));
     assert!(!rx.needs_keyframe(accepted, accepted + Duration::from_secs(1)));
+}
+
+#[test]
+fn av1_offer_is_additive_and_unknown_codecs_still_fall_through() {
+    use latch_proto::control::StreamRequest;
+    let mut request: serde_json::Value = serde_json::to_value(StreamRequest {
+        protocol: 1,
+        width: 1920,
+        height: 1080,
+        fps: 240,
+        bitrate_kbps: 100_000,
+        codecs: vec![Codec::Av1, Codec::Hevc, Codec::H264Baseline],
+        udp_port: 47880,
+        audio: false,
+        name: String::new(),
+        cursor: false,
+        gamepads: false,
+    })
+    .unwrap();
+    assert_eq!(request["codecs"][0], "av1");
+    request["codecs"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, serde_json::json!("future-codec"));
+    let decoded: StreamRequest = serde_json::from_value(request).unwrap();
+    assert_eq!(
+        decoded.codecs,
+        [Codec::Av1, Codec::Hevc, Codec::H264Baseline]
+    );
 }

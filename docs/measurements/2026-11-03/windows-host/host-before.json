@@ -1,0 +1,107 @@
+[
+  {
+    "capture_to_encode_ms": {
+      "p50": 4.5548,
+      "p95": 5.587
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      120,
+      50000
+    ],
+    "encoder": "Media Foundation HEVC (AMDh265Encoder)",
+    "fps": 120.03714858396373
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 4.3027999999999995,
+      "p95": 5.3593
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      240,
+      50000
+    ],
+    "encoder": "Media Foundation HEVC (AMDh265Encoder)",
+    "fps": 221.0825779081593
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 4.5757,
+      "p95": 5.591600000000001
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      60,
+      50000
+    ],
+    "encoder": "Media Foundation HEVC (AMDh265Encoder)",
+    "fps": 60.71094007813581
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 6.7735,
+      "p95": 8.0755
+    },
+    "codec": "hevc",
+    "config": [
+      2560,
+      1440,
+      120,
+      50000
+    ],
+    "encoder": "Media Foundation HEVC (AMDh265Encoder)",
+    "fps": 119.29864327617935
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 6.8205,
+      "p95": 7.8576
+    },
+    "codec": "hevc",
+    "config": [
+      2560,
+      1440,
+      240,
+      50000
+    ],
+    "encoder": "Media Foundation HEVC (AMDh265Encoder)",
+    "fps": 121.08164434376731
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 13.372,
+      "p95": 14.811100000000001
+    },
+    "codec": "hevc",
+    "config": [
+      3840,
+      2160,
+      120,
+      50000
+    ],
+    "encoder": "Media Foundation HEVC (AMDh265Encoder)",
+    "fps": 72.21500303294694
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 13.1661,
+      "p95": 69.61670000000001
+    },
+    "codec": "hevc",
+    "config": [
+      3840,
+      2160,
+      60,
+      50000
+    ],
+    "encoder": "Media Foundation HEVC (AMDh265Encoder)",
+    "fps": 38.433227391837
+  }
+]

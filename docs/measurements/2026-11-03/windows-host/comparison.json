@@ -1,0 +1,149 @@
+[
+  {
+    "requested": [
+      1920,
+      1080,
+      60
+    ],
+    "before": {
+      "fps": 60.08973248799642,
+      "host_ms": 4.4244444370269775,
+      "rtt_ms": 158.66666666666666,
+      "mean_loss_pct": 0.0,
+      "encoder": "Media Foundation HEVC (AMDh265Encoder)"
+    },
+    "after": {
+      "fps": 51.49065478642782,
+      "host_ms": 2.9876630703608194,
+      "rtt_ms": 160.66666666666666,
+      "mean_loss_pct": 0.829320510228475,
+      "encoder": "AMF HEVC (AMD)"
+    }
+  },
+  {
+    "requested": [
+      1920,
+      1080,
+      120
+    ],
+    "before": {
+      "fps": 113.82738367716472,
+      "host_ms": 4.928477843602498,
+      "rtt_ms": 163.16666666666666,
+      "mean_loss_pct": 0.244140625,
+      "encoder": "Media Foundation HEVC (AMDh265Encoder)"
+    },
+    "after": {
+      "fps": 119.67490005493164,
+      "host_ms": 2.971807599067688,
+      "rtt_ms": 176.33333333333334,
+      "mean_loss_pct": 0.2799552083015442,
+      "encoder": "AMF HEVC (AMD)"
+    }
+  },
+  {
+    "requested": [
+      1920,
+      1080,
+      240
+    ],
+    "before": {
+      "fps": 115.30707295735677,
+      "host_ms": 4.408888975779216,
+      "rtt_ms": 154.33333333333334,
+      "mean_loss_pct": 0.0,
+      "encoder": "Media Foundation HEVC (AMDh265Encoder)"
+    },
+    "after": {
+      "fps": 222.17634137471518,
+      "host_ms": 2.939484159151713,
+      "rtt_ms": 195.83333333333334,
+      "mean_loss_pct": 0.41724618275960285,
+      "encoder": "AMF HEVC (AMD)"
+    }
+  },
+  {
+    "requested": [
+      2560,
+      1440,
+      120
+    ],
+    "before": {
+      "fps": 100.8853874206543,
+      "host_ms": 5.820523023605347,
+      "rtt_ms": 169.5,
+      "mean_loss_pct": 0.0,
+      "encoder": "Media Foundation HEVC (AMDh265Encoder)"
+    },
+    "after": {
+      "fps": 102.04104216893514,
+      "host_ms": 4.889704624811809,
+      "rtt_ms": 172.33333333333334,
+      "mean_loss_pct": 0.8085262775421143,
+      "encoder": "AMF HEVC (AMD)"
+    }
+  },
+  {
+    "requested": [
+      2560,
+      1440,
+      240
+    ],
+    "before": {
+      "fps": 115.71536000569661,
+      "host_ms": 7.535024722417195,
+      "rtt_ms": 169.5,
+      "mean_loss_pct": 0.0,
+      "encoder": "Media Foundation HEVC (AMDh265Encoder)"
+    },
+    "after": {
+      "fps": 150.78598976135254,
+      "host_ms": 5.130419095357259,
+      "rtt_ms": 170.66666666666666,
+      "mean_loss_pct": 0.0,
+      "encoder": "AMF HEVC (AMD)"
+    }
+  },
+  {
+    "requested": [
+      3840,
+      2160,
+      60
+    ],
+    "before": {
+      "fps": 61.11585807800293,
+      "host_ms": 13.739791711171469,
+      "rtt_ms": 171.66666666666666,
+      "mean_loss_pct": 0.0,
+      "encoder": "Media Foundation HEVC (AMDh265Encoder)"
+    },
+    "after": {
+      "fps": 55.088409423828125,
+      "host_ms": 10.418258666992188,
+      "rtt_ms": 164.5,
+      "mean_loss_pct": 0.0,
+      "encoder": "AMF HEVC (AMD)"
+    }
+  },
+  {
+    "requested": [
+      3840,
+      2160,
+      120
+    ],
+    "before": {
+      "fps": 76.2846565246582,
+      "host_ms": 13.07315762837728,
+      "rtt_ms": 158.16666666666666,
+      "mean_loss_pct": 0.0,
+      "encoder": "Media Foundation HEVC (AMDh265Encoder)"
+    },
+    "after": {
+      "fps": 70.85163243611653,
+      "host_ms": 13.241374174753824,
+      "rtt_ms": 166.33333333333334,
+      "mean_loss_pct": 0.5056889851888021,
+      "encoder": "AMF HEVC (AMD)"
+    }
+  }
+]

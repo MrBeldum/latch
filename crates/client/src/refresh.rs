@@ -273,6 +273,8 @@ mod tests {
                 loop {
                     match listener.accept() {
                         Ok((mut socket, _)) => {
+                            // macOS hands on the listener's non-blocking mode.
+                            socket.set_nonblocking(false).unwrap();
                             if !blocked_auth {
                                 socket
                                     .set_read_timeout(Some(Duration::from_secs(10)))

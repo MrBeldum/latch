@@ -4,7 +4,7 @@
 //! measure input to picture).
 
 use crate::input::{DisplayRect, Event};
-use crate::software::{Bgra, CpuCapture};
+use crate::software::{Bgra, CpuCapture, Rect};
 use std::time::{Duration, Instant};
 
 /// What the pattern draws.
@@ -32,6 +32,18 @@ pub struct Pattern {
     pub cursor_drawn: bool,
     pub cursor_pending: bool,
     pub cursor_serial: u32,
+    /// What the last picture showed, to say what the next one changes.
+    shown: Option<Shown>,
+    damage: Option<Vec<Rect>>,
+}
+
+/// The parts of a rendered picture that move.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Shown {
+    size: (u32, u32),
+    cursor: Option<(i32, i32)>,
+    square_white: bool,
+    frame_count: u64,
 }
 
 impl Pattern {
@@ -49,7 +61,72 @@ impl Pattern {
             cursor_drawn: true,
             cursor_pending: true,
             cursor_serial: 1,
+            shown: None,
+            damage: None,
         }
+    }
+
+    /// The rectangles that differ between pictures showing `old` and `new`,
+    /// or `None` for a different size or cursor drawing.
+    fn changes(&self, old: Shown, new: Shown) -> Option<Vec<Rect>> {
+        if old.size != new.size || old.cursor.is_some() != new.cursor.is_some() {
+            return None;
+        }
+        let (w, h) = (self.width as usize, self.height as usize);
+        let top_h = h / 2;
+        let mut rects = Vec::new();
+        let mut add = |x: usize, y: usize, width: usize, height: usize| {
+            rects.push(Rect {
+                x: x as u32,
+                y: y as u32,
+                width: width as u32,
+                height: height as u32,
+            })
+        };
+        if old.frame_count != new.frame_count {
+            // The "FRAME:" line and the big counter, as `render` places them.
+            let text_y = (top_h + 32).min(h.saturating_sub(120)) + 48;
+            add(32, text_y, w.saturating_sub(32), 14);
+            let scale = 6;
+            let counter_x = w.saturating_sub(6 * (5 * scale + 2 * scale) + 40);
+            let counter_y = (top_h + 32).min(h.saturating_sub(70));
+            let box_w = 6 * (5 * scale + 2 * scale) + 16;
+            let box_h = 7 * scale + 16;
+            add(
+                counter_x.saturating_sub(8),
+                counter_y.saturating_sub(8),
+                box_w + 8,
+                box_h + 8,
+            );
+            match self.motion {
+                Motion::Still => {}
+                Motion::Sweep => {
+                    for count in [old.frame_count, new.frame_count] {
+                        let x = ((count * 8) % (w as u64)) as usize;
+                        add(x, 0, 16, h);
+                        if x + 16 > w {
+                            add(0, 0, x + 16 - w, h);
+                        }
+                    }
+                }
+                Motion::Noise => {
+                    let patch_w = (w / 3).clamp(64, 256);
+                    let patch_h = (h / 4).clamp(64, 256);
+                    let patch_x = (w / 2).saturating_sub(patch_w / 2);
+                    let patch_y = (top_h + 20).min(h.saturating_sub(patch_h));
+                    add(patch_x, patch_y, patch_w, patch_h);
+                }
+            }
+        }
+        if old.square_white != new.square_white {
+            add(0, 0, 64, 64);
+        }
+        if old.cursor != new.cursor {
+            for (x, y) in [old.cursor, new.cursor].into_iter().flatten() {
+                add(x.max(0) as usize, y.max(0) as usize, 16, 16);
+            }
+        }
+        Some(rects)
     }
 
     /// Feeds an input event in (the square at the top left flips between
@@ -373,6 +450,14 @@ impl CpuCapture for Pattern {
         };
 
         if changed {
+            let shown = Shown {
+                size: (self.width, self.height),
+                cursor: self.cursor_drawn.then_some(self.cursor_pos),
+                square_white: self.square_white,
+                frame_count: self.frame_count,
+            };
+            self.damage = self.shown.and_then(|old| self.changes(old, shown));
+            self.shown = Some(shown);
             self.render(frame);
             self.frame_count += 1;
         }
@@ -391,6 +476,10 @@ impl CpuCapture for Pattern {
 
     fn name(&self) -> String {
         "test pattern".into()
+    }
+
+    fn damage(&self) -> Option<Vec<Rect>> {
+        self.damage.clone()
     }
 
     fn set_cursor_drawn(&mut self, drawn: bool) -> bool {
@@ -573,6 +662,52 @@ mod tests {
 
         assert!(found_white, "No white text pixels found in bottom half");
         assert!(found_green, "No green counter pixels found in bottom half");
+    }
+
+    #[test]
+    fn damage_covers_every_changed_pixel() {
+        for motion in [Motion::Still, Motion::Sweep, Motion::Noise] {
+            for (w, h) in [(320, 240), (1920, 1080), (200, 100)] {
+                let mut p = Pattern::new(w, h, 1000, motion);
+                let mut old = Bgra::default();
+                assert!(p.grab(&mut old, Duration::ZERO).unwrap());
+                assert_eq!(p.damage(), None, "the first picture is new everywhere");
+                for i in 0..300 {
+                    match i % 7 {
+                        0 => p.input(&Event::Key {
+                            vk: 0x41,
+                            down: true,
+                            modifiers: 0,
+                        }),
+                        3 => p.input(&Event::MouseMove {
+                            dx: 37 - (i % 90) as i16,
+                            dy: (i % 13) as i16 - 6,
+                        }),
+                        _ => {}
+                    }
+                    let mut new = old.clone();
+                    if !p.grab(&mut new, Duration::ZERO).unwrap() {
+                        continue;
+                    }
+                    let rects = p.damage().expect("same size");
+                    for y in 0..h as usize {
+                        for x in 0..w as usize {
+                            let at = y * new.stride + x * 4;
+                            if new.data[at..at + 4] != old.data[at..at + 4] {
+                                assert!(
+                                    rects.iter().any(|r| (r.x as usize..(r.x + r.width) as usize)
+                                        .contains(&x)
+                                        && (r.y as usize..(r.y + r.height) as usize)
+                                            .contains(&y)),
+                                    "{motion:?} {w}x{h} frame {i}: ({x}, {y}) changed outside {rects:?}"
+                                );
+                            }
+                        }
+                    }
+                    old = new;
+                }
+            }
+        }
     }
 
     #[test]

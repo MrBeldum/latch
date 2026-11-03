@@ -1,0 +1,338 @@
+[
+  {
+    "capture_to_encode_ms": {
+      "p50": 2.9255,
+      "p95": 3.0882
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      120,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 101.1313566534911,
+    "phase": "amf-1920-1080-120"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 2.9513,
+      "p95": 3.2033
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      240,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 150.9692065976222,
+    "phase": "amf-1920-1080-240"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 2.9266,
+      "p95": 3.474
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      60,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 55.74805553278483,
+    "phase": "amf-1920-1080-60"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 4.7177,
+      "p95": 4.8929
+    },
+    "codec": "hevc",
+    "config": [
+      2560,
+      1440,
+      120,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 99.30448995121591,
+    "phase": "amf-2560-1440-120"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 4.7232,
+      "p95": 6.243
+    },
+    "codec": "hevc",
+    "config": [
+      2560,
+      1440,
+      240,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 135.30945121519386,
+    "phase": "amf-2560-1440-240"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 9.6903,
+      "p95": 13.232199999999999
+    },
+    "codec": "hevc",
+    "config": [
+      3840,
+      2160,
+      120,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 76.15534617445783,
+    "phase": "amf-3840-2160-120"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 9.6778,
+      "p95": 9.9376
+    },
+    "codec": "hevc",
+    "config": [
+      3840,
+      2160,
+      60,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 54.563464420670336,
+    "phase": "amf-3840-2160-60"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 2.9145999999999996,
+      "p95": 3.0682
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      120,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 118.31595469152174,
+    "phase": "final-amf-1920-1080-120"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 2.9185,
+      "p95": 3.1441
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      240,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 201.99004525726957,
+    "phase": "final-amf-1920-1080-240"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 2.9327,
+      "p95": 3.1238
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      60,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 59.452002416715565,
+    "phase": "final-amf-1920-1080-60"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 4.6844,
+      "p95": 4.9030000000000005
+    },
+    "codec": "hevc",
+    "config": [
+      2560,
+      1440,
+      120,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 117.86571951461433,
+    "phase": "final-amf-2560-1440-120"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 4.687099999999999,
+      "p95": 5.4007
+    },
+    "codec": "hevc",
+    "config": [
+      2560,
+      1440,
+      240,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 157.40490644918384,
+    "phase": "final-amf-2560-1440-240"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 9.694700000000001,
+      "p95": 13.1982
+    },
+    "codec": "hevc",
+    "config": [
+      3840,
+      2160,
+      120,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 90.2201191131955,
+    "phase": "final-amf-3840-2160-120"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 9.679,
+      "p95": 9.7891
+    },
+    "codec": "hevc",
+    "config": [
+      3840,
+      2160,
+      60,
+      50000
+    ],
+    "encoder": "AMF HEVC (AMD)",
+    "fps": 58.6155265735821,
+    "phase": "final-amf-3840-2160-60"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 6.1625,
+      "p95": 8.356300000000001
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      120,
+      50000
+    ],
+    "encoder": "Media Foundation HEVC (AMDh265Encoder)",
+    "fps": 105.67648828941418,
+    "phase": "mf-1920-1080-120"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 6.2307,
+      "p95": 7.3511
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      240,
+      50000
+    ],
+    "encoder": "Media Foundation HEVC (AMDh265Encoder)",
+    "fps": 111.80339373212206,
+    "phase": "mf-1920-1080-240"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 4.9286,
+      "p95": 7.7645
+    },
+    "codec": "hevc",
+    "config": [
+      1920,
+      1080,
+      60,
+      50000
+    ],
+    "encoder": "Media Foundation HEVC (AMDh265Encoder)",
+    "fps": 57.13294109154033,
+    "phase": "mf-1920-1080-60"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 8.7544,
+      "p95": 12.4003
+    },
+    "codec": "hevc",
+    "config": [
+      2560,
+      1440,
+      120,
+      50000
+    ],
+    "encoder": "Media Foundation HEVC (AMDh265Encoder)",
+    "fps": 82.63421345656849,
+    "phase": "mf-2560-1440-120"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 9.4275,
+      "p95": 12.066199999999998
+    },
+    "codec": "hevc",
+    "config": [
+      2560,
+      1440,
+      240,
+      50000
+    ],
+    "encoder": "Media Foundation HEVC (AMDh265Encoder)",
+    "fps": 82.61992975425997,
+    "phase": "mf-2560-1440-240"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 14.8809,
+      "p95": 16.7017
+    },
+    "codec": "hevc",
+    "config": [
+      3840,
+      2160,
+      120,
+      50000
+    ],
+    "encoder": "Media Foundation HEVC (AMDh265Encoder)",
+    "fps": 56.443018890995575,
+    "phase": "mf-3840-2160-120"
+  },
+  {
+    "capture_to_encode_ms": {
+      "p50": 15.4692,
+      "p95": 19.186600000000002
+    },
+    "codec": "hevc",
+    "config": [
+      3840,
+      2160,
+      60,
+      50000
+    ],
+    "encoder": "Media Foundation HEVC (AMDh265Encoder)",
+    "fps": 53.386903404264956,
+    "phase": "mf-3840-2160-60"
+  }
+]

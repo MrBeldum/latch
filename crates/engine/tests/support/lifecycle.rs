@@ -46,6 +46,13 @@ fn session(addr: SocketAddr) -> Arc<Session> {
             sink: None,
             display: info().display,
         }),
+        pads: Mutex::new(SessionPads {
+            receiver: Default::default(),
+            sink: None,
+            slots: 0,
+            failing: Default::default(),
+        }),
+        feedback: Default::default(),
         rtt: Mutex::new(RttEstimator::new()),
         rtt_low: Mutex::new(None),
         pace_kbps: AtomicU32::new(0),
@@ -122,6 +129,9 @@ fn a_viewer_that_does_not_read_cannot_block_the_control_writer() {
     host.set_nonblocking(false).unwrap();
     let accept = Accept {
         cursor: false,
+        gamepads: 0,
+        gamepad_kinds: Vec::new(),
+        gamepad_problem: String::new(),
         session: session.id,
         token: control::token_hex(&session.token),
         codec: Codec::H264Baseline,
@@ -199,6 +209,40 @@ fn video_reopen_failure_uses_remaining_budget() {
         Ok(pipeline())
     });
     assert_eq!(attempts, VIDEO_RECOVERIES);
+}
+
+/// A codec whose encoder cannot go on (HEVC after a resize to a size its
+/// only encoder does not take) ends the session at once, as an encoder
+/// failure the viewer reconnects from, not after the reopen budget as a
+/// capture failure.
+#[test]
+fn a_codec_that_cannot_go_on_ends_the_session_for_a_new_negotiation() {
+    let server = Server::bind(0, Options::default()).unwrap();
+    for during_reopen in [false, true] {
+        let session = session("127.0.0.1:9".parse().unwrap());
+        let mut attempts = 0;
+        let pipeline = Box::new(Video {
+            info: info(),
+            held: Arc::new(AtomicBool::new(true)),
+            next: Box::new(move |_, _, _| {
+                if during_reopen {
+                    anyhow::bail!("capture lost");
+                }
+                Err(video::Unencodable("1366 × 768 is not whole coding blocks".into()).into())
+            }),
+        });
+        send_video(&server, &session, pipeline, config(), |_| {
+            attempts += 1;
+            Err(
+                anyhow::Error::from(video::Unencodable("no HEVC at this size".into()))
+                    .context("open the HEVC encoder"),
+            )
+        });
+        assert_eq!(attempts, usize::from(during_reopen));
+        let ended = session.ended.lock().clone().unwrap();
+        assert_eq!(ended.code, end::ENCODER_FAILED);
+        assert!(ended.message.contains("reconnecting"), "{}", ended.message);
+    }
 }
 
 #[test]
@@ -385,6 +429,9 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
     let (host, mut client) = sockets();
     let accept = Accept {
         cursor: false,
+        gamepads: 0,
+        gamepad_kinds: Vec::new(),
+        gamepad_problem: String::new(),
         session: session.id,
         token: control::token_hex(&session.token),
         codec: Codec::H264Baseline,

@@ -79,7 +79,69 @@ GitHub release notes, so each version gets a heading of the form
   FEC, dropped frames, decode and present times and an estimated latency
   breakdown over the picture's corner, without taking the mouse. The full
   Stream performance panel moved to More.
+- Windows hardware HEVC is enabled by default. AMD HEVC can use the driver’s
+  AMF runtime directly, with Media Foundation fallback; hardware AV1 MFTs
+  are negotiated only after a keyframe probe. Windows honors requested
+  frame rates and bitrates beyond the former 240 fps/500 Mbps limits.
+- Virtual display setup adds missing high-refresh gaming modes and 8K
+  sizes, preserves existing XML, and checks monitor arrival after restart.
+  Hardware timing and driver mode-count limitations are documented in
+  `docs/measurements/2026-11-03/windows-host/`.
+- Mac host keyframe requests discard queued pictures until the requested
+  IDR, coalesce retries, and clear on output. A bitrate change applies from
+  the next picture on, without an IDR.
+  HEVC uses its quality path through the pixel rate of 1080p120, recovering
+  the quality lost to the speed hint; faster streams retain the fast path.
 
+- A Mac host keeps up with fast streams. VideoToolbox no longer uses its
+  low-latency rate control, which doubled each frame's encode time,
+  dropped frames and sent a fifth of the asked-for bitrate; and a frame
+  is handed to the encoder without waiting for the one before, so the
+  media engine overlaps them. Synthetic 1080p HEVC on an M3 Pro: 240 fps
+  where 110 was the ceiling, about 5 ms a frame instead of 9.4; the
+  14" MacBook Pro's own 3024×1964 at 120 fps where 31–43 came out.
+  ScreenCaptureKit takes every refresh of a display as fast as the
+  stream (ProMotion included) instead of a gap of exactly one frame that
+  timing jitter could halve, keeps more surfaces so two frames in the
+  encoder never starve it, and `LATCH_MAC_DISPLAY` picks a display other
+  than the main one. HEVC Main10 from P010 surfaces is in place for HDR.
+
+- Gamepads. Pads connected to the viewer (Xbox, DualSense, DualShock 4,
+  Switch Pro and others, on a Mac, Windows or Linux) reach the host's games
+  as virtual pads, and the game's rumble comes back to them. A Windows PC
+  makes Xbox 360 and DualShock 4 pads through the ViGEmBus driver, which
+  setup now installs (checksum-pinned, never restarting Windows) and
+  uninstall removes only if setup installed it; a Linux host makes Xbox 360
+  pads through `/dev/uinput` (see the Linux notes for the permission it
+  needs); a Mac host takes none. Each pad's whole state is sent when it
+  changes and again until the host has it, so a lost packet never leaves a
+  button held; on the PC a state reaches XInput well under a millisecond
+  after the viewer sends it. The stream toolbar shows the connected pads.
+  Hosts and viewers from before this negotiate no gamepads and work as
+  before.
+- Linux host: only what changed on screen is read, converted and encoded.
+  X Damage rectangles are kept apart instead of merged into one box, only
+  those are read from the X server and converted to YUV (split across
+  cores), and the encoder skips the rest without comparing it.
+  Measurements: `docs/measurements/2026-11-03-linux-host/`.
+- Linux host: NVENC and VA-API hardware encoding (H.264, HEVC, and AV1 on
+  NVENC), loaded at run time and probed when the host starts, with
+  `latch-codec` as the fallback; `LATCH_LINUX_ENCODER` chooses. Each
+  encoder's limits come from its driver and are reported in
+  `streamer.codecs`; VA-API uses, for each codec, the first render node
+  that encodes it. Only failures that last give a codec up for the
+  process (a session limit or a size it does not take fail one open);
+  HEVC is not offered at sizes VA-API cannot code (1366 × 768), and a
+  resize to one ends the session for the viewer to reconnect with H.264.
+  Not yet run on a GPU.
+- The software H.264 encoder writes its reconstruction in place, searches
+  for scrolls only when enough of a band changed, and runs its analysis on
+  the slice workers. Its output changes only where little of a band
+  changed: under 1/64 of its samples (was 1/256) the band is not searched
+  for a scroll, and under 1/16 not for a sideways one, which is most of
+  why a 1440p sweep went from 3.7 to 0.5 Mb/s. Colour conversion keeps
+  its threads instead of starting them each frame (a whole 1080p frame:
+  1.35 to 1.06 ms on four Neoverse N1 cores).
 - One pointer while the mouse is captured. The Mac's arrow was hidden only
   by egui's cursor, which macOS applies when the pointer moves over the
   window; a captured pointer is held still, so the Mac's arrow could stay

@@ -4575,10 +4575,21 @@ mod live_snapshot {
             None,
             "reconnect must not be queued at launch"
         );
-        assert!(
-            h.state().video_help.lock().as_ref().unwrap().busy,
-            "must be marked busy"
-        );
+        // The request runs on its own thread, and 127.0.0.1 refuses it at
+        // once: busy until it answers, which may already have happened (the
+        // thread clears busy, then hands over its answer).
+        let busy = h.state().video_help.lock().as_ref().unwrap().busy;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let answered = || {
+            h.state()
+                .pending_hdr
+                .as_ref()
+                .is_some_and(|slot| slot.lock().is_some())
+        };
+        while !busy && !answered() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(busy || answered(), "must be marked busy until it answers");
     }
 
     #[test]

@@ -6,7 +6,21 @@ use std::ffi::c_void;
 use std::ptr;
 
 pub type Ref = *const c_void;
+
+/// An opaque `CGColorRef`, typed only so that an Objective-C send carries
+/// the `^{CGColor=}` its method declares (debug builds check it).
+#[repr(C)]
+pub struct CGColor {
+    _private: [u8; 0],
+}
+// SAFETY: CGColor is an opaque CoreFoundation struct named CGColor.
+unsafe impl objc2::encode::RefEncode for CGColor {
+    const ENCODING_REF: objc2::encode::Encoding =
+        objc2::encode::Encoding::Pointer(&objc2::encode::Encoding::Struct("CGColor", &[]));
+}
 pub const NV12: u32 = u32::from_be_bytes(*b"420v");
+/// 10-bit video-range 4:2:0, two planes, each sample in the top bits of 16.
+pub const P010: u32 = u32::from_be_bytes(*b"x420");
 
 /// Owns one Create/Copy reference, including on an error path.
 pub struct Owned(pub Ref);
@@ -61,6 +75,29 @@ pub fn dictionary(entries: &[(Ref, Ref)]) -> Owned {
     })
     .unwrap()
 }
+/// A framework constant newer than macOS 13, looked up when it is needed so
+/// the binary still loads on the oldest supported system; `None` there.
+pub fn optional(name: &std::ffi::CStr) -> Option<Ref> {
+    // SAFETY: dlsym only reads the loaded images' symbol tables; a found
+    // constant is a CFStringRef variable that lives as long as its framework.
+    unsafe {
+        let symbol = dlsym(RTLD_DEFAULT, name.as_ptr()).cast::<Ref>();
+        (!symbol.is_null())
+            .then(|| *symbol)
+            .filter(|key| !key.is_null())
+    }
+}
+const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+extern "C" {
+    fn dlsym(handle: *mut c_void, symbol: *const std::ffi::c_char) -> *mut c_void;
+}
+/// kCMTimeInvalid: for CompleteFrames, every pending frame.
+pub const INVALID_TIME: CMTime = CMTime {
+    value: 0,
+    timescale: 0,
+    flags: objc2_core_media::CMTimeFlags(0),
+    epoch: 0,
+};
 pub fn time(value: i64, fps: u32) -> CMTime {
     CMTime {
         value,
@@ -101,7 +138,6 @@ extern "C" {
 extern "C" {
     pub static kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: Ref;
     pub static kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: Ref;
-    pub static kVTVideoEncoderSpecification_EnableLowLatencyRateControl: Ref;
     pub static kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder: Ref;
     pub static kVTCompressionPropertyKey_RealTime: Ref;
     pub static kVTCompressionPropertyKey_AllowFrameReordering: Ref;
@@ -117,6 +153,7 @@ extern "C" {
     pub static kVTCompressionPropertyKey_TransferFunction: Ref;
     pub static kVTCompressionPropertyKey_YCbCrMatrix: Ref;
     pub static kVTProfileLevel_HEVC_Main_AutoLevel: Ref;
+    pub static kVTProfileLevel_HEVC_Main10_AutoLevel: Ref;
     pub static kVTProfileLevel_H264_High_AutoLevel: Ref;
     pub static kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel: Ref;
     pub static kVTProfileLevel_H264_Baseline_AutoLevel: Ref;
@@ -248,8 +285,11 @@ extern "C" {
     pub fn CGPreflightScreenCaptureAccess() -> bool;
     pub fn CGMainDisplayID() -> u32;
     pub fn CGDisplayBounds(display: u32) -> objc2_core_foundation::CGRect;
+    pub fn CGDisplayCopyDisplayMode(display: u32) -> Ref;
+    pub fn CGDisplayModeGetRefreshRate(mode: Ref) -> f64;
+    pub fn CGDisplayModeRelease(mode: Ref);
     pub static kCGColorBlack: Ref;
-    pub fn CGColorGetConstantColor(name: Ref) -> Ref;
+    pub fn CGColorGetConstantColor(name: Ref) -> *const CGColor;
 }
 #[link(name = "CoreMedia", kind = "framework")]
 extern "C" {

@@ -2,6 +2,7 @@
 //! datagram layouts ([`wire`]), Reed–Solomon erasure coding ([`fec`]),
 //! cutting frames into shards and putting them back together ([`video`]),
 //! audio packets and their parity ([`audio`]), reliable input ([`input`]),
+//! gamepad snapshots, rumble and lights ([`gamepad`]),
 //! the TCP control messages ([`control`]), round-trip estimation ([`rtt`]),
 //! and a network impairment simulator for tests ([`sim`]).
 //!
@@ -12,6 +13,7 @@ pub mod audio;
 pub mod base64;
 pub mod control;
 pub mod fec;
+pub mod gamepad;
 pub mod input;
 pub mod rtt;
 pub mod sim;
