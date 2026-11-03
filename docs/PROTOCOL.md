@@ -48,6 +48,8 @@ Content-Length: <n>
 | `audio` | bool | send desktop audio |
 | `name` | string | the viewer's machine name, for the host's log |
 | `cursor` | bool | optional, default false; viewer can draw pointer locally and handle shape updates |
+| `audio_channels` | u32 | optional; most channels the viewer plays (6 for 5.1, 8 for 7.1). Absent, or below 3, means stereo |
+| `mic` | bool | optional, default false; the viewer offers its microphone (datagram kind 9) |
 
 The control service authorizes the caller exactly as for every other
 route. A refusal is an ordinary HTTP error with an `Ack` JSON body. On
@@ -89,6 +91,8 @@ type byte and the payload and is at most 65 536. Payloads are JSON objects.
 | `audio` | object or null | `{"rate": 48000, "channels": 2, "frame_samples": 240, "codec": "lpcm-rice"}`; null when there is none |
 | `audio_problem` | string | why there is no audio, when `audio` is null |
 | `cursor` | bool | optional, default false; host supports omitting pointer from video and sending shape updates |
+| `mic` | object | optional; the format the viewer's microphone is to be sent in (`{"rate": 48000, "channels": 1, "frame_samples": 240, "codec": "lpcm-rice"}`), present only when the viewer offered it and the host has somewhere to play it |
+| `mic_problem` | string | optional; why an offered microphone is not wanted, when `mic` is absent |
 
 Either side sends `Keepalive` when it has sent nothing for one second. A
 connection that has been silent for ten seconds is dead. The session ends
@@ -128,6 +132,7 @@ not match its kind is dropped without an answer.
 | 6 | `KeyframeRequest` | viewer → host |
 | 7 | `Ping` | both |
 | 8 | `Pong` | both |
+| 9 | `Mic` | viewer → host |
 
 ### Hello (1)
 
@@ -195,82 +200,20 @@ one lost packet of the four.
 
 Each coded audio frame is at most `MAX_DATAGRAM - 18` (1 182) bytes,
 leaving room for the 16-byte audio header and the parity packet's two-byte
-length. The host picks `frame_samples` and announces it in `Accept`;
-the default is 240 samples (5 ms at 48 kHz).
+length. The host picks `frame_samples` and announces it in `Accept`: 240
+samples (5 ms at 48 kHz) for stereo, 80 for 5.1 and 60 for 7.1, the most
+whose worst case fits. Stereo frames are `lpcm-rice` version 1, exactly as
+5.1.0 sent them; more channels are version 2 (see the codec's module
+documentation), which only a viewer that asked with `audio_channels`
+receives. Channels are in WAVE order (5.1: FL FR FC LFE BL BR; 7.1 adds
+SL SR).
 
-### Input (4)
+### Mic (9)
 
-| Offset | Size | Field |
-| --- | --- | --- |
-| 8 | 4 | `first` — sequence number of the first event |
-| 12 | 1 | `count` — events in this datagram |
-| 13 | … | events `first, first+1, …` |
-
-Events, each `u8 kind` then a fixed payload:
-
-| Kind | Event | Payload |
-| --- | --- | --- |
-| 1 | relative mouse move | `i16 dx, i16 dy` |
-| 2 | absolute mouse position | `u16 x, u16 y, u16 width, u16 height` — a point in a `width × height` picture |
-| 3 | mouse button | `u8 button` (1 left, 2 middle, 3 right, 4 back, 5 forward), `u8 down` |
-| 4 | key | `u16 vk` (Windows virtual-key code), `u8 down`, `u8 modifiers` (1 shift, 2 ctrl, 4 alt, 8 meta) |
-| 5 | scroll | `i16 vertical, i16 horizontal` (120 per notch; up and right positive) |
-| 6 | text | `u8 len` (1–64), UTF-8 bytes |
-| 7 | release everything held | none |
-
-Input is reliable without retransmission timers: the viewer numbers every
-event and keeps it until the host acknowledges it. Each `Input` datagram
-carries every unacknowledged event, oldest first, as many as fit. The
-viewer sends one whenever it has a new event, and again every 20 ms while
-any event is unacknowledged. The host applies events in sequence order,
-ignores ones it has applied, and keeps a later event until the gap before
-it is filled.
-
-### InputAck (5)
-
-`u32 next` at offset 8: every event before `next` has been applied. Sent at
-once for every `Input` datagram.
-
-### KeyframeRequest (6)
-
-`u32 last` at offset 8: the last frame the viewer decoded. The viewer sends
-it when a frame is lost, and again every 100 ms (or the measured round
-trip, if longer) until a keyframe newer than `last` arrives. The host
-answers with an IDR frame; it encodes at most one keyframe per 50 ms for
-requests.
-
-At session start the viewer waits for the host's first keyframe without
-requesting another one, unless a frame is declared lost.
-
-### Ping (7) and Pong (8)
-
-`Ping` carries `u64 time` at offset 8, the sender's clock. The receiver
-answers at once with a `Pong` carrying the same `time`. The viewer pings
-twice a second, the host ten times a second (the lowest round trip between
-two viewer reports tells a filling queue from the path's base), and each
-keeps a smoothed round trip and its variance. No clocks are compared
-across machines.
-
-## Versioning
-
-`protocol` in `StreamRequest` and the upgrade token's `/1` name the
-version. A host that cannot speak the requested version answers 426 with
-an `Ack` naming the versions it speaks. `/v1/status` reports
-`streamer.protocol` (1 here; absent from Latch 4 hosts, which speak only
-GameStream).
-
-## Additive transport feedback (5.0.x compatible)
-
-Report retains its four original required fields. New JSON fields all have
-serde defaults, so older endpoints ignore them and new hosts accept the
-original four-field report. No datagram layout or protocol number changes.
-
-Viewer reports add `received_kbps` (received media rate), `frames_lost`
-(unrecovered frames in the last measurement window), `unrecovered_loss_pct`
-(optional; absence means legacy raw loss), `queue_ms` (decode queue age),
-and `window_ms` (measurement duration). Measurements and reports use 250 ms
-windows. Raw `loss_pct` includes FEC-recovered shards; recovery alone is
-not congestion. RTT is milliseconds on the reporter's clock.
+The viewer's microphone, laid out exactly as `Audio` (3) with its own
+`seq` and parity groups, sent only after an `Accept` with `mic`, in that
+format (5 ms of 48 kHz mono). The host takes it only from the address the
+session's `Hello` came from. A host that does not know kind 9 drops it.
 
 Hosts may reply using the existing Report type, adding
 `requested_bitrate_kbps`, `applied_bitrate_kbps`, `pacing_queue_ms`,

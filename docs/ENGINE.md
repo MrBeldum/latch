@@ -91,11 +91,51 @@ every frame it was asked for.
 
 ### Audio
 
-48 kHz stereo 16-bit, 10 ms frames, coded losslessly with `lpcm-rice`
-(fixed linear prediction and Rice codes, like FLAC's fixed predictors).
-Silence costs a few bytes a frame and a desktop's sound about 0.5–1 Mbps;
-coding it costs microseconds. The decoded samples are exactly the
-captured ones, which lets tests check audio bit for bit. Opus is gone.
+48 kHz 16-bit, coded losslessly with `lpcm-rice` (fixed linear prediction
+and Rice codes, like FLAC's fixed predictors). Silence costs a few bytes a
+frame and a desktop's stereo sound about 0.5–1 Mbps; coding it costs
+microseconds. The decoded samples are exactly the captured ones, which
+lets tests check audio bit for bit. Opus is gone.
+
+* **5 ms frames, sent as soon as captured.** Captures hand over 5 ms
+  frames (240 samples); each is its own packet the moment the capture
+  period holds it. WASAPI loopback runs at the endpoint's engine period
+  (10 ms on most drivers, and low-latency `IAudioClient3` streams refuse
+  the loopback flag), so a Windows host sends two packets every 10 ms.
+* **Surround when both ends have it.** A viewer whose output device has
+  more than two channels asks for them (`StreamRequest.audio_channels`);
+  the host captures the device's own layout up to that (WASAPI channel
+  mask, PulseAudio channel map) and sends `lpcm-rice` version 2, 80
+  samples a packet for 5.1 and 60 for 7.1 so the worst case always fits
+  a datagram. Stereo is still version 1, byte for byte, so older viewers
+  are unaffected. The viewer mixes any stream layout onto its device
+  (5.1 into headphones, stereo onto the front of a 5.1 set). The encoder
+  budget keeps 1.2 Mbps more of the wire for each pair beyond stereo.
+* **A jitter buffer that follows the path.** The viewer measures arrival
+  jitter and capture bursts and steers the least audio left before each
+  device pull to a 2 ms margin plus whatever part of a burst the jitter
+  does not already spread, trimming playback speed by at most 0.2 % to
+  hold it. A real underrun (not the host going quiet: it sends nothing
+  for silence) widens the margin by 2 ms, which narrows again by 0.1 ms
+  a second. Devices that state their range get a 2.5 ms buffer
+  (`LATCH_AUDIO_BUFFER` overrides it, in frames or `default`).
+* **The viewer's microphone, opt-in.** With **Send my microphone** on and
+  a host that answers with `Accept.mic`, the default input is mixed to
+  mono, resampled to 48 kHz and sent as `lpcm-rice` 5 ms frames with the
+  same parity as host audio (datagram kind 9). A Linux host makes a
+  "Latch Microphone" source itself (a null sink and a source over its
+  monitor, through PulseAudio's native protocol or PipeWire's pulse
+  server) and removes it after the session. Windows and macOS cannot turn
+  sound into a microphone without a driver, so the host plays it into a
+  virtual cable's output (VB-CABLE, BlackHole, or the output named by
+  `LATCH_MIC_DEVICE`) and programs record the cable's input.
+* **Measured glass to glass.** `LATCH_TEST_AUDIO=clicks[:period_ms]` on a
+  host replaces its sound with a click on every wall-clock quarter second,
+  delivered a device period at a time; `LATCH_AUDIO_PROBE=1` on the viewer
+  notes when each click reaches the speaker (callback time plus the
+  device's own playback delay) and `view` reports them as
+  `audio_click_ms`. `LATCH_AUDIO_TRACE` on a Windows host logs loopback
+  packet sizes and QPC ages.
 
 ## Decisions
 
@@ -130,10 +170,12 @@ captured ones, which lets tests check audio bit for bit. Opus is gone.
 * **Media threads at high priority** (user-interactive QoS on macOS,
   highest priority on Windows) and media sockets with 8 MB buffers, so a
   keyframe's burst is not dropped by the sender or the receiver.
-* **Sound stays bounded.** #32's viewer keeps its 40 ms preroll and existing
-  smoothed ±0.2% clock steering, with a 120 ms hard cap trimmed to 50 ms.
-  A 30-minute ±300 ppm simulation verifies no gaps or trims and 25–45 ms
-  mean queue depth. This already bounds latency; no second controller is added.
+* **Sound stays bounded, and short.** The fixed 40 ms preroll is gone:
+  the jitter buffer above holds what the measured path needs, with the
+  same ±0.2 % clock steering and a 120 ms hard cap trimmed back to the
+  current target. The 30-minute ±300 ppm simulation still has no gaps and
+  no trims, at about 27 ms buffered on its old jittery path and 11–15 ms
+  on a quiet LAN-like one. No second controller is added.
 * **A Mac viewer never copies a picture**: VideoToolbox decodes into an
   IOSurface that the renderer samples as Metal textures.
 * **One viewer at a time.** A new authorized viewer takes the host over;

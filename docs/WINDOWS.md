@@ -290,6 +290,25 @@ removes the old task. A game cursor whose visible pixels sit to the right
 of or below its hotspot can therefore be cut off at the right or bottom
 edge.
 
+## Sound: surround and the viewer's microphone
+
+The PC sends what its default playback device plays, losslessly. When the
+viewer's speakers have 5.1 or 7.1 and the PC's playback device is set to
+that layout (Sound settings > the device > Speaker setup), the stream
+carries every channel; otherwise it is stereo, and a stereo viewer gets a
+downmix of whatever the PC plays.
+
+With **Send my microphone** on in the viewer's settings, the viewer's
+microphone plays on the PC where games and voice chat can record it.
+Windows has no way to make a microphone without a driver, so Latch plays
+it into a virtual cable: install [VB-CABLE](https://vb-audio.com/Cable/)
+(free) and pick **CABLE Output** as the microphone in the program that
+should hear it. Latch finds the cable's playback side (**CABLE Input**) by
+itself; to use another device, set the user environment variable
+`LATCH_MIC_DEVICE` to the name of the playback device to play it into,
+and restart Latch. Without one, the viewer's stats line says
+"microphone not sent" and why.
+
 ## Troubleshooting
 
 - **The picture is an enlarged, blurry desktop**: the PC's display could not

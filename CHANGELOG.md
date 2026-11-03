@@ -6,6 +6,25 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- Sound arrives sooner. The host sends each 5 ms of sound as soon as it is
+  captured, and the viewer's fixed 40 ms preroll is gone: its buffer holds
+  what the measured jitter of the path needs (11–15 ms on a quiet LAN),
+  widens after an underrun and narrows again slowly, and asks the output
+  device for a 2.5 ms buffer where it allows one. The 30-minute ±300 ppm
+  clock-drift simulation still plays with no gaps and no cuts.
+- 5.1 and 7.1 sound. A viewer whose speakers have more than two channels
+  asks for them, and the PC sends its own layout up to that, still
+  lossless (`lpcm-rice` version 2; stereo is unchanged, so older viewers
+  and hosts are unaffected). Any layout plays on any device: 5.1 is mixed
+  down for headphones, stereo goes to the front pair of a 5.1 set.
+- **Send my microphone** (off by default): the viewer's microphone plays
+  on the PC as a microphone. A Linux host makes a "Latch Microphone"
+  input for the session; Windows needs VB-CABLE and a Mac host BlackHole
+  (or `LATCH_MIC_DEVICE`), since sound becomes a microphone there only
+  through a driver. macOS asks for the microphone the first time.
+- Audio latency can be measured: `LATCH_TEST_AUDIO=clicks` on a test host
+  and `LATCH_AUDIO_PROBE=1` on `view` report `audio_click_ms`, the time
+  from the host's click to the viewer's speaker.
 - One pointer while the mouse is captured. The Mac's arrow was hidden only
   by egui's cursor, which macOS applies when the pointer moves over the
   window; a captured pointer is held still, so the Mac's arrow could stay
