@@ -1,0 +1,8 @@
+RECOVERY interval=50 cut=36000 double_ms=600
+RECOVERY interval=250 cut=36000 double_ms=1500
+RECOVERY interval=1000 cut=36000 double_ms=6000
+# above: 16ac72a, review_43_scratch.rs::slow_feedback_recovery
+RECOVERY interval=50 cut=36000 double_ms=600 ceiling_ms=750
+RECOVERY interval=250 cut=36000 double_ms=500 ceiling_ms=750
+RECOVERY interval=1000 cut=36000 double_ms=1000 ceiling_ms=1000
+# above: after, congestion::tests::recovery_integrates_report_time_and_rejects_stale_credit

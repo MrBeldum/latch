@@ -12,6 +12,21 @@
   the climb holds just under the policed rate; 5–15 ms Wi-Fi ping
   jitter no longer trips the queue threshold; a capacity collapse cuts on its
   first report (100→20 Mbps at 10 ms RTT: 160→60 ms).
+- Hold steady caps: keep the last sustainable rate and probe above it in
+  bounded, RTT-aware steps instead of doubling to the ceiling after every
+  drain. Budget spread on a fixed 20/50/100 Mbps cap is 0.7/1.2/2.5 Mbps
+  (5.1: 1.6/3.5/7.1); 150–250 ms RTT paths no longer fill the queue.
+- Recovery counts the real time between reports, so 5.1's 250 ms and older
+  one-second viewers recover as fast as 50 ms ones; reports after more than
+  2 s of silence grant no growth.
+- A permanent lossless RTT increase (route change) is rebased instead of
+  pinning the budget at its floor.
+- The wire floor is 1 Mbps rather than a tenth of the requested rate, so a
+  100 Mbps request adapts to a 2–5 Mbps link.
+- Older viewers without repaired-loss reporting no longer lose their bitrate
+  to FEC-repaired radio loss.
+- Windows viewers rearm Mio readiness after a batched receive, so packets
+  after an idle gap wake the receive loop instead of waiting for its 20 ms timer.
 
 
 The release workflow publishes the section that matches the tag as the

@@ -1,0 +1,6 @@
+main-host-new-view-20000: 10 samples, 59.5 fps (last 8 s), exit=0, applied 16666 kbps, send_errors: 0
+main-host-new-view-50000: 10 samples, 60.1 fps (last 8 s), exit=0, applied 41666 kbps, send_errors: 0
+new-host-main-view-20000: 10 samples, 59.8 fps (last 8 s), exit=0, applied 15943 kbps, send_errors: 0
+new-host-main-view-50000: 10 samples, 59.5 fps (last 8 s), exit=0, applied 39859 kbps, send_errors: 0
+new-host-new-view-20000: 10 samples, 59.4 fps (last 8 s), exit=0, applied 15943 kbps, send_errors: 0
+new-host-new-view-50000: 10 samples, 59.5 fps (last 8 s), exit=0, applied 39859 kbps, send_errors: 0

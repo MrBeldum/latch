@@ -5,6 +5,134 @@ production Packetizer, ReedSolomon, wire parser and Reassembler; they exclude
 capture, encoders, decoders, rendering and audio. FEC is on (10% initially).
 No installed host was replaced or stopped. All manual servers used UDP 47881.
 
+## Review fixes (#43 independent review)
+
+Commits `533e289` (finding 1) and `041711a` (findings 2–6), measured against
+the reviewed head **16ac72a**. Raw logs are in [review/](review/).
+
+### Steady caps, long RTT, slow feedback, low caps, route change
+
+[`steady_transport`](../../../../crates/engine/tests/steady_transport.rs) is the
+review's paced harness ported into the engine tests: 35 simulated seconds,
+production Packetizer/FEC/Reassembler and Pacer, 120 fps, 40 ms FIFO, 80 bytes
+per packet overhead, seed 17; mean, population SD and queue p95 cover the last
+30 s, and frame counts cover all 35 s. At 16ac72a it reproduces the review's
+table digit for digit. "main" is 9fe0ae9's controller in the same harness
+(`steady-main-controller-9fe0ae9.txt`). Budget values are Mbps of wire budget,
+which counts headers and parity, so they can sit slightly above the link cap
+while encoder output stays below it.
+
+| Scenario | Cap / ceiling Mbps | RTT ms | Report / feedback delay ms | Mean budget | Budget SD (main) | Queue p95 ms | Frames lost / skipped | Final budget |
+| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| steady20 | 20 / 100 | 10 | 50 / 10 | 16.34 → **19.29** | 3.56 → **0.73** (1.60) | 17.0 → **9.0** | 19/1 → **19/1** | 16.98 → **19.33** |
+| steady50 | 50 / 100 | 10 | 50 / 10 | 41.72 → **49.21** | 8.29 → **1.21** (3.52) | 12.0 → **8.0** | 22/0 → **16/2** | 32.77 → **48.67** |
+| steady100 | 100 / 200 | 10 | 50 / 10 | 91.96 → **101.64** | 11.91 → **2.50** (7.07) | 10.5 → **8.8** | 22/2 → **16/2** | 91.12 → **107.23** |
+| cap20rtt150 | 20 / 100 | 150 | 50 / 150 | 15.90 → **19.53** | 5.21 → **0.58** (1.55) | 36.6 → **14.7** | 154/687 → **48/13** | 11.58 → **20.22** |
+| cap20rtt250 | 20 / 100 | 250 | 50 / 250 | 16.76 → **19.49** | 6.34 → **0.23** (1.57) | 37.8 → **10.5** | 422/843 → **66/25** | 19.99 → **19.42** |
+| rtt150 | 50 / 100 | 150 | 50 / 150 | 42.61 → **50.49** | 15.47 → **0.54** (3.24) | 36.8 → **8.6** | 393/786 → **33/10** | 33.62 → **50.47** |
+| rtt250 | 50 / 100 | 250 | 50 / 250 | 45.11 → **49.23** | 17.43 → **0.97** (4.51) | 37.4 → **8.0** | 565/929 → **69/22** | 46.62 → **48.47** |
+| cap100rtt150 | 100 / 200 | 150 | 50 / 150 | 80.10 → **102.17** | 30.16 → **1.13** (8.21) | 34.9 → **9.0** | 235/798 → **33/10** | 66.20 → **101.47** |
+| cap100rtt250 | 100 / 200 | 250 | 50 / 250 | 90.08 → **98.68** | 36.26 → **1.95** (8.52) | 37.9 → **7.9** | 572/861 → **76/15** | 55.44 → **97.14** |
+| slow250 | 50 / 100 | 10 | 250 / 125 | 45.29 → **50.71** | 13.06 → **0.66** (4.02) | 38.8 → **11.4** | 621/168 → **42/0** | 38.18 → **50.34** |
+| legacy1000 | 50 / 100 | 10 | 1000 / 10 | 45.78 → **50.23** | 13.69 → **0.77** (5.99) | 38.9 → **22.7** | 718/0 → **238/0** | 32.10 → **51.01** |
+| legacy_radio | 100 / 100, 5% loss | 10 | 1000 / 10 | 12.75 → **100.00** | 6.79 → **0.00** (7.42) | 1.0 → **7.8** | 13/40 → **10/31** | 10.00 → **100.00** |
+| cap2 | 2 / 100 | 10 | 50 / 10 | 10.00 → **1.08** | 0.00 → **0.11** (0.00) | 38.4 → **14.6** | 4184/0 → **20/1** | 10.00 → **1.00** |
+| cap5 | 5 / 100 | 10 | 50 / 10 | 10.00 → **3.06** | 0.00 → **0.83** (0.00) | 39.2 → **28.3** | 4184/0 → **20/1** | 10.00 → **2.94** |
+| route | 100 / 100 | 10 → 100 | 50 / 10 | 10.48 → **86.30** | 5.90 → **32.46** (12.77) | 0.9 → **8.4** | 0/0 → **0/0** | 10.00 → **100.00** |
+| lan1g | 1000 / 1000 | 1 | 50 / 1 | 1000.00 → **1000.00** | 0.00 → **0.00** (25.42) | 8.0 → **8.0** | 0/0 → **0/0** | 1000.00 → **1000.00** |
+
+- Steady-cap SD is at or under main's in every row: 0.73/1.21/2.50 Mbps at
+  20/50/100 Mbps, against 1.60/3.52/7.07 for main and 3.56/8.29/11.91 for
+  16ac72a. The PR's queue and loss gains over main hold: queue p95 ≤ 11.4 ms
+  for 50 ms and 5.1-cadence reports (main 10.6–39.9 ms).
+- Long RTT no longer fills the FIFO: at 150/250 ms, queue p95 is 7.9–14.7 ms
+  (was 34.9–37.9).
+- After the fix, every lost or skipped frame in every row falls in the first
+  5 s: the start at the ceiling, before the first feedback arrives. None falls
+  in any 30 s measurement window (checked by sampling the counters at 5 s).
+- `legacy1000` (one-second reports, no repaired-loss field) still reaches
+  22.7 ms queue p95, and its startup overload loses 238 frames: one-second
+  feedback cannot react inside a 40 ms FIFO.
+- `cap2`/`cap5`: the fixed 1 Mbps floor lets a 100 Mbps request adapt, and
+  frames are delivered (20 lost at startup). Mean budget sits under the cap
+  because at 120 fps per-packet overhead and parity make the offered rate
+  exceed the budget. `cap5` keeps a 28 ms queue p95: at that rate one frame's
+  burst is a large share of the 40 ms FIFO.
+- `route`: a lossless 10→100 ms RTT step first cuts to the floor, then rebases
+  after 2 s at under a quarter of the load and regains the ceiling with an
+  empty queue (final 100 Mbps). The large SD is that transient.
+  `route_rebase_requires_lossless_delay_unresponsive_to_load_reduction` checks
+  that loss, or a falling RTT from a draining FIFO, keeps the old minimum.
+- `legacy_radio`: 5% FEC-repaired loss from a viewer without
+  `unrecovered_loss_pct` now keeps the 100 Mbps ceiling. Lost frames still
+  cut, so policer detection for those viewers is unchanged (`policer*` rows below).
+
+### Recovery cadence and the 100→20→100 step
+
+Fake clock, queue-only cuts to 36 Mbps at 10 ms base RTT, then clean reports
+([review/recovery.txt](review/recovery.txt)):
+
+| Report interval | Time to double before → after | Time to 100 Mbps after |
+| ---: | ---: | ---: |
+| 50 ms | 600 → 600 ms | 750 ms |
+| 250 ms (5.1 viewers) | 1,500 → 500 ms | 750 ms |
+| 1,000 ms | 6,000 → 1,000 ms | 1,000 ms |
+
+Growth integrates the real time between reports. Reports more than 2 s apart
+grant none: the next report waits for fresh feedback (tested).
+
+`transport_scenarios` (12 s, [before](review/scenarios-before-16ac72a.txt) /
+[after](review/scenarios-after.txt)): the 100→20 Mbps step at 10 ms RTT still
+first crosses in **60 ms**. Cuts during the 20 Mbps phase drop 16 → 10,
+queue p95 is 10.60 → 9.38 ms, lost frames stay at 7, and the ceiling returns in
+910 → 1,110 ms once capacity is back (requirement ~1–2 s). Wi-Fi, jitter,
+240 fps, RTT 100 and the policer rows are unchanged within three frames.
+
+### Windows batched receive (finding 1)
+
+`batch_receive_rearms_after_a_drained_burst` (Windows-only) passes on the RX
+6600 PC at 041711a and fails with `missed burst 1` when the `try_io` wrapper
+is removed. End-to-end on the PC's loopback, 1280×720 60 fps sweep, 20 Mbps,
+40 key presses, interleaved, `view` with the fix reverted ("before") vs head
+([review/windows-mio-e2e.txt](review/windows-mio-e2e.txt)):
+
+| Run | Key→picture p50 / p95 ms | Frame interval p50 / p95 ms |
+| --- | ---: | ---: |
+| before 1 | 23.9 / 51.6 | 27.7 / 30.6 |
+| after 1 | 16.3 / 17.6 | 16.6 / 18.2 |
+| before 2 | 24.4 / 52.7 | 27.4 / 30.7 |
+| after 2 | 16.5 / 17.1 | 16.6 / 17.6 |
+
+### Compatibility
+
+Mac loopback, noise pattern, 640×360 60 fps, 10 s each, port 47881, main 5.1
+binaries from 9fe0ae9 ([review/compat.txt](review/compat.txt)):
+
+| Pair | 20 Mbps | 50 Mbps |
+| --- | --- | --- |
+| 5.1 host → new viewer | 59.5 fps, exit 0, 0 send errors | 60.1 fps, exit 0, 0 send errors |
+| new host → 5.1 viewer (250 ms reports) | 59.8 fps, exit 0, 0 send errors | 59.5 fps, exit 0, 0 send errors |
+| new ↔ new | 59.4 fps, exit 0 | 59.5 fps, exit 0 |
+
+No pair cut its applied bitrate during the run. No wire change.
+
+### Reproduction
+
+```sh
+export PATH=$HOME/.cargo/bin:$PATH TMPDIR=/tmp
+cargo test --release -p latch-engine --test steady_transport transport_scenarios -- --nocapture --exact
+cargo test --release -p latch-engine --test transport_scenarios -- --nocapture
+cargo test --release -p latch-engine --lib congestion::tests::recovery -- --nocapture
+# Before: a worktree at 16ac72a with this steady_transport.rs, assertions removed;
+# main: the same with 9fe0ae9's crates/engine/src/congestion.rs.
+# Windows (C:\Users\Daniel\dev\latch-gfn-b2):
+cargo test --release -p latch-stream --lib batch_receive_rearms
+```
+
+Not covered: competing TCP flows (no TCP model; needs a netem bottleneck),
+multi-minute runs, multiple seeds, real encoder IDR spikes, and Windows URO
+coalescing (still zero coalesced datagrams on this NIC).
+
 ## Follow-up: policers and UDP offloads
 
 Follow-up commits `82dd14d` and `2e7fbbb` build on `b8be885`. Tables below
@@ -299,8 +427,9 @@ Outstanding / unverified:
 - Timestamped encode-completion→last-packet egress and viewer handoff quantiles;
   no measured microsecond latency guarantee. Clean-path pacing and immediate
   data-before-parity handoff are checked structurally and in regressions.
-- Oscillation-free step-down (first crossing now 60 ms at 10-ms RTT),
-  prolonged fairness/stability, route changes and adversarial feedback tests.
+- Competing-TCP fairness, multi-minute stability and multiple seeds. Steady
+  caps, long RTT, slow feedback, low caps and lossless route changes are now
+  covered by `steady_transport` (see "Review fixes" above).
 - Reference invalidation is a negotiated protocol proposal only, with no wire
   plumbing or encoder implementation. KeyframeRequest keeps last-delivered-frame
   semantics; requested IDRs are tested at max(50 ms, RTT), including repeated

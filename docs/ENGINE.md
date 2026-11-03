@@ -191,9 +191,13 @@ media. Audio, input acknowledgements and pings bypass the video queue.
 Under pressure video uses a wire-byte token bucket at 2.5 times the wire budget,
 with a sixteen-datagram burst. The encoder allowance reserves audio separately,
 then compounds header overhead with rounded FEC rather than adding the two.
-Cuts use the lower of current budget and actual successful send rate (and
-received throughput when loss or a collapse supplies it). Each cut removes
-20%, or 40% for queue delay above 20 ms or loss above 10%. Sender age above
+Cuts use the lower of current budget and actual successful send rate, bounded
+by received throughput +7% (a standing FIFO delivers its bottleneck rate; a
+viewer without `received_kbps` is credited the offered rate less its loss).
+Each cut removes 20%, or 40% for queue delay above 20 ms or loss above 10%.
+Loss in a window that delivered more than is now sent predates the last cut
+and is ignored, as is a queue still falling within three horizons of a cut
+(horizon: 2× base RTT plus one report window, two for windows ≥200 ms). Sender age above
 20 ms is also pressure. Uncorrected loss above 3% (raw loss for legacy
 reports) or lost frames in two windows running count at any raw loss. Loss
 without queue delay is treated as a policer: a smoothed received rate (+7%
@@ -202,9 +206,25 @@ damaged window near it cuts again. A 50 ms window holds only a few frames, so
 received/sent ratios are too coarse to be a signal on their own; they gate only
 the one-window collapse cut, together with loss above 10% or delay above 20 ms. The
 ping-jitter estimate starts at 3 ms and learns only from falling delay outside
-congestion. The wire floor is max(1 Mbps, ceiling/10). After clean feedback the
-budget doubles per 400 ms, with each feedback step capped at 100 ms of growth
-so legacy reports do not make huge probe jumps. Rate setters run between frames at a 5% target change.
+congestion. The wire floor is a fixed 1 Mbps, whatever the ceiling, so a
+high-quality session can still fit a 2–5 Mbps link.
+
+A cut remembers the sustainable rate (what got through, raised to whatever the
+smoothed received rate later shows). Clean feedback grows the budget at
+doubling per 400 ms of actual elapsed time between reports, but only to 97% of
+that rate (92% for coarse ≥200 ms windows). Above it, one probe is in flight at
+a time: first ~2.5 ms of queue per horizon (1–5%), doubling only while probes
+survive a horizon, and stepping up to the rate that last congested before
+accelerating past it. A probe whose own feedback shows over 3 ms of queue
+drops under the held rate by as much as it went over, so its excess drains as
+fast as it built. With no throughput or loss feedback at the cut, there is no
+estimate and recovery is purely time-based. Reports more than 2 s apart grant
+no growth: the controller waits for fresh feedback. A lossless RTT plateau
+that persists for 2 s through a fourfold budget reduction with no local queue
+is a route change: the RTT minima are rebased and the estimate dropped; loss or
+a falling RTT (a draining FIFO) cancels the evidence. Raw legacy loss under 10%
+without lost frames is treated as repaired radio loss. Rate setters run between
+frames at a 5% target change.
 This remains a heuristic controller; it is not a full GCC implementation.
 
 Linux sends up to 32 datagrams with `sendmmsg` and receives with `recvmmsg`.

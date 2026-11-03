@@ -298,8 +298,12 @@ above max(6 ms, base RTT / 10, 3× ping jitter) is pressure, as are uncorrected
 loss and lost frames at any raw loss. Two windows trigger a budget cut; one
 does when `received_kbps` is under half the host's send rate while loss is
 above 10% or delay above 20 ms (reports without `received_kbps` never do).
-Clean recovery doubles the budget per 400 ms, capped below a policer's rate
-for three seconds after loss without queueing.
+Clean recovery doubles the budget per 400 ms of actual time between reports
+(up to 2 s apart) back to just under the last sustainable rate, then probes
+above it in bounded, RTT-aware steps; it is capped below a policer's rate for
+three seconds after loss without queueing. The wire floor is 1 Mbps. Legacy
+reports without `unrecovered_loss_pct` count raw loss above 10% (or any lost
+frame) as damage.
 The session starts at its ceiling, and clean paths bypass pacing. Recovered
 random loss alone enables neither cuts nor pacing. Parity uses fast-attack,
 two-second-decay raw loss with a base-RTT floor (15% at 40 ms, 20% at 100 ms),
