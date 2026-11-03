@@ -71,9 +71,10 @@ fn device(slot: u8) -> Result<VirtualDevice> {
     let mut builder = VirtualDevice::builder()?
         .name(name)
         .input_id(InputId::new(BusType::BUS_USB, 0x045e, 0x028e, 0x0114))
-        // So a viewer on this machine does not take it for a real pad
+        // No `phys`: evdev 0.13.2 encodes UI_SET_PHYS with the wrong size,
+        // which the kernel refuses (EINVAL). A viewer on this machine tells
+        // these pads from xpad's by their being virtual
         // (`crates/stream/src/gamepad/linux.rs`).
-        .with_phys(c"latch-virtual-gamepad")?
         .with_keys(&keys)?
         .with_ff(&ff)?
         .with_ff_effects_max(16);

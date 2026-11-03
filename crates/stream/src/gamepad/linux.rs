@@ -18,14 +18,16 @@ use evdev::{
 use latch_proto::gamepad::button;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 /// How often `/dev/input` is looked at for new pads.
 const SCAN: Duration = Duration::from_secs(1);
-/// The `phys` Latch's host gives its virtual pads (`crates/engine/src/linux/uinput.rs`).
-const LATCH_PHYS: &str = "latch-virtual-gamepad";
+/// What Latch's host makes its virtual pads look like
+/// (`crates/engine/src/linux/uinput.rs`): xpad's name and ids for an Xbox
+/// 360 pad, but under `/sys/devices/virtual`, where a USB pad never is.
+const LATCH_PAD: (&str, u16, u16) = ("Microsoft X-Box 360 pad", 0x045e, 0x028e);
 
 struct Linux {
     rumble: Arc<Mutex<HashMap<u8, FFEffect>>>,
@@ -71,21 +73,35 @@ fn rumble_effect(strong: u16, weak: u16) -> FFEffectData {
     }
 }
 
-fn is_gamepad(dev: &Device) -> bool {
+fn is_gamepad(path: &Path, dev: &Device) -> bool {
     let keys = dev
         .supported_keys()
         .is_some_and(|k| k.contains(KeyCode::BTN_SOUTH));
     let stick = dev
         .supported_absolute_axes()
         .is_some_and(|a| a.contains(AbsoluteAxisCode::ABS_X));
-    keys && stick && dev.physical_path() != Some(LATCH_PHYS)
+    keys && stick && !is_latch_pad(path, dev)
+}
+
+/// A pad Latch's host made on this machine, which must not go back to it.
+fn is_latch_pad(path: &Path, dev: &Device) -> bool {
+    let (name, vendor, product) = LATCH_PAD;
+    let id = dev.input_id();
+    if dev.name() != Some(name) || id.vendor() != vendor || id.product() != product {
+        return false;
+    }
+    let Some(node) = path.file_name() else {
+        return false;
+    };
+    std::fs::canonicalize(Path::new("/sys/class/input").join(node))
+        .is_ok_and(|sys| sys.starts_with("/sys/devices/virtual"))
 }
 
 fn scan(shared: &Arc<Shared>, effects: &Arc<Mutex<HashMap<u8, FFEffect>>>) {
     let open: Arc<Mutex<HashSet<PathBuf>>> = Default::default();
     loop {
         for (path, dev) in evdev::enumerate() {
-            if open.lock().contains(&path) || !is_gamepad(&dev) {
+            if open.lock().contains(&path) || !is_gamepad(&path, &dev) {
                 continue;
             }
             open.lock().insert(path.clone());
