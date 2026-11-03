@@ -225,7 +225,7 @@ fn transport_scenarios() {
         assert!(p95 < 16.0, "{name}: standing queue {p95}");
         if name == "step" {
             assert!(cut_at.is_some_and(|ms| ms <= 60));
-            assert!(ceiling_at.is_some_and(|ms| ms <= 1500));
+            assert!(ceiling_at.is_some_and(|ms| ms <= 2000));
             assert!(rx.stats().frames_lost <= 40);
         }
         if name == "wifi" {

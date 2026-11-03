@@ -1,0 +1,220 @@
+//! Codec-free, deterministic frame/FEC/FIFO feedback scenarios. Run --nocapture
+//! for measurements; all time is simulated, including delayed feedback and IDR.
+#[path = "../src/congestion.rs"]
+mod congestion;
+#[path = "../src/pacing.rs"]
+mod pacing;
+use latch_proto::{
+    control::Report,
+    sim::{Impairment, Link},
+    video::{OutFrame, Packetizer, Reassembled, Reassembler},
+    wire::Datagram,
+};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
+
+#[test]
+fn transport_scenarios() {
+    for (name, cap, ceiling, base, interval, back, legacy) in [
+        ("steady20", 20000, 100000, 10, 50, 10, false),
+        ("steady50", 50000, 100000, 10, 50, 10, false),
+        ("steady100", 100000, 200000, 10, 50, 10, false),
+        ("cap20rtt150", 20000, 100000, 150, 50, 150, false),
+        ("cap20rtt250", 20000, 100000, 250, 50, 250, false),
+        ("cap100rtt150", 100000, 200000, 150, 50, 150, false),
+        ("cap100rtt250", 100000, 200000, 250, 50, 250, false),
+        ("rtt150", 50000, 100000, 150, 50, 150, false),
+        ("rtt250", 50000, 100000, 250, 50, 250, false),
+        ("slow250", 50000, 100000, 10, 250, 125, false),
+        ("legacy1000", 50000, 100000, 10, 1000, 10, true),
+        ("legacy_radio", 100000, 100000, 10, 1000, 10, true),
+        ("cap2", 2000, 100000, 10, 50, 10, false),
+        ("cap5", 5000, 100000, 10, 50, 10, false),
+        ("route", 100000, 100000, 10, 50, 10, false),
+        ("lan1g", 1000000, 1000000, 1, 50, 1, false),
+    ] {
+        let fps = 120;
+        let impairment = Impairment {
+            loss: if name == "legacy_radio" { 0.05 } else { 0.0 },
+            delay: Duration::from_millis(base / 2),
+            ..Impairment::NONE
+        };
+        let start = Instant::now();
+        let mut pending = VecDeque::<Vec<u8>>::new();
+        let mut pacer = pacing::Pacer::new(start);
+        let mut controller = congestion::Controller::new(ceiling, start);
+        let mut link = Link::new(impairment, 17);
+        let mut tx = Packetizer::new(1);
+        let mut rx = Reassembler::new(1);
+        let mut next_frame = 0;
+        let mut feedback = VecDeque::new();
+        let mut previous = rx.stats();
+        let mut sent = 0;
+        let mut wire_received = 0;
+        let mut idr_due = Some(start);
+        let mut last_idr = start - Duration::from_secs(1);
+        let mut queue_samples = Vec::new();
+        let mut ping_low = f32::MAX;
+        let mut minimum = ceiling;
+        let mut fec_loss = 0.0;
+        let mut budgets = Vec::new();
+        let mut route_recovered = false;
+        for ms in 0..35_000u64 {
+            let now = start + Duration::from_millis(ms);
+            let capacity = cap;
+            link.set_bandwidth(capacity, Duration::from_millis(40));
+            if ms * fps >= next_frame * 1000 {
+                let size = (u64::from(congestion::video_budget(
+                    controller.budget(),
+                    tx.fec_percent(),
+                    false,
+                )) * 1000
+                    / 8
+                    / fps) as usize;
+                let data = vec![0x5a; size];
+                let keyframe = idr_due.is_some_and(|at| at <= now)
+                    && now - last_idr >= Duration::from_millis(base);
+                if keyframe {
+                    idr_due = None;
+                    last_idr = now;
+                }
+                tx.packetize(
+                    &OutFrame {
+                        data: &data,
+                        keyframe,
+                        host_delay: 0,
+                    },
+                    |dg| {
+                        pending.push_back(dg.to_vec());
+                    },
+                );
+                next_frame += 1;
+            }
+            while let Some(dg) = pending.front() {
+                let pace = if controller.pacing() {
+                    controller.budget()
+                } else {
+                    0
+                };
+                if !pacer.delay(now, dg.len(), pace).is_zero() {
+                    break;
+                }
+                let dg = pending.pop_front().unwrap();
+                sent += dg.len() + 80;
+                link.send(now, &dg);
+            }
+            let queue = link.queue_delay(now).as_secs_f32() * 1000.0;
+            if ms >= 5000 {
+                queue_samples.push(queue);
+                budgets.push(controller.budget() as f64);
+            }
+            if ms % 20 == 0 {
+                ping_low = ping_low.min(
+                    (if name == "route" && ms >= 5000 {
+                        100.0
+                    } else {
+                        base as f32
+                    }) + queue,
+                );
+            }
+            for dg in link.receive(now) {
+                wire_received += dg.len() + 80;
+                if let Ok(Datagram::Video { shard, .. }) = latch_proto::wire::parse(&dg) {
+                    rx.push(&shard, now);
+                }
+                while let Some(event) = rx.poll(now) {
+                    if matches!(event, Reassembled::Lost { .. }) && idr_due.is_none() {
+                        idr_due = Some(now + Duration::from_millis(base));
+                    }
+                }
+            }
+            while rx.poll(now).is_some() {}
+            if rx.waiting_for_keyframe() && idr_due.is_none() {
+                idr_due = Some(now + Duration::from_millis(base));
+            }
+            if ms > 0 && ms % interval == 0 {
+                let stats = rx.stats();
+                let recovered = stats.shards_recovered - previous.shards_recovered;
+                let missing = stats.shards_missing - previous.shards_missing;
+                let received = stats.shards_received - previous.shards_received;
+                let denom = (received + missing).max(1) as f32;
+                let report = Report {
+                    rtt_ms: (if name == "route" && ms >= 5000 {
+                        100.0
+                    } else {
+                        base as f32
+                    }) + queue,
+                    received_kbps: (wire_received * 8 / interval as usize) as u32,
+                    frames_lost: stats.frames_lost - previous.frames_lost,
+                    loss_pct: (missing + recovered) as f32 * 100.0 / denom,
+                    unrecovered_loss_pct: if legacy {
+                        None
+                    } else {
+                        Some(missing as f32 * 100.0 / denom)
+                    },
+                    window_ms: interval as u32,
+                    ..Default::default()
+                };
+                feedback.push_back((
+                    now + Duration::from_millis(back),
+                    report,
+                    ping_low,
+                    (sent * 8 / interval as usize) as u32,
+                ));
+                ping_low = f32::MAX;
+                sent = 0;
+                wire_received = 0;
+                previous = stats;
+            }
+            while feedback.front().is_some_and(|(at, ..)| *at <= now) {
+                let (_, report, rtt, sent) = feedback.pop_front().unwrap();
+                controller.observe_sent(sent);
+                controller.update(now, &report, rtt, 0.0);
+                fec_loss = latch_proto::video::fec_loss_sample(
+                    fec_loss,
+                    report.loss_pct,
+                    Duration::from_millis(interval),
+                );
+                tx.set_fec_percent(
+                    latch_proto::video::fec_percent_for(fec_loss, controller.base_rtt()).min(30),
+                );
+            }
+            minimum = minimum.min(controller.budget());
+            if name == "route" && ms >= 15000 && controller.budget() == ceiling {
+                route_recovered = true;
+            }
+        }
+        queue_samples.sort_by(f32::total_cmp);
+        let p95 = queue_samples[queue_samples.len() * 95 / 100];
+        let mean = budgets.iter().sum::<f64>() / budgets.len() as f64;
+        let sd =
+            (budgets.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / budgets.len() as f64).sqrt();
+        println!("REVIEW {name} mean={mean:.1} sd={sd:.1} queue_p95={p95:.3} lost={} skipped={} min={} final={}",rx.stats().frames_lost,rx.stats().frames_skipped,minimum,controller.budget());
+        if interval == 50 && name != "route" && name != "lan1g" && cap >= 20000 {
+            let sd_bound = match cap {
+                20000 => 1700.0,
+                50000 => 3500.0,
+                _ => 7100.0,
+            };
+            assert!(sd <= sd_bound, "{name}: budget SD {sd} > {sd_bound}");
+            assert!(p95 < 16.0, "{name}: queue p95 {p95}");
+            assert!(rx.stats().frames_lost < 120, "{name}: frame damage");
+            assert!(rx.stats().frames_skipped < 60, "{name}: skipped frames");
+            assert!(mean > f64::from(cap) * 0.65, "{name}: underused path");
+        }
+        if name == "cap2" || name == "cap5" {
+            assert!(rx.stats().frames_lost < 50 && rx.stats().frames_skipped < 10);
+            assert!(controller.budget() < cap);
+            assert!(rx.stats().frames_lost + rx.stats().frames_skipped < 100);
+        }
+        if name == "route" {
+            assert!(route_recovered);
+            assert_eq!(controller.budget(), ceiling);
+        }
+        if name == "legacy_radio" {
+            assert_eq!(controller.budget(), ceiling);
+        }
+    }
+}

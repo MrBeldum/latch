@@ -25,6 +25,12 @@ pub(crate) struct Controller {
     /// About what got through when loss without a queue last forced a cut:
     /// a policer's rate.
     lossy: Option<(u32, Instant)>,
+    /// Sustainable FIFO wire rate and the next bounded probe's deadline.
+    capacity: Option<u32>,
+    probe_at: Instant,
+    probe: Option<(u32, Instant)>,
+    /// A lossless RTT plateau that survives a fourfold load reduction.
+    route: Option<(f32, Instant, u32)>,
 }
 
 impl Controller {
@@ -32,7 +38,7 @@ impl Controller {
         Self {
             ceiling,
             budget: ceiling,
-            floor: (ceiling / 10).max(1000).min(ceiling),
+            floor: 1000.min(ceiling),
             min_rtt: [f32::MAX; 2],
             last_cut: now - Duration::from_secs(1),
             last_step: now,
@@ -46,6 +52,10 @@ impl Controller {
             jitter: 3.0,
             received_kbps: 0.0,
             lossy: None,
+            capacity: None,
+            probe_at: now,
+            probe: None,
+            route: None,
         }
     }
 
@@ -102,7 +112,57 @@ impl Controller {
         // not cut a new viewer's budget. Uncorrected loss or lost frames in
         // two windows running do, however low the raw loss: a policer drops
         // only the overshoot and never queues, so delay never rises.
-        let damaged = loss > 3.0 || report.frames_lost > 0;
+        let damaged = report.frames_lost > 0
+            || report
+                .unrecovered_loss_pct
+                .map_or(report.loss_pct > 10.0, |loss| loss > 3.0);
+        // An old viewer cannot label repaired shards. Moderate raw loss with
+        // no frame damage is radio loss; even low-raw frame loss still catches policers.
+        let rtt = self.base_rtt().unwrap_or_default();
+        let window = Duration::from_millis(u64::from(report.window_ms.clamp(25, 1000)));
+        let horizon = (rtt * 2
+            + window
+                * if window >= Duration::from_millis(200) {
+                    2
+                } else {
+                    1
+                })
+        .max(Duration::from_millis(50));
+        // A permanent route change doesn't drain when load falls. Require
+        // lossless, stable RTT through a >=4x reduction before rebasing; a
+        // real FIFO's falling RTT, loss or local queue cancels this evidence.
+        let sample = if host_rtt_ms.is_finite() && host_rtt_ms > 0.0 {
+            host_rtt_ms
+        } else {
+            report.rtt_ms
+        };
+        if queued && !damaged && queue_ms < 1.0 && sample.is_finite() {
+            let (level, since, load) = *self.route.get_or_insert((sample, now, self.budget));
+            if (sample - level).abs() > 1.0 {
+                self.route = Some((sample, now, self.budget));
+            } else if now.duration_since(since) >= Duration::from_secs(2) && self.budget <= load / 4
+            {
+                for (minimum, current) in self.min_rtt.iter_mut().zip([report.rtt_ms, host_rtt_ms])
+                {
+                    if current.is_finite() && current > 0.0 {
+                        *minimum = current;
+                    }
+                }
+                self.previous_delay = 0.0;
+                self.gradient = 0.0;
+                delay = 0.0;
+                queued = false;
+                self.capacity = None;
+                self.probe = None;
+                self.route = None;
+            }
+        } else {
+            self.route = None;
+        }
+        // A small probe needs a smaller queue threshold than an emergency
+        // cut. Wait for its own feedback before increasing again.
+        let probe_queued = self.probe.is_some() && delay > 3.0f32.max(self.jitter * 2.0);
+        queued |= probe_queued;
         let pressure = queued || queue_ms > 20.0 || damaged;
         self.pressure_windows = if pressure {
             self.pressure_windows.saturating_add(1)
@@ -128,25 +188,28 @@ impl Controller {
             .filter(|(_, at)| now.duration_since(*at) < LOSSY_MEMORY)
             .map(|(kbps, _)| kbps);
         let old = self.budget;
-        let elapsed = now
-            .saturating_duration_since(self.last_step)
-            .as_secs_f64()
-            .min(1.0);
+        let elapsed = now.saturating_duration_since(self.last_step);
+        // Reports up to 2 s apart integrate all elapsed time (including 5.1's
+        // 250 ms cadence). After a longer silence require fresh feedback;
+        // never spend missing time as permission for a burst of growth.
+        let stale = elapsed > Duration::from_secs(2);
         self.last_step = now;
         // Require two windows: a late ping or a short radio burst is a blip.
         if damaged {
             self.clean_since = now;
         }
         let repeat = damaged && lossy.is_some_and(|kbps| self.budget > kbps * 9 / 10);
-        if self.pressure_windows >= 2 || collapsed || repeat {
+        if self.pressure_windows >= 2 || collapsed || repeat || probe_queued {
             self.pacing = true;
             self.clean_since = now;
             // A queue that persists after a cut needs another to drain. Loss
             // reported in the window after a cut was mostly sent before it:
             // wait a round trip and a report window past it.
             let rtt = self.base_rtt().unwrap_or_default();
-            let spacing = if queued {
+            let spacing = if queued && damaged {
                 rtt.max(Duration::from_millis(50))
+            } else if queued {
+                horizon
             } else {
                 rtt + Duration::from_millis(u64::from(report.window_ms.clamp(25, 250)))
             };
@@ -164,6 +227,20 @@ impl Controller {
                 let cut = if delay > 20.0 || loss > 10.0 { 60 } else { 80 };
                 self.budget =
                     ((u64::from(offered.min(measured)) * cut / 100) as u32).max(self.floor);
+                let probe = self.probe.take();
+                if let Some((safe, _)) = probe.filter(|_| !collapsed && !damaged) {
+                    self.budget = safe.max(self.floor);
+                } else {
+                    let capacity = if received > 0 {
+                        received.min(offered)
+                    } else {
+                        offered
+                    };
+                    // Without throughput feedback do not invent a FIFO rate
+                    // from a cut target; clean time must still recover promptly.
+                    self.capacity = (received > 0).then_some(capacity.max(self.floor));
+                }
+                self.probe_at = now + Duration::from_millis(500).max(horizon);
                 // Loss without a queue is a policer, whose rate stays put:
                 // remember about what got through, to climb back just under it.
                 if damaged && !queued && self.received_kbps > 0.0 {
@@ -172,22 +249,56 @@ impl Controller {
                 }
                 self.last_cut = now;
             }
-        } else if !pressure
-            && now.duration_since(self.clean_since)
-                >= Duration::from_millis(200).max(Duration::from_secs_f64(elapsed * 2.0))
-        {
+        } else if !pressure && now.duration_since(self.clean_since) >= Duration::from_millis(200) {
             self.pacing = false;
-            // Double in 400 ms while clean. A cut can regain 5x headroom in
-            // about 1.2 s, rather than spending seconds at an unusable floor.
-            // A remembered policer caps the climb until the memory lapses.
-            let cap = lossy.map_or(self.ceiling, |kbps| (kbps * 97 / 100).max(self.budget));
-            self.budget = self
-                .budget
-                .saturating_add(
-                    (f64::from(self.budget) * (2.0f64.powf(elapsed.min(0.1) / 0.4) - 1.0)) as u32,
-                )
-                .min(cap)
-                .min(self.ceiling);
+            if stale {
+                self.clean_since = now;
+                self.probe = None;
+                self.probe_at = now + horizon;
+            } else {
+                let cap = lossy.map_or(self.ceiling, |kbps| kbps * 97 / 100);
+                let growth =
+                    (f64::from(self.budget) * 2.0f64.powf(elapsed.as_secs_f64() / 0.4)) as u32;
+                if let Some((_, at)) = self.probe {
+                    if now.duration_since(at) >= horizon {
+                        // The probe survived a feedback round trip: capacity
+                        // really grew. Accelerate only after this confirmation.
+                        self.capacity = Some(
+                            self.budget
+                                .saturating_mul(if horizon >= Duration::from_millis(200) {
+                                    110
+                                } else {
+                                    150
+                                })
+                                / 100,
+                        );
+                        self.probe = None;
+                        self.probe_at = now;
+                    }
+                } else if let Some(capacity) = self.capacity {
+                    let safe = (capacity
+                        * (if window >= Duration::from_millis(200) {
+                            92
+                        } else {
+                            97
+                        })
+                        / 100)
+                        .max(self.floor)
+                        .min(cap);
+                    if self.budget < safe {
+                        self.budget = growth.min(safe);
+                    } else if now >= self.probe_at && self.budget < cap {
+                        // Bound outstanding excess to a few ms of queue even
+                        // on long RTT paths. Only one increase can be in flight.
+                        let step = (0.005 / horizon.as_secs_f64()).clamp(0.01, 0.1);
+                        self.probe = Some((self.budget, now));
+                        self.budget = ((f64::from(capacity) * (1.0 + step)) as u32).min(cap);
+                    }
+                } else {
+                    self.budget = growth.min(cap);
+                }
+                self.budget = self.budget.min(self.ceiling);
+            }
         }
         self.budget != old
     }
@@ -205,6 +316,102 @@ pub(crate) fn video_budget(wire_kbps: u32, fec: u8, audio: bool) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovery_integrates_report_time_and_rejects_stale_credit() {
+        // Same fake-clock setup as the independent review's recovery probe.
+        for interval in [50, 250, 1000] {
+            let start = Instant::now();
+            let mut c = Controller::new(100_000, start);
+            let clean = Report {
+                rtt_ms: 10.0,
+                window_ms: interval,
+                ..Default::default()
+            };
+            c.update(start, &clean, 10.0, 0.0);
+            for ms in [50, 100, 200] {
+                c.update(
+                    start + Duration::from_millis(ms),
+                    &Report::default(),
+                    40.0,
+                    0.0,
+                );
+            }
+            let cut = c.budget();
+            let mut doubled = None;
+            let mut ceiling = None;
+            for tick in 1..=40 {
+                let ms = u64::from(tick * interval);
+                c.update(start + Duration::from_millis(200 + ms), &clean, 10.0, 0.0);
+                if c.budget() >= cut * 2 {
+                    doubled.get_or_insert(ms);
+                }
+                if c.budget() == 100_000 {
+                    ceiling.get_or_insert(ms);
+                }
+            }
+            println!(
+                "RECOVERY interval={interval} cut={cut} double_ms={} ceiling_ms={}",
+                doubled.unwrap(),
+                ceiling.unwrap()
+            );
+            assert!(doubled.unwrap() <= 1000);
+            assert!(ceiling.unwrap() <= 2000);
+            c.budget = cut;
+            c.update(start + Duration::from_secs(60), &clean, 10.0, 0.0);
+            assert_eq!(c.budget(), cut, "silence is not growth credit");
+            c.update(start + Duration::from_millis(60_250), &clean, 10.0, 0.0);
+            assert!(c.budget() > cut, "fresh reports resume growth");
+        }
+    }
+
+    #[test]
+    fn route_rebase_requires_lossless_delay_unresponsive_to_load_reduction() {
+        for damaged in [false, true] {
+            let start = Instant::now();
+            let mut c = Controller::new(100_000, start);
+            let mut r = Report {
+                rtt_ms: 10.0,
+                window_ms: 50,
+                ..Default::default()
+            };
+            c.update(start, &r, 10.0, 0.0);
+            for tick in 1..=100 {
+                r.rtt_ms = 100.0;
+                r.frames_lost = u64::from(damaged);
+                c.update(start + Duration::from_millis(tick * 50), &r, 100.0, 0.0);
+            }
+            if damaged {
+                assert_eq!(c.base_rtt(), Some(Duration::from_millis(10)));
+                assert_eq!(c.budget(), 1000);
+            } else {
+                assert!(
+                    c.base_rtt().unwrap().abs_diff(Duration::from_millis(100))
+                        < Duration::from_micros(1)
+                );
+                assert_eq!(c.budget(), 100_000);
+            }
+        }
+        // A FIFO responds to reduced offered load: its falling RTT must
+        // invalidate the route-change candidate, even without any loss.
+        let start = Instant::now();
+        let mut c = Controller::new(100_000, start);
+        let r = Report {
+            rtt_ms: 10.0,
+            window_ms: 50,
+            ..Default::default()
+        };
+        c.update(start, &r, 10.0, 0.0);
+        for tick in 1..=100 {
+            c.update(
+                start + Duration::from_millis(tick * 50),
+                &r,
+                100.0 - tick as f32 * 0.8,
+                0.0,
+            );
+        }
+        assert_eq!(c.base_rtt(), Some(Duration::from_millis(10)));
+    }
+
     #[test]
     fn underfilled_encoder_cuts_actual_rate_and_only_pressure_enables_pacing() {
         let start = Instant::now();
@@ -225,7 +432,7 @@ mod tests {
             c.update(start + Duration::from_millis(tick * 250), &r, 40.0, 0.0);
         }
         assert!(c.pacing());
-        assert_eq!(c.budget(), 5_000);
+        assert_eq!(c.budget(), 4_800);
         r.rtt_ms = 12.0;
         c.update(start + Duration::from_secs(3), &r, 12.0, 0.0);
         assert!(!c.pacing());
@@ -286,7 +493,7 @@ mod tests {
                 assert_eq!(c.budget(), 100_000);
             }
         }
-        assert!(minimum >= 10_000);
+        assert!(minimum >= 1_000);
         assert_eq!(c.budget(), 100_000, "must recover to ceiling");
     }
 
