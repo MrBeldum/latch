@@ -1184,6 +1184,34 @@ mod tests {
 #[cfg(test)]
 mod timing_tests {
     use super::*;
+    /// Capture updates without conversion, encoding, or a pacer. Run with
+    /// desktop animation to distinguish DXGI/DWM cadence from encode limits.
+    #[test]
+    #[ignore]
+    fn hardware_capture_rate() -> Result<()> {
+        let _runtime = super::super::Runtime::new(false)?;
+        for (width, height, fps) in [(1920, 1080, 240), (2560, 1440, 240), (3840, 2160, 120)] {
+            let previous = display::prepare(width, height, fps)?;
+            let result = (|| -> Result<()> {
+                let mut capture = Capture::new()?;
+                let start = Instant::now();
+                let mut frames = 0;
+                while start.elapsed() < Duration::from_secs(3) {
+                    frames += usize::from(capture.grab(Duration::from_millis(100))?);
+                }
+                eprintln!(
+                    "DXGI capture only {width}x{height}@{fps}: {:.1} updates/s",
+                    frames as f64 / start.elapsed().as_secs_f64()
+                );
+                Ok(())
+            })();
+            if let Some(previous) = previous {
+                display::restore(&previous)?;
+            }
+            result?;
+        }
+        Ok(())
+    }
     #[test]
     #[ignore]
     fn hardware_conversion_timing() -> Result<()> {

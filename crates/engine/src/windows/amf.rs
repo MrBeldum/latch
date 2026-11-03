@@ -262,6 +262,14 @@ impl Encoder {
                 "create HEVC",
             )?;
             let component = Object::new(component)?;
+            // Usage first: it resets every other property to its defaults.
+            component.set("HevcUsage", Variant::int(1))?; // ultra low latency
+            component.set("HevcQualityPreset", Variant::int(10))?; // speed
+            component.set("HevcProfile", Variant::int(1))?; // Main
+            component.set(
+                "HevcFrameSize",
+                Variant::pair(5, config.width, config.height),
+            )?;
             // Asked for more pictures a second than the hardware encodes,
             // AMD's encoder stalls outright (4K at 240 fps on an RX 6600).
             // Rate control is told the rate it can reach instead; frames
@@ -280,18 +288,11 @@ impl Encoder {
                 }
                 _ => config.fps,
             };
-            // Usage first: it resets every other property to its defaults.
-            component.set("HevcUsage", Variant::int(1))?; // ultra low latency
-            component.set("HevcQualityPreset", Variant::int(10))?; // speed
-            component.set("HevcProfile", Variant::int(1))?; // Main
-            component.set(
-                "HevcFrameSize",
-                Variant::pair(5, config.width, config.height),
-            )?;
             component.set("HevcFrameRate", Variant::pair(7, fps, 1))?;
             component.set("HevcRateControlMethod", Variant::int(3))?; // CBR
-                                                                      // The buffer bounds each frame; padding small frames up to the
-                                                                      // mean would only spend the link on filler NAL units.
+
+            // The buffer bounds each frame; padding small frames up to the
+            // mean would only spend the link on filler NAL units.
             component.set("HevcEnforceHRD", Variant::boolean(true))?;
             component.set("HevcFillerDataEnable", Variant::boolean(false))?;
             // One endless GOP: an IDR only when the engine forces one.

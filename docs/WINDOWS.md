@@ -236,8 +236,11 @@ H.264 accepts their setters but rejects their reads; neither result proves refer
 reliable capability test on this AMD MFT. Gradual intra-refresh reads are
 rejected. Main10 output-type negotiation succeeds. These probes do not prove
 reference recovery or HDR encoding: neither is implemented here. AMF's
-published HEVC API has LTR and intra-refresh properties, but their behavior
-on this GPU still needs a dedicated recovery test.
+RX 6600 probe marks an LTR and reports its later forced use on a P-frame;
+intra-refresh configuration emits non-IDRs, but actual CTB refresh and
+decoder recovery still need dedicated tests. P010 Main10 produces an IDR
+whose SPS identifies profile 2. HDR metadata and fidelity are unverified;
+the streaming path remains 8-bit SDR.
 
 Measurements and reproduction commands: [Windows hardware measurements](measurements/2026-11-03/windows-host/README.md).
 

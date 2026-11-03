@@ -1,0 +1,2 @@
+Listing virtual display resolutions and refresh rates
+  every resolution and refresh rate is listed already
