@@ -96,10 +96,19 @@ toolbar goes away and the mouse is captured back. The keys are shown when
 a stream starts, and on the toolbar itself. Before the first picture
 arrives, a **Cancel** button under the progress ends the attempt without
 the host key. A menu or a question keeps the toolbar there until it is
-answered. The status line, with the session clock, the frame rate and
-bitrate against what was asked for, and the round trip, is drawn over the
-picture's bottom-left corner while **Stats** is open, or in the bar below
-the picture when a manual size leaves one.
+answered.
+
+**Stats** (or the host key with **S**, or **F6** as in GeForce NOW:
+Control-Option-S) lays a stats overlay over the picture's top-right
+corner without taking the mouse or showing the toolbar: resolution, codec
+and decoder; frames a second received, decoded and drawn against what was
+asked for; bitrate now against the host's current target and the ceiling;
+round trip; frame jitter; packet loss as it happened and after FEC; frames
+lost, skipped before decoding and decoded but never drawn; decode time;
+how long a decoded picture waits to be drawn; and an estimated latency
+with its breakdown (host capture to send, half the round trip plus frame
+assembly, decoder queue plus decode, waiting to be drawn plus half a
+refresh of this display). Values worth a look turn amber.
 
 The mouse is captured by default: the Mac cursor is hidden and held in
 place and raw movement is sent, which is what games read for the camera
@@ -114,7 +123,7 @@ the Mac cursor's position is sent 1:1 instead and nothing is captured.
 | **Direct · 38 ms / Relayed via Tokyo · 210 ms / Via your relay · 60 ms** | The path Tailscale found and its round trip. Amber means every packet goes through one of Tailscale's shared relays, which adds delay; **Connection details** under the machine list say why and what would give a direct path. What Latch asks for is the same on every path |
 | **Mouse** | **Captured, for games** (the default): a click on the picture hides the cursor and sends raw movement, which games read; the host key frees it. **Free, for desktops**: the Mac cursor's position is sent 1:1 and nothing is captured. The choice is remembered, and is also in Settings |
 | **Keys** | Ctrl+Alt+Delete, Windows key, Alt+Tab, Escape, Print Screen; and **Command acts as Ctrl** |
-| **Stats** | The Stream performance panel: frame rate and bitrate against what was asked for, round trip, packet loss, encode, assembly, queue and decode times, and the decoder. **Copy diagnostics** puts it all on the clipboard |
+| **Stats** | The stats overlay (above). **More → Stream performance** opens the full panel: frame rate and bitrate against what was asked for, round trip, packet loss, encode, assembly, queue and decode times, and the decoder. **Copy diagnostics** puts it all on the clipboard |
 | **Full screen** | Toggle; the setting decides how a session starts |
 | **PC** (or **Mac**, **Machine**) | Sleep…, Restart…, Shut down…, each asking first, when the machine's owner allows them; Sleep only on a Windows PC, the one kind a wake packet can bring back. **Update Latch Host…** for a PC whose host is older than 3.1 |
 | **Stream settings** | The same controls as Settings: quality profile, resolution, frame rate, bitrate and codec. **Apply and reconnect** restarts the session with them in a second or two; Escape or the close button leaves them as they were |
@@ -153,11 +162,12 @@ Shift+Insert. To copy in a terminal, select the text and press ⌘C.
 
 A Linux VPS draws a desktop of one fixed size and encodes on the CPU, so
 Latch never asks it for more than that size: a larger resolution setting
-gets the desktop's own size, a smaller one (720p, say) is scaled down. On
-a machine with fewer than four cores, Latch asks for at most 30 fps at
-1080p, and more for a smaller picture in proportion to the pixels it
-saves: up to 67 fps at 720p, 43 at 900p, 120 at 540p. To get 60 fps from
-such a machine, pick 720p (or 540p) and 60 fps.
+gets the desktop's own size, a smaller one (720p, say) is scaled down.
+Latch Host there times its software encoder on its own CPU at that size
+and reports the frame rate it keeps up with; Latch asks for no more than
+that, and more for a smaller picture in proportion to the pixels it saves
+(a host measured at 30 fps at 1080p is asked for up to 67 at 720p, 120 at
+540p). To get 60 fps from a slow machine, pick 720p (or 540p) and 60 fps.
 
 ## Only connecting from this Mac
 
@@ -174,10 +184,10 @@ both routers. When it cannot, every packet goes through a relay: your own
 peer relay if you run one (**Relay** in Settings), otherwise one of
 Tailscale's (DERP). A relay adds a detour, and the round trip it adds is a
 floor under how quickly the PC answers a click; it changes nothing about
-what Latch asks for. Recommended quality is this screen's size at 50
-Mbps on every path, so a relayed stream is laggier, not blurrier. The
-encoder holds that rate (CBR); a still desktop no longer drops to a
-trickle.
+what Latch asks for. Balanced quality is this screen's size at its own
+refresh rate on every path, so a relayed stream is laggier, not blurrier;
+the host's rate control lowers the bitrate only when the network does not
+carry it.
 Tailscale's own relays are shared, so a stream through one can also
 stutter at busy times; a peer relay you run is yours alone.
 
@@ -206,11 +216,11 @@ it from this network (see below).
 
 | Setting | What it changes |
 |---------|-----------------|
-| Quality | **Recommended** (the default) asks for this screen's own size at 50 Mbps, on every path. **Smooth** is 1080p · 60 fps · 20 Mbps, **Balanced** match screen · 60 · 50, **Sharp** match screen · 60 · 100. **Custom** uses the rows below; changing one of them switches to it |
-| Resolution | **Match screen** is this display's own pixel size (3024×1964 on a 14" MacBook Pro), so the picture fills it exactly. **540p**, **720p**, **900p**, **1080p**, **1440p** and **4K** are the standard 16:9 sizes, 960×540, 1280×720, 1600×900, 1920×1080, 2560×1440 and 3840×2160; on a display of another shape they leave a bar above and below. The sizes below 1080p are for a PC that encodes in software or a slow network: fewer pixels leave more bitrate for each and a higher frame rate. The list shows the pixel size of each. The PC switches its display to the size asked for; a PC with no monitor needs a virtual display that lists that size, which setup on the PC arranges for the Virtual Display Driver |
-| Frame rate | 30 to 240; the PC's display is switched to match when it can |
-| Bitrate | 2 to 150 Mbps; arrow keys step by 1, Shift-arrow by 10. The encoder holds this rate. Large swings mean the path is dropping packets |
-| Codec | Auto (HEVC when both ends can), HEVC, H.264 |
+| Quality | Profiles that follow this display, as GeForce NOW's do. **Balanced** (the default) asks for this screen's own size at its own refresh rate (120 Hz on a ProMotion MacBook Pro, 144–360 on a fast monitor). **Competitive** is 1080p at the display's refresh rate, up to 360 fps. **Cinematic** is this screen's size up to 4K, up to 120 fps, at twice the bitrate. Each profile's bitrate is a ceiling of a quarter of a bit a pixel (half for Cinematic), never under 50 Mbps; the host comes down from it whenever the network carries less. **Custom** uses the rows below; changing one of them switches to it, starting from what the profile asked for. The PC's encoder sets the only other limits: a larger picture than it takes is scaled down in proportion. Settings saved by 5.1 move Smooth, Balanced and Sharp to Competitive, Balanced and Cinematic once |
+| Resolution | **Match screen** is this display's own pixel size (3024×1964 on a 14" MacBook Pro), so the picture fills it exactly. **540p**, **720p**, **900p**, **1080p**, **1440p**, **4K**, **5K** and **8K** are the standard 16:9 sizes, 960×540, 1280×720, 1600×900, 1920×1080, 2560×1440, 3840×2160, 5120×2880 and 7680×4320; on a display of another shape they leave a bar above and below. The sizes below 1080p are for a PC that encodes in software or a slow network: fewer pixels leave more bitrate for each and a higher frame rate. The list shows the pixel size of each. The PC switches its display to the size asked for; a PC with no monitor needs a virtual display that lists that size, which setup on the PC arranges for the Virtual Display Driver |
+| Frame rate | 30 to 500, and this display's own rate (marked); the PC's display is switched to match when it can |
+| Bitrate | 2 to 1000 Mbps in steps (fine at the low end); arrow keys step once, Shift-arrow ten times. The most the encoder spends; the host's rate control comes down from it when the path drops packets |
+| Codec | Auto (the best both ends have: AV1, then HEVC, then H.264), AV1, HEVC, H.264. A codec either end lacks falls back to H.264 |
 | Open streams full screen | How a session starts |
 | Capture the mouse | The toolbar's Mouse choice, remembered |
 | Command acts as Ctrl | Off makes ⌘ the Windows key on Windows and Linux machines; a Mac always gets ⌘ as Command |

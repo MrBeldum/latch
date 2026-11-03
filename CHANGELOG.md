@@ -6,6 +6,35 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- No Latch-imposed ceilings on a stream. The viewer allowed 30–240 fps and
+  2–150 Mbps and the host clamped every request to 240 fps, 500 Mbps and
+  8192 pixels; the software H.264 encoder refused anything over 240 fps.
+  Requests now run to 500 fps, 1 Gbps and 16384 pixels a side, and the host
+  meets them with what its encoder takes: each codec's top level, lowered
+  where the hardware has a smaller limit (VideoToolbox is tried at a ladder
+  of sizes: an M3 Pro takes H.264 to 4096 × 2160 and HEVC to 8192 × 4320).
+  Hosts report these limits in `/v1/status` (`streamer.codecs`), and a
+  viewer fits what it asks for to them. A Linux host's software frame rate
+  is measured on its own CPU instead of guessed from its core count (an
+  M3 Pro: 67 fps at 1080p). Measured on the test pattern: 1280 × 720 asked
+  at 300 fps streams at 283 (was held at 240); 640 × 360 at 480 streams at
+  474 (was 240).
+- Quality profiles modelled on GeForce NOW's, which follow the display:
+  **Balanced** (the default: this screen's size at its own refresh rate,
+  so 120 fps on ProMotion and up to 500 on a fast monitor), **Competitive**
+  (1080p at the display's rate, up to 360), **Cinematic** (up to 4K and 120
+  fps at twice the bitrate) and **Custom** (30–500 fps, 2–1000 Mbps, 5K and
+  8K sizes). A profile's bitrate is a ceiling the host comes down from.
+  AV1 is a codec choice (`"av1"` on the wire) for when both ends have it.
+  5.1's Smooth, Balanced and Sharp move to Competitive, Balanced and
+  Cinematic once.
+- A stats overlay, as in GeForce NOW: **Stats**, or the host key with S
+  (or F6), lays resolution, codec, frames received / decoded / drawn,
+  bitrate against its target, round trip, jitter, loss before and after
+  FEC, dropped frames, decode and present times and an estimated latency
+  breakdown over the picture's corner, without taking the mouse. The full
+  Stream performance panel moved to More.
+
 - One pointer while the mouse is captured. The Mac's arrow was hidden only
   by egui's cursor, which macOS applies when the pointer moves over the
   window; a captured pointer is held still, so the Mac's arrow could stay
