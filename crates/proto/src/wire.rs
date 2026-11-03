@@ -383,7 +383,9 @@ pub fn parse(buf: &[u8]) -> Result<Datagram<'_>, WireError> {
         11 => {
             let updates = entries(buf, FEEDBACK_LEN, read_feedback)?;
             if buf[9..]
-                .chunks_exact(FEEDBACK_LEN)
+                .as_chunks::<FEEDBACK_LEN>()
+                .0
+                .iter()
                 .any(|c| FeedbackUpdate::read(c).is_none())
             {
                 return Err(WireError::Field("feedback"));

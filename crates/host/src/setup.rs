@@ -244,6 +244,7 @@ if ($LASTEXITCODE -ne 0) {{ $setupFailed = $true }}
 {virtual_display}
 Step "Recording the power settings this PC had before Latch"
 {record}
+{gamepad_driver}
 Step "Turning Fast Startup off so a shut-down PC can wake"
 try {{ Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -Value 0 -Type DWord -ErrorAction Stop }} catch {{ Write-Output "  Fast Startup: $_"; $setupFailed = $true }}
 Step "Keeping this PC awake when plugged in so Tailscale stays reachable"
@@ -264,6 +265,61 @@ exit 0
         virtual_display = crate::virtual_display::setup_ps(),
         input_helper = input_helper_ps(),
         record = record_power_ps(),
+        gamepad_driver = gamepad_driver_ps(),
+    )
+}
+
+/// The ViGEmBus release setup installs for viewers' gamepads (the last one;
+/// the project has ended, the driver is signed by Microsoft's hardware
+/// program), and its SHA-256, so only that very file ever runs.
+const VIGEM_URL: &str =
+    "https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/ViGEmBus_1.22.0_x64_x86_arm64.exe";
+const VIGEM_SHA256: &str = "89220A7865076B342892F98865F3499FB7C4CFD673159E89D352C360FD014C6A";
+/// Under [`SAVED_KEY`]: setup installed ViGEmBus, so `--uninstall` removes it.
+const VIGEM_MARK: &str = "ViGEmBusInstalled";
+/// Finds ViGEmBus's entry in Programs and Features, if it is installed.
+const VIGEM_ENTRY: &str = r#"Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'ViGEm Bus Driver*' } | Select-Object -First 1"#;
+
+/// Setup's step for gamepads: installs ViGEmBus unless something already
+/// did, from the pinned release, downloaded into setup's administrators-only
+/// folder so nothing can swap the file between the check and the run. The
+/// installer runs silently and never restarts Windows (an upgrade over an
+/// older ViGEmBus would otherwise force one); if it says a
+/// restart is needed, the step says so. A failure here leaves gamepads off
+/// and fails nothing else.
+fn gamepad_driver_ps() -> String {
+    format!(
+        r#"Step "Installing the ViGEmBus gamepad driver, so a viewer's gamepads reach games"
+try {{
+    $vigem = {entry}
+    if ($vigem -or (Get-Service -Name ViGEmBus -ErrorAction SilentlyContinue)) {{
+        Write-Output "  already installed ($($vigem.DisplayVersion))"
+    }} else {{
+        $vigemDir = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Latch\Setup'
+        Assert-ProtectedTree $vigemDir
+        $vigemSetup = Join-Path $vigemDir 'ViGEmBus-setup.exe'
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -UseBasicParsing -Uri '{url}' -OutFile $vigemSetup -ErrorAction Stop
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $vigemSetup).Hash
+        if ($hash -ne '{sha256}') {{
+            Remove-Item -LiteralPath $vigemSetup -Force -ErrorAction SilentlyContinue
+            throw "the download's SHA-256 is $hash, not the one Latch knows"
+        }}
+        Write-Output "  signature: $((Get-AuthenticodeSignature -LiteralPath $vigemSetup).Status)"
+        $p = Start-Process -FilePath $vigemSetup -ArgumentList '/qn', '/norestart', 'REBOOT=ReallySuppress' -Wait -PassThru
+        Remove-Item -LiteralPath $vigemSetup -Force -ErrorAction SilentlyContinue
+        if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {{ throw "the installer exited with $($p.ExitCode)" }}
+        # Without -Force: on an existing key it would wipe the recorded power settings.
+        if (-not (Test-Path -LiteralPath $latchSaved)) {{ New-Item -Path $latchSaved -ErrorAction Stop | Out-Null }}
+        New-ItemProperty -LiteralPath $latchSaved -Name '{mark}' -Value '1' -PropertyType String -Force -ErrorAction Stop | Out-Null
+        if ($p.ExitCode -eq 3010) {{ Write-Output "  installed; gamepads work after Windows next restarts" }} else {{ Write-Output "  installed" }}
+    }}
+}} catch {{ Write-Output "  gamepad driver: $_ (viewers' gamepads stay off; nothing else depends on it)" }}"#,
+        entry = VIGEM_ENTRY,
+        url = VIGEM_URL,
+        sha256 = VIGEM_SHA256,
+        mark = VIGEM_MARK,
     )
 }
 
@@ -715,8 +771,18 @@ Stop-ScheduledTask -TaskName '{input_task}' -ErrorAction SilentlyContinue
 if (Get-ScheduledTask -TaskName '{input_task}' -ErrorAction SilentlyContinue) {{
     Unregister-ScheduledTask -TaskName '{input_task}' -Confirm:$false -ErrorAction SilentlyContinue
 }}
-Step "Putting back the power settings setup changed"
 $latchSaved = '{key}'
+Step "Removing the ViGEmBus gamepad driver if Latch's setup installed it"
+if ((Get-ItemProperty -LiteralPath $latchSaved -Name '{mark}' -ErrorAction SilentlyContinue).'{mark}' -eq '1') {{
+    $vigem = {entry}
+    $removed = $true
+    if ($vigem -and $vigem.PSChildName -match '^\{{[0-9A-Fa-f-]{{36}}\}}$') {{
+        $p = Start-Process -FilePath msiexec.exe -ArgumentList '/x', $vigem.PSChildName, '/qn', '/norestart' -Wait -PassThru
+        if ($p.ExitCode -notin 0, 1605, 3010) {{ Write-Output "  msiexec exited with $($p.ExitCode)"; $removed = $false }}
+    }} elseif ($vigem) {{ Write-Output "  no product code in '$($vigem.PSChildName)'"; $removed = $false }}
+    if ($removed) {{ Remove-ItemProperty -LiteralPath $latchSaved -Name '{mark}' -ErrorAction SilentlyContinue }} else {{ $setupFailed = $true }}
+}} else {{ Write-Output "  not installed by Latch; left alone" }}
+Step "Putting back the power settings setup changed"
 $saved = Get-ItemProperty -LiteralPath $latchSaved -ErrorAction SilentlyContinue
 if ($saved) {{
     $restored = $true
@@ -765,6 +831,8 @@ exit 0
         task = START_TASK,
         input_task = INPUT_TASK,
         key = SAVED_KEY,
+        mark = VIGEM_MARK,
+        entry = VIGEM_ENTRY,
     )
 }
 
@@ -874,8 +942,54 @@ mod tests {
         assert!(s.contains("HiberbootEnabled"));
         assert!(s.contains("*WakeOnMagicPacket"));
         assert!(s.contains("vdd_settings.xml"));
-        assert!(!s.contains("Invoke-WebRequest"));
+        // The one download is the pinned gamepad driver (no Sunshine).
+        assert_eq!(s.matches("Invoke-WebRequest").count(), 1);
+        assert!(s.contains(&format!("-Uri '{VIGEM_URL}'")));
         assert!(!s.contains("--creds"));
+    }
+
+    /// Setup installs ViGEmBus only when nothing has, runs only the file
+    /// whose hash it pins, never restarts Windows, and marks what it
+    /// installed; uninstall removes only that.
+    #[test]
+    fn setup_installs_the_pinned_gamepad_driver_and_uninstall_only_removes_its_own() {
+        let s = script(&Plan {
+            exe: Path::new(r"C:\Latch\latch-host.exe"),
+            adapter: "",
+            adapter_description: "",
+        });
+        let step = s
+            .split("Step \"Installing the ViGEmBus gamepad driver")
+            .nth(1)
+            .expect("a gamepad driver step");
+        let at = |needle: &str| step.find(needle).unwrap_or_else(|| panic!("no {needle}"));
+        assert!(at("already installed") < at("Invoke-WebRequest"));
+        assert!(at("Assert-ProtectedTree $vigemDir") < at("Invoke-WebRequest"));
+        assert!(at("Invoke-WebRequest") < at(VIGEM_SHA256));
+        assert!(at(VIGEM_SHA256) < at("Start-Process"));
+        assert!(step.contains("'/qn', '/norestart', 'REBOOT=ReallySuppress'"));
+        assert!(!s.contains("Restart-Computer") && !s.contains("shutdown"));
+        assert!(at("Start-Process") < at(VIGEM_MARK));
+        // New-Item -Force would empty the key the power settings are in.
+        assert!(!step.contains("New-Item -Path $latchSaved -Force"));
+        // The mark goes under the saved key after the power settings were
+        // recorded, so its existence never stops them being recorded.
+        assert!(
+            s.find("Recording the power settings").unwrap()
+                < s.find("Installing the ViGEmBus").unwrap()
+        );
+        let m = uninstall_machine_ps();
+        let removal = m
+            .split("Step \"Removing the ViGEmBus gamepad driver")
+            .nth(1)
+            .unwrap();
+        assert!(removal.find(VIGEM_MARK).unwrap() < removal.find("msiexec.exe").unwrap());
+        assert!(removal.contains("'/x', $vigem.PSChildName, '/qn', '/norestart'"));
+        assert!(removal.contains("not installed by Latch; left alone"));
+        // Read before the power restore deletes the saved key.
+        assert!(
+            m.find("Removing the ViGEmBus").unwrap() < m.find("Putting back the power").unwrap()
+        );
     }
 
     /// The power settings setup changes are recorded first, once, so that

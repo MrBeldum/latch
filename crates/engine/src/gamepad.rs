@@ -28,9 +28,13 @@ pub struct Opened {
     pub kinds: Vec<PadKind>,
 }
 
-/// Opens this platform's virtual pads. `feedback` gets their rumble.
+/// Opens this platform's virtual pads. `feedback` gets their rumble. A
+/// test-pattern host gets pads that only remember, unless
+/// `LATCH_TEST_GAMEPADS=system` asks for the platform's own.
 pub fn open(feedback: FeedbackFn) -> anyhow::Result<Opened> {
-    if crate::testmode::motion().is_some() {
+    if crate::testmode::motion().is_some()
+        && std::env::var("LATCH_TEST_GAMEPADS").as_deref() != Ok("system")
+    {
         return Ok(Pads::opened(crate::testmode::TestBus, feedback));
     }
     #[cfg(windows)]
@@ -306,7 +310,7 @@ pub(crate) mod map {
 
     /// Linux key codes (`input-event-codes.h`) of an Xbox-layout pad, as the
     /// kernel's `xpad` driver reports them.
-    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub const EV_KEYS: [(u32, u16); 11] = [
         (button::SOUTH, 0x130),          // BTN_SOUTH
         (button::EAST, 0x131),           // BTN_EAST
