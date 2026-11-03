@@ -15,7 +15,7 @@ use std::{
 use windows::{
     core::{Interface, VARIANT},
     Win32::{
-        Foundation::{CloseHandle, HANDLE, HMODULE, LUID, WAIT_OBJECT_0},
+        Foundation::{CloseHandle, E_NOTIMPL, HANDLE, HMODULE, LUID, WAIT_OBJECT_0},
         Graphics::{
             Direct3D::*,
             Direct3D11::*,
@@ -799,11 +799,17 @@ impl State {
             let transform = create_transform(subtype)?;
             // The H.264 decoder exposes this as a UINT32 transform attribute,
             // not the VT_BOOL encoder property on ICodecAPI. Set it before types.
-            transform
-                .GetAttributes()
-                .context("decoder attributes")?
-                .SetUINT32(&CODECAPI_AVLowLatencyMode, 1)
-                .context("enable decoder low-latency mode")?;
+            // A transform without attributes answers E_NOTIMPL; low latency
+            // is a hint, so that decoder runs without it.
+            match transform.GetAttributes() {
+                Ok(attributes) => attributes
+                    .SetUINT32(&CODECAPI_AVLowLatencyMode, 1)
+                    .context("enable decoder low-latency mode")?,
+                Err(error) if error.code() == E_NOTIMPL => {
+                    tracing::debug!("the decoder has no attributes; no low-latency attribute")
+                }
+                Err(error) => return Err(error).context("decoder attributes"),
+            }
             if let Ok(api) = transform.cast::<ICodecAPI>() {
                 if let Err(error) = api.SetValue(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true)) {
                     tracing::debug!("decoder ICodecAPI low-latency mode: {error}");
