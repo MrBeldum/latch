@@ -76,7 +76,7 @@ type byte and the payload and is at most 65 536. Payloads are JSON objects.
 | Type | Name | Direction | Payload |
 | --- | --- | --- | --- |
 | 1 | `Accept` | host → viewer | see below; always the first message |
-| 2 | `End` | either | `{"code": u32, "message": string}`; the sender closes after it |
+| 2 | `End` | either | `{"code": u32, "message": string}`; the sender closes after it (a host half-closes and reads for up to 100 ms first, so a report in flight cannot reset the connection before the viewer reads the End) |
 | 3 | `Keepalive` | either | `{}` |
 | 4 | `Notice` | host → viewer | `{"kind": "audio" \| "video" \| "input", "message": string}`; `message` empty clears it |
 | 5 | `Report` | either | `{"fps", "loss_pct", "decode_ms", "rtt_ms"}`, every 50 ms (older viewers: 250 ms or once a second), for bitrate and FEC feedback |

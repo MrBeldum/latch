@@ -629,6 +629,17 @@ impl Server {
         if let Some(mut w) = session.control_writer.lock().take() {
             let _ = w.flush();
         }
+        // Close our side first and read until the viewer closes too, for at
+        // most two report intervals: a report arriving at a fully closed
+        // socket draws a reset, which can discard the End before the viewer
+        // has read it (Windows does), and 50 ms reports are often in flight.
+        let _ = tcp.shutdown(Shutdown::Write);
+        let linger = Instant::now() + Duration::from_millis(100);
+        while let Some(left) = linger.checked_duration_since(Instant::now()) {
+            if let Err(mpsc::RecvTimeoutError::Disconnected) = inbox.recv_timeout(left) {
+                break;
+            }
+        }
         let _ = tcp.shutdown(Shutdown::Both);
         if let Some(v) = video {
             let _ = v.join();

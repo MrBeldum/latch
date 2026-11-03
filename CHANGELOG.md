@@ -25,6 +25,10 @@
   100 Mbps request adapts to a 2–5 Mbps link.
 - Older viewers without repaired-loss reporting no longer lose their bitrate
   to FEC-repaired radio loss.
+- A host that ends a stream half-closes and keeps reading briefly, and the
+  viewer closes its connection as soon as it has read the end: with 50 ms
+  reports in flight, a takeover could otherwise reset the connection before
+  the old viewer learned why it ended.
 - Windows viewers rearm Mio readiness after a batched receive, so packets
   after an idle gap wake the receive loop instead of waiting for its 20 ms timer.
 

@@ -702,6 +702,11 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     inner.connected.store(false, Ordering::Release);
     inner.queue_cv.notify_all();
     let _ = tcp.shutdown(Shutdown::Both);
+    // After the host's FIN macOS refuses that shutdown: only closing every
+    // handle sends ours, which lets the host finish without waiting.
+    *inner.control_writer.lock() = None;
+    inner.tcp.lock().take();
+    drop(tcp);
     if let Ok(r) = receiver {
         let _ = r.join();
     }
