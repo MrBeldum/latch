@@ -7,8 +7,8 @@ GitHub release notes, so each version gets a heading of the form
 ## Unreleased
 
 - Mac host keyframe requests discard queued pictures until the requested
-  IDR, coalesce retries, and clear on output. Bitrate changes start a fresh
-  reference chain when draining old-rate work discards queued output.
+  IDR, coalesce retries, and clear on output. A bitrate change applies from
+  the next picture on, without an IDR.
   HEVC uses its quality path through the pixel rate of 1080p120, recovering
   the quality lost to the speed hint; faster streams retain the fast path.
 

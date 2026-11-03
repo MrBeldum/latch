@@ -1114,7 +1114,7 @@ fn a_dropped_recovery_idr_is_retried_before_any_p_frame_leaves() {
 }
 
 #[test]
-fn bitrate_change_discards_old_output_and_starts_with_one_new_idr() {
+fn a_bitrate_change_keeps_the_reference_chain_and_applies_to_the_next_picture() {
     let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
     for codec in [Codec::Hevc, Codec::H264High] {
         let mut encoder = Encoder::create(
@@ -1122,36 +1122,72 @@ fn bitrate_change_discards_old_output_and_starts_with_one_new_idr() {
                 width: WIDTH as u32,
                 height: HEIGHT as u32,
                 fps: FPS,
-                bitrate_kbps: 10_000,
+                bitrate_kbps: 20_000,
                 codec,
             },
             true,
         )
         .unwrap();
-        let image = surface();
-        fill(&image, &pattern(0));
-        encoder.encode(image.0, Instant::now(), true).unwrap();
-        for _ in 0..2 {
-            encoder.submit(image.0, Instant::now(), false).unwrap();
+        let images: Vec<_> = (0..4)
+            .map(|f| {
+                let image = surface();
+                fill(&image, &pattern(f * 5));
+                image
+            })
+            .collect();
+        let mut out = Vec::new();
+        let run = |encoder: &mut Encoder, from: usize, frames: usize, out: &mut Vec<Done>| {
+            for f in from..from + frames {
+                while encoder.in_flight() >= 2 {
+                    out.extend(encoder.collect(Duration::from_secs(2)));
+                }
+                encoder
+                    .submit(images[f % 4].0, Instant::now(), f == 0)
+                    .unwrap();
+            }
+        };
+        run(&mut encoder, 0, 30, &mut out);
+        // Two pictures are still in the encoder when the rate drops.
+        assert_eq!(encoder.in_flight(), 2);
+        let boundary = encoder.index;
+        encoder.bitrate(2_000).unwrap();
+        assert_eq!(encoder.in_flight(), 0);
+        run(&mut encoder, 30, 30, &mut out);
+        while encoder.in_flight() > 0 {
+            out.extend(encoder.collect(Duration::from_secs(2)));
         }
-        encoder.bitrate(5_000).unwrap();
-        assert!(encoder.collect(Duration::ZERO).is_none());
-        let idr = encoder.submit(image.0, Instant::now(), false).unwrap();
-        let (index, _, frame) = encoder.collect(Duration::from_secs(2)).unwrap();
-        assert_eq!(index, idr);
-        assert!(frame.unwrap().unwrap().keyframe);
-        encoder.bitrate(5_000).unwrap(); // An unchanged rate does not reset recovery.
-        encoder.bitrate(6_000).unwrap(); // No output was lost: preserve this reference chain.
-        encoder.submit(image.0, Instant::now(), false).unwrap();
-        assert!(
-            !encoder
-                .collect(Duration::from_secs(2))
-                .unwrap()
-                .2
-                .unwrap()
-                .unwrap()
-                .keyframe
+        out.extend(std::iter::from_fn(|| encoder.collect(Duration::ZERO)));
+        // VideoToolbox may drop a picture to meet a much lower rate; every
+        // other one leaves, in order, and only the first is an IDR. The
+        // old-rate pictures are references for the new-rate ones.
+        let frames: Vec<_> = out
+            .into_iter()
+            .filter_map(|(i, _, frame)| Some((i, frame?.unwrap())))
+            .collect();
+        let indices: Vec<_> = frames.iter().map(|(i, _)| *i).collect();
+        assert!(indices.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(
+            indices[..boundary as usize],
+            (0..boundary).collect::<Vec<_>>()
         );
+        assert!(frames[0].1.keyframe);
+        assert!(frames[1..].iter().all(|(_, frame)| !frame.keyframe));
+        let mean = |range: std::ops::Range<i64>| {
+            let sizes: Vec<_> = frames
+                .iter()
+                .filter(|(i, _)| range.contains(i))
+                .map(|(_, frame)| frame.data.len())
+                .collect();
+            sizes.iter().sum::<usize>() / sizes.len()
+        };
+        let (before, after) = (mean(10..boundary), mean(40..60));
+        assert!(
+            after * 4 < before,
+            "{codec:?}: {before} bytes per frame before, {after} after"
+        );
+        // An unchanged rate does nothing.
+        encoder.bitrate(2_000).unwrap();
+        assert!(!encoder.needs_keyframe());
     }
 }
 

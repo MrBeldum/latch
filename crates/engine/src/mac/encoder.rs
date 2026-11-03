@@ -289,18 +289,15 @@ impl Encoder {
             return Ok(());
         }
         if self.config.bitrate_kbps != 0 {
-            // Finish old-rate work before changing properties. If output is
-            // discarded, repair its reference chain with an IDR at the new rate.
-            // With no queued output, keep the chain (avoid IDRs at every ramp).
+            // Finish old-rate work first, so every picture submitted after
+            // this encodes at the new rate. What already came out still
+            // leaves, in order: later P-frames reference it, and dropping it
+            // would cost an IDR at every step of a ramp.
             // SAFETY: the live session owns all outstanding submissions.
             check(
                 unsafe { VTCompressionSessionCompleteFrames(self.session.0, INVALID_TIME) },
                 "complete pictures before bitrate change",
             )?;
-            if !self.output.output.lock().done.is_empty() || self.recovery.is_some() {
-                self.recovery = Some(self.index);
-                self.forced = None;
-            }
         }
         let rate = number(i64::from(kbps) * 1000);
         let bytes = number(i64::from(kbps) * 1000 * 3 / 16);

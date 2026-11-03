@@ -283,10 +283,12 @@ VideoToolbox encodes that surface; only compressed bytes reach Latch.
 A requested keyframe is the next picture returned to the server. Queued
 pre-request frames are discarded until the fresh IDR, so they cannot delay
 loss recovery or make the server request another IDR. Retries share that
-request until the IDR leaves. Bitrate changes complete old submissions
-before changing properties. If queued output is discarded they start a
-fresh IDR; with no output lost, the reference chain continues. An unchanged
-rate leaves it alone too.
+request until the IDR leaves. A bitrate change first completes the
+pictures already in the encoder, so every later picture is encoded at the
+new rate (on an M3 Pro the first one after a 20 → 1 Mbps cut came out at
+half the size). The completed old-rate pictures still leave, in order:
+later P-frames reference them, and dropping them would cost an IDR at
+every step of a ramp.
 
 ### Measured limits (M3 Pro)
 
