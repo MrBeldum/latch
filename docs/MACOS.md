@@ -313,9 +313,33 @@ H.264 runs out of encoder at about 195 fps at 1080p and 72 at
 3024×1964; asked for more, its frames queue behind each other (hence
 ~10 ms and ~27 ms). HEVC is the codec for fast or large streams. 4K60
 HEVC takes 14 ms a frame.
+The table predates HEVC's quality path: up to 1080p120 an HEVC frame
+now takes about 7 ms (p95 8–9 ms), still inside a 120 Hz frame.
+
+Picture quality, from the paced synthetic matrix in
+[measurements/2026-11-03/mac-host](measurements/2026-11-03/mac-host/README.md)
+(medians of three, FFmpeg PSNR against the exact source pictures, a
+forced IDR every second; 5.1 → the speed hint alone → now):
+
+| Case | PSNR dB | IDR max kB |
+| --- | --- | --- |
+| HEVC 1080p60, 20 Mbps, moving | 40.61 → 34.72 → 42.41 | 925 → 830 → 1329 |
+| HEVC 1080p60, 20 Mbps, still | 42.32 → 38.69 → 43.32 | 925 → 1018 → 1279 |
+| HEVC 1080p120, 50 Mbps, moving | 44.27 → 40.72 → 47.70 | 1021 → 1215 → 1970 |
+| HEVC 1080p240, 80 Mbps, moving | 44.17 → 39.36 → 39.36 | 925 → 1066 → 1066 |
+| HEVC 3024×1964@120, 100 Mbps, moving | 43.70 → 36.18 → 36.18 | 2524 → 2794 → 2794 |
+| H.264 High 1080p60, 20 Mbps, still | 43.18 → 39.33 → 39.33 | 925 → 844 → 844 |
+| H.264 High 1080p120, 50 Mbps, still | 45.18 → 42.92 → 42.92 | 1031 → 1254 → 1254 |
+
+5.1's figures at 240 fps and 3024×1964 come from the 26–45 fps it
+managed there. H.264 ignores `PrioritizeEncodingSpeedOverQuality` (its
+output is bit-identical either way). It trails 5.1 by up to 4.5 dB
+on some cases and gains a little on others; the low-latency rate control
+gets 1 dB back at 1080p60/20 but doubles the encode time, so H.264 stays
+as it is. HEVC's quality path buys its PSNR with larger IDRs.
 
 Keyframes stay large. VideoToolbox holds P-frames to `DataRateLimits`
-but not keyframes: an IDR is 20–40× a P-frame at 1080p (0.8–1.3 MB).
+but not keyframes: an IDR is 20–40× a P-frame at 1080p (0.8–2 MB).
 Nothing found bounds the IDR alone. `ConstantBitRate` and the macOS 26
 VBV keys pad P-frames and leave the IDR as it was, `MinAllowedFrameQP`
 takes effect only at a keyframe and then holds for the whole GOP (every
