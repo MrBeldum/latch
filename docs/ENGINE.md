@@ -71,7 +71,8 @@ The viewer lists what it decodes; the host picks the first it can encode.
 viewer probes platform codecs before offering AV1 > HEVC > H.264 High >
 Baseline. Windows probes actual pictures through the installed synchronous
 MFT and D3D11 manager, caching the result; missing codec extensions or drivers
-leave that codec out of negotiation. Mac checks `VTIsHardwareDecodeSupported`.
+leave that codec out of negotiation. Mac checks `VTIsHardwareDecodeSupported` and requires a decoded hardware
+picture too; a capability query alone can succeed on an unusable decoder.
 Only Baseline streams have the ten-access-unit `latch-codec` safety net;
 High, HEVC and AV1 require a working platform decoder. Unknown codec names
 in an offer are skipped by protocol-1 hosts.

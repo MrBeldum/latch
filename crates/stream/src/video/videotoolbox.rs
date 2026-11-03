@@ -236,12 +236,50 @@ pub struct VideoToolbox {
 unsafe impl Send for VideoToolbox {}
 
 pub fn supported(codec: Codec) -> bool {
-    let fourcc = match codec {
-        Codec::Av1 => u32::from_be_bytes(*b"av01"),
-        Codec::Hevc => u32::from_be_bytes(*b"hvc1"),
-        _ => u32::from_be_bytes(*b"avc1"),
-    };
-    unsafe { VTIsHardwareDecodeSupported(fourcc) != 0 }
+    static CODECS: std::sync::OnceLock<Vec<Codec>> = std::sync::OnceLock::new();
+    CODECS
+        .get_or_init(|| {
+            [
+                (
+                    Codec::Av1,
+                    *b"av01",
+                    include_bytes!("../../tests/fixtures/gray-bars.av1").as_slice(),
+                ),
+                (
+                    Codec::Hevc,
+                    *b"hvc1",
+                    include_bytes!("../../tests/fixtures/gray-bars.hevc").as_slice(),
+                ),
+                (
+                    Codec::H264High,
+                    *b"avc1",
+                    include_bytes!("../../tests/fixtures/decode-probe.h264").as_slice(),
+                ),
+            ]
+            .into_iter()
+            .filter_map(|(codec, fourcc, bytes)| {
+                if unsafe { VTIsHardwareDecodeSupported(u32::from_be_bytes(fourcc)) } == 0 {
+                    return None;
+                }
+                // The capability query can succeed even when no usable decoder
+                // session is available (for example on virtualized CI Macs).
+                let result = (|| {
+                    let mut decoder = VideoToolbox::with_format(codec, PixelFormat::Nv12)?;
+                    let picture = decoder.decode(bytes, true, None)?;
+                    anyhow::ensure!(picture.is_some() && decoder.hardware, "no hardware picture");
+                    Ok::<_, anyhow::Error>(())
+                })();
+                match result {
+                    Ok(()) => Some(codec),
+                    Err(error) => {
+                        tracing::info!(?codec, "hardware decode unavailable: {error:#}");
+                        None
+                    }
+                }
+            })
+            .collect()
+        })
+        .contains(&codec)
 }
 
 impl VideoToolbox {
