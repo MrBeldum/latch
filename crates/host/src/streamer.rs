@@ -48,7 +48,6 @@ pub fn encoder_description() -> &'static str {
 /// viewer that connects without asking, or before the look ends, gets no
 /// more than one that waited.
 pub fn capacity(encoder: &str, streaming: bool) -> (u32, Vec<CodecCaps>) {
-    static MEASURED: Mutex<Option<Measured>> = Mutex::new(None);
     static LOOKING: AtomicBool = AtomicBool::new(false);
     // A Linux host always has the software path: Constrained Baseline,
     // and H.264 at a size its hardware does not take.
@@ -132,6 +131,9 @@ pub fn capacity(encoder: &str, streaming: bool) -> (u32, Vec<CodecCaps>) {
     (max_fps, measured.map(|m| m.codecs).unwrap_or_default())
 }
 
+/// The latest look at the encoders.
+static MEASURED: Mutex<Option<Measured>> = Mutex::new(None);
+
 /// How long the software path is timed for.
 const MEASURE_FOR: Duration = Duration::from_millis(1500);
 
@@ -183,6 +185,8 @@ mod tests {
     /// holds a session to, the provisional ceiling; a hardware one neither.
     #[test]
     fn software_is_held_to_a_provisional_ceiling_until_measured() {
+        // As before the first look (another test may have looked).
+        *MEASURED.lock() = None;
         let size = capture_size().unwrap_or([1920, 1080]);
         // `streaming` keeps the measurement from starting.
         let (fps, _) = capacity("Latch software H.264", true);
