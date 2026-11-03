@@ -354,3 +354,24 @@ desktop; it cannot show the sign-in screen. Keep the PC's Tailscale key
 from expiring by disabling key expiry for it in the
 [admin console](https://login.tailscale.com/admin/machines); the Mac warns
 about this for every PC it lists.
+
+## Viewer hardware decode
+
+The Windows viewer enumerates installed synchronous Media Foundation
+decoders at session startup and tests AV1, HEVC and H.264 High pictures with
+a D3D11 DXGI device manager. Successful DXVA output is required before a
+codec is offered; Baseline is always offered. Missing Store HEVC/AV1 codec
+extensions can prevent an otherwise capable GPU from being used. MF is
+loaded lazily so Windows without Media Foundation can still start.
+
+Decoders enable `CODECAPI_AVLowLatencyMode` before type negotiation. The
+streaming encoders must disable B-frame/reorder delay too. NV12 and Main10
+P010 decoder outputs are accepted; P010 is reduced to SDR eight-bit output.
+Baseline retains the first-ten-access-unit fallback to `latch-codec`. Modern
+codecs have no pure-Rust software fallback.
+
+Decoded D3D11 surfaces currently cross a cached staging texture and CPU
+planes into wgpu; D3D11/D3D12 shared-texture/fence import is still outstanding.
+The renderer requests `AutoNoVsync`, latency 1 and repaints on decoded frames.
+See [viewer measurements](measurements/2026-11-03/viewer/README.md) for
+interactive-session tests, throughput limits and timing definitions.

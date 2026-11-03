@@ -6,6 +6,15 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- Negotiate hardware-probed AV1, HEVC and H.264 High on the viewer; retain
+  Baseline's ten-access-unit software fallback and protocol-1 compatibility.
+- Decode AV1 through VideoToolbox on supported Macs, with selectable P010
+  Main10 output and IOSurface-to-Metal rendering.
+- Enumerate Windows Media Foundation decoders with D3D11/DXVA and accept
+  NV12/P010 output; GPU-to-wgpu readback remains.
+- Retain native surfaces until GPU work completes; add a native present
+  measurement example and decode-to-render timestamps.
+
 - One pointer while the mouse is captured. The Mac's arrow was hidden only
   by egui's cursor, which macOS applies when the pointer moves over the
   window; a captured pointer is held still, so the Mac's arrow could stay

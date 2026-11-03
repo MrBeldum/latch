@@ -87,7 +87,7 @@ pub struct Settings {
     pub height: u32,
     pub fps: u32,
     pub bitrate_kbps: u32,
-    /// Ask for HEVC when both sides can; otherwise H.264.
+    /// Allow AV1/HEVC when both ends support them; otherwise H.264.
     pub hevc: bool,
     pub audio: bool,
     /// This machine's name, for the host's log.

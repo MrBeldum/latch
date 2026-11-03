@@ -1,0 +1,92 @@
+[
+  {
+    "run": "modern-av1-1920-120",
+    "decoded": 596,
+    "prepared": 535,
+    "decode_p50_ms": 4.47,
+    "decode_p95_ms": 6.828,
+    "prepare_p50_ms": 0.426,
+    "prepare_p95_ms": 0.986
+  },
+  {
+    "run": "modern-av1-1920-240",
+    "decoded": 972,
+    "prepared": 846,
+    "decode_p50_ms": 3.338,
+    "decode_p95_ms": 10.318,
+    "prepare_p50_ms": 0.496,
+    "prepare_p95_ms": 2.587
+  },
+  {
+    "run": "modern-av1-1920-60",
+    "decoded": 298,
+    "prepared": 272,
+    "decode_p50_ms": 4.17,
+    "decode_p95_ms": 6.702,
+    "prepare_p50_ms": 0.44,
+    "prepare_p95_ms": 0.925
+  },
+  {
+    "run": "modern-av1-3840-120",
+    "decoded": 281,
+    "prepared": 280,
+    "decode_p50_ms": 17.861,
+    "decode_p95_ms": 18.297,
+    "prepare_p50_ms": 1.256,
+    "prepare_p95_ms": 1.462
+  },
+  {
+    "run": "modern-av1-3840-60",
+    "decoded": 298,
+    "prepared": 296,
+    "decode_p50_ms": 13.929,
+    "decode_p95_ms": 18.645,
+    "prepare_p50_ms": 1.265,
+    "prepare_p95_ms": 1.411
+  },
+  {
+    "run": "modern-hevc-1920-120",
+    "decoded": 595,
+    "prepared": 594,
+    "decode_p50_ms": 5.162,
+    "decode_p95_ms": 5.295,
+    "prepare_p50_ms": 0.296,
+    "prepare_p95_ms": 0.521
+  },
+  {
+    "run": "modern-hevc-1920-240",
+    "decoded": 947,
+    "prepared": 946,
+    "decode_p50_ms": 5.173,
+    "decode_p95_ms": 5.837,
+    "prepare_p50_ms": 0.294,
+    "prepare_p95_ms": 0.506
+  },
+  {
+    "run": "modern-hevc-1920-60",
+    "decoded": 298,
+    "prepared": 298,
+    "decode_p50_ms": 5.899,
+    "decode_p95_ms": 6.367,
+    "prepare_p50_ms": 0.365,
+    "prepare_p95_ms": 0.561
+  },
+  {
+    "run": "modern-hevc-3840-120",
+    "decoded": 265,
+    "prepared": 264,
+    "decode_p50_ms": 19.039,
+    "decode_p95_ms": 19.741,
+    "prepare_p50_ms": 1.324,
+    "prepare_p95_ms": 1.557
+  },
+  {
+    "run": "modern-hevc-3840-60",
+    "decoded": 264,
+    "prepared": 263,
+    "decode_p50_ms": 18.869,
+    "decode_p95_ms": 19.546,
+    "prepare_p50_ms": 1.25,
+    "prepare_p95_ms": 1.382
+  }
+]

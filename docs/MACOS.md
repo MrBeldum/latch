@@ -342,3 +342,20 @@ it says what happened last. A copy that is not running from an app bundle
   MAC. While Tailscale on this Mac is off they stay
   listed with when they were last seen, and **Wake** still works over the
   LAN or the public address.
+
+## Viewer decode and high refresh
+
+The viewer offers hardware-supported codecs in AV1 > HEVC > H.264 High >
+Baseline order. VideoToolbox's AV1 hardware probe gates the offer on M3 or
+newer hardware; older hosts skip the new name and negotiate HEVC/H.264.
+AV1 sized OBUs are submitted with an `av1C` format description. All codecs
+retain the IOSurface → Metal path. HEVC Main10 callers can select P010
+output without losing ten-bit samples; normal sessions still request NV12
+and SDR. HDR transfer functions and display negotiation are future work.
+
+Frame arrival wakes egui immediately. `AutoNoVsync` and a maximum frame
+latency of one avoid an application 60 Hz cap on ProMotion. The newest
+picture is prepared for rendering without an extra frame queue; previous
+IOSurfaces live until their GPU submissions complete. Physical scanout and
+compositor delay remain display-dependent. See the [measurements and
+native viewer command](measurements/2026-11-03/viewer/README.md).

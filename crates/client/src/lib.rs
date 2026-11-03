@@ -41,6 +41,8 @@ pub fn native_options() -> eframe::NativeOptions {
         let descriptor = setup.device_descriptor.clone();
         setup.device_descriptor = std::sync::Arc::new(move |adapter| {
             let mut desc = descriptor(adapter);
+            desc.required_limits.max_texture_dimension_2d =
+                adapter.limits().max_texture_dimension_2d;
             desc.required_features |=
                 adapter.features() & egui_wgpu::wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
             desc

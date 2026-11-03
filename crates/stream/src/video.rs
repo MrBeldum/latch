@@ -339,7 +339,7 @@ pub trait Decoder: Send {
     fn name(&self) -> &'static str;
 }
 
-/// What this machine decodes, best first, probed once per process.
+/// What this machine decodes, best first, gated by platform hardware probes.
 /// Baseline always remains available through `latch-codec`.
 pub fn decodable() -> Vec<Codec> {
     #[cfg(target_os = "macos")]
