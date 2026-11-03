@@ -7,6 +7,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use windows::core::Interface;
 use windows::Win32::{
     Foundation::*,
     Media::{Audio::*, KernelStreaming::*, Multimedia::*},
