@@ -46,7 +46,7 @@ KeyframeRequest on loss ──────────────────�
 
 | Crate | What | Platform code |
 | --- | --- | --- |
-| `latch-proto` | wire format, Reed–Solomon FEC, packetizer and reassembler, input reliability, control framing, an impairment simulator for tests | none |
+| `latch-proto` | wire format, Reed–Solomon FEC, packetizer and reassembler, input reliability, control framing, an impairment simulator for tests | socket helpers in `transport` |
 | `latch-codec` | H.264 Constrained Baseline encoder and decoder, BGRA→YUV conversion, the `lpcm-rice` audio codec | none |
 | `latch-engine` | the host side: capture, encode, audio capture, input injection, display sizing, and the session server | `mac/`, `windows/`, `linux/` |
 | `latch-stream` | the viewer side: session, decoders (VideoToolbox, Media Foundation, `latch-codec`), audio playback | `video/` |
@@ -113,18 +113,20 @@ captured ones, which lets tests check audio bit for bit. Opus is gone.
   comes out of the interval instead of adding to it, a screen refreshing at
   the stream's rate gives up every refresh, and a late frame moves the
   grid rather than bursting.
-* **The bitrate follows the path** (`engine::congestion`). #32's wire-budget
-  controller owns adaptation, including the audio/FEC/header allowance.
-  Cuts use the lower of current budget and actual successful wire throughput;
-  a target above the encoder's output cannot relieve congestion. Host pings
-  run at 10 Hz; each report uses the lowest RTT in its window to distinguish
-  standing queues from transient jitter. Parity has a base-RTT floor of 15%
-  at 40 ms and 20% at 100 ms (30% cap).
+* **The bitrate follows the path** (`engine::congestion`). One controller
+  owns the wire budget, including audio, FEC and headers. It starts at the
+  requested ceiling. New viewers report every 50 ms; display statistics retain 250 ms windows.
+  Host pings run at 50 Hz.
+  Two pressure windows trigger cuts, no faster than max(50 ms, base RTT).
+  A smoothed positive delay gradient detects filling queues; sustained delay
+  above max(6 ms, 10% of base RTT) also counts. Recovered random loss alone
+  does not cut bitrate. Parity has a base-RTT floor of 15% at 40 ms and 20%
+  at 100 ms (30% cap), with fast attack and a two-second decay after bursts.
 * **Send immediately on clean paths.** The bounded two-frame sender remains,
-  but its token bucket is disabled until loss or queue pressure arrives.
-  Congestion enables the existing 2.5×-budget, sixteen-datagram bucket; two
-  clean seconds release it. Raw loss of at least 1.5% also enables pacing,
-  including loss FEC repaired, without necessarily cutting bitrate.
+  with no token-bucket delay on a clean path. Queue or severe sustained loss
+  enables the 2.5×-budget, sixteen-datagram bucket. Radio loss repaired by FEC
+  does not enable pacing. Clean feedback releases pacing after at least
+  200 ms (two report intervals for slower peers).
 * **Data before parity.** A frame's data shards go out before any parity
   is computed, so a frame that loses nothing never waits for FEC.
 * **Media threads at high priority** (user-interactive QoS on macOS,
@@ -183,17 +185,26 @@ backpressure preserves encoded references. Cancellation may discard queued
 media. Audio, input acknowledgements and pings bypass the video queue.
 
 Under pressure video uses a wire-byte token bucket at 2.5 times the wire budget,
-with a sixteen-datagram burst. The encoder allowance subtracts audio and
-FEC/header overhead from that budget. A session controller cuts by 20% after
-two pressure reports, at most once per 500 ms, from the lower of actual wire
-throughput and budget, when unrecovered loss exceeds
-3%, a frame is lost, the lowest host RTT in the report window rises above its session minimum
-by max(10 ms, 25%),
-or sender age exceeds 50 ms. After two clean seconds it adds 5% of the
-requested ceiling per second, capped at that ceiling. The wire floor is
-max(1 Mbps, ceiling/10). Recovered random loss alone does not reduce rate;
-legacy viewers' raw loss is tolerated through 3%. Parity is capped at 30%.
-Rate setters run between frames when the target changes by at least 5%.
+with a sixteen-datagram burst. The encoder allowance reserves audio separately,
+then compounds header overhead with rounded FEC rather than adding the two.
+Cuts use the lower of current budget and actual successful send rate (and
+received throughput when severe loss supplies it). Each cut removes 20%, or
+40% for queue delay above 20 ms or loss above 10%. Sender age above 20 ms is
+also pressure. Sustained uncorrected loss above 3% counts when raw loss exceeds
+10%; legacy raw-loss-only reports retain the 3% threshold. The wire floor is
+max(1 Mbps, ceiling/10). After clean feedback the budget doubles per 400 ms,
+with each feedback step capped at 100 ms of growth so legacy reports do not
+make huge probe jumps. Rate setters run between frames at a 5% target change.
+This remains a heuristic controller; it is not a full GCC implementation.
+
+Linux sends up to 32 datagrams with `sendmmsg` and receives with `recvmmsg`.
+macOS receives up to 32 with `recvmsg_x`; sends retain `send_to`, since Darwin's
+batch-send API disallows destination addresses on the shared unconnected socket.
+Batch storage is reused, and data flushes before parity computation. Batches
+never wait to fill. Unsupported batch receive syscalls fall back to scalar I/O
+on the nonblocking media socket. Windows retains its existing scalar socket
+path; USO/URO and Linux UDP GSO/GRO are not implemented here. Protocol 1 retains
+the 1200-byte datagram limit; route MTU discovery/negotiation remains outstanding.
 
 Host and viewer UDP request 8 MiB in both directions through the one
 `latch_proto::transport::configure_socket` helper. Readback is logged once per session, including Linux sysctl caps;
@@ -202,12 +213,17 @@ Status and viewer stats expose requested/applied bitrate, sender queue age,
 send errors/retries and effective socket buffers. Bytes count successful
 media sends only. ENOBUFS uses the platform constant (10055 on Windows).
 
-Viewer receive uses mio readiness and bounded 64-datagram batches. Completed
-frames are handed to decode before waiting for more readiness: waiting at the
+Viewer receive uses mio readiness and bounded 32-datagram syscall batches on
+Linux/macOS (64 scalar receives on Windows). Completed
+frames on the batch path are handed to decode after each datagram, before
+processing the rest of the batch or waiting for readiness: waiting at the
 end of a receive batch held each complete picture until the next datagram. Video
 shard storage is reused with a 4096-buffer pool cap. Decode queues are
 bounded by eight frames and 50 ms of age; exceeding either restarts at an
 IDR rather than decoding an increasing backlog. A missing initial IDR
 triggers recovery on the first complete P-frame, or after 500 ms without
 a delivered keyframe. Requests retry at max(100 ms, RTT); host duplicate
-requests with the same last-delivered frame are throttled for 250 ms.
+requests with the same last-delivered frame are throttled for 250 ms. Requested
+IDRs are gated at max(50 ms, smoothed RTT), including requests that advance
+the last-delivered frame. See [transport measurements](measurements/2026-11-03/transport/README.md)
+for codec-free throughput, CPU, FEC and impairment results and remaining targets.

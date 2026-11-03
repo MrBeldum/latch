@@ -354,3 +354,10 @@ desktop; it cannot show the sign-in screen. Keep the PC's Tailscale key
 from expiring by disabling key expiry for it in the
 [admin console](https://login.tailscale.com/admin/machines); the Mac warns
 about this for every PC it lists.
+
+### Transport feedback (2026-11-03)
+
+The shared controller uses 50 ms feedback while viewer display statistics retain
+250 ms windows, and requested recovery IDRs are gated at max(50 ms, RTT).
+Windows sockets retain their scalar send/receive path; USO/URO remains outstanding.
+See [transport measurements](measurements/2026-11-03/transport/README.md).

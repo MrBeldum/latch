@@ -342,3 +342,11 @@ it says what happened last. A copy that is not running from an app bundle
   MAC. While Tailscale on this Mac is off they stay
   listed with when they were last seen, and **Wake** still works over the
   LAN or the public address.
+
+### Transport measurement (2026-11-03)
+
+The viewer drains UDP in reusable 32-datagram `recvmsg_x` batches and hands
+completed video to decode within the batch. Unsupported batch receive falls
+back on the nonblocking socket. Host sends retain the shared unconnected UDP
+socket and scalar sends. See [transport measurements](measurements/2026-11-03/transport/README.md)
+for measured headroom and outstanding MTU/offload work.

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — transport workstream
+
+- Batch Linux video sends/receives and macOS receives without waiting to fill
+  batches; reuse packetizer storage and hand complete frames to decode inline.
+- Faster delay-gradient bitrate feedback and recovery, persistent FEC protection
+  after radio bursts, and RTT-gated recovery IDRs. Protocol 1 stays compatible.
+- Add codec-free transport/FEC measurements and deterministic capacity-step,
+  240 fps, random/burst loss, long-RTT and jitter scenarios.
+
+
 The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.

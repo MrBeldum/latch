@@ -1,0 +1,18 @@
+   Compiling latch-engine v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-cf8a2264/crates/engine)
+    Finished `release` profile [optimized] target(s) in 2.84s
+     Running tests/transport_scenarios.rs (target/release/deps/transport_scenarios-4346293584bc7d77)
+
+running 4 tests
+test congestion::tests::a_lone_late_window_does_not_stall_recovery ... ok
+test congestion::tests::underfilled_encoder_cuts_actual_rate_and_only_pressure_enables_pacing ... ok
+test congestion::tests::capacity_steps_random_loss_and_steady_path ... ok
+step: ceiling_ms=960 cut_ms=160 queue_p95_ms=11.23 lost=19 skipped=1 peak_kbps=100000
+240fps: ceiling_ms=0 cut_ms=-1 queue_p95_ms=4.22 lost=0 skipped=0 peak_kbps=200000
+random2: ceiling_ms=0 cut_ms=-1 queue_p95_ms=7.99 lost=0 skipped=0 peak_kbps=100000
+wifi: ceiling_ms=0 cut_ms=-1 queue_p95_ms=8.19 lost=15 skipped=42 peak_kbps=100000
+rtt100: ceiling_ms=0 cut_ms=-1 queue_p95_ms=8.38 lost=0 skipped=0 peak_kbps=100000
+jitter: ceiling_ms=0 cut_ms=-1 queue_p95_ms=8.38 lost=0 skipped=0 peak_kbps=100000
+test transport_scenarios ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
