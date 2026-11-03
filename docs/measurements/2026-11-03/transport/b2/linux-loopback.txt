@@ -1,0 +1,13 @@
+ 02:16:29 up 4 days,  9:59, 13 users,  load average: 1.39, 0.94, 0.95
+run=1 offload=0 tx {"receive":false,"seconds":5.000,"media_mbps":299.989,"pps":35639,"cpu_percent":17.56,"cpu_us_per_Mbit":585.36,"frames":600,"packets":178200,"errors":0}
+run=1 offload=0 rx {"receive":true,"seconds":4.996,"media_mbps":300.263,"pps":35671,"cpu_percent":10.31,"cpu_us_per_Mbit":343.42,"frames":600,"packets":178200,"errors":0}
+run=1 offload=1 tx {"receive":false,"seconds":5.000,"media_mbps":299.989,"pps":35639,"cpu_percent":4.46,"cpu_us_per_Mbit":148.55,"frames":600,"packets":178200,"errors":0}
+run=1 offload=1 rx {"receive":true,"seconds":4.995,"media_mbps":300.329,"pps":35679,"cpu_percent":2.04,"cpu_us_per_Mbit":67.79,"frames":600,"packets":178200,"errors":0}
+run=2 offload=0 tx {"receive":false,"seconds":5.000,"media_mbps":299.988,"pps":35639,"cpu_percent":17.82,"cpu_us_per_Mbit":593.98,"frames":600,"packets":178200,"errors":0}
+run=2 offload=0 rx {"receive":true,"seconds":4.996,"media_mbps":300.268,"pps":35672,"cpu_percent":10.42,"cpu_us_per_Mbit":347.15,"frames":600,"packets":178200,"errors":0}
+run=2 offload=1 tx {"receive":false,"seconds":5.000,"media_mbps":299.988,"pps":35639,"cpu_percent":4.43,"cpu_us_per_Mbit":147.76,"frames":600,"packets":178200,"errors":0}
+run=2 offload=1 rx {"receive":true,"seconds":4.995,"media_mbps":300.328,"pps":35679,"cpu_percent":2.15,"cpu_us_per_Mbit":71.54,"frames":600,"packets":178200,"errors":0}
+run=3 offload=0 tx {"receive":false,"seconds":5.000,"media_mbps":299.989,"pps":35639,"cpu_percent":17.80,"cpu_us_per_Mbit":593.39,"frames":600,"packets":178200,"errors":0}
+run=3 offload=0 rx {"receive":true,"seconds":4.995,"media_mbps":300.320,"pps":35678,"cpu_percent":10.40,"cpu_us_per_Mbit":346.24,"frames":600,"packets":178200,"errors":0}
+run=3 offload=1 tx {"receive":false,"seconds":5.000,"media_mbps":299.989,"pps":35639,"cpu_percent":4.46,"cpu_us_per_Mbit":148.65,"frames":600,"packets":178200,"errors":0}
+run=3 offload=1 rx {"receive":true,"seconds":4.995,"media_mbps":300.321,"pps":35678,"cpu_percent":2.24,"cpu_us_per_Mbit":74.47,"frames":600,"packets":178200,"errors":0}
