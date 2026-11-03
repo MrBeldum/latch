@@ -13,6 +13,7 @@ use crate::audio::Player;
 use crate::video::{self, Decoder, FrameSlot};
 use latch_proto::audio::{AudioOut, AudioReceiver};
 use latch_proto::control::{self, Accept, Codec, Message, Report, StreamRequest};
+use latch_proto::gamepad::{Feedback, LatestReceiver, PadKind, PadSender, PadState};
 use latch_proto::input::{Event as InputEvent, InputSender};
 use latch_proto::rtt::RttEstimator;
 use latch_proto::video::{InFrame, KeyframeRequests, Reassembled, Reassembler, ReassemblyStats};
@@ -94,7 +95,12 @@ pub struct Settings {
     pub name: String,
     /// Ask the host to stream cursor shapes and omit the pointer from video.
     pub cursor: bool,
+    /// Offer gamepads.
+    pub gamepads: bool,
 }
+
+/// Where a session sends the host's rumble and lights: slot and feedback.
+pub type FeedbackFn = Box<dyn Fn(u8, Feedback) + Send + Sync>;
 
 #[derive(Debug, Clone, Default)]
 pub struct CursorState {
@@ -205,6 +211,7 @@ struct Link {
     udp: UdpSocket,
     host: SocketAddr,
     sender: InputSender,
+    pads: PadSender,
     buf: Vec<u8>,
 }
 
@@ -213,6 +220,17 @@ impl Link {
         if self.sender.poll(now, &mut self.buf) {
             let _ = self.udp.send_to(&self.buf, self.host);
         }
+        if self.pads.poll(now, &mut self.buf) {
+            let _ = self.udp.send_to(&self.buf, self.host);
+        }
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.sender
+            .next_deadline()
+            .into_iter()
+            .chain(self.pads.next_deadline())
+            .min()
     }
 }
 
@@ -247,6 +265,10 @@ struct Inner {
     cursor_supported: AtomicBool,
     cursor_state: Mutex<Option<CursorState>>,
     control_writer: Mutex<Option<TcpStream>>,
+    /// Gamepad slots the host takes; 0 until it accepts, or if it takes none.
+    pad_slots: AtomicU32,
+    pad_problem: Mutex<String>,
+    pad_feedback: Mutex<Option<FeedbackFn>>,
 }
 
 #[derive(Default)]
@@ -360,6 +382,32 @@ impl Input {
     pub fn release_all(&self) {
         self.send(InputEvent::ReleaseAll);
     }
+
+    /// Gamepad slots the host takes (0 while connecting, or when it takes
+    /// none).
+    pub fn pad_slots(&self) -> u8 {
+        self.inner.pad_slots.load(Ordering::Acquire) as u8
+    }
+
+    /// The pad in `slot` looks like this now. Sent at once, then again until
+    /// the host has it; a slot the host does not take is ignored.
+    pub fn pad(&self, slot: u8, kind: PadKind, state: PadState) {
+        if !self.connected() || slot >= self.pad_slots() {
+            return;
+        }
+        if let Some(link) = self.inner.link.lock().as_mut() {
+            link.pads.update(slot, kind, state);
+            link.flush(Instant::now());
+        }
+    }
+
+    /// The pad in `slot` went away.
+    pub fn pad_gone(&self, slot: u8) {
+        if let Some(link) = self.inner.link.lock().as_mut() {
+            link.pads.remove(slot);
+            link.flush(Instant::now());
+        }
+    }
 }
 
 impl Session {
@@ -394,6 +442,9 @@ impl Session {
             cursor_supported: AtomicBool::new(false),
             cursor_state: Mutex::new(None),
             control_writer: Mutex::new(None),
+            pad_slots: AtomicU32::new(0),
+            pad_problem: Mutex::new(String::new()),
+            pad_feedback: Mutex::new(None),
         });
         let worker = inner.clone();
         let spawned = std::thread::Builder::new()
@@ -476,6 +527,16 @@ impl Session {
             inner: self.inner.clone(),
         }
     }
+
+    /// Why the host takes no gamepads, once it has said so.
+    pub fn pad_problem(&self) -> String {
+        self.inner.pad_problem.lock().clone()
+    }
+
+    /// Where the host's rumble and lights go, from the receive thread.
+    pub fn on_pad_feedback(&self, f: impl Fn(u8, Feedback) + Send + Sync + 'static) {
+        *self.inner.pad_feedback.lock() = Some(Box::new(f));
+    }
 }
 
 impl Drop for Session {
@@ -545,7 +606,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         audio: settings.audio,
         name: settings.name.clone(),
         cursor: settings.cursor,
-        gamepads: false,
+        gamepads: settings.gamepads,
     };
     let body = serde_json::to_vec(&request).unwrap_or_default();
     let host = SocketAddr::new(server.address, server.port);
@@ -601,6 +662,18 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     inner
         .cursor_supported
         .store(accept.cursor, Ordering::Release);
+    let pad_slots = accept.gamepads.min(latch_proto::gamepad::MAX_PADS as u8);
+    inner.pad_slots.store(
+        pad_slots as u32 * settings.gamepads as u32,
+        Ordering::Release,
+    );
+    if settings.gamepads && pad_slots == 0 {
+        *inner.pad_problem.lock() = if accept.gamepad_problem.is_empty() {
+            "the host takes no gamepads".into()
+        } else {
+            accept.gamepad_problem.clone()
+        };
+    }
     let Some(token) = control::token_from_hex(&accept.token) else {
         return fail("starting", "the host sent a malformed session token".into());
     };
@@ -652,6 +725,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         udp: send_udp,
         host: media,
         sender: InputSender::new(accept.session),
+        pads: PadSender::new(accept.session),
         buf: Vec::with_capacity(latch_proto::MAX_DATAGRAM),
     });
     inner.heard();
@@ -921,6 +995,7 @@ fn receive(
         |format| AudioReceiver::with_format(session, format.frame_samples, format.rate),
     );
     let mut keyframes = KeyframeRequests::new();
+    let mut feedback = LatestReceiver::new();
     let mut rtt = RttEstimator::new();
     let mut media_seen = false;
     let mut last_hello: Option<Instant> = None;
@@ -940,6 +1015,7 @@ fn receive(
                 .next_deadline()
                 .into_iter()
                 .chain(audio_rx.next_deadline())
+                .chain(inner.link.lock().as_ref().and_then(Link::next_deadline))
                 .min()
                 .unwrap_or(now + Duration::from_millis(20));
             let wait = deadline
@@ -978,6 +1054,7 @@ fn receive(
                                 &mut out,
                                 &mut reassembler,
                                 &mut audio_rx,
+                                &mut feedback,
                                 &mut rtt,
                                 &mut media_seen,
                                 &mut throughput,
@@ -1147,6 +1224,7 @@ fn handle(
     out: &mut Vec<u8>,
     reassembler: &mut Reassembler,
     audio_rx: &mut AudioReceiver,
+    feedback: &mut LatestReceiver,
     rtt: &mut RttEstimator,
     media_seen: &mut bool,
     throughput: &mut Throughput,
@@ -1172,6 +1250,30 @@ fn handle(
         Datagram::InputAck { next, .. } => {
             if let Some(link) = inner.link.lock().as_mut() {
                 link.sender.ack(*next);
+            }
+        }
+        Datagram::PadAck { acks, .. } => {
+            if let Some(link) = inner.link.lock().as_mut() {
+                for ack in acks.iter() {
+                    link.pads.ack(ack);
+                }
+            }
+        }
+        Datagram::PadFeedback { updates, .. } => {
+            let mut acks = Vec::with_capacity(updates.count());
+            let deliver = inner.pad_feedback.lock();
+            for u in updates.iter() {
+                if feedback.accept(u.slot, u.seq) {
+                    if let Some(f) = deliver.as_ref() {
+                        f(u.slot, u.feedback);
+                    }
+                }
+                acks.extend(feedback.ack(u.slot));
+            }
+            drop(deliver);
+            if !acks.is_empty() {
+                wire::write_pad_feedback_ack(out, session, &acks);
+                let _ = udp.send_to(out, from);
             }
         }
         Datagram::Ping { time, .. } => {
@@ -1374,6 +1476,7 @@ mod tests {
     fn hevc_is_offered_only_when_the_settings_allow_it() {
         let mut s = Settings {
             cursor: false,
+            gamepads: false,
             width: 1920,
             height: 1080,
             fps: 60,
@@ -1402,6 +1505,7 @@ mod tests {
             },
             Settings {
                 cursor: false,
+                gamepads: false,
                 width: 1920,
                 height: 1080,
                 fps: 60,
@@ -1469,6 +1573,9 @@ mod tests {
             cursor_supported: AtomicBool::new(false),
             cursor_state: Mutex::new(None),
             control_writer: Mutex::new(None),
+            pad_slots: AtomicU32::new(0),
+            pad_problem: Mutex::new(String::new()),
+            pad_feedback: Mutex::new(None),
             done: Mutex::new(false),
             done_cv: Condvar::new(),
         });

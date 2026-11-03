@@ -655,7 +655,11 @@ mod tests {
         let mut out = Vec::new();
         let acks = [Ack { slot: 1, seq: 7 }, Ack { slot: 15, seq: 0 }];
         wire::write_pad_ack(&mut out, 9, &acks);
-        let Ok(Datagram::PadAck { session: 9, acks: got }) = wire::parse(&out) else {
+        let Ok(Datagram::PadAck {
+            session: 9,
+            acks: got,
+        }) = wire::parse(&out)
+        else {
             panic!("not a pad ack");
         };
         assert_eq!(got.iter().collect::<Vec<_>>(), acks);

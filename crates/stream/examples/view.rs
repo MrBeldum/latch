@@ -127,6 +127,7 @@ fn main() -> anyhow::Result<()> {
             audio: flag("--audio"),
             name: "view example".into(),
             cursor: false,
+            gamepads: false,
         },
         frames.clone(),
         tx,

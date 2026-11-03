@@ -46,6 +46,13 @@ fn session(addr: SocketAddr) -> Arc<Session> {
             sink: None,
             display: info().display,
         }),
+        pads: Mutex::new(SessionPads {
+            receiver: Default::default(),
+            sink: None,
+            slots: 0,
+            failing: Default::default(),
+        }),
+        feedback: Default::default(),
         rtt: Mutex::new(RttEstimator::new()),
         rtt_low: Mutex::new(None),
         pace_kbps: AtomicU32::new(0),

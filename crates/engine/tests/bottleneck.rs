@@ -176,6 +176,7 @@ fn noise_stream_adapts_to_sustained_queue_delay_and_recovers() {
         // the standing queue must still drive adaptation on a slow CI runner.
         Settings {
             cursor: false,
+            gamepads: false,
             width: 640,
             height: 360,
             fps: 12,

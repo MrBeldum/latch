@@ -981,6 +981,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             audio: true,
             name: latch_core::config::machine_name(),
             cursor: true,
+            gamepads: false,
         },
         frames.clone(),
         tx,

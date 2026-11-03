@@ -368,7 +368,10 @@ pub fn parse(buf: &[u8]) -> Result<Datagram<'_>, WireError> {
         }
         10 | 12 => {
             let acks = entries(buf, ACK_LEN, read_ack)?;
-            if acks.iter().any(|a| a.slot as usize >= crate::gamepad::MAX_PADS) {
+            if acks
+                .iter()
+                .any(|a| a.slot as usize >= crate::gamepad::MAX_PADS)
+            {
                 return Err(WireError::Field("slot"));
             }
             Ok(if kind == 10 {
