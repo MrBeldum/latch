@@ -301,7 +301,12 @@ impl Player {
         if q.len() > self.max_queued {
             // Back to the mixer's cushion, in whole frames: dropping half a
             // frame would swap the channels.
-            let target = self.link.target_us.load(Ordering::Relaxed) as usize;
+            // Before the device's first pull there is no target yet: keep
+            // what the mixer will start with by default.
+            let target = match self.link.target_us.load(Ordering::Relaxed) {
+                0 => ((DEFAULT_JITTER_MS + MARGIN_MS) * 1000.0) as usize,
+                us => us as usize,
+            };
             let keep = (target * self.rate as usize / 1_000_000).max(1) * self.channels;
             let drop = q.len().saturating_sub(keep);
             q.drain(..drop);
@@ -944,6 +949,7 @@ impl Mixer {
             if q.len() < cushion {
                 drop(q);
                 out.fill(0.0);
+                self.pulled.fetch_add(frames_out as u64, Ordering::Relaxed);
                 return;
             }
             self.started = true;
