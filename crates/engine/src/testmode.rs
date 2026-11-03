@@ -56,6 +56,10 @@ impl CpuCapture for Shared {
         self.pattern.lock().size()
     }
 
+    fn damage(&self) -> Option<Vec<crate::software::Rect>> {
+        self.pattern.lock().damage()
+    }
+
     /// Looks at the pattern once a frame interval, as a screen refreshes;
     /// sleeps outside the lock so input is never held up behind a frame.
     fn grab(&mut self, frame: &mut Bgra, timeout: Duration) -> anyhow::Result<bool> {

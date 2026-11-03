@@ -4,6 +4,7 @@
 use crate::input::DisplayRect;
 use crate::video::{Codec, EncodedVideo, Pacer, VideoConfig, VideoInfo, VideoPipeline};
 use anyhow::ensure;
+pub use latch_codec::color::Rect;
 use latch_codec::h264::{Encoder, EncoderConfig};
 use latch_codec::Yuv420;
 use std::time::{Duration, Instant};
@@ -28,6 +29,13 @@ pub trait CpuCapture: Send {
     fn grab(&mut self, frame: &mut Bgra, timeout: Duration) -> anyhow::Result<bool>;
 
     fn display(&self) -> DisplayRect;
+
+    /// Where the picture the last `grab` that returned true differs from
+    /// the one the source returned before it; `None` when it cannot tell.
+    /// Lets the pipeline convert only what changed.
+    fn damage(&self) -> Option<Vec<Rect>> {
+        None
+    }
 
     /// For [`VideoInfo::encoder`]'s sake: "X11", "test pattern".
     fn name(&self) -> String;
@@ -64,6 +72,7 @@ pub struct SoftwarePipeline<C: CpuCapture> {
     last_sent: Option<Instant>,
     captured: Instant,
     timings: SoftwareTimings,
+    threads: usize,
 }
 
 impl<C: CpuCapture> SoftwarePipeline<C> {
@@ -85,6 +94,7 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
             last_sent: None,
             captured: Instant::now(),
             timings: SoftwareTimings::default(),
+            threads: std::thread::available_parallelism().map_or(1, |n| n.get().min(4)),
         })
     }
 
@@ -183,17 +193,26 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
                 height: self.frame.height,
                 fps: self.config.fps,
                 bitrate_kbps: self.config.bitrate_kbps,
-                threads: std::thread::available_parallelism().map_or(1, |n| n.get().min(4)),
+                threads: self.threads,
             })?);
             self.picture = Yuv420::new(self.frame.width, self.frame.height);
         }
         let started = Instant::now();
         if changed || resized {
-            latch_codec::color::bgra_to_yuv420(
+            let whole = [Rect {
+                x: 0,
+                y: 0,
+                width: self.frame.width,
+                height: self.frame.height,
+            }];
+            let damage = if resized { None } else { self.capture.damage() };
+            latch_codec::color::bgra_to_yuv420_rects(
                 &self.frame.data,
                 self.frame.width,
                 self.frame.height,
                 self.frame.stride,
+                damage.as_deref().unwrap_or(&whole),
+                self.threads,
                 &mut self.picture,
             );
         }
