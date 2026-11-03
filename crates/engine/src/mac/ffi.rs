@@ -218,14 +218,12 @@ pub struct AudioBuffer {
 }
 #[link(name = "CoreVideo", kind = "framework")]
 extern "C" {
-    #[cfg(test)]
     pub static kCVPixelBufferIOSurfacePropertiesKey: Ref;
     #[cfg(test)]
     pub static kCVImageBufferYCbCrMatrixKey: Ref;
     pub static kCVImageBufferYCbCrMatrix_ITU_R_709_2: Ref;
     pub static kCVImageBufferColorPrimaries_ITU_R_709_2: Ref;
     pub static kCVImageBufferTransferFunction_ITU_R_709_2: Ref;
-    #[cfg(test)]
     pub fn CVPixelBufferCreate(
         allocator: Ref,
         width: usize,

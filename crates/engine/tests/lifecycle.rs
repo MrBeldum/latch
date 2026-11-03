@@ -177,6 +177,7 @@ fn post_accept_end_close_and_missing_media_are_reported_as_failures() {
                 fps: 60,
                 bitrate_kbps: 1000,
                 hevc: false,
+                av1: false,
                 audio: false,
                 name: "failure test".into(),
                 cursor: false,

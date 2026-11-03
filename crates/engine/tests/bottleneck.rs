@@ -182,6 +182,7 @@ fn noise_stream_adapts_to_sustained_queue_delay_and_recovers() {
             fps: 12,
             bitrate_kbps: 50_000,
             hevc: false,
+            av1: false,
             audio: false,
             name: "bottleneck test".into(),
         },

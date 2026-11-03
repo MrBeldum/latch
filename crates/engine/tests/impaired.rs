@@ -176,6 +176,7 @@ fn a_bad_network_slows_the_picture_but_loses_no_key() {
             fps: 60,
             bitrate_kbps: 6_000,
             hevc: false,
+            av1: false,
             audio: false,
             name: "impaired test".into(),
             cursor: false,

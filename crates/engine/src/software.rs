@@ -130,6 +130,105 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
     }
 }
 
+/// Frames a second this machine's CPU takes through the software path at
+/// `width` × `height`: the test pattern's moving bar drawn, converted and
+/// encoded as a session would, at no frame-rate limit, for about
+/// `budget`. A host that encodes in software reports this as its ceiling,
+/// so a viewer asks for what it keeps up with rather than what a core
+/// count suggests. 0 when the pipeline cannot be opened.
+pub fn measure_fps(width: u32, height: u32, budget: Duration) -> u32 {
+    let fps = latch_proto::control::MAX_FPS;
+    let pattern = crate::pattern::Pattern::new(width, height, fps, crate::pattern::Motion::Sweep);
+    let config = VideoConfig {
+        width,
+        height,
+        fps,
+        bitrate_kbps: 20_000,
+        codec: Codec::H264Baseline,
+    };
+    let Ok(mut pipeline) = SoftwarePipeline::new(pattern, &config) else {
+        return 0;
+    };
+    // The first frame is an IDR and sets up the encoder: not counted.
+    if pipeline.next(true, Duration::ZERO).is_err() {
+        return 0;
+    }
+    let (start, mut frames) = (Instant::now(), 0u32);
+    while start.elapsed() < budget {
+        if pipeline.next(false, Duration::ZERO).is_err() {
+            return 0;
+        }
+        frames += 1;
+    }
+    (f64::from(frames) / start.elapsed().as_secs_f64()) as u32
+}
+
+/// What the software path keeps up with: `fps` frames a second at
+/// `width` × `height`, as [`measure_fps`] found it. Encoding time follows
+/// the pixel count, so it holds any picture to the same pixels a second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ceiling {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+}
+
+impl Ceiling {
+    /// Until the host has measured: 30 fps at 1080p, what 5.1 held a
+    /// small CPU to. A first connection must not ask a slow CPU for its
+    /// display's refresh rate at 4K while the measurement runs.
+    pub const PROVISIONAL: Ceiling = Ceiling {
+        width: 1920,
+        height: 1080,
+        fps: 30,
+    };
+
+    fn pixel_rate(&self) -> u64 {
+        u64::from(self.fps) * u64::from(self.width) * u64::from(self.height)
+    }
+
+    /// Frames a second at `width` × `height`.
+    pub fn fps_at(&self, width: u32, height: u32) -> u32 {
+        let pixels = (u64::from(width) * u64::from(height)).max(1);
+        u32::try_from(self.pixel_rate() / pixels).unwrap_or(u32::MAX)
+    }
+
+    /// `width` × `height` at `fps` held to this: the frame rate comes down
+    /// first, to no less than 30 (or what was asked, if less), then the
+    /// picture shrinks in proportion. Sides stay even.
+    pub fn fit(&self, width: u32, height: u32, fps: u32) -> (u32, u32, u32) {
+        let at = self.fps_at(width, height);
+        if fps <= at {
+            return (width, height, fps);
+        }
+        let least = fps.min(SMOOTH);
+        if at >= least {
+            return (width, height, at);
+        }
+        let pixels = (u64::from(width) * u64::from(height)).max(1);
+        let scale = ((self.pixel_rate() / u64::from(least.max(1))) as f64 / pixels as f64).sqrt();
+        let even = |v: u32| ((f64::from(v) * scale) as u32 / 2 * 2).max(64);
+        (even(width), even(height), least)
+    }
+}
+
+/// The least frame rate [`Ceiling::fit`] trades picture size for.
+const SMOOTH: u32 = 30;
+
+static CEILING: parking_lot::Mutex<Option<Ceiling>> = parking_lot::Mutex::new(None);
+
+/// What a session is held to while this host encodes in software; None
+/// when it does not, and nothing is held. The host sets it (see
+/// `set_ceiling`) from what it measured, so a request it did not fit
+/// itself cannot ask for more.
+pub fn ceiling() -> Option<Ceiling> {
+    *CEILING.lock()
+}
+
+pub fn set_ceiling(ceiling: Option<Ceiling>) {
+    *CEILING.lock() = ceiling.filter(|c| c.fps > 0 && c.width > 0 && c.height > 0);
+}
+
 fn validate_size(width: u32, height: u32) -> anyhow::Result<()> {
     ensure!(
         width > 0 && height > 0 && width <= 16384 && height <= 16384,
@@ -319,6 +418,40 @@ mod tests {
         p.set_bitrate(2000);
         assert_eq!(p.config.bitrate_kbps, 2000);
     }
+    #[test]
+    fn the_software_ceiling_is_measured() {
+        let fps = measure_fps(320, 240, Duration::from_millis(200));
+        assert!(fps > 0, "a small picture encodes at some rate");
+        assert!(fps <= latch_proto::control::MAX_FPS + 10, "{fps} fps");
+        assert_eq!(
+            measure_fps(3, 3, Duration::from_millis(10)),
+            0,
+            "odd sizes cannot open"
+        );
+    }
+
+    #[test]
+    fn a_software_ceiling_holds_the_pixels_a_second() {
+        let measured = Ceiling {
+            width: 1920,
+            height: 1080,
+            fps: 120,
+        };
+        assert_eq!(measured.fit(1920, 1080, 60), (1920, 1080, 60));
+        assert_eq!(measured.fit(1920, 1080, 240), (1920, 1080, 120));
+        assert_eq!(measured.fit(1280, 720, 240), (1280, 720, 240));
+        assert_eq!(measured.fit(3840, 2160, 120), (3840, 2160, 30));
+        // Until measured, a cold 4K request at a display's refresh rate
+        // becomes 1080p at 30.
+        let (w, h, fps) = Ceiling::PROVISIONAL.fit(3840, 2160, 120);
+        assert_eq!((fps, w % 2, h % 2), (30, 0, 0));
+        assert!(
+            u64::from(w) * u64::from(h) <= 1920 * 1080 && w >= 1900,
+            "{w} × {h}"
+        );
+        assert_eq!(Ceiling::PROVISIONAL.fit(1920, 1080, 24), (1920, 1080, 24));
+    }
+
     #[test]
     fn rejects_bad_frames_and_config() {
         let mut p = pipeline();

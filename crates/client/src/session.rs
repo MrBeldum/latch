@@ -5,7 +5,7 @@ use crate::clipboard;
 use crate::config::{ClientConfig, Codec, KnownPc, StreamSettings};
 use crate::path::{self, Path};
 use anyhow::{anyhow, bail, Context, Result};
-use latch_core::api::{Ack, NatReport, PowerAction, PowerRequest, Status};
+use latch_core::api::{Ack, CodecCaps, NatReport, PowerAction, PowerRequest, Status};
 use latch_core::{http, tailscale, wake, CONTROL_PORT};
 use latch_stream::session::Server;
 use latch_stream::{Event, FrameSlot, Input, Session, Settings};
@@ -677,10 +677,9 @@ pub struct Target {
     pub path: Path,
     /// Tailscale's OS string for the PC.
     pub os: String,
-    /// The PC's fixed capture size and frame-rate ceiling, from its last
-    /// status; see [`fit_to_host`].
-    pub capture_size: Option<[u32; 2]>,
-    pub max_fps: u32,
+    /// What the PC's capture and encoders take, from its last status;
+    /// see [`plan`].
+    pub limits: HostLimits,
 }
 
 impl Target {
@@ -699,9 +698,105 @@ impl Target {
             public_ip: saved_public(k.and_then(|k| k.public_ip.as_ref())),
             path: pc.path.clone(),
             os: pc.os.clone(),
-            capture_size: pc.host.as_ref().and_then(|h| h.streamer.capture_size),
-            max_fps: pc.host.as_ref().map_or(0, |h| h.streamer.max_fps),
+            limits: pc
+                .host
+                .as_ref()
+                .map(|h| HostLimits::of(&h.streamer))
+                .unwrap_or_default(),
         })
+    }
+}
+
+/// What a PC's capture and encoders take, as its status said: a fixed
+/// desktop size, a measured software frame rate, and each codec's limits.
+/// All empty for a PC that has not said (an older host, or one not
+/// reached yet), which limits nothing.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HostLimits {
+    pub capture_size: Option<[u32; 2]>,
+    pub max_fps: u32,
+    pub codecs: Vec<CodecCaps>,
+}
+
+impl HostLimits {
+    pub fn of(streamer: &latch_core::api::Streamer) -> Self {
+        Self {
+            capture_size: streamer.capture_size,
+            max_fps: streamer.max_fps,
+            codecs: streamer.codecs.clone(),
+        }
+    }
+
+    /// The limits of the codec the PC will pick from `offer`: the first
+    /// it encodes, as its server picks.
+    fn codec(&self, offer: &[latch_stream::Codec]) -> Option<&CodecCaps> {
+        offer.iter().find_map(|c| {
+            let name = serde_json::to_value(c).ok()?;
+            self.codecs.iter().find(|caps| name == caps.codec.as_str())
+        })
+    }
+}
+
+/// What a stream asks a PC for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Plan {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate_kbps: u32,
+}
+
+/// The codecs a stream with `codec` offers, best first: what this machine
+/// decodes, less what the setting leaves out.
+pub fn offer(codec: Codec) -> Vec<latch_stream::Codec> {
+    let (hevc, av1) = codec.allows();
+    latch_stream::video::decodable()
+        .into_iter()
+        .filter(|&c| {
+            (hevc || c != latch_stream::Codec::Hevc) && (av1 || c != latch_stream::Codec::Av1)
+        })
+        .collect()
+}
+
+/// What a stream with `settings` asks the PC for on a display of `native`
+/// pixels refreshing at `display_hz`: the quality setting's choice (see
+/// [`path::effective_for`]), then the PC's limits. The picture is scaled
+/// down in proportion to what the codec it will use takes, the frame rate
+/// to what its encoder keeps up with, and the bitrate to the codec's
+/// ceiling; a profile's bitrate follows the picture it ends up with.
+pub fn plan(
+    settings: &StreamSettings,
+    native: (u32, u32),
+    display_hz: u32,
+    host: &HostLimits,
+) -> Plan {
+    let s = path::effective_for(settings, native, display_hz);
+    let (mut w, mut h, mut fps) = fit_to_host(
+        s.resolution.pixels(native),
+        s.fps,
+        host.capture_size,
+        host.max_fps,
+    );
+    let mut kbps = s.bitrate_kbps;
+    if let Some(caps) = host.codec(&offer(settings.codec)) {
+        (w, h, fps) = latch_proto::control::fit(
+            (caps.max_side, caps.max_pixels, caps.max_pixel_rate),
+            w,
+            h,
+            fps,
+        );
+        kbps = settings.quality.bitrate_kbps(w, h, fps).unwrap_or(kbps);
+        if caps.max_kbps > 0 {
+            kbps = kbps.min(caps.max_kbps);
+        }
+    } else {
+        kbps = settings.quality.bitrate_kbps(w, h, fps).unwrap_or(kbps);
+    }
+    Plan {
+        width: w,
+        height: h,
+        fps,
+        bitrate_kbps: kbps,
     }
 }
 
@@ -744,28 +839,16 @@ fn fixed_desktop(capture_size: Option<[u32; 2]>) -> Option<(u32, u32)> {
     }
 }
 
-/// What a stream with `settings` asks the PC for on a display of `native`
-/// pixels, after Auto has had its say and the PC's limits theirs: width,
-/// height and frame rate. A connect asks for exactly this.
-pub fn request_for(
-    settings: &StreamSettings,
-    native: (u32, u32),
-    capture_size: Option<[u32; 2]>,
-    max_fps: u32,
-) -> (u32, u32, u32) {
-    let hz = settings.fps;
-    request_for_hz(settings, native, hz, capture_size, max_fps)
-}
-
+/// [`plan`]'s picture and frame rate: what a connect asks for, and what
+/// a display change is compared with.
 pub fn request_for_hz(
     settings: &StreamSettings,
     native: (u32, u32),
     display_hz: u32,
-    capture_size: Option<[u32; 2]>,
-    max_fps: u32,
+    host: &HostLimits,
 ) -> (u32, u32, u32) {
-    let s = path::effective_for(settings, display_hz);
-    fit_to_host(s.resolution.pixels(native), s.fps, capture_size, max_fps)
+    let p = plan(settings, native, display_hz, host);
+    (p.width, p.height, p.fps)
 }
 
 pub struct Connect {
@@ -941,23 +1024,23 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     let hz = crate::refresh::hz().or(c.display_hz).unwrap_or(60);
     #[cfg(not(target_os = "linux"))]
     let hz = c.display_hz.unwrap_or(60);
-    let mut settings = path::effective_for(&c.settings, hz);
+    let mut settings = path::effective_for(&c.settings, c.native, hz);
     let wanted = settings.resolution.pixels(c.native);
-    let (w, h, fps) = request_for_hz(
-        &c.settings,
-        c.native,
-        hz,
-        host.streamer.capture_size,
-        host.streamer.max_fps,
-    );
+    let planned = plan(&c.settings, c.native, hz, &HostLimits::of(&host.streamer));
+    let (w, h, fps) = (planned.width, planned.height, planned.fps);
     settings.fps = fps;
+    settings.bitrate_kbps = planned.bitrate_kbps;
     tracing::info!(
-        "path to {}: {} · {}{}",
+        "path to {}: {} · {} · {w} × {h} · {fps} fps · up to {} Mbps{}",
         t.name,
         path.label(),
-        settings.describe(),
+        settings.quality.label(),
+        planned.bitrate_kbps / 1000,
         if (w, h) != wanted {
-            format!(" · {w} × {h}, the size {} draws", t.name)
+            format!(
+                " (asked for {} × {}; what {} takes)",
+                wanted.0, wanted.1, t.name
+            )
         } else {
             String::new()
         }
@@ -979,7 +1062,8 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             height: h,
             fps,
             bitrate_kbps: settings.bitrate_kbps,
-            hevc: settings.codec != Codec::H264,
+            hevc: settings.codec.allows().0,
+            av1: settings.codec.allows().1,
             audio: true,
             name: latch_core::config::machine_name(),
             cursor: true,
@@ -1129,6 +1213,14 @@ mod tests {
     #[test]
     fn the_request_depends_on_the_display_only_where_the_setting_does() {
         use crate::config::{Quality, Resolution};
+        let request_for = |s: &StreamSettings, native, capture_size, max_fps| {
+            let host = HostLimits {
+                capture_size,
+                max_fps,
+                codecs: Vec::new(),
+            };
+            request_for_hz(s, native, s.fps, &host)
+        };
         let (laptop, monitor) = ((3024, 1964), (2560, 1440));
         let custom = |resolution| StreamSettings {
             quality: Quality::Custom,
@@ -1396,10 +1488,10 @@ mod tests {
         };
         let t = Target::from_pc(&pc).unwrap();
         assert_eq!(t.os, "linux");
-        assert_eq!(t.capture_size, Some([1920, 1080]));
-        assert_eq!(t.max_fps, 30);
+        assert_eq!(t.limits.capture_size, Some([1920, 1080]));
+        assert_eq!(t.limits.max_fps, 30);
         let old = Target::from_pc(&Pc { host: None, ..pc }).unwrap();
-        assert_eq!((old.capture_size, old.max_fps), (None, 0));
+        assert_eq!(old.limits, HostLimits::default());
     }
 
     #[test]
@@ -1634,8 +1726,110 @@ mod tests {
     #[test]
     fn request_for_hz_respects_high_refresh_rate() {
         let settings = StreamSettings::default();
-        let (w, h, fps) = request_for_hz(&settings, (1920, 1080), 120, None, 144);
+        let host = HostLimits {
+            max_fps: 144,
+            ..Default::default()
+        };
+        let (w, h, fps) = request_for_hz(&settings, (1920, 1080), 120, &host);
         assert_eq!((w, h, fps), (1920, 1080, 120));
+        // A 360 Hz monitor is asked for at 360 when nothing says otherwise.
+        let p = plan(&settings, (1920, 1080), 360, &HostLimits::default());
+        assert_eq!((p.width, p.height, p.fps), (1920, 1080, 360));
+        assert_eq!(p.bitrate_kbps, 97_979);
+    }
+
+    fn caps(codec: &str, max_side: u32, max_pixels: u64, max_kbps: u32) -> CodecCaps {
+        CodecCaps {
+            codec: codec.into(),
+            max_side,
+            max_pixels,
+            max_pixel_rate: 4_278_190_080,
+            max_kbps,
+        }
+    }
+
+    #[test]
+    fn the_plan_meets_the_codec_the_host_will_use() {
+        use crate::config::{Quality, Resolution};
+        let decodes_hevc = offer(Codec::Auto).contains(&latch_stream::Codec::Hevc);
+        // A Mac host: VideoToolbox's H.264 stops at 4096 × 2160, its HEVC
+        // at 8192 × 4320.
+        let mac = HostLimits {
+            codecs: vec![
+                caps("hevc", 8192, 8192 * 4320, 800_000),
+                caps("h264-high", 4096, 4096 * 2160, 1_000_000),
+                caps("h264-baseline", 4096, 4096 * 2160, 800_000),
+            ],
+            ..Default::default()
+        };
+        let five_k = (5120, 2880);
+        let auto = StreamSettings::default();
+        let p = plan(&auto, five_k, 60, &mac);
+        if decodes_hevc {
+            assert_eq!((p.width, p.height), five_k, "HEVC takes 5K");
+        } else {
+            assert!(u64::from(p.width) * u64::from(p.height) <= 4096 * 2160);
+        }
+        let h264 = StreamSettings {
+            codec: Codec::H264,
+            ..auto.clone()
+        };
+        let p = plan(&h264, five_k, 60, &mac);
+        assert!(
+            u64::from(p.width) * u64::from(p.height) <= 4096 * 2160 && p.width.is_multiple_of(2),
+            "{p:?}: H.264 is scaled into what the hardware takes"
+        );
+        assert!((p.width as f32 / p.height as f32 - 16.0 / 9.0).abs() < 0.01);
+        // Counted in coded blocks, as the host and its media engine do:
+        // 3762 × 2350 would be under 4096 × 2160 in pixels, over in blocks.
+        let p = plan(&h264, (3840, 2400), 60, &mac);
+        assert!(
+            latch_proto::control::coded_pixels(p.width, p.height) <= 4096 * 2160,
+            "{p:?}"
+        );
+        // Custom's bitrate is capped at the codec's ceiling, not Latch's.
+        let custom = StreamSettings {
+            quality: Quality::Custom,
+            resolution: Resolution::P1080,
+            fps: 500,
+            bitrate_kbps: 1_000_000,
+            codec: Codec::H264,
+            ..auto.clone()
+        };
+        let linux = HostLimits {
+            codecs: vec![caps("h264-baseline", 16384, 35_651_584, 800_000)],
+            ..Default::default()
+        };
+        let p = plan(&custom, five_k, 60, &linux);
+        assert_eq!((p.fps, p.bitrate_kbps), (500, 800_000));
+        // An older host says nothing, and nothing is capped.
+        let p = plan(&custom, five_k, 60, &HostLimits::default());
+        assert_eq!(
+            (p.width, p.height, p.fps, p.bitrate_kbps),
+            (1920, 1080, 500, 1_000_000)
+        );
+    }
+
+    #[test]
+    fn the_codec_setting_decides_what_is_offered() {
+        for (codec, hevc, av1) in [
+            (Codec::Auto, true, true),
+            (Codec::Hevc, true, false),
+            (Codec::Av1, false, true),
+            (Codec::H264, false, false),
+        ] {
+            let offered = offer(codec);
+            let decodable = latch_stream::video::decodable();
+            assert!(offered.contains(&latch_stream::Codec::H264Baseline));
+            assert_eq!(
+                offered.contains(&latch_stream::Codec::Hevc),
+                hevc && decodable.contains(&latch_stream::Codec::Hevc)
+            );
+            assert_eq!(
+                offered.contains(&latch_stream::Codec::Av1),
+                av1 && decodable.contains(&latch_stream::Codec::Av1)
+            );
+        }
     }
 
     #[test]

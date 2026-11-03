@@ -32,7 +32,6 @@ const OVERFLOW_BELOW: f32 = 1040.0;
 const HINT_BELOW: f32 = 1200.0;
 /// Below this width the toolbar drops the stream facts after the name.
 const FACTS_BELOW: f32 = 1560.0;
-const STATUS: f32 = 24.0;
 const TOAST_FOR: Duration = Duration::from_secs(5);
 /// How long the host-key hint stays up when a stream starts.
 const HINT_FOR: Duration = Duration::from_secs(6);
@@ -210,7 +209,15 @@ pub struct View {
     grabbed: bool,
     /// The host key dropped the toolbar over the picture.
     bar_shown: bool,
+    /// The stats overlay over the picture's corner.
     stats: bool,
+    /// The Stream performance panel, with everything and a copy button.
+    details: bool,
+    /// What the renderer has drawn, for the overlay.
+    presented: Presented,
+    /// Whether the mouse was captured and the toolbar up before the host
+    /// key went down, so a stats chord (host key + S) can put both back.
+    chord_before: Option<(bool, bool)>,
     settings: Option<StreamSettings>,
     held: Held,
     scroll: (f32, f32),
@@ -259,6 +266,10 @@ pub struct View {
     /// the recovery overlay without a broken capture.
     #[cfg(test)]
     problem: Option<String>,
+    /// Statistics to show in place of the session's, for rendering the
+    /// overlay without a stream.
+    #[cfg(test)]
+    fake_stats: Option<latch_stream::Stats>,
     /// Where input goes in tests instead of the PC, and whether the
     /// stream counts as connected.
     #[cfg(test)]
@@ -311,6 +322,9 @@ impl Default for View {
             grabbed: false,
             bar_shown: false,
             stats: false,
+            details: false,
+            presented: Presented::default(),
+            chord_before: None,
             settings: None,
             held: Held::default(),
             scroll: (0.0, 0.0),
@@ -340,6 +354,8 @@ impl Default for View {
             caps_now: None,
             #[cfg(test)]
             problem: None,
+            #[cfg(test)]
+            fake_stats: None,
             #[cfg(test)]
             tap: None,
         }
@@ -496,6 +512,8 @@ impl View {
         self.host_mac = is_mac_os(&env.os);
         let screen = ctx.screen_rect();
         let stats = live.session.stats();
+        #[cfg(test)]
+        let stats = self.fake_stats.clone().unwrap_or(stats);
         let (vw, vh) = if stats.width > 0 {
             (stats.width as f32, stats.height as f32)
         } else {
@@ -506,7 +524,6 @@ impl View {
         // toolbar, when the host key has asked for it, lies over the top of
         // it. A menu or a question keeps it there until it is answered.
         let video = fit(screen, vw / vh);
-        let bottom_gap = screen.bottom() - video.bottom();
         let popup = ctx.memory(|m| m.any_popup_open());
         let bar_visible = self.bar_shown || popup || self.confirm.is_some() || self.confirm_install;
         if !bar_visible {
@@ -516,6 +533,11 @@ impl View {
             .then(|| Rect::from_min_size(screen.min, Vec2::new(screen.width(), self.bar_h)));
         let waiting = live.frames.seq() == 0;
         let interruption = self.interrupted.clone();
+        self.presented.frame(
+            Instant::now(),
+            live.frames.seq(),
+            live.session.published_at(),
+        );
 
         egui::CentralPanel::default()
             .frame(Frame::new().fill(Color32::BLACK))
@@ -529,9 +551,6 @@ impl View {
                             },
                         ),
                     ));
-                }
-                if self.stats {
-                    self.status_line(ui, screen, video, env, &stats, bottom_gap >= STATUS);
                 }
             });
         if let Some(intr) = interruption.as_ref() {
@@ -567,7 +586,10 @@ impl View {
             .map(|b| Rect::from_min_max(Pos2::new(screen.left(), b.bottom()), screen.max))
             .unwrap_or(screen);
         self.settings_panel(ctx, below_bar, &mut actions);
-        if self.stats {
+        if self.stats && !waiting {
+            self.stats_overlay(ctx, video, below_bar.top(), env, &stats);
+        }
+        if self.details {
             self.diagnostics(ctx, env, below_bar, &stats);
         }
         if interruption.is_none() {
@@ -821,6 +843,7 @@ impl View {
                             ui,
                             settings,
                             crate::app::ClientApp::native_pixels(ctx),
+                            crate::app::ClientApp::display_hz(),
                         );
                     },
                 );
@@ -930,7 +953,60 @@ impl View {
                 });
             });
         if close {
-            self.stats = false;
+            self.details = false;
+        }
+    }
+
+    /// The stats overlay, GeForce NOW style: what the picture is and how
+    /// it is getting here, in the picture's top right corner (under the
+    /// toolbar while it shows). Painted, never a window, so every click
+    /// still goes to the PC.
+    fn stats_overlay(
+        &self,
+        ctx: &egui::Context,
+        video: Rect,
+        top: f32,
+        env: &Env<'_>,
+        stats: &latch_stream::Stats,
+    ) {
+        let rows = overlay_rows(env.live, stats, &self.presented);
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Middle,
+            Id::new("stats-overlay"),
+        ));
+        let font = theme::mono(theme::text::MONO - 1.0);
+        let lay =
+            |text: &str, colour| painter.layout_no_wrap(text.to_string(), font.clone(), colour);
+        let laid: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                let colour = if r.warn { P.warning } else { P.text };
+                (lay(r.label, P.text_tertiary), lay(&r.value, colour))
+            })
+            .collect();
+        let label_w = laid.iter().map(|(l, _)| l.size().x).fold(0.0, f32::max);
+        let value_w = laid.iter().map(|(_, v)| v.size().x).fold(0.0, f32::max);
+        let row_h = laid.first().map_or(14.0, |(l, _)| l.size().y) + 2.0;
+        let pad = Vec2::new(space::MD, space::SM);
+        let size = Vec2::new(label_w + space::MD + value_w, row_h * laid.len() as f32) + 2.0 * pad;
+        let corner = Pos2::new(
+            video.right().min(ctx.screen_rect().right()) - space::MD,
+            video.top().max(top) + space::MD,
+        );
+        let rect = Rect::from_min_size(Pos2::new(corner.x - size.x, corner.y), size);
+        painter.rect(
+            rect,
+            theme::radius::MD,
+            P.overlay,
+            egui::Stroke::new(1.0_f32, P.hairline),
+            egui::StrokeKind::Inside,
+        );
+        let mut y = rect.top() + pad.y;
+        for (label, value) in laid {
+            painter.galley(Pos2::new(rect.left() + pad.x, y), label, P.text_tertiary);
+            let x = rect.right() - pad.x - value.size().x;
+            painter.galley(Pos2::new(x, y), value, P.text);
+            y += row_h;
         }
     }
 
@@ -1150,8 +1226,11 @@ impl View {
             if ui::menu_choice(ui, "Full screen", env.fullscreen).clicked() {
                 actions.push(Action::Fullscreen(!env.fullscreen));
             }
-            if ui::menu_choice(ui, "Stream performance", self.stats).clicked() {
+            if ui::menu_choice(ui, "Stats overlay", self.stats).clicked() {
                 self.stats = !self.stats;
+            }
+            if ui::menu_choice(ui, "Stream performance", self.details).clicked() {
+                self.details = !self.details;
             }
             ui::menu_label(ui, "Audio");
             self.volume_controls(ui, live);
@@ -1208,8 +1287,9 @@ impl View {
     }
 
     fn stats_button(&mut self, ui: &mut egui::Ui) {
+        let (_, keys) = host_key();
         if ui::ghost_button(ui, if self.stats { "Hide stats" } else { "Stats" })
-            .on_hover_text("Frame rate, bitrate, round trip, packet loss and decode time")
+            .on_hover_text(format!("Frame rate, bitrate, round trip, loss and latency over the picture ({keys}-S). More has the full Stream performance panel."))
             .clicked()
         {
             self.stats = !self.stats;
@@ -1457,57 +1537,6 @@ impl View {
             });
     }
 
-    fn status_line(
-        &self,
-        ui: &mut egui::Ui,
-        screen: Rect,
-        video: Rect,
-        env: &Env<'_>,
-        stats: &latch_stream::Stats,
-        in_gap: bool,
-    ) {
-        let live = env.live;
-        let secs = live.started.elapsed().as_secs();
-        let text = format!(
-            "{:02}:{:02}:{:02}   {:.0}/{} fps   {:.1}/{} Mbps   {} ms",
-            secs / 3600,
-            (secs / 60) % 60,
-            secs % 60,
-            stats.fps,
-            live.requested.2,
-            stats.mbps,
-            live.settings.bitrate_kbps / 1000,
-            stats.rtt_ms
-        );
-        let font = theme::mono(theme::text::LABEL + 0.5);
-        if in_gap {
-            let y = video.bottom() + (screen.bottom() - video.bottom()) / 2.0;
-            ui.painter().text(
-                Pos2::new(screen.left() + space::MD, y),
-                Align2::LEFT_CENTER,
-                text,
-                font,
-                P.text_tertiary,
-            );
-        } else {
-            let galley = ui.painter().layout_no_wrap(text, font, P.text_secondary);
-            let size = galley.size() + Vec2::new(2.0 * space::SM, space::SM);
-            let rect = Rect::from_min_size(
-                Pos2::new(
-                    screen.left() + space::MD,
-                    screen.bottom() - size.y - space::MD,
-                ),
-                size,
-            );
-            ui.painter().rect_filled(rect, theme::radius::SM, P.overlay);
-            ui.painter().galley(
-                rect.min + Vec2::new(space::SM, space::XS),
-                galley,
-                P.text_secondary,
-            );
-        }
-    }
-
     /// Capture the mouse and take the toolbar away: the picture is all.
     fn grab(&mut self, ctx: &egui::Context, out: &(impl Sink + ?Sized)) {
         self.held.release_all(out);
@@ -1719,14 +1748,41 @@ impl View {
                 self.capture_chord_held = true;
                 self.settle_paste(&link, true);
                 if connected {
+                    self.chord_before = Some((self.captured, self.bar_shown));
                     self.host_key(ctx, cfg, out);
                 } else {
                     self.release(ctx, out);
                 }
             }
+            // The host key and S (or F6, GeForce NOW's key) toggles the
+            // stats overlay, and leaves the mouse and the toolbar as they
+            // were before the host key went down.
+            let stats_key = events.iter().any(|e| {
+                matches!(
+                    e,
+                    Event::Key {
+                        key: egui::Key::S | egui::Key::F6,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    }
+                )
+            });
+            if ctrl_alt && stats_key {
+                self.stats = !self.stats;
+                if let Some((captured, bar)) = self.chord_before.take() {
+                    if captured && !self.captured {
+                        self.grab(ctx, out);
+                    } else if !captured && self.captured {
+                        self.release(ctx, out);
+                    }
+                    self.bar_shown = bar;
+                }
+            }
             return;
         }
         self.capture_chord_held = false;
+        self.chord_before = None;
         if !keys_to_pc && self.held.any_down() {
             self.held.release_all(out);
         }
@@ -2240,12 +2296,152 @@ fn desktop_per_stream_pixel(desktop: Option<(u32, u32)>, stream: (u32, u32)) -> 
     }
 }
 
+/// What the renderer has drawn of the frames the decoder published, a
+/// second at a time.
+#[derive(Debug, Default)]
+struct Presented {
+    seq: u64,
+    since: Option<Instant>,
+    shown: u32,
+    skipped: u64,
+    wait_us: u64,
+    /// Pictures drawn a second, over the last whole second.
+    fps: f32,
+    /// Pictures published but replaced before they were drawn.
+    not_shown: u64,
+    /// From the decoder publishing a picture to this window drawing it.
+    wait_ms: f32,
+    /// This display's refresh rate; 0 when unknown.
+    hz: u32,
+}
+
+impl Presented {
+    /// A UI frame is being drawn with the slot at `seq`.
+    fn frame(&mut self, now: Instant, seq: u64, published: Option<Instant>) {
+        if seq > self.seq {
+            if self.seq > 0 {
+                self.skipped += seq - self.seq - 1;
+            }
+            self.seq = seq;
+            self.shown += 1;
+            if let Some(at) = published {
+                self.wait_us += now.saturating_duration_since(at).as_micros() as u64;
+            }
+        }
+        let since = *self.since.get_or_insert(now);
+        let secs = now.saturating_duration_since(since).as_secs_f32();
+        if secs >= 1.0 {
+            self.fps = self.shown as f32 / secs;
+            self.wait_ms = self.wait_us as f32 / self.shown.max(1) as f32 / 1000.0;
+            self.not_shown = self.skipped;
+            self.hz = crate::app::ClientApp::display_hz();
+            (self.shown, self.skipped, self.wait_us) = (0, 0, 0);
+            self.since = Some(now);
+        }
+    }
+}
+
+/// One line of the stats overlay.
+#[derive(Debug, Clone, PartialEq)]
+struct Row {
+    label: &'static str,
+    value: String,
+    /// Worth a look: shown in the warning colour.
+    warn: bool,
+}
+
+fn row(label: &'static str, value: String, warn: bool) -> Row {
+    Row { label, value, warn }
+}
+
+/// The stats overlay's lines, from what the session and the renderer
+/// measured. The latency is an estimate: the host's capture to send, half
+/// the round trip, putting the frame together, waiting for and running the
+/// decoder, waiting to be drawn, and half a refresh of this display on
+/// average before the picture is on it.
+fn overlay_rows(live: &Live, s: &latch_stream::Stats, p: &Presented) -> Vec<Row> {
+    let (w, h) = if s.width > 0 {
+        (s.width, s.height)
+    } else {
+        (live.requested.0, live.requested.1)
+    };
+    let asked = live.requested.2;
+    let codec = if !s.codec.is_empty() {
+        s.codec
+    } else {
+        live.codec
+    };
+    let ceiling = live.settings.bitrate_kbps / 1000;
+    let target = if s.applied_bitrate_kbps > 0 {
+        s.applied_bitrate_kbps / 1000
+    } else {
+        ceiling
+    };
+    let hz = if p.hz > 0 { p.hz } else { 60 };
+    let display = 1000.0 / hz as f32 / 2.0;
+    let network = s.rtt_ms as f32 / 2.0 + s.assembly_ms;
+    let decode = s.queue_ms + s.decode_ms;
+    let shown = p.wait_ms + display;
+    let total = s.host_ms + network + decode + shown;
+    let slow = |fps: f32| asked > 0 && fps < asked as f32 * 0.9;
+    vec![
+        row("Resolution", format!("{w} × {h}"), false),
+        row("Codec", format!("{codec} · {}", s.decoder), false),
+        row(
+            "Frame rate",
+            format!(
+                "{:.0} in · {:.0} decoded · {:.0} shown / {asked}",
+                s.received_fps, s.fps, p.fps
+            ),
+            slow(s.fps),
+        ),
+        row(
+            "Bitrate",
+            if target < ceiling {
+                format!("{:.1} / {target} of {ceiling} Mbps", s.mbps)
+            } else {
+                format!("{:.1} / {ceiling} Mbps", s.mbps)
+            },
+            false,
+        ),
+        row(
+            "Round trip",
+            format!("{} ms ± {}", s.rtt_ms, s.rtt_var_ms),
+            false,
+        ),
+        row("Jitter", format!("{:.1} ms", s.frame_jitter_ms), false),
+        row(
+            "Packet loss",
+            format!("{:.2}% · {:.2}% after FEC", s.raw_loss_pct, s.loss_pct),
+            s.loss_pct > 0.0,
+        ),
+        row(
+            "Dropped",
+            format!(
+                "{} lost · {} skipped · {} not shown",
+                s.frames_lost, s.frames_dropped, p.not_shown
+            ),
+            s.frames_lost + s.frames_dropped > 0,
+        ),
+        row("Decode", format!("{:.1} ms", s.decode_ms), false),
+        row("Present", format!("{:.1} ms", p.wait_ms), false),
+        row("Latency", format!("≈ {total:.0} ms"), false),
+        row(
+            "",
+            format!(
+                "host {:.1} · net {network:.1} · decode {decode:.1} · display {shown:.1}",
+                s.host_ms
+            ),
+            false,
+        ),
+    ]
+}
+
 /// The quality profile a stream runs at, named as Settings names it.
 fn profile_label(s: &StreamSettings) -> String {
-    match (s.quality, s.preset()) {
-        (crate::config::Quality::Auto, _) => "Recommended".into(),
-        (_, Some(p)) => p.label().into(),
-        _ => format!("Custom · {}", s.describe()),
+    match s.quality {
+        crate::config::Quality::Custom => format!("Custom · {}", s.describe()),
+        q => q.label().into(),
     }
 }
 
@@ -2586,6 +2782,22 @@ pub(crate) mod tests {
     /// A session to an address that never answers, so the view shows its
     /// toolbar and overlays with no picture behind them.
     pub(crate) fn dummy_live(ctx: &egui::Context) -> Live {
+        live_to(
+            ctx,
+            latch_stream::session::Server {
+                address: "10.255.255.1".parse().unwrap(),
+                port: latch_core::CONTROL_PORT,
+            },
+            (1920, 1080, 60),
+        )
+    }
+
+    /// A session to `server` asking for `requested` (width, height, fps).
+    fn live_to(
+        ctx: &egui::Context,
+        server: latch_stream::session::Server,
+        requested: (u32, u32, u32),
+    ) -> Live {
         let (tx, rx) = std::sync::mpsc::channel();
         let frames = std::sync::Arc::new(latch_stream::FrameSlot::default());
         let path = crate::path::Path {
@@ -2596,16 +2808,14 @@ pub(crate) mod tests {
         };
         let settings = crate::config::StreamSettings::default();
         let session = latch_stream::Session::start(
-            latch_stream::session::Server {
-                address: "10.255.255.1".parse().unwrap(),
-                port: latch_core::CONTROL_PORT,
-            },
+            server,
             latch_stream::Settings {
-                width: 1920,
-                height: 1080,
-                fps: 60,
+                width: requested.0,
+                height: requested.1,
+                fps: requested.2,
                 bitrate_kbps: 50_000,
                 hevc: true,
+                av1: true,
                 audio: true,
                 name: "UI test".into(),
                 cursor: true,
@@ -2629,7 +2839,7 @@ pub(crate) mod tests {
             events: rx,
             started: Instant::now(),
             codec: "HEVC",
-            requested: (1920, 1080, 60),
+            requested,
             desktop: None,
             settings,
             path,
@@ -2813,7 +3023,12 @@ pub(crate) mod tests {
             h.ctx.memory(|m| m.any_popup_open()),
             "More must use egui::popup so any_popup_open is true; a Background Area would fail this"
         );
-        for item in ["Ctrl+Alt+Delete", "Stream performance", "Sleep…"] {
+        for item in [
+            "Ctrl+Alt+Delete",
+            "Stats overlay",
+            "Stream performance",
+            "Sleep…",
+        ] {
             assert!(h.query_by_label(item).is_some(), "More lists {item}");
         }
         let popup_open = h.ctx.memory(|m| m.any_popup_open());
@@ -2821,7 +3036,7 @@ pub(crate) mod tests {
         h.get_by_label("Stream performance").simulate_click();
         h.run_steps(2);
         assert!(
-            h.state().view.stats,
+            h.state().view.details,
             "click inside More is consumed by the popup, not forwarded"
         );
     }
@@ -2896,25 +3111,210 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn stats_toggle_controls_the_bottom_line_with_and_without_letterboxing() {
+    fn stats_toggle_controls_the_overlay_with_and_without_letterboxing() {
         for size in [Vec2::new(1920.0, 1200.0), Vec2::new(1920.0, 1080.0)] {
             let mut h = harness(size);
-            let line_visible = |h: &egui_kittest::Harness<'_, Fixture>| {
+            h.state()
+                .live
+                .as_ref()
+                .unwrap()
+                .frames
+                .publish(latch_stream::video::Frame::default());
+            h.run_steps(2);
+            let overlay = |h: &egui_kittest::Harness<'_, Fixture>| {
                 h.output().shapes.iter().any(|s| {
-                    matches!(&s.shape, egui::Shape::Text(t) if t.galley.job.text.contains("/60 fps"))
+                    matches!(&s.shape, egui::Shape::Text(t) if t.galley.job.text.contains("shown / 60"))
                 })
             };
-            assert!(!line_visible(&h), "stats start hidden at {size}");
+            assert!(!overlay(&h), "stats start hidden at {size}");
             h.get_by_label("Stats").simulate_click();
             h.run_steps(3);
-            assert!(line_visible(&h), "Stats shows the bottom line at {size}");
+            assert!(overlay(&h), "Stats shows the overlay at {size}");
             h.get_by_label("Hide stats").simulate_click();
             h.run_steps(3);
-            assert!(
-                !line_visible(&h),
-                "Hide stats removes the bottom line at {size}"
-            );
+            assert!(!overlay(&h), "Hide stats removes the overlay at {size}");
         }
+    }
+
+    #[test]
+    fn the_host_key_and_s_toggle_the_overlay_and_leave_the_mouse_alone() {
+        let (mut h, _tap) = recording(View::default(), true);
+        h.state_mut().view.captured = true;
+        h.run_steps(1);
+        let chord = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Default::default()
+        };
+        frame(&mut h, vec![key(Key::S, true, chord)], chord);
+        frame(&mut h, vec![key(Key::S, false, chord)], Modifiers::NONE);
+        let v = &h.state().view;
+        assert!(v.stats, "the overlay is on");
+        assert!(
+            v.captured && !v.bar_shown,
+            "the mouse stays captured, no toolbar"
+        );
+        frame(&mut h, vec![], chord);
+        frame(&mut h, vec![key(Key::F6, true, chord)], chord);
+        frame(&mut h, vec![], Modifiers::NONE);
+        let v = &h.state().view;
+        assert!(!v.stats, "F6 toggles it too");
+        assert!(v.captured && !v.bar_shown);
+        // The host key alone still does what it did.
+        frame(&mut h, vec![], chord);
+        frame(&mut h, vec![], Modifiers::NONE);
+        assert!(h.state().view.bar_shown && !h.state().view.captured);
+    }
+
+    #[test]
+    fn the_overlay_counts_frames_drawn_and_never_drawn() {
+        let mut p = Presented::default();
+        let t = Instant::now();
+        p.frame(t, 1, Some(t));
+        for i in 1..=10u64 {
+            // Every other picture is replaced before a frame draws it.
+            let now = t + Duration::from_millis(i * 100);
+            p.frame(now, 1 + i * 2, Some(now - Duration::from_millis(4)));
+        }
+        assert!((p.fps - 11.0).abs() < 0.01, "{}", p.fps);
+        assert_eq!(p.not_shown, 10);
+        assert!((p.wait_ms - 40.0 / 11.0).abs() < 0.01, "{}", p.wait_ms);
+    }
+
+    /// The overlay over a real stream: `LATCH_TEST_SERVE=127.0.0.1:47883`
+    /// names a test host (`serve` with `LATCH_TEST_PATTERN=sweep`), and
+    /// `LATCH_TEST_REQUEST=1280x720@300` what to ask it for. Renders the
+    /// overlay after a few seconds of real statistics.
+    #[test]
+    #[ignore = "needs a test host and a GPU"]
+    fn snapshot_live_stats_overlay() {
+        use crate::app::snapshots::{file_name, save};
+        let host: std::net::SocketAddr = std::env::var("LATCH_TEST_SERVE")
+            .expect("LATCH_TEST_SERVE")
+            .parse()
+            .unwrap();
+        let request = std::env::var("LATCH_TEST_REQUEST").unwrap_or("1920x1080@120".into());
+        let (size, fps) = request.split_once('@').unwrap();
+        let (w, h) = size.split_once('x').unwrap();
+        let requested = (w.parse().unwrap(), h.parse().unwrap(), fps.parse().unwrap());
+        let ctx = egui::Context::default();
+        let live = live_to(
+            &ctx,
+            latch_stream::session::Server {
+                address: host.ip(),
+                port: host.port(),
+            },
+            requested,
+        );
+        let mut fixture = fixture(
+            View {
+                stats: true,
+                ..View::default()
+            },
+            Extra::default(),
+        );
+        fixture.live = Some(live);
+        let size = Vec2::new(1280.0, 800.0);
+        let mut h = harness_with(size, 2.0, true, fixture);
+        let until = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < until {
+            h.run_steps(1);
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        let stats = h.state().live.as_ref().unwrap().session.stats();
+        eprintln!("live stats: {stats:#?}");
+        eprintln!("presented: {:?}", h.state().view.presented);
+        save(
+            h.render().unwrap(),
+            &file_name("stream", "stats-overlay-live", size, 2.0),
+        );
+    }
+
+    /// A 1440p HEVC stream at 120 fps on a good network.
+    fn sample_stats() -> latch_stream::Stats {
+        latch_stream::Stats {
+            width: 2560,
+            height: 1440,
+            fps: 118.0,
+            received_fps: 119.0,
+            mbps: 41.5,
+            rtt_ms: 12,
+            rtt_var_ms: 2,
+            frame_jitter_ms: 0.8,
+            raw_loss_pct: 1.2,
+            loss_pct: 0.0,
+            frames_dropped: 0,
+            decode_ms: 1.5,
+            host_ms: 4.0,
+            assembly_ms: 1.0,
+            queue_ms: 0.5,
+            codec: "HEVC",
+            decoder: "VideoToolbox",
+            applied_bitrate_kbps: 120_000,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_overlay_lists_what_gfn_does_and_flags_trouble() {
+        let ctx = egui::Context::default();
+        let live = dummy_live(&ctx);
+        let stats = latch_stream::Stats {
+            width: 2560,
+            height: 1440,
+            fps: 118.0,
+            received_fps: 119.0,
+            mbps: 41.5,
+            rtt_ms: 12,
+            rtt_var_ms: 2,
+            frame_jitter_ms: 0.8,
+            raw_loss_pct: 1.2,
+            loss_pct: 0.0,
+            frames_dropped: 0,
+            decode_ms: 1.5,
+            host_ms: 4.0,
+            assembly_ms: 1.0,
+            queue_ms: 0.5,
+            codec: "HEVC",
+            decoder: "VideoToolbox",
+            ..Default::default()
+        };
+        let p = Presented {
+            fps: 117.0,
+            wait_ms: 2.0,
+            hz: 120,
+            ..Default::default()
+        };
+        let rows = overlay_rows(&live, &stats, &p);
+        let labels: Vec<_> = rows.iter().map(|r| r.label).collect();
+        for want in [
+            "Resolution",
+            "Codec",
+            "Frame rate",
+            "Bitrate",
+            "Round trip",
+            "Jitter",
+            "Packet loss",
+            "Dropped",
+            "Decode",
+            "Present",
+            "Latency",
+        ] {
+            assert!(labels.contains(&want), "{want} in {labels:?}");
+        }
+        let value = |label: &str| rows.iter().find(|r| r.label == label).unwrap();
+        assert_eq!(value("Resolution").value, "2560 × 1440");
+        assert_eq!(value("Packet loss").value, "1.20% · 0.00% after FEC");
+        assert!(!value("Packet loss").warn, "FEC rebuilt it all");
+        // 4 host + 6 + 1 network + 0.5 + 1.5 decode + 2 + 4.2 display.
+        assert_eq!(value("Latency").value, "≈ 19 ms");
+        let lossy = latch_stream::Stats {
+            loss_pct: 0.5,
+            frames_lost: 2,
+            ..stats
+        };
+        let rows = overlay_rows(&live, &lossy, &p);
+        assert!(rows.iter().filter(|r| r.warn).count() >= 2);
     }
 
     #[test]
@@ -3074,7 +3474,7 @@ pub(crate) mod tests {
         };
 
         let mut view = view_with_bar();
-        view.stats = true;
+        view.details = true;
         let mut h = harness_with(min, 1.0, false, fixture(view, windows_old_host()));
         tab_to(&mut h, "Copy diagnostics");
         let below = below_bar(&h, screen);
@@ -3354,6 +3754,26 @@ pub(crate) mod tests {
                 None,
             ),
             (
+                "stats-overlay",
+                View {
+                    stats: true,
+                    fake_stats: Some(sample_stats()),
+                    ..View::default()
+                },
+                windows(),
+                None,
+            ),
+            (
+                "stats-overlay-bar",
+                View {
+                    stats: true,
+                    fake_stats: Some(sample_stats()),
+                    ..view_with_bar()
+                },
+                windows(),
+                None,
+            ),
+            (
                 "black-picture",
                 View {
                     problem: Some("The PC is sending a black picture: the connection and the video are healthy, but every frame is blank. Asking the PC why…".into()),
@@ -3416,9 +3836,18 @@ pub(crate) mod tests {
                     poor: view.poor,
                     poor_hinted: view.poor_hinted,
                     problem: view.problem.clone(),
+                    fake_stats: view.fake_stats.clone(),
                     ..View::default()
                 };
+                let overlay = view.fake_stats.is_some();
                 let mut h = harness_with(size, ppp, true, fixture(view, extra.clone()));
+                if overlay {
+                    let mut frame = latch_stream::video::Frame::default();
+                    let y: Vec<u8> = (0..64 * 64).map(|i| (40 + (i % 64) * 2) as u8).collect();
+                    frame.fill((64, 64), (&y, 64), (&[128; 64 * 32], 64), false);
+                    h.state().live.as_ref().unwrap().frames.publish(frame);
+                    h.run_steps(3);
+                }
                 if let Some(label) = open {
                     h.get_by_label(label).simulate_click();
                     h.run_steps(3);
@@ -4021,6 +4450,7 @@ pub(crate) mod tests {
     fn tab_in_free_mode_goes_to_the_pc_with_the_stats_panel_open() {
         let view = View {
             stats: true,
+            details: true,
             ..View::default()
         };
         let (mut h, tap) = recording(view, true);

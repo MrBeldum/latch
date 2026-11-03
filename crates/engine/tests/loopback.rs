@@ -96,6 +96,7 @@ fn connect_with(
             fps: FPS,
             bitrate_kbps: 8_000,
             hevc: false,
+            av1: false,
             audio: false,
             name: "loopback test".into(),
             cursor,
