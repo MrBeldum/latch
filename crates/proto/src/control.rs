@@ -16,6 +16,8 @@ pub const MAX_MESSAGE: usize = 65_536;
 pub enum Codec {
     #[serde(rename = "hevc")]
     Hevc,
+    #[serde(rename = "av1")]
+    Av1,
     #[serde(rename = "h264-high")]
     H264High,
     #[serde(rename = "h264-baseline")]
@@ -26,6 +28,7 @@ impl Codec {
     pub fn name(self) -> &'static str {
         match self {
             Codec::Hevc => "HEVC",
+            Codec::Av1 => "AV1",
             Codec::H264High | Codec::H264Baseline => "H.264",
         }
     }
@@ -278,6 +281,29 @@ pub fn token_from_hex(s: &str) -> Option<[u8; 16]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codec_offers_skip_unknown_names_and_preserve_preference() {
+        #[derive(Deserialize)]
+        struct Offer {
+            #[serde(deserialize_with = "known_codecs")]
+            codecs: Vec<Codec>,
+        }
+        let offer: Offer = serde_json::from_str(
+            r#"{"codecs":["future", "av1", "hevc", "h264-high", "h264-baseline"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            offer.codecs,
+            [
+                Codec::Av1,
+                Codec::Hevc,
+                Codec::H264High,
+                Codec::H264Baseline
+            ]
+        );
+        assert_eq!(serde_json::to_string(&Codec::Av1).unwrap(), "\"av1\"");
+    }
 
     #[test]
     fn stream_request_backward_compatible() {

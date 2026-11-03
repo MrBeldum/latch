@@ -488,7 +488,7 @@ impl Drop for Session {
 fn offer(settings: &Settings) -> Vec<Codec> {
     video::decodable()
         .into_iter()
-        .filter(|&c| settings.hevc || c != Codec::Hevc)
+        .filter(|&c| settings.hevc || !matches!(c, Codec::Hevc | Codec::Av1))
         .collect()
 }
 
@@ -609,7 +609,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
             format!("the host chose {:?}, which was not offered", accept.codec),
         );
     }
-    let decoder = match video::new_decoder(accept.codec) {
+    let decoder = match video::new_decoder_for_stream(accept.codec, accept.width, accept.height) {
         Ok(d) => d,
         Err(e) => return fail("decoding", format!("{e:#}")),
     };
@@ -1225,8 +1225,9 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
             return;
         }
         match decoded {
-            Ok(Some(picture)) => {
+            Ok(Some(mut picture)) => {
                 let decoded = Instant::now();
+                picture.decoded_at = Some(decoded);
                 if decoder.name() != named {
                     named = decoder.name();
                     inner.stats.lock().decoder = named;

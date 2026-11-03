@@ -1,6 +1,5 @@
-//! Decoded frames and the decoders that make them. Frames are NV12 (a Y plane
-//! and an interleaved UV plane at half resolution), which is what
-//! VideoToolbox produces and what the renderer's shader expects.
+//! Decoded NV12/P010 frames (Y and interleaved half-resolution UV planes)
+//! and the platform decoders that make them.
 
 #[cfg(windows)]
 pub mod mediafoundation;
@@ -9,6 +8,8 @@ use latch_proto::control::Codec;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(any(target_os = "macos", test))]
+mod av1;
 mod software;
 #[cfg(target_os = "macos")]
 mod videotoolbox;
@@ -60,6 +61,23 @@ impl NativeFrame {
     }
 }
 
+/// Decoder output precision. P010 retains Main10 samples for a future HDR
+/// compositor; choosing it does not negotiate HDR or change transfer functions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PixelFormat {
+    #[default]
+    Nv12,
+    P010,
+}
+impl PixelFormat {
+    pub fn bytes_per_sample(self) -> usize {
+        match self {
+            Self::Nv12 => 1,
+            Self::P010 => 2,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Frame {
     pub width: u32,
@@ -69,6 +87,9 @@ pub struct Frame {
     pub uv: Vec<u8>,
     pub uv_stride: usize,
     pub full_range: bool,
+    pub format: PixelFormat,
+    /// Viewer clock, immediately after decode, before health checks or rendering.
+    pub decoded_at: Option<std::time::Instant>,
     #[cfg(target_os = "macos")]
     pub native: Option<NativeFrame>,
 }
@@ -94,6 +115,7 @@ impl Frame {
         self.y_stride = y_stride;
         self.uv_stride = uv_stride;
         self.full_range = full_range;
+        self.format = PixelFormat::Nv12;
         self.y.clear();
         self.y.extend_from_slice(y);
         self.uv.clear();
@@ -193,9 +215,10 @@ impl Frame {
     /// capture can still be a valid, successfully decoded video stream.
     pub fn is_black(&self) -> bool {
         self.with_planes(|y, y_stride, uv, uv_stride| {
-            let width = self.width as usize;
+            let bytes = self.format.bytes_per_sample();
+            let width = self.width as usize * bytes;
             let height = self.height as usize;
-            let chroma_width = width.div_ceil(2) * 2;
+            let chroma_width = (self.width as usize).div_ceil(2) * 2 * bytes;
             let chroma_height = height.div_ceil(2);
             if width == 0
                 || height == 0
@@ -211,8 +234,18 @@ impl Frame {
             // compiler turns a max or min over a row into vector instructions,
             // and the scan still stops at the first row with a visible pixel.
             // A black frame is every row, sixty times a second.
-            let max = |row: &[u8]| row.iter().fold(0, |m, &v| m.max(v));
-            let min = |row: &[u8]| row.iter().fold(u8::MAX, |m, &v| m.min(v));
+            let max = |row: &[u8]| {
+                row.iter()
+                    .skip(bytes - 1)
+                    .step_by(bytes)
+                    .fold(0, |m, &v| m.max(v))
+            };
+            let min = |row: &[u8]| {
+                row.iter()
+                    .skip(bytes - 1)
+                    .step_by(bytes)
+                    .fold(u8::MAX, |m, &v| m.min(v))
+            };
             y.chunks(y_stride)
                 .take(height)
                 .all(|row| max(&row[..width]) <= black)
@@ -234,9 +267,34 @@ pub struct FrameSlot {
     latest: Mutex<Option<Frame>>,
     seq: AtomicU64,
     spare: Mutex<Vec<Frame>>,
+    render_times: Mutex<Option<Vec<std::time::Duration>>>,
 }
 
 impl FrameSlot {
+    /// Enable bounded decode-to-render timing for the measurement viewer.
+    pub fn measure_render(&self) {
+        *self.render_times.lock() = Some(Vec::new());
+    }
+
+    pub fn render_times(&self) -> Vec<std::time::Duration> {
+        self.render_times
+            .lock()
+            .as_deref()
+            .unwrap_or_default()
+            .to_vec()
+    }
+
+    /// Record CPU render preparation, not GPU completion or physical scanout.
+    pub fn rendered(&self, decoded_at: Option<std::time::Instant>) {
+        if let Some(at) = decoded_at {
+            if let Some(times) = self.render_times.lock().as_mut() {
+                if times.len() < 16384 {
+                    times.push(at.elapsed());
+                }
+            }
+        }
+    }
+
     pub fn publish(&self, frame: Frame) {
         if let Some(undrawn) = self.latest.lock().replace(frame) {
             self.recycle(undrawn);
@@ -273,27 +331,41 @@ impl FrameSlot {
 }
 
 pub trait Decoder: Send {
-    /// One access unit in Annex B. `None` when the decoder needs more data.
+    /// One access unit: Annex B for H.264/HEVC, sized low-overhead OBUs for AV1.
+    /// `None` when the decoder needs more data.
     /// `spare` is a drawn frame whose buffers may be filled instead of
     /// allocating new ones.
     fn decode(&mut self, annexb: &[u8], idr: bool, spare: Option<Frame>) -> Result<Option<Frame>>;
     fn name(&self) -> &'static str;
 }
 
-/// What this machine decodes, best first. HEVC and H.264 High need the
-/// platform's decoder; `latch-codec` decodes Constrained Baseline anywhere.
-///
-/// A Windows viewer asks for Constrained Baseline only: Media Foundation's
-/// decoder is used when it works, and when it gives no picture the stream
-/// carries on in `latch-codec` without the host noticing (see
-/// [`Fallback`]). Media Foundation has not been seen decoding on real
-/// hardware yet; a High-profile stream would leave no way out.
+/// What this machine decodes, best first, probed once per process.
+/// Baseline always remains available through `latch-codec`.
 pub fn decodable() -> Vec<Codec> {
     #[cfg(target_os = "macos")]
     {
-        vec![Codec::Hevc, Codec::H264High, Codec::H264Baseline]
+        [
+            Codec::Av1,
+            Codec::Hevc,
+            Codec::H264High,
+            Codec::H264Baseline,
+        ]
+        .into_iter()
+        .filter(|&codec| codec == Codec::H264Baseline || videotoolbox::supported(codec))
+        .collect()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        static CODECS: std::sync::OnceLock<Vec<Codec>> = std::sync::OnceLock::new();
+        CODECS
+            .get_or_init(|| {
+                let mut codecs = mediafoundation::supported();
+                codecs.push(Codec::H264Baseline);
+                codecs
+            })
+            .clone()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         vec![Codec::H264Baseline]
     }
@@ -302,10 +374,37 @@ pub fn decodable() -> Vec<Codec> {
 /// A decoder for `codec`: the platform's where there is one, else
 /// `latch-codec`'s for Constrained Baseline.
 pub fn new_decoder(codec: Codec) -> Result<Box<dyn Decoder>> {
+    new_decoder_with_format(codec, PixelFormat::Nv12)
+}
+
+/// Negotiated dimensions are hints for MFTs that need them before parsing SPS/OBUs.
+pub fn new_decoder_for_stream(codec: Codec, _width: u32, _height: u32) -> Result<Box<dyn Decoder>> {
+    #[cfg(windows)]
+    match mediafoundation::MfDecoder::with_size(codec, _width, _height) {
+        Ok(d) if codec == Codec::H264Baseline => {
+            Ok(Box::new(Fallback::new(Box::new(MediaFoundation(d)))))
+        }
+        Ok(d) => Ok(Box::new(MediaFoundation(d))),
+        Err(e) if codec == Codec::H264Baseline => {
+            tracing::warn!("Media Foundation: {e:#}; decoding in software");
+            Ok(Box::new(software::Software::new()))
+        }
+        Err(e) => Err(e),
+    }
+    #[cfg(not(windows))]
+    new_decoder(codec)
+}
+
+pub fn new_decoder_with_format(codec: Codec, format: PixelFormat) -> Result<Box<dyn Decoder>> {
+    #[cfg(not(target_os = "macos"))]
+    anyhow::ensure!(
+        format == PixelFormat::Nv12,
+        "P010 output is available on macOS only"
+    );
     #[cfg(target_os = "macos")]
     {
-        match videotoolbox::VideoToolbox::new(codec == Codec::Hevc) {
-            Ok(d) if codec == Codec::H264Baseline => {
+        match videotoolbox::VideoToolbox::with_format(codec, format) {
+            Ok(d) if codec == Codec::H264Baseline && format == PixelFormat::Nv12 => {
                 return Ok(Box::new(Fallback::new(Box::new(d))));
             }
             Ok(d) => return Ok(Box::new(d)),
@@ -317,11 +416,15 @@ pub fn new_decoder(codec: Codec) -> Result<Box<dyn Decoder>> {
     }
     #[cfg(windows)]
     {
-        if codec == Codec::H264Baseline {
-            match mediafoundation::MfDecoder::new() {
-                Ok(d) => return Ok(Box::new(Fallback::new(Box::new(MediaFoundation(d))))),
-                Err(e) => tracing::warn!("Media Foundation: {e:#}; decoding in software"),
+        match mediafoundation::MfDecoder::with_codec(codec) {
+            Ok(d) if codec == Codec::H264Baseline => {
+                return Ok(Box::new(Fallback::new(Box::new(MediaFoundation(d)))))
             }
+            Ok(d) => return Ok(Box::new(MediaFoundation(d))),
+            Err(e) if codec == Codec::H264Baseline => {
+                tracing::warn!("Media Foundation: {e:#}; decoding in software")
+            }
+            Err(e) => return Err(e),
         }
     }
     match codec {
@@ -433,6 +536,8 @@ impl Decoder for MediaFoundation {
             uv: d.uv,
             uv_stride: d.uv_stride,
             full_range: false,
+            decoded_at: None,
+            format: PixelFormat::Nv12,
         }))
     }
 

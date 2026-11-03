@@ -4,6 +4,7 @@
 use egui_wgpu::wgpu;
 #[cfg(target_os = "macos")]
 use egui_wgpu::wgpu::hal;
+use latch_stream::video::PixelFormat;
 use latch_stream::{Frame, FrameSlot};
 use std::sync::Arc;
 
@@ -151,7 +152,7 @@ fn warn_native_fallback(reason: &str) {
 
 #[cfg(target_os = "macos")]
 struct InFlightFrame {
-    frame: Frame,
+    _frame: Frame,
     _cv_textures: (
         macos_zero_copy::CVMetalTextureWrapper,
         macos_zero_copy::CVMetalTextureWrapper,
@@ -164,7 +165,7 @@ const SHADER: &str = r#"
 struct Uniforms {
     full_range: u32,
     srgb_target: u32,
-    _pad0: u32,
+    p010: u32,
     _pad1: u32,
 };
 @group(0) @binding(0) var y_tex: texture_2d<f32>;
@@ -196,8 +197,14 @@ fn to_linear(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let y = textureSample(y_tex, samp, in.uv).r;
-    let c = textureSample(uv_tex, samp, in.uv).rg;
+    var y = textureSample(y_tex, samp, in.uv).r;
+    var c = textureSample(uv_tex, samp, in.uv).rg;
+    if (u.p010 == 1u) {
+        // P010 stores ten significant bits in the high bits of each u16.
+        let scale = select(65535.0 / 65280.0, 65535.0 / 65472.0, u.full_range == 1u);
+        y *= scale;
+        c *= scale;
+    }
     var yy: f32;
     var cb: f32;
     var cr: f32;
@@ -205,6 +212,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         yy = y;
         cb = c.x - 128.0 / 255.0;
         cr = c.y - 128.0 / 255.0;
+        if (u.p010 == 1u) {
+            cb = c.x - 512.0 / 1023.0;
+            cr = c.y - 512.0 / 1023.0;
+        }
     } else {
         yy = (y - 16.0 / 255.0) * (255.0 / 219.0);
         cb = (c.x - 128.0 / 255.0) * (255.0 / 224.0);
@@ -226,7 +237,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 struct Uniforms {
     full_range: u32,
     srgb_target: u32,
-    _pad: [u32; 2],
+    p010: u32,
+    _pad: u32,
 }
 
 impl Uniforms {
@@ -234,13 +246,25 @@ impl Uniforms {
         let mut b = [0u8; 16];
         b[..4].copy_from_slice(&self.full_range.to_ne_bytes());
         b[4..8].copy_from_slice(&self.srgb_target.to_ne_bytes());
+        b[8..12].copy_from_slice(&self.p010.to_ne_bytes());
         b
+    }
+}
+
+fn texture_formats(format: PixelFormat) -> (wgpu::TextureFormat, wgpu::TextureFormat) {
+    match format {
+        PixelFormat::Nv12 => (wgpu::TextureFormat::R8Unorm, wgpu::TextureFormat::Rg8Unorm),
+        PixelFormat::P010 => (
+            wgpu::TextureFormat::R16Unorm,
+            wgpu::TextureFormat::Rg16Unorm,
+        ),
     }
 }
 
 struct Planes {
     width: u32,
     height: u32,
+    format: PixelFormat,
     y: wgpu::Texture,
     uv: wgpu::Texture,
     bind_group: wgpu::BindGroup,
@@ -369,11 +393,17 @@ impl Resources {
         self.planes.as_ref().map(|p| &p.bind_group)
     }
 
-    fn planes(&mut self, device: &wgpu::Device, width: u32, height: u32) -> &Planes {
+    fn planes(
+        &mut self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+    ) -> &Planes {
         let stale = self
             .planes
             .as_ref()
-            .is_none_or(|p| p.width != width || p.height != height);
+            .is_none_or(|p| p.width != width || p.height != height || p.format != format);
         if stale {
             let make = |w, h, format, label| {
                 device.create_texture(&wgpu::TextureDescriptor {
@@ -391,13 +421,9 @@ impl Resources {
                     view_formats: &[],
                 })
             };
-            let y = make(width, height, wgpu::TextureFormat::R8Unorm, "latch y");
-            let uv = make(
-                width.div_ceil(2),
-                height.div_ceil(2),
-                wgpu::TextureFormat::Rg8Unorm,
-                "latch uv",
-            );
+            let (y_format, uv_format) = texture_formats(format);
+            let y = make(width, height, y_format, "latch y");
+            let uv = make(width.div_ceil(2), height.div_ceil(2), uv_format, "latch uv");
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("latch video"),
                 layout: &self.layout,
@@ -427,6 +453,7 @@ impl Resources {
             self.planes = Some(Planes {
                 width,
                 height,
+                format,
                 y,
                 uv,
                 bind_group,
@@ -438,12 +465,16 @@ impl Resources {
     /// Upload the newest frame, if there is one.
     fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, slot: &FrameSlot) {
         let Some(frame) = slot.take() else { return };
+        let decoded_at = frame.decoded_at;
         #[cfg(target_os = "macos")]
         let mut frame = frame;
         #[cfg(target_os = "macos")]
         if frame.native.is_some() {
-            match self.upload_native(device, queue, frame, slot) {
-                Ok(()) => return,
+            match self.upload_native(device, queue, frame) {
+                Ok(()) => {
+                    slot.rendered(decoded_at);
+                    return;
+                }
                 Err((mut f, reason)) => {
                     warn_native_fallback(&reason);
                     f.ensure_cpu_planes();
@@ -452,15 +483,16 @@ impl Resources {
             }
         }
         self.upload_cpu(device, queue, frame, slot);
+        slot.rendered(decoded_at);
     }
 
     #[cfg(target_os = "macos")]
+    #[allow(clippy::result_large_err)] // Preserve ownership for the CPU fallback.
     fn upload_native(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         frame: Frame,
-        slot: &FrameSlot,
     ) -> Result<(), (Frame, String)> {
         let native = match &frame.native {
             Some(n) => n,
@@ -497,10 +529,16 @@ impl Resources {
             }
         }
         let cache = self.metal_cache.as_ref().unwrap();
+        let p010 = frame.format == PixelFormat::P010;
+        let (y_format, uv_format) = texture_formats(frame.format);
 
         let (mtl_y, cv_y) = match cache.create_texture(
             pb,
-            metal::MTLPixelFormat::R8Unorm as usize,
+            if p010 {
+                metal::MTLPixelFormat::R16Unorm
+            } else {
+                metal::MTLPixelFormat::R8Unorm
+            } as usize,
             frame.width as usize,
             frame.height as usize,
             0,
@@ -518,7 +556,11 @@ impl Resources {
         let uv_h = frame.height.div_ceil(2);
         let (mtl_uv, cv_uv) = match cache.create_texture(
             pb,
-            metal::MTLPixelFormat::RG8Unorm as usize,
+            if p010 {
+                metal::MTLPixelFormat::RG16Unorm
+            } else {
+                metal::MTLPixelFormat::RG8Unorm
+            } as usize,
             uv_w as usize,
             uv_h as usize,
             1,
@@ -535,7 +577,7 @@ impl Resources {
         let hal_tex_y = unsafe {
             hal::metal::Device::texture_from_raw(
                 mtl_y,
-                wgpu::TextureFormat::R8Unorm,
+                y_format,
                 metal::MTLTextureType::D2,
                 1,
                 1,
@@ -556,7 +598,7 @@ impl Resources {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format: y_format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         };
@@ -565,7 +607,7 @@ impl Resources {
         let hal_tex_uv = unsafe {
             hal::metal::Device::texture_from_raw(
                 mtl_uv,
-                wgpu::TextureFormat::Rg8Unorm,
+                uv_format,
                 metal::MTLTextureType::D2,
                 1,
                 1,
@@ -586,7 +628,7 @@ impl Resources {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rg8Unorm,
+            format: uv_format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         };
@@ -622,21 +664,23 @@ impl Resources {
         let u = Uniforms {
             full_range: frame.full_range as u32,
             srgb_target: self.srgb_target as u32,
-            _pad: [0; 2],
+            p010: (frame.format == PixelFormat::P010) as u32,
+            _pad: 0,
         };
         queue.write_buffer(&self.uniforms, 0, &u.bytes());
 
         self.in_flight_ring.push_back(InFlightFrame {
-            frame,
+            _frame: frame,
             _cv_textures: (cv_y, cv_uv),
             _wgpu_textures: (y, uv),
             bind_group,
         });
 
-        if self.in_flight_ring.len() > 3 {
-            if let Some(mut old) = self.in_flight_ring.pop_front() {
-                old.frame.native = None;
-                slot.recycle(old.frame);
+        if self.in_flight_ring.len() > 1 {
+            if let Some(old) = self.in_flight_ring.pop_front() {
+                // Previous frames were submitted before this prepare call.
+                // Retain their IOSurfaces until that GPU work completes.
+                queue.on_submitted_work_done(move || drop(old));
             }
         }
 
@@ -658,12 +702,11 @@ impl Resources {
         slot: &FrameSlot,
     ) {
         #[cfg(target_os = "macos")]
-        while let Some(mut old) = self.in_flight_ring.pop_front() {
-            old.frame.native = None;
-            slot.recycle(old.frame);
+        while let Some(old) = self.in_flight_ring.pop_front() {
+            queue.on_submitted_work_done(move || drop(old));
         }
         let srgb = self.srgb_target;
-        let planes = self.planes(device, frame.width, frame.height);
+        let planes = self.planes(device, frame.width, frame.height, frame.format);
         let write = |tex: &wgpu::Texture, data: &[u8], stride: usize, w: u32, h: u32| {
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -702,7 +745,8 @@ impl Resources {
         let u = Uniforms {
             full_range: frame.full_range as u32,
             srgb_target: srgb as u32,
-            _pad: [0; 2],
+            p010: (frame.format == PixelFormat::P010) as u32,
+            _pad: 0,
         };
         queue.write_buffer(&self.uniforms, 0, &u.bytes());
         slot.recycle(frame);
@@ -775,36 +819,64 @@ mod tests {
                     });
             }
         }
-        let frames = Arc::new(FrameSlot::default());
-        let encoded = include_bytes!("../../stream/tests/fixtures/gray-bars.h264");
-        let mut decoder = latch_stream::video::new_decoder(latch_stream::Codec::H264High).unwrap();
-        let frame = decoder
-            .decode(encoded, true, None)
-            .unwrap()
-            .expect("decoded frame");
-        #[cfg(target_os = "macos")]
-        assert!(
-            frame.native.is_some(),
-            "decoded frame must have a native CVPixelBuffer"
-        );
-        frames.publish(frame);
-        let mut harness = egui_kittest::Harness::builder()
-            .wgpu()
-            .with_size(egui::vec2(128.0, 128.0))
-            .build_eframe(move |cc| {
-                install(cc.wgpu_render_state.as_ref().unwrap());
-                TestApp(frames)
-            });
-        harness.run_steps(2);
-        for _ in 0..2 {
-            let image = harness.render().unwrap();
-            let top = image.get_pixel(64, 32);
-            let bottom = image.get_pixel(64, 96);
-            assert!(top.0[..3].iter().all(|&c| c >= 250), "white half: {top:?}");
+        let cases = [
+            (
+                latch_stream::Codec::H264High,
+                PixelFormat::Nv12,
+                include_bytes!("../../stream/tests/fixtures/gray-bars.h264").as_slice(),
+            ),
+            (
+                latch_stream::Codec::Hevc,
+                PixelFormat::Nv12,
+                include_bytes!("../../stream/tests/fixtures/gray-bars.hevc").as_slice(),
+            ),
+            (
+                latch_stream::Codec::Av1,
+                PixelFormat::Nv12,
+                include_bytes!("../../stream/tests/fixtures/gray-bars.av1").as_slice(),
+            ),
+            (
+                latch_stream::Codec::Hevc,
+                PixelFormat::P010,
+                include_bytes!("../../stream/tests/fixtures/gray-bars-main10.hevc").as_slice(),
+            ),
+        ];
+        for (codec, format, encoded) in cases {
+            if !latch_stream::video::decodable().contains(&codec)
+                || (format == PixelFormat::P010 && !cfg!(target_os = "macos"))
+            {
+                continue;
+            }
+            let frames = Arc::new(FrameSlot::default());
+            let mut decoder = latch_stream::video::new_decoder_with_format(codec, format).unwrap();
+            let frame = decoder
+                .decode(encoded, true, None)
+                .unwrap()
+                .expect("decoded frame");
+            #[cfg(target_os = "macos")]
             assert!(
-                bottom.0[..3].iter().all(|&c| c <= 5),
-                "black half: {bottom:?}"
+                frame.native.is_some(),
+                "decoded frame must have a native CVPixelBuffer"
             );
+            frames.publish(frame);
+            let mut harness = egui_kittest::Harness::builder()
+                .wgpu_setup(crate::native_options().wgpu_options.wgpu_setup)
+                .with_size(egui::vec2(128.0, 128.0))
+                .build_eframe(move |cc| {
+                    install(cc.wgpu_render_state.as_ref().unwrap());
+                    TestApp(frames)
+                });
+            harness.run_steps(2);
+            for _ in 0..2 {
+                let image = harness.render().unwrap();
+                let top = image.get_pixel(64, 32);
+                let bottom = image.get_pixel(64, 96);
+                assert!(top.0[..3].iter().all(|&c| c >= 250), "white half: {top:?}");
+                assert!(
+                    bottom.0[..3].iter().all(|&c| c <= 5),
+                    "black half: {bottom:?}"
+                );
+            }
         }
     }
 
@@ -839,6 +911,7 @@ mod tests {
             full_range: false,
             #[cfg(target_os = "macos")]
             native: None,
+            ..Default::default()
         });
         let mut harness = egui_kittest::Harness::builder()
             .wgpu()
@@ -987,6 +1060,7 @@ mod tests {
             uv: vec![128; (width / 2) * (height / 2) * 2],
             uv_stride: width,
             full_range: false,
+            ..Default::default()
         };
 
         frames.publish(make_frame());

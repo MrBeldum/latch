@@ -1181,6 +1181,7 @@ fn names(codecs: &[Codec]) -> String {
         .iter()
         .map(|c| match c {
             Codec::Hevc => "HEVC",
+            Codec::Av1 => "AV1",
             Codec::H264High => "H.264 High",
             Codec::H264Baseline => "H.264 Baseline",
         })

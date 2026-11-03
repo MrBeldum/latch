@@ -1,9 +1,10 @@
-//! Standalone H.264 decoding. COM and MF stay on a dedicated MTA so callers
+//! Standalone H.264, HEVC and AV1 decoding. COM and MF stay on a dedicated MTA so callers
 //! can create and move the decoder from a UI thread with any apartment.
 use anyhow::{bail, ensure, Context, Result};
-use std::{cell::RefCell, collections::VecDeque, mem::ManuallyDrop, sync::mpsc, thread};
+use latch_proto::control::Codec;
+use std::{cell::RefCell, mem::ManuallyDrop, sync::mpsc, thread};
 use windows::{
-    core::Interface,
+    core::{Interface, VARIANT},
     Win32::{
         Foundation::HMODULE,
         Graphics::{Direct3D::*, Direct3D11::*, Dxgi::Common::*},
@@ -30,6 +31,14 @@ pub struct MfDecoder {
 }
 impl MfDecoder {
     pub fn new() -> Result<Self> {
+        Self::with_codec(Codec::H264Baseline)
+    }
+
+    pub fn with_codec(codec: Codec) -> Result<Self> {
+        Self::with_size(codec, 0, 0)
+    }
+
+    pub fn with_size(codec: Codec, width: u32, height: u32) -> Result<Self> {
         let (requests, receive) = mpsc::channel::<Request>();
         let (ready, startup) = mpsc::sync_channel(1);
         thread::Builder::new()
@@ -37,7 +46,8 @@ impl MfDecoder {
             .spawn(move || {
                 let initialized = (|| {
                     let runtime = Runtime::new()?;
-                    let decoder = State::new(true).or_else(|_| State::new(false))?;
+                    let decoder = State::new(codec, true, width, height)
+                        .or_else(|_| State::new(codec, false, width, height))?;
                     Ok::<_, anyhow::Error>((runtime, decoder))
                 })();
                 let (_runtime, mut decoder) = match initialized {
@@ -59,7 +69,7 @@ impl MfDecoder {
                     let result = decoder
                         .decode(&request.bytes)
                         .map(|frame| (frame, decoder.name()))
-                        .context("decode Media Foundation H.264 access unit");
+                        .context("decode Media Foundation access unit");
                     let _ = request.reply.send(result);
                 }
             })
@@ -74,7 +84,7 @@ impl MfDecoder {
     pub fn decode(&mut self, annexb: &[u8]) -> Result<Option<DecodedNv12>> {
         ensure!(
             annexb.len() <= 64 * 1024 * 1024,
-            "H.264 access unit exceeds 64 MiB"
+            "video access unit exceeds 64 MiB"
         );
         let (reply, receive) = mpsc::sync_channel(1);
         self.requests
@@ -91,6 +101,80 @@ impl MfDecoder {
         self.name
     }
 }
+/// Probe actual pictures, not just an installed MFT or a D3D profile GUID.
+/// This also catches missing Store codec extensions and unusable driver paths.
+pub fn supported() -> Vec<Codec> {
+    std::thread::spawn(|| {
+        let Ok(_runtime) = Runtime::new() else {
+            return Vec::new();
+        };
+        [
+            (
+                Codec::Av1,
+                include_bytes!("../../tests/fixtures/decode-probe.av1").as_slice(),
+            ),
+            (
+                Codec::Hevc,
+                include_bytes!("../../tests/fixtures/decode-probe.hevc").as_slice(),
+            ),
+            (
+                Codec::H264High,
+                include_bytes!("../../tests/fixtures/decode-probe.h264").as_slice(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(codec, bytes)| {
+            let result: Result<()> = (|| {
+                let mut state = State::new(codec, true, 256, 256)?;
+                for _ in 0..10 {
+                    if state.decode(bytes)?.is_some() {
+                        ensure!(state.dxva_used, "decoder returned CPU samples");
+                        return Ok(());
+                    }
+                }
+                bail!("no hardware picture within ten access units");
+            })();
+            match result {
+                Ok(()) => Some(codec),
+                Err(error) => {
+                    tracing::info!(?codec, "hardware decode unavailable: {error:#}");
+                    None
+                }
+            }
+        })
+        .collect()
+    })
+    .join()
+    .unwrap_or_default()
+}
+
+unsafe fn create_transform(subtype: windows::core::GUID) -> Result<IMFTransform> {
+    let input = MFT_REGISTER_TYPE_INFO {
+        guidMajorType: MFMediaType_Video,
+        guidSubtype: subtype,
+    };
+    let (mut activates, mut count) = (std::ptr::null_mut(), 0);
+    mf::MFTEnumEx(
+        MFT_CATEGORY_VIDEO_DECODER,
+        MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+        &input,
+        &mut activates,
+        &mut count,
+    )?;
+    let mut result = None;
+    if !activates.is_null() {
+        for activate in std::slice::from_raw_parts_mut(activates, count as usize) {
+            if let Some(activate) = activate.take() {
+                if result.is_none() {
+                    result = activate.ActivateObject::<IMFTransform>().ok();
+                }
+            }
+        }
+        CoTaskMemFree(Some(activates.cast()));
+    }
+    result.context("no synchronous Media Foundation decoder installed for codec")
+}
+
 struct Runtime {
     mf: bool,
 }
@@ -182,7 +266,7 @@ impl Gpu {
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             texture.GetDesc(&mut desc);
             ensure!(
-                desc.Format == DXGI_FORMAT_NV12
+                matches!(desc.Format, DXGI_FORMAT_NV12 | DXGI_FORMAT_P010)
                     && layout.coded_width <= desc.Width
                     && layout.coded_height <= desc.Height,
                 "invalid DXVA NV12 texture dimensions"
@@ -232,6 +316,7 @@ struct Layout {
     width: u32,
     height: u32,
     stride: usize,
+    p010: bool,
 }
 impl Layout {
     fn from_type(ty: &IMFMediaType) -> Result<Self> {
@@ -249,7 +334,9 @@ impl Layout {
                     && coded_height <= 16384,
                 "invalid decoded dimensions"
             );
+            let p010 = ty.GetGUID(&MF_MT_SUBTYPE)? == MFVideoFormat_P010;
             let mut layout = Self {
+                p010,
                 coded_width,
                 coded_height,
                 left: 0,
@@ -258,7 +345,8 @@ impl Layout {
                 height: coded_height,
                 stride: ty
                     .GetUINT32(&MF_MT_DEFAULT_STRIDE)
-                    .unwrap_or(coded_width.div_ceil(2) * 2) as usize,
+                    .unwrap_or(coded_width.div_ceil(2) * 2 * if p010 { 2 } else { 1 })
+                    as usize,
             };
             for key in [MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_GEOMETRIC_APERTURE] {
                 if let Ok(size) = ty.GetBlobSize(&key) {
@@ -303,8 +391,10 @@ impl Layout {
             self.height as usize,
         );
         let uv_width = width.div_ceil(2) * 2;
+        let bytes_per_sample = if self.p010 { 2 } else { 1 };
+        let left = left * bytes_per_sample;
         ensure!(
-            stride >= left + uv_width && surface_height >= top + height,
+            stride >= left + uv_width * bytes_per_sample && surface_height >= top + height,
             "invalid NV12 pitch or height"
         );
         let mut y = Vec::with_capacity(width * height);
@@ -314,22 +404,28 @@ impl Layout {
                 .checked_mul(stride)
                 .and_then(|n| n.checked_add(left))
                 .context("NV12 Y offset overflow")?;
-            y.extend_from_slice(
-                bytes
-                    .get(start..start + width)
-                    .context("truncated NV12 Y plane")?,
-            );
+            let row = bytes
+                .get(start..start + width * bytes_per_sample)
+                .context("truncated decoded Y plane")?;
+            if self.p010 {
+                y.extend(row.iter().skip(1).step_by(2));
+            } else {
+                y.extend_from_slice(row);
+            }
         }
         for row in top / 2..top / 2 + height.div_ceil(2) {
             let start = (surface_height + row)
                 .checked_mul(stride)
                 .and_then(|n| n.checked_add(left))
                 .context("NV12 UV offset overflow")?;
-            uv.extend_from_slice(
-                bytes
-                    .get(start..start + uv_width)
-                    .context("truncated NV12 UV plane")?,
-            );
+            let row = bytes
+                .get(start..start + uv_width * bytes_per_sample)
+                .context("truncated decoded UV plane")?;
+            if self.p010 {
+                uv.extend(row.iter().skip(1).step_by(2));
+            } else {
+                uv.extend_from_slice(row);
+            }
         }
         Ok(DecodedNv12 {
             width: self.width,
@@ -345,7 +441,7 @@ struct State {
     transform: IMFTransform,
     gpu: Option<Gpu>,
     output_type: Option<IMFMediaType>,
-    queue: VecDeque<DecodedNv12>,
+    latest: Option<DecodedNv12>,
     time: i64,
     dxva_used: bool,
 }
@@ -357,12 +453,15 @@ impl State {
             "Media Foundation (software)"
         }
     }
-    fn new(dxva: bool) -> Result<Self> {
+    fn new(codec: Codec, dxva: bool, width: u32, height: u32) -> Result<Self> {
         // SAFETY: This runs only in the initialized decoder MTA.
         unsafe {
-            let transform: IMFTransform =
-                CoCreateInstance(&CLSID_MSH264DecoderMFT, None, CLSCTX_INPROC_SERVER)
-                    .context("create Microsoft H.264 decoder")?;
+            let subtype = match codec {
+                Codec::Hevc => MFVideoFormat_HEVC,
+                Codec::Av1 => MFVideoFormat_AV1,
+                _ => MFVideoFormat_H264,
+            };
+            let transform = create_transform(subtype)?;
             // The H.264 decoder exposes this as a UINT32 transform attribute,
             // not the VT_BOOL encoder property on ICodecAPI. Set it before types.
             transform
@@ -370,6 +469,11 @@ impl State {
                 .context("decoder attributes")?
                 .SetUINT32(&CODECAPI_AVLowLatencyMode, 1)
                 .context("enable decoder low-latency mode")?;
+            if let Ok(api) = transform.cast::<ICodecAPI>() {
+                if let Err(error) = api.SetValue(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true)) {
+                    tracing::debug!("decoder ICodecAPI low-latency mode: {error}");
+                }
+            }
             let gpu = if dxva {
                 Some(Gpu::new(&transform)?)
             } else {
@@ -377,19 +481,37 @@ impl State {
             };
             let input = mf::MFCreateMediaType()?;
             input.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            input.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
+            input.SetGUID(&MF_MT_SUBTYPE, &subtype)?;
+            if width != 0 && height != 0 {
+                input.SetUINT64(
+                    &MF_MT_FRAME_SIZE,
+                    (u64::from(width) << 32) | u64::from(height),
+                )?;
+                input.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+            }
             transform
                 .SetInputType(0, &input, 0)
-                .context("decoder H.264 input type")?;
+                .context("decoder compressed input type")?;
             let mut state = Self {
                 transform,
                 gpu,
                 output_type: None,
-                queue: VecDeque::new(),
+                latest: None,
                 time: 0,
                 dxva_used: dxva,
             };
-            state.output_type()?;
+            match state.output_type() {
+                Err(e)
+                    if e.downcast_ref::<windows::core::Error>().is_some_and(|e| {
+                        matches!(
+                            e.code(),
+                            MF_E_TRANSFORM_TYPE_NOT_SET
+                                | MF_E_ATTRIBUTENOTFOUND
+                                | MF_E_INVALIDMEDIATYPE
+                        )
+                    }) => {}
+                other => other?,
+            }
             state
                 .transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
@@ -410,7 +532,8 @@ impl State {
                     Err(e) if e.code() == MF_E_NO_MORE_TYPES => break,
                     Err(e) => return Err(e).context("enumerate decoder output types"),
                 };
-                if ty.GetGUID(&MF_MT_SUBTYPE)? == MFVideoFormat_NV12 {
+                let subtype = ty.GetGUID(&MF_MT_SUBTYPE)?;
+                if subtype == MFVideoFormat_NV12 || subtype == MFVideoFormat_P010 {
                     match self.transform.SetOutputType(0, &ty, 0) {
                         Err(e) if e.code() == MF_E_UNSUPPORTED_D3D_TYPE && self.gpu.is_some() => {
                             self.transform
@@ -463,7 +586,7 @@ impl State {
             }
         }
         self.drain()?;
-        Ok(self.queue.pop_front())
+        Ok(self.latest.take())
     }
     fn drain(&mut self) -> Result<()> {
         if self.output_type.is_none() {
@@ -563,11 +686,7 @@ impl State {
                     buffer.Unlock()?;
                     result?
                 };
-                ensure!(
-                    self.queue.len() < 64,
-                    "decoder output queue exceeded 64 pictures"
-                );
-                self.queue.push_back(picture);
+                self.latest = Some(picture);
             }
         }
         bail!("decoder produced too many outputs without needing input")
@@ -596,6 +715,51 @@ impl Drop for State {
 mod tests {
     use super::*;
     #[test]
+    fn installed_hardware_decoders_produce_visible_pixels() {
+        let codecs = supported();
+        eprintln!("hardware decoders: {codecs:?}");
+        for codec in codecs {
+            let bytes = match codec {
+                Codec::Av1 => include_bytes!("../../tests/fixtures/decode-probe.av1").as_slice(),
+                Codec::Hevc => include_bytes!("../../tests/fixtures/decode-probe.hevc").as_slice(),
+                _ => include_bytes!("../../tests/fixtures/decode-probe.h264").as_slice(),
+            };
+            let mut decoder = MfDecoder::with_size(codec, 256, 256).unwrap();
+            let frame = decoder.decode(bytes).unwrap().expect("picture");
+            assert_eq!((frame.width, frame.height), (256, 256));
+            assert!(frame.y[64 * frame.y_stride + 128] >= 230);
+            assert!(frame.y[192 * frame.y_stride + 128] <= 20);
+            assert_eq!(decoder.name(), "Media Foundation (DXVA)");
+        }
+    }
+    #[test]
+    fn p010_is_reduced_to_sdr_without_reading_padding() {
+        let layout = Layout {
+            coded_width: 2,
+            coded_height: 2,
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 2,
+            stride: 8,
+            p010: true,
+        };
+        let mut bytes = vec![0; 24];
+        for (offset, sample) in [
+            (0, 64u16),
+            (2, 940),
+            (8, 64),
+            (10, 940),
+            (16, 512),
+            (18, 512),
+        ] {
+            bytes[offset..offset + 2].copy_from_slice(&(sample << 6).to_le_bytes());
+        }
+        let frame = layout.copy(&bytes, 8, 2).unwrap();
+        assert_eq!(frame.y, [16, 235, 16, 235]);
+        assert_eq!(frame.uv, [128, 128]);
+    }
+    #[test]
     fn crop_preserves_visible_planes_and_ignores_padding() -> Result<()> {
         let layout = Layout {
             coded_width: 8,
@@ -605,6 +769,7 @@ mod tests {
             width: 4,
             height: 2,
             stride: 12,
+            p010: false,
         };
         let bytes: Vec<u8> = (0..108).collect();
         let frame = layout.copy(&bytes, 12, 6)?;
@@ -683,6 +848,34 @@ mod mf {
         }
         // SAFETY: Successful COM creation transfers one owned reference.
         Ok(unsafe { T::from_raw(pointer) })
+    }
+    pub unsafe fn MFTEnumEx(
+        category: windows::core::GUID,
+        flags: MFT_ENUM_FLAG,
+        input: *const MFT_REGISTER_TYPE_INFO,
+        activates: *mut *mut Option<IMFActivate>,
+        count: *mut u32,
+    ) -> windows::core::Result<()> {
+        let function = bind!(
+            "MFTEnumEx",
+            unsafe extern "system" fn(
+                windows::core::GUID,
+                u32,
+                *const MFT_REGISTER_TYPE_INFO,
+                *const MFT_REGISTER_TYPE_INFO,
+                *mut *mut Option<IMFActivate>,
+                *mut u32,
+            ) -> HRESULT
+        );
+        function(
+            category,
+            flags.0 as u32,
+            input,
+            std::ptr::null(),
+            activates,
+            count,
+        )
+        .ok()
     }
     pub unsafe fn MFStartup(version: u32, flags: u32) -> windows::core::Result<()> {
         // SAFETY: Exact SDK signature; caller balances startup with shutdown.
