@@ -10,10 +10,24 @@ use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchRetained};
 use latch_proto::gamepad::button;
 use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2::{msg_send, AnyThread};
+use objc2_core_haptics::{
+    CHHapticAdvancedPatternPlayer, CHHapticDynamicParameter,
+    CHHapticDynamicParameterIDHapticIntensityControl, CHHapticEngine, CHHapticEvent,
+    CHHapticEventParameter, CHHapticEventParameterIDHapticIntensity,
+    CHHapticEventParameterIDHapticSharpness, CHHapticEventTypeHapticContinuous, CHHapticPattern,
+    CHHapticPatternPlayer, CHHapticTimeImmediate,
+};
+use objc2_foundation::NSArray;
 use objc2_game_controller::{
     GCController, GCControllerButtonInput, GCControllerDirectionPad, GCControllerElement, GCDevice,
-    GCDualSenseGamepad, GCDualShockGamepad, GCExtendedGamepad, GCXboxGamepad,
+    GCDeviceHaptics, GCDualSenseGamepad, GCDualShockGamepad, GCExtendedGamepad, GCHapticsLocality,
+    GCHapticsLocalityDefault, GCHapticsLocalityLeftHandle, GCHapticsLocalityLeftTrigger,
+    GCHapticsLocalityRightHandle, GCHapticsLocalityRightTrigger, GCXboxGamepad,
 };
+use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,21 +35,209 @@ use std::time::Duration;
 /// How often the list of controllers is looked at.
 const SCAN: Duration = Duration::from_millis(250);
 
-struct Mac;
+/// The longest a continuous haptic event may be; the player loops it.
+const EVENT: f64 = 30.0;
+
+/// Each connected pad's rumble, by slot.
+type Rumbles = Arc<Mutex<HashMap<u8, Haptics>>>;
+
+struct Mac {
+    rumbles: Rumbles,
+}
 
 impl Backend for Mac {
-    // GameController's rumble goes through Core Haptics engines per pad
-    // (`GCDeviceHaptics`); not wired up yet, so the host's rumble is
-    // dropped on a Mac.
-    fn rumble(&self, _slot: u8, _feedback: Feedback) {}
+    fn rumble(&self, slot: u8, feedback: Feedback) {
+        if let Some(h) = self.rumbles.lock().get_mut(&slot) {
+            h.play(&feedback);
+        }
+    }
 }
 
 pub(super) fn start(shared: Arc<Shared>) -> Option<Box<dyn Backend>> {
+    let rumbles = Rumbles::default();
+    let pads = rumbles.clone();
     std::thread::Builder::new()
         .name("gamepads".into())
-        .spawn(move || scan(&shared))
+        .spawn(move || scan(&shared, &pads))
         .ok()?;
-    Some(Box::new(Mac))
+    Some(Box::new(Mac { rumbles }))
+}
+
+/// Where a pad's rumble plays. The engines are made the first time the
+/// host rumbles the pad, and again after the system resets them.
+struct Haptics {
+    controller: Retained<GCController>,
+    motors: Option<Vec<Motor>>,
+}
+
+// SAFETY: Core Haptics engines and players may be driven from any thread,
+// and the mutex they sit behind lets one caller at a time at them; the
+// controller is only asked for its haptics.
+unsafe impl Send for Haptics {}
+
+/// One actuator: an engine and a player looping a full-strength continuous
+/// event, scaled by the intensity control.
+struct Motor {
+    /// Which of the host's levels this actuator plays.
+    level: fn(&Feedback) -> u16,
+    engine: Retained<CHHapticEngine>,
+    player: Retained<ProtocolObject<dyn CHHapticAdvancedPatternPlayer>>,
+    playing: bool,
+}
+
+impl Haptics {
+    fn play(&mut self, feedback: &Feedback) {
+        if self.motors.is_none() {
+            if *feedback == Feedback::default() {
+                return;
+            }
+            self.motors = Some(motors(&self.controller));
+        }
+        let motors = self.motors.as_mut().expect("made above");
+        if motors
+            .iter_mut()
+            .any(|m| m.set((m.level)(feedback)).is_err())
+        {
+            // A reset engine forgets its players; make new ones next time.
+            tracing::debug!("gamepad haptics stopped; remaking them");
+            for m in motors.iter() {
+                unsafe { m.engine.stopWithCompletionHandler(std::ptr::null_mut()) };
+            }
+            self.motors = None;
+        }
+    }
+}
+
+impl Drop for Haptics {
+    fn drop(&mut self) {
+        for m in self.motors.iter().flatten() {
+            unsafe { m.engine.stopWithCompletionHandler(std::ptr::null_mut()) };
+        }
+    }
+}
+
+impl Motor {
+    fn set(&mut self, level: u16) -> Result<(), ()> {
+        unsafe {
+            if level == 0 {
+                if self.playing {
+                    self.playing = false;
+                    self.player
+                        .stopAtTime_error(CHHapticTimeImmediate)
+                        .map_err(drop)?;
+                }
+                return Ok(());
+            }
+            let intensity = CHHapticDynamicParameter::initWithParameterID_value_relativeTime(
+                CHHapticDynamicParameter::alloc(),
+                CHHapticDynamicParameterIDHapticIntensityControl,
+                f32::from(level) / 65535.0,
+                0.0,
+            );
+            let intensity = NSArray::from_retained_slice(&[intensity]);
+            let send = || {
+                self.player
+                    .sendParameters_atTime_error(&intensity, CHHapticTimeImmediate)
+            };
+            send().map_err(drop)?;
+            if !self.playing {
+                self.engine.startAndReturnError().map_err(drop)?;
+                self.player
+                    .startAtTime_error(CHHapticTimeImmediate)
+                    .map_err(drop)?;
+                self.playing = true;
+                // A player starts from its pattern's own intensity.
+                send().map_err(drop)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The pad's actuators: its handles (heavy motor left, light right), else
+/// one engine for the whole pad, plus trigger motors where it has them.
+fn motors(controller: &GCController) -> Vec<Motor> {
+    let Some(haptics) = (unsafe { controller.haptics() }) else {
+        return Vec::new();
+    };
+    let make = |locality: &GCHapticsLocality, level: fn(&Feedback) -> u16, sharpness: f32| {
+        motor(&haptics, locality, level, sharpness)
+    };
+    let mut out: Vec<Motor> = unsafe {
+        [
+            make(GCHapticsLocalityLeftHandle, |f| f.large, 0.2),
+            make(GCHapticsLocalityRightHandle, |f| f.small, 0.8),
+        ]
+    }
+    .into_iter()
+    .flatten()
+    .collect();
+    if out.is_empty() {
+        out.extend(unsafe { make(GCHapticsLocalityDefault, |f| f.large.max(f.small), 0.5) });
+    }
+    out.extend(
+        unsafe {
+            [
+                make(GCHapticsLocalityLeftTrigger, |f| f.left_trigger, 0.6),
+                make(GCHapticsLocalityRightTrigger, |f| f.right_trigger, 0.6),
+            ]
+        }
+        .into_iter()
+        .flatten(),
+    );
+    out
+}
+
+fn motor(
+    haptics: &GCDeviceHaptics,
+    locality: &GCHapticsLocality,
+    level: fn(&Feedback) -> u16,
+    sharpness: f32,
+) -> Option<Motor> {
+    unsafe {
+        // `createEngineWithLocality:` is in macOS 11's GameController but
+        // the bindings only declare it for iOS.
+        let engine: Option<Retained<CHHapticEngine>> =
+            msg_send![haptics, createEngineWithLocality: locality];
+        let engine = engine?;
+        let parameters = NSArray::from_retained_slice(&[
+            CHHapticEventParameter::initWithParameterID_value(
+                CHHapticEventParameter::alloc(),
+                CHHapticEventParameterIDHapticIntensity,
+                1.0,
+            ),
+            CHHapticEventParameter::initWithParameterID_value(
+                CHHapticEventParameter::alloc(),
+                CHHapticEventParameterIDHapticSharpness,
+                sharpness,
+            ),
+        ]);
+        let event = CHHapticEvent::initWithEventType_parameters_relativeTime_duration(
+            CHHapticEvent::alloc(),
+            CHHapticEventTypeHapticContinuous,
+            &parameters,
+            0.0,
+            EVENT,
+        );
+        let pattern = CHHapticPattern::initWithEvents_parameters_error(
+            CHHapticPattern::alloc(),
+            &NSArray::from_retained_slice(&[event]),
+            &NSArray::new(),
+        )
+        .ok()?;
+        engine.startAndReturnError().ok()?;
+        let player = engine
+            .createAdvancedPlayerWithPattern_error(&pattern)
+            .ok()?;
+        player.setLoopEnabled(true);
+        player.setLoopEnd(EVENT);
+        Some(Motor {
+            level,
+            engine,
+            player,
+            playing: false,
+        })
+    }
 }
 
 fn kind(controller: &GCController) -> PadKind {
@@ -49,7 +251,7 @@ fn kind(controller: &GCController) -> PadKind {
     }
 }
 
-fn scan(shared: &Arc<Shared>) {
+fn scan(shared: &Arc<Shared>, rumbles: &Rumbles) {
     let queue: DispatchRetained<DispatchQueue> =
         DispatchQueue::new("io.github.MrBeldum.Latch.gamepads", None);
     let mut known: Vec<(Retained<GCController>, u8)> = Vec::new();
@@ -61,6 +263,7 @@ fn scan(shared: &Arc<Shared>) {
                 .iter()
                 .any(|n| Retained::as_ptr(n) == Retained::as_ptr(c));
             if !present {
+                rumbles.lock().remove(slot);
                 shared.disconnect(*slot);
             }
             present
@@ -91,6 +294,13 @@ fn scan(shared: &Arc<Shared>) {
                 gamepad.setValueChangedHandler(RcBlock::as_ptr(&handler));
             }
             shared.update(slot, read(&gamepad));
+            rumbles.lock().insert(
+                slot,
+                Haptics {
+                    controller: controller.clone(),
+                    motors: None,
+                },
+            );
             known.push((controller, slot));
         }
         std::thread::sleep(SCAN);

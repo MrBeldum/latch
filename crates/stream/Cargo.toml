@@ -42,6 +42,9 @@ objc2 = "0.6"
 block2 = "0.6"
 dispatch2 = "0.3"
 objc2-game-controller = { version = "0.3", features = ["block2", "dispatch2"] }
+# Rumble through each pad's Core Haptics engines.
+objc2-core-haptics = { version = "0.3", default-features = false, features = ["std", "block2", "CHHapticEngine", "CHHapticEvent", "CHHapticParameter", "CHHapticPattern", "CHHapticPatternPlayer"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSError", "NSString"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Gamepads through evdev; pure Rust ioctls.
