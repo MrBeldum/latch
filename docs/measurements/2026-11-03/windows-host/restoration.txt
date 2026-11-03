@@ -4,8 +4,8 @@ Restarting device:         ROOT\DISPLAY\0000
 Device restarted successfully.
 
 
-Algorithm       Hash                                                                   Path       
----------       ----                                                                   ----       
+Algorithm       Hash                                                                   Path
+---------       ----                                                                   ----
 SHA256          A720F0A1BA5C740EEAE0CDD055A9E30754DA56B0DF049768454314641EB5591B       C:\Virtu...
 
 LocalAddress  : 0.0.0.0
@@ -37,5 +37,3 @@ LocalAddress OwningProcess
 ------------ -------------
 0.0.0.0               6084
 A720F0A1BA5C740EEAE0CDD055A9E30754DA56B0DF049768454314641EB5591B
-
-
