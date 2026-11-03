@@ -28,7 +28,12 @@ pub(crate) struct Controller {
     /// Sustainable FIFO wire rate and the next bounded probe's deadline.
     capacity: Option<u32>,
     probe_at: Instant,
+    /// The budget before the probe in flight, and when it started.
     probe: Option<(u32, Instant)>,
+    /// The next probe's fraction above capacity; doubles while probes hold.
+    step: f64,
+    /// The offered rate when the path last congested.
+    overload: Option<u32>,
     /// A lossless RTT plateau that survives a fourfold load reduction.
     route: Option<(f32, Instant, u32)>,
 }
@@ -55,6 +60,8 @@ impl Controller {
             capacity: None,
             probe_at: now,
             probe: None,
+            step: 0.0,
+            overload: None,
             route: None,
         }
     }
@@ -99,6 +106,7 @@ impl Controller {
         // so queue thresholds sit above it. Only falls measure it: a filling
         // queue only rises, and the drain after a cut is not counted.
         let fall = (self.previous_delay - delay).clamp(0.0, 10.0) * 2.0;
+        let falling = delay + 0.5 < self.previous_delay;
         self.gradient = self.gradient * 0.5 + (delay - self.previous_delay) * 0.5;
         self.previous_delay = delay;
         let threshold = 6.0f32.max(self.min_rtt[1].min(self.min_rtt[0]) * 0.1);
@@ -111,15 +119,21 @@ impl Controller {
         // Legacy loss_pct is raw loss. FEC-recovered random radio loss does
         // not cut a new viewer's budget. Uncorrected loss or lost frames in
         // two windows running do, however low the raw loss: a policer drops
-        // only the overshoot and never queues, so delay never rises.
+        // only the overshoot and never queues, so delay never rises. An old
+        // viewer cannot label repaired shards: moderate raw loss with no frame
+        // damage is radio loss, and even low-raw frame loss catches policers.
         let damaged = report.frames_lost > 0
             || report
                 .unrecovered_loss_pct
                 .map_or(report.loss_pct > 10.0, |loss| loss > 3.0);
-        // An old viewer cannot label repaired shards. Moderate raw loss with
-        // no frame damage is radio loss; even low-raw frame loss still catches policers.
         let rtt = self.base_rtt().unwrap_or_default();
         let window = Duration::from_millis(u64::from(report.window_ms.clamp(25, 1000)));
+        // Coarse windows measure the bottleneck less precisely: hold further under it.
+        let margin = if window >= Duration::from_millis(200) {
+            92
+        } else {
+            97
+        };
         let horizon = (rtt * 2
             + window
                 * if window >= Duration::from_millis(200) {
@@ -153,6 +167,8 @@ impl Controller {
                 delay = 0.0;
                 queued = false;
                 self.capacity = None;
+                self.overload = None;
+                self.step = 0.0;
                 self.probe = None;
                 self.route = None;
             }
@@ -177,6 +193,10 @@ impl Controller {
         if received > 0 {
             let weight = if self.received_kbps > 0.0 { 0.3 } else { 1.0 };
             self.received_kbps += (f64::from(received) - self.received_kbps) * weight;
+        }
+        // The path carries at least what it has been seen to deliver.
+        if let Some(kbps) = self.capacity.as_mut() {
+            *kbps = (*kbps).max(self.received_kbps as u32);
         }
         let sent = self.sent_kbps.unwrap_or(0);
         let collapsed =
@@ -207,20 +227,35 @@ impl Controller {
             // wait a round trip and a report window past it.
             let rtt = self.base_rtt().unwrap_or_default();
             let spacing = if queued && damaged {
-                rtt.max(Duration::from_millis(50))
+                (rtt + window).max(Duration::from_millis(50))
             } else if queued {
                 horizon
             } else {
                 rtt + Duration::from_millis(u64::from(report.window_ms.clamp(25, 250)))
             };
-            if now.duration_since(self.last_cut) >= spacing {
+            // Loss in a window that delivered more than is now sent was
+            // sent before the last cut: it says nothing new.
+            let late = !queued && !collapsed && received > self.budget.max(sent);
+            // Soon after a cut, a falling queue is draining as intended.
+            let draining = falling
+                && !damaged
+                && !collapsed
+                && !probe_queued
+                && now.duration_since(self.last_cut) < horizon * 3;
+            if now.duration_since(self.last_cut) >= spacing && !late && !draining {
                 // A target cut above the encoder's actual wire rate has no effect.
                 let offered = self.sent_kbps.unwrap_or(self.budget).min(self.budget);
-                // Delay gives a capacity estimate before the FIFO drops packets.
-                // With loss or a collapse, received throughput bounds the new
-                // offered rate.
-                let measured = if received > 0 && (damaged || collapsed) {
-                    (u64::from(received) * 107 / 100).min(u64::from(u32::MAX)) as u32
+                // What got through bounds the new offered rate: a standing
+                // FIFO delivers its bottleneck rate. A viewer that omits
+                // throughput still reports loss: about the offered rate less
+                // the share lost got through.
+                let through = if received > 0 {
+                    received
+                } else {
+                    (f64::from(offered) * (1.0 - f64::from(loss.clamp(0.0, 100.0)) / 100.0)) as u32
+                };
+                let measured = if received > 0 || damaged || collapsed {
+                    (u64::from(through) * 107 / 100).min(u64::from(u32::MAX)) as u32
                 } else {
                     offered
                 };
@@ -228,17 +263,21 @@ impl Controller {
                 self.budget =
                     ((u64::from(offered.min(measured)) * cut / 100) as u32).max(self.floor);
                 let probe = self.probe.take();
-                if let Some((safe, _)) = probe.filter(|_| !collapsed && !damaged) {
-                    self.budget = safe.max(self.floor);
+                self.step = 0.0;
+                self.overload = Some(offered);
+                if let Some((before, _)) = probe.filter(|_| !collapsed && !damaged) {
+                    // Only the probe's excess queued: go as far under the
+                    // last rate that held as the probe went over it, so that
+                    // excess drains as fast as it built, then climb back.
+                    let held = self.capacity.unwrap_or(before);
+                    let drain = held.saturating_sub(offered.saturating_sub(held));
+                    self.budget = drain.max(held * 9 / 10).min(before).max(self.floor);
                 } else {
-                    let capacity = if received > 0 {
-                        received.min(offered)
-                    } else {
-                        offered
-                    };
-                    // Without throughput feedback do not invent a FIFO rate
-                    // from a cut target; clean time must still recover promptly.
-                    self.capacity = (received > 0).then_some(capacity.max(self.floor));
+                    // A queue without loss or throughput feedback says only
+                    // that the offered rate was too high, not what the path
+                    // carries: recover by elapsed time.
+                    self.capacity =
+                        (received > 0 || loss > 0.0).then(|| through.min(offered).max(self.floor));
                 }
                 self.probe_at = now + Duration::from_millis(500).max(horizon);
                 // Loss without a queue is a policer, whose rate stays put:
@@ -259,40 +298,35 @@ impl Controller {
                 let cap = lossy.map_or(self.ceiling, |kbps| kbps * 97 / 100);
                 let growth =
                     (f64::from(self.budget) * 2.0f64.powf(elapsed.as_secs_f64() / 0.4)) as u32;
+                // Bound a first probe's excess to a few ms of queue even on
+                // long RTT paths; only one increase is in flight at a time.
+                let base = (0.0025 / horizon.as_secs_f64()).clamp(0.01, 0.05);
                 if let Some((_, at)) = self.probe {
                     if now.duration_since(at) >= horizon {
-                        // The probe survived a feedback round trip: capacity
-                        // really grew. Accelerate only after this confirmation.
-                        self.capacity = Some(
-                            self.budget
-                                .saturating_mul(if horizon >= Duration::from_millis(200) {
-                                    110
-                                } else {
-                                    150
-                                })
-                                / 100,
-                        );
+                        // The probe survived a feedback round trip: its rate
+                        // holds, and the next probe may reach twice as far.
+                        self.capacity = Some(self.budget);
+                        self.step = (self.step.max(base) * 2.0).min(1.0);
                         self.probe = None;
-                        self.probe_at = now;
                     }
+                }
+                if self.probe.is_some() {
+                    // Hold the probe's rate until its feedback arrives.
                 } else if let Some(capacity) = self.capacity {
-                    let safe = (capacity
-                        * (if window >= Duration::from_millis(200) {
-                            92
-                        } else {
-                            97
-                        })
-                        / 100)
-                        .max(self.floor)
-                        .min(cap);
+                    let safe = (capacity * margin / 100).max(self.floor).min(cap);
                     if self.budget < safe {
                         self.budget = growth.min(safe);
                     } else if now >= self.probe_at && self.budget < cap {
-                        // Bound outstanding excess to a few ms of queue even
-                        // on long RTT paths. Only one increase can be in flight.
-                        let step = (0.005 / horizon.as_secs_f64()).clamp(0.01, 0.1);
                         self.probe = Some((self.budget, now));
-                        self.budget = ((f64::from(capacity) * (1.0 + step)) as u32).min(cap);
+                        let step = self.step.max(base);
+                        let mut target = (f64::from(capacity) * (1.0 + step)) as u32;
+                        // Approach the rate that last congested by steps; only
+                        // a probe that holds there may accelerate past it.
+                        if let Some(kbps) = self.overload.filter(|kbps| capacity < *kbps) {
+                            target =
+                                target.min(kbps.max((f64::from(capacity) * (1.0 + base)) as u32));
+                        }
+                        self.budget = target.min(cap);
                     }
                 } else {
                     self.budget = growth.min(cap);

@@ -1,5 +1,6 @@
-//! Codec-free, deterministic frame/FEC/FIFO feedback scenarios. Run --nocapture
-//! for measurements; all time is simulated, including delayed feedback and IDR.
+//! 35 s codec-free frame/FEC/FIFO runs behind a fixed cap: budget spread,
+//! standing queue and frame damage over the last 30 s, with the production
+//! pacer. Run --nocapture for the table in docs/measurements/2026-11-03/transport.
 #[path = "../src/congestion.rs"]
 mod congestion;
 #[path = "../src/pacing.rs"]
@@ -191,8 +192,16 @@ fn transport_scenarios() {
         let mean = budgets.iter().sum::<f64>() / budgets.len() as f64;
         let sd =
             (budgets.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / budgets.len() as f64).sqrt();
-        println!("REVIEW {name} mean={mean:.1} sd={sd:.1} queue_p95={p95:.3} lost={} skipped={} min={} final={}",rx.stats().frames_lost,rx.stats().frames_skipped,minimum,controller.budget());
-        if interval == 50 && name != "route" && name != "lan1g" && cap >= 20000 {
+        let stats = rx.stats();
+        println!(
+            "STEADY {name} mean={mean:.1} sd={sd:.1} queue_p95={p95:.3} lost={} skipped={} min={minimum} final={}",
+            stats.frames_lost,
+            stats.frames_skipped,
+            controller.budget()
+        );
+        // Main's controller spreads 1.7/3.5/7.1 Mbps at these caps (10 ms,
+        // 50 ms reports); stay at or under it at every RTT and at 5.1's cadence.
+        if interval <= 250 && !legacy && name != "route" && name != "lan1g" && cap >= 20000 {
             let sd_bound = match cap {
                 20000 => 1700.0,
                 50000 => 3500.0,
@@ -200,14 +209,20 @@ fn transport_scenarios() {
             };
             assert!(sd <= sd_bound, "{name}: budget SD {sd} > {sd_bound}");
             assert!(p95 < 16.0, "{name}: queue p95 {p95}");
-            assert!(rx.stats().frames_lost < 120, "{name}: frame damage");
-            assert!(rx.stats().frames_skipped < 60, "{name}: skipped frames");
-            assert!(mean > f64::from(cap) * 0.65, "{name}: underused path");
+            assert!(stats.frames_lost < 120, "{name}: frame damage");
+            assert!(stats.frames_skipped < 60, "{name}: skipped frames");
+            assert!(mean > f64::from(cap) * 0.85, "{name}: underused path");
         }
+        if name == "legacy1000" {
+            assert!(p95 < 30.0 && mean > 40_000.0, "{name}: {p95} {mean}");
+        }
+        // A 100 Mbps request must still adapt to a 2-5 Mbps link.
         if name == "cap2" || name == "cap5" {
-            assert!(rx.stats().frames_lost < 50 && rx.stats().frames_skipped < 10);
+            assert!(
+                stats.frames_lost < 50 && stats.frames_skipped < 10,
+                "{name}"
+            );
             assert!(controller.budget() < cap);
-            assert!(rx.stats().frames_lost + rx.stats().frames_skipped < 100);
         }
         if name == "route" {
             assert!(route_recovered);
