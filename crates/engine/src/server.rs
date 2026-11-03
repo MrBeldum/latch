@@ -242,10 +242,26 @@ impl Server {
             opening: Some(opening),
         };
         let config = VideoConfig {
-            width: even(prepared.req.width.clamp(64, 8192)),
-            height: even(prepared.req.height.clamp(64, 8192)),
-            fps: prepared.req.fps.clamp(1, 240),
-            bitrate_kbps: prepared.req.bitrate_kbps.clamp(500, 500_000),
+            width: even(if cfg!(windows) {
+                prepared.req.width
+            } else {
+                prepared.req.width.clamp(64, 8192)
+            }),
+            height: even(if cfg!(windows) {
+                prepared.req.height
+            } else {
+                prepared.req.height.clamp(64, 8192)
+            }),
+            fps: if cfg!(windows) {
+                prepared.req.fps
+            } else {
+                prepared.req.fps.clamp(1, 240)
+            },
+            bitrate_kbps: if cfg!(windows) {
+                prepared.req.bitrate_kbps
+            } else {
+                prepared.req.bitrate_kbps.clamp(500, 500_000)
+            },
             codec,
         };
         let pipeline = video::open(&config)
@@ -1181,6 +1197,7 @@ fn names(codecs: &[Codec]) -> String {
         .iter()
         .map(|c| match c {
             Codec::Hevc => "HEVC",
+            Codec::Av1 => "AV1",
             Codec::H264High => "H.264 High",
             Codec::H264Baseline => "H.264 Baseline",
         })

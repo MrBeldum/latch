@@ -436,6 +436,7 @@ pub(super) struct Capture {
     rotation: DXGI_MODE_ROTATION,
     pub display: DisplayRect,
     pub has_frame: bool,
+    pub captured: Instant,
     cpu_seeded: bool,
     white: f32,
     retry: ReopenBackoff,
@@ -546,6 +547,7 @@ impl Capture {
             rotation: desc.Rotation,
             display,
             has_frame: false,
+            captured: Instant::now(),
             cpu_seeded: false,
             white: display::sdr_white_level(&output.desc.DeviceName),
             retry: ReopenBackoff::new(),
@@ -662,7 +664,9 @@ impl Capture {
             Err(e) => return Err(e).context("acquire desktop frame"),
             Ok(()) => {}
         }
+        self.captured = Instant::now();
         let mut shape_bytes = None;
+        let mut composite = true;
         let copied = (|| -> Result<()> {
             let texture: ID3D11Texture2D = resource.context("DXGI returned no frame")?.cast()?;
             // Use the acquired texture as the final authority on physical size;
@@ -695,10 +699,6 @@ impl Capture {
                 self.display.width = width;
                 self.display.height = height;
             }
-            // SAFETY: these textures have identical dimensions and format.
-            unsafe {
-                self.gpu.context.CopyResource(&self.source, &texture);
-            }
             if info.LastMouseUpdateTime != 0 {
                 self.pointer = info.PointerPosition;
             }
@@ -720,13 +720,26 @@ impl Capture {
                 .context("read DXGI pointer shape")?;
                 shape_bytes = Some(bytes);
             }
+            composite = self.pointer.Visible.as_bool()
+                || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM
+                || !matches!(
+                    self.rotation,
+                    DXGI_MODE_ROTATION_IDENTITY | DXGI_MODE_ROTATION_UNSPECIFIED
+                );
+            // SAFETY: the selected destination has the same size/format. A
+            // plain SDR desktop needs only its retained copy, no cursor pass.
+            unsafe {
+                self.gpu
+                    .context
+                    .CopyResource(if composite { &self.source } else { &self.frame }, &texture);
+            }
             Ok(())
         })();
-        // SAFETY: AcquireNextFrame succeeded; no borrowed frame escapes this call.
+        // SAFETY: each successful acquisition is released, including copy errors.
         let released = unsafe {
             self.duplication
                 .as_ref()
-                .context("missing desktop duplication")?
+                .context("missing duplication")?
                 .ReleaseFrame()
         }
         .context("release desktop frame");
@@ -739,14 +752,16 @@ impl Capture {
         if let Some(bytes) = shape_bytes {
             self.renderer.shape(&self.gpu, &self.shape, &bytes)?;
         }
-        self.renderer.draw(
-            &self.gpu,
-            &self.source,
-            &self.frame,
-            &self.pointer,
-            &self.shape,
-            (self.rotation, self.white),
-        )?;
+        if composite {
+            self.renderer.draw(
+                &self.gpu,
+                &self.source,
+                &self.frame,
+                &self.pointer,
+                &self.shape,
+                (self.rotation, self.white),
+            )?;
+        }
         self.has_frame = true;
         Ok(true)
     }
@@ -1160,6 +1175,83 @@ mod tests {
                 if !super::super::unavailable(&e, "interactive desktop") {
                     return Err(e);
                 }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+    #[test]
+    #[ignore]
+    fn hardware_conversion_timing() -> Result<()> {
+        let _runtime = super::super::Runtime::new(false)?;
+        let output = display::select()?;
+        let gpu = Gpu::new(&output.adapter)?;
+        // SAFETY: queries and textures belong to this device; GetData sizes
+        // match SDK types. Disjoint timestamps are discarded, waits bounded.
+        unsafe {
+            for (width, height) in [(1920, 1080), (2560, 1440), (3840, 2160)] {
+                let input = gpu.texture(
+                    width,
+                    height,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    D3D11_BIND_RENDER_TARGET.0 as u32,
+                    false,
+                )?;
+                let mut converter = Converter::new(&gpu, (width, height), (width, height), 240)?;
+                let query = |kind| -> Result<ID3D11Query> {
+                    let mut query = None;
+                    gpu.device.CreateQuery(
+                        &D3D11_QUERY_DESC {
+                            Query: kind,
+                            MiscFlags: 0,
+                        },
+                        Some(&mut query),
+                    )?;
+                    query.context("missing timing query")
+                };
+                let disjoint = query(D3D11_QUERY_TIMESTAMP_DISJOINT)?;
+                let before = query(D3D11_QUERY_TIMESTAMP)?;
+                let after = query(D3D11_QUERY_TIMESTAMP)?;
+                let mut times = Vec::new();
+                for i in 0..40 {
+                    gpu.context.Begin(&disjoint);
+                    gpu.context.End(&before);
+                    converter.convert(&input)?;
+                    gpu.context.End(&after);
+                    gpu.context.End(&disjoint);
+                    gpu.context.Flush();
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    let mut timing = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT::default();
+                    while timing.Frequency == 0 {
+                        gpu.context.GetData(
+                            &disjoint,
+                            Some((&mut timing as *mut D3D11_QUERY_DATA_TIMESTAMP_DISJOINT).cast()),
+                            std::mem::size_of_val(&timing) as u32,
+                            0,
+                        )?;
+                        anyhow::ensure!(Instant::now() < deadline, "GPU timestamps timed out");
+                        thread::yield_now();
+                    }
+                    let (mut start, mut end) = (0u64, 0u64);
+                    gpu.context
+                        .GetData(&before, Some((&mut start as *mut u64).cast()), 8, 0)?;
+                    gpu.context
+                        .GetData(&after, Some((&mut end as *mut u64).cast()), 8, 0)?;
+                    if i >= 10 && !timing.Disjoint.as_bool() {
+                        times.push((end - start) as f64 * 1000.0 / timing.Frequency as f64);
+                    }
+                }
+                anyhow::ensure!(!times.is_empty(), "all timestamps disjoint");
+                times.sort_by(f64::total_cmp);
+                eprintln!(
+                    "GPU BGRA→NV12 {width}x{height}: p50={:.3}ms p95={:.3}ms",
+                    times[times.len() / 2],
+                    times[times.len() * 95 / 100]
+                );
             }
         }
         Ok(())

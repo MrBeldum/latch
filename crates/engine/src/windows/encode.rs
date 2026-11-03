@@ -48,20 +48,27 @@ impl IMFAsyncCallback_Impl for EventCallback_Impl {
         Ok(())
     }
 }
-/// Set `LATCH_WINDOWS_HEVC=1` to offer HEVC from a GPU's Media Foundation
-/// encoder. Off by default until it has run on real AMD, NVIDIA and Intel
-/// hardware; with it off nothing about H.264 changes.
-fn hevc_enabled() -> bool {
-    std::env::var_os("LATCH_WINDOWS_HEVC").is_some_and(|v| v == "1")
-}
-/// An HEVC encoder that did not work stays off until the process restarts,
-/// so the next viewer is offered H.264 instead of failing the same way.
+// A codec that failed at runtime stays off until restart. Each hardware-only
+// codec is offered only after a real keyframe has passed through its MFT.
 static HEVC_FAILED: AtomicBool = AtomicBool::new(false);
-/// A probe encoded a keyframe through the whole HEVC path.
 static HEVC_PROVEN: AtomicBool = AtomicBool::new(false);
-pub(super) fn hevc_failed(why: &anyhow::Error) {
-    tracing::debug!("HEVC encoder is not used again: {why:#}");
-    HEVC_FAILED.store(true, Ordering::Relaxed);
+static AV1_FAILED: AtomicBool = AtomicBool::new(false);
+static AV1_PROVEN: AtomicBool = AtomicBool::new(false);
+pub(super) fn codec_failed(codec: Codec, why: &anyhow::Error) {
+    tracing::warn!(?codec, "encoder is not used again: {why:#}");
+    match codec {
+        Codec::Hevc => &HEVC_FAILED,
+        Codec::Av1 => &AV1_FAILED,
+        _ => return,
+    }
+    .store(true, Ordering::Relaxed);
+}
+pub(super) fn codec_allowed(codec: Codec) -> bool {
+    match codec {
+        Codec::Hevc => !HEVC_FAILED.load(Ordering::Relaxed),
+        Codec::Av1 => !AV1_FAILED.load(Ordering::Relaxed),
+        _ => true,
+    }
 }
 
 pub(super) fn media_type(subtype: &GUID, config: &VideoConfig) -> Result<IMFMediaType> {
@@ -130,11 +137,11 @@ pub(super) fn nv12_sample(
         Ok(sample)
     }
 }
-fn activations(flags: MFT_ENUM_FLAG, format: Format) -> Result<Vec<(IMFActivate, String)>> {
+fn activations(flags: MFT_ENUM_FLAG, codec: Codec) -> Result<Vec<(IMFActivate, String)>> {
     let (mut array, mut count) = (std::ptr::null_mut(), 0);
     let filter = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
-        guidSubtype: subtype(format),
+        guidSubtype: subtype(codec),
     };
     // SAFETY: MFTEnumEx allocates an array of owned activation references. Each
     // slot is moved out once and the array itself is freed with CoTaskMemFree.
@@ -147,7 +154,7 @@ fn activations(flags: MFT_ENUM_FLAG, format: Format) -> Result<Vec<(IMFActivate,
             &mut array,
             &mut count,
         )
-        .with_context(|| format!("enumerate {} encoders", label(format)))?;
+        .with_context(|| format!("enumerate {} encoders", codec.name()))?;
         let mut out = Vec::new();
         for i in 0..count as usize {
             if let Some(activate) = array.add(i).read() {
@@ -157,7 +164,7 @@ fn activations(flags: MFT_ENUM_FLAG, format: Format) -> Result<Vec<(IMFActivate,
                     activate.GetString(&MFT_FRIENDLY_NAME_Attribute, &mut text, None)?;
                     Ok(String::from_utf16_lossy(&text[..length as usize]))
                 })()
-                .unwrap_or_else(|_| format!("hardware {} encoder", label(format)));
+                .unwrap_or_else(|_| format!("hardware {} encoder", codec.name()));
                 out.push((activate, name));
             }
         }
@@ -165,30 +172,18 @@ fn activations(flags: MFT_ENUM_FLAG, format: Format) -> Result<Vec<(IMFActivate,
         Ok(out)
     }
 }
-fn subtype(format: Format) -> GUID {
-    match format {
-        Format::H264 => MFVideoFormat_H264,
-        Format::Hevc => MFVideoFormat_HEVC,
+fn subtype(codec: Codec) -> GUID {
+    match codec {
+        Codec::Hevc => MFVideoFormat_HEVC,
+        Codec::Av1 => MFVideoFormat_AV1,
+        _ => MFVideoFormat_H264,
     }
 }
-fn label(format: Format) -> &'static str {
-    match format {
-        Format::H264 => "H.264",
-        Format::Hevc => "HEVC",
-    }
-}
-fn format_of(codec: Codec) -> Format {
-    if codec == Codec::Hevc {
-        Format::Hevc
-    } else {
-        Format::H264
-    }
-}
-fn hardware(format: Format) -> Result<Vec<(IMFActivate, String)>> {
-    activations(MFT_ENUM_FLAG_HARDWARE, format)
+fn hardware(codec: Codec) -> Result<Vec<(IMFActivate, String)>> {
+    activations(MFT_ENUM_FLAG_HARDWARE, codec)
 }
 pub(super) fn available() -> bool {
-    if hardware(Format::H264).is_ok_and(|v| !v.is_empty()) {
+    if hardware(Codec::H264High).is_ok_and(|v| !v.is_empty()) {
         return true;
     }
     // SAFETY: This probe runs in an initialized MTA with MF started.
@@ -197,22 +192,22 @@ pub(super) fn available() -> bool {
             .is_ok()
     }
 }
-/// HEVC may be opened: enabled, and not given up on.
-pub(super) fn hevc_allowed() -> bool {
-    hevc_enabled() && !HEVC_FAILED.load(Ordering::Relaxed)
-}
-/// Whether an HEVC encoder is worth offering: enabled, a GPU has one, and
-/// it has encoded a keyframe through the whole path here (activation,
-/// configuration, one frame, parameter sets in band). The probe runs once
-/// per process when it succeeds.
-pub(super) fn hevc_available() -> bool {
-    if !hevc_allowed() {
+pub(super) fn codec_available(codec: Codec) -> bool {
+    if matches!(codec, Codec::H264High | Codec::H264Baseline) {
+        return available();
+    }
+    if !codec_allowed(codec) {
         return false;
     }
-    if HEVC_PROVEN.load(Ordering::Relaxed) {
+    let proven = if codec == Codec::Hevc {
+        &HEVC_PROVEN
+    } else {
+        &AV1_PROVEN
+    };
+    if proven.load(Ordering::Relaxed) {
         return true;
     }
-    if !hardware(Format::Hevc).is_ok_and(|v| !v.is_empty()) {
+    if !hardware(codec).is_ok_and(|v| !v.is_empty()) {
         return false;
     }
     let _dpi = display::DpiAwareness::physical();
@@ -229,15 +224,15 @@ pub(super) fn hevc_available() -> bool {
         height: 1080,
         fps: 60,
         bitrate_kbps: 10_000,
-        codec: Codec::Hevc,
+        codec,
     };
     match probe_keyframe(&config, &gpu) {
         Ok(()) => {
-            HEVC_PROVEN.store(true, Ordering::Relaxed);
+            proven.store(true, Ordering::Relaxed);
             true
         }
         Err(e) => {
-            hevc_failed(&e);
+            codec_failed(codec, &e);
             false
         }
     }
@@ -254,11 +249,11 @@ fn probe_keyframe(config: &VideoConfig, gpu: &Gpu) -> Result<()> {
     let sample = Encoder::texture_sample(&texture)?;
     for _ in 0..4 {
         if let Some((_, idr)) = encoder.encode(&sample, true)? {
-            anyhow::ensure!(idr, "HEVC encoder did not make a keyframe when asked");
+            anyhow::ensure!(idr, "encoder did not make a keyframe when asked");
             return Ok(());
         }
     }
-    bail!("HEVC encoder produced no output")
+    bail!("encoder produced no output")
 }
 
 /// Toward speed (0 is fastest, 100 best quality) for Microsoft's CPU
@@ -278,7 +273,8 @@ pub(super) struct Encoder {
     pub name: String,
     duration: i64,
     time: i64,
-    seq: Sequence,
+    seq: Option<Sequence>,
+    av1: crate::bitstream::Av1Sequence,
     activation: Option<IMFActivate>,
     /// Reused CPU output with growth when an MFT underreports its size.
     output_sample: Option<IMFSample>,
@@ -288,9 +284,9 @@ pub(super) struct Encoder {
 }
 impl Encoder {
     pub fn new(config: &VideoConfig, gpu: &Gpu) -> Result<Self> {
-        let format = format_of(config.codec);
-        let label = label(format);
-        for (activation, name) in hardware(format).unwrap_or_default() {
+        let codec = config.codec;
+        let label = codec.name();
+        for (activation, name) in hardware(codec).unwrap_or_default() {
             // SAFETY: Activation is performed on the worker's MTA.
             let transform = unsafe { activation.ActivateObject::<IMFTransform>() };
             let result = transform
@@ -310,8 +306,8 @@ impl Encoder {
                 }
             }
         }
-        if format == Format::Hevc {
-            bail!("no hardware HEVC encoder accepted the configuration");
+        if !matches!(codec, Codec::H264High | Codec::H264Baseline) {
+            bail!("no hardware {label} encoder accepted the configuration");
         }
         Self::software(config)
     }
@@ -320,7 +316,7 @@ impl Encoder {
         let transform =
             unsafe { CoCreateInstance(&CLSID_MSH264EncoderMFT, None, CLSCTX_INPROC_SERVER) }
                 .context("create Microsoft H.264 encoder")?;
-        let name = activations(MFT_ENUM_FLAG_SYNCMFT, Format::H264)
+        let name = activations(MFT_ENUM_FLAG_SYNCMFT, Codec::H264High)
             .unwrap_or_default()
             .into_iter()
             .find_map(|(activation, name)| {
@@ -366,7 +362,7 @@ impl Encoder {
         name: String,
         hardware: bool,
     ) -> Result<Self> {
-        let format = format_of(config.codec);
+        let codec = config.codec;
         // SAFETY: All transform calls are serialized on its owning worker.
         unsafe {
             let attributes = transform.GetAttributes().context("encoder attributes")?;
@@ -446,7 +442,7 @@ impl Encoder {
                 api.SetValue(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(longest))
                     .context("encoder longest supported GOP")?;
             }
-            if format == Format::H264 {
+            if matches!(codec, Codec::H264High | Codec::H264Baseline) {
                 // CABAC saves bits at the same quality; Constrained Baseline
                 // has none.
                 Self::optional(
@@ -456,9 +452,15 @@ impl Encoder {
                     (config.codec == Codec::H264High).into(),
                 );
             }
-            let output = media_type(&subtype(format), config)?;
+            let output = media_type(&subtype(codec), config)?;
             output.SetUINT32(&MF_MT_AVG_BITRATE, config.bitrate_kbps.saturating_mul(1000))?;
-            if format == Format::Hevc {
+            if codec == Codec::Av1 {
+                // AV1 Main (8-bit NV12); the MFT selects level/tier for size/rate.
+                output.SetUINT32(&MF_MT_MPEG2_PROFILE, 0)?;
+                transform
+                    .SetOutputType(0, &output, 0)
+                    .context("encoder AV1 output type")?;
+            } else if codec == Codec::Hevc {
                 output.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH265VProfile_Main_420_8.0 as u32)?;
                 transform
                     .SetOutputType(0, &output, 0)
@@ -493,10 +495,15 @@ impl Encoder {
                 output_credit: 0,
                 _manager: manager,
                 hardware,
-                name: format!("Media Foundation {} ({name})", label(format)),
+                name: format!("Media Foundation {} ({name})", codec.name()),
                 duration: 10_000_000 / i64::from(config.fps),
                 time: 0,
-                seq: Sequence::new(format),
+                seq: match codec {
+                    Codec::Av1 => None,
+                    Codec::Hevc => Some(Sequence::new(Format::Hevc)),
+                    _ => Some(Sequence::new(Format::H264)),
+                },
+                av1: Default::default(),
                 activation: None,
                 output_sample: None,
                 output_capacity: 0,
@@ -641,7 +648,10 @@ impl Encoder {
                         self.transform.SetOutputType(0, &ty, 0)?;
                         // The new type may need a bigger sample and has its
                         // own sequence header.
-                        self.seq.clear();
+                        if let Some(seq) = &mut self.seq {
+                            seq.clear();
+                        }
+                        self.av1 = Default::default();
                         continue;
                     }
                     Err(e) => return Err(e).context("encoder ProcessOutput"),
@@ -655,11 +665,16 @@ impl Encoder {
                 let (mut data, mut length) = (std::ptr::null_mut(), 0);
                 buffer.Lock(&mut data, None, Some(&mut length))?;
                 // One copy, out of the encoder's buffer into the access unit.
-                let result = self
-                    .seq
-                    .assemble(std::slice::from_raw_parts(data, length as usize), || {
-                        sequence_header(&self.transform)
-                    });
+                let bytes = std::slice::from_raw_parts(data, length as usize);
+                let result = if let Some(seq) = &mut self.seq {
+                    seq.assemble(bytes, || sequence_header(&self.transform))
+                } else {
+                    self.av1.assemble(
+                        bytes,
+                        sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0,
+                        || sequence_header(&self.transform),
+                    )
+                };
                 buffer.Unlock()?;
                 return result.map(Some);
             }
@@ -802,6 +817,79 @@ mod output_tests {
         assert_eq!(super::grown_output_capacity(1024, 8192)?, 8192);
         assert_eq!(super::grown_output_capacity(1024, 1024)?, 2048);
         assert!(super::grown_output_capacity(64 * 1024 * 1024, 1).is_err());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hardware_tests {
+    use super::*;
+
+    /// Run in the signed-in desktop; never run hardware probes in CI/session 0.
+    #[test]
+    #[ignore]
+    fn hardware_capabilities() -> Result<()> {
+        let _runtime = super::super::Runtime::new(true)?;
+        for codec in [Codec::H264High, Codec::Hevc, Codec::Av1] {
+            eprintln!("{codec:?}: {} hardware MFTs", hardware(codec)?.len());
+            let config = VideoConfig {
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                bitrate_kbps: 50_000,
+                codec,
+            };
+            for (activation, name) in hardware(codec)? {
+                // SAFETY: the test owns a COM/MF runtime on this thread.
+                unsafe {
+                    let transform = activation.ActivateObject::<IMFTransform>()?;
+                    let api: ICodecAPI = transform.cast()?;
+                    for (name, key) in [
+                        ("LTRBufferControl", CODECAPI_AVEncVideoLTRBufferControl),
+                        ("MarkLTRFrame", CODECAPI_AVEncVideoMarkLTRFrame),
+                        ("UseLTRFrame", CODECAPI_AVEncVideoUseLTRFrame),
+                        (
+                            "GradualIntraRefresh",
+                            CODECAPI_AVEncVideoGradualIntraRefresh,
+                        ),
+                    ] {
+                        let get = api.GetValue(&key);
+                        let value = if name == "MarkLTRFrame" { 0 } else { 1u32 };
+                        eprintln!(
+                            "{codec:?} {name} set={:?}",
+                            api.SetValue(&key, &VARIANT::from(value))
+                        );
+                        eprintln!(
+                            "{codec:?} {name}: supported={:?} modifiable={:?} get={get:?}",
+                            api.IsSupported(&key),
+                            api.IsModifiable(&key)
+                        );
+                    }
+                    if codec == Codec::Hevc {
+                        let attrs = transform.GetAttributes()?;
+                        attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)?;
+                        let ty = media_type(&MFVideoFormat_HEVC, &config)?;
+                        ty.SetUINT32(&MF_MT_AVG_BITRATE, 50_000_000)?;
+                        ty.SetUINT32(
+                            &MF_MT_MPEG2_PROFILE,
+                            eAVEncH265VProfile_Main_420_10.0 as u32,
+                        )?;
+                        eprintln!(
+                            "HEVC Main10 output test: {:?}",
+                            transform.SetOutputType(0, &ty, MFT_SET_TYPE_TEST_ONLY.0 as u32)
+                        );
+                    }
+                    drop(transform);
+                    activation.ShutdownObject()?;
+                }
+                eprintln!("{name}");
+            }
+            let proven = codec_available(codec);
+            eprintln!("{codec:?} proven: {proven}");
+            if codec == Codec::Av1 && hardware(codec)?.is_empty() {
+                assert!(!proven);
+            }
+        }
         Ok(())
     }
 }
