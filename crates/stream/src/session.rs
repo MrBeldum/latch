@@ -901,9 +901,9 @@ fn receive(
     }
     let mut events = mio::Events::with_capacity(4);
     let accepted = Instant::now();
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     let mut buf = vec![0u8; latch_proto::MAX_DATAGRAM + 1];
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     let mut batch = latch_proto::transport::ReceiveBatch::default();
     let mut out = Vec::with_capacity(64);
     let mut reassembler = Reassembler::new(session);
@@ -956,7 +956,7 @@ fn receive(
         if let Some(link) = inner.link.lock().as_mut() {
             link.flush(now);
         }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         match batch.receive(&udp, |bytes, from| {
             if from.ip() == host.ip() {
                 if let Ok(datagram) = wire::parse(bytes) {
@@ -983,7 +983,7 @@ fn receive(
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => drained = true,
             _ => {}
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         // Drain a bounded batch before timers and feedback bookkeeping.
         for _ in 0..64 {
             match ready_socket.recv_from(&mut buf) {

@@ -1031,6 +1031,7 @@ fn paced_video(
 ) {
     crate::priority::media_thread();
     let mut packetizer = Packetizer::new(session.id);
+    let mut sender = latch_proto::transport::SendBatch::default();
     let mut pacer = crate::pacing::Pacer::new(Instant::now());
     while !session.stopping() {
         let (frame, queued) = match rx.recv_timeout(Duration::from_millis(20)) {
@@ -1056,7 +1057,7 @@ fn paced_video(
                         .transport
                         .queue_us
                         .fetch_max(queued.elapsed().as_micros() as u64, Ordering::Relaxed);
-                    send_batch(&server.udp, session, batch, addr);
+                    send_batch(&mut sender, &server.udp, session, batch, addr);
                 }
                 return;
             }
@@ -1168,11 +1169,17 @@ fn audio_problem(server: &Server, session: &Session, message: String) {
 }
 
 /// Retry only an unsent suffix: batch syscalls can succeed partially.
-fn send_batch(udp: &UdpSocket, session: &Session, batch: &[Vec<u8>], to: SocketAddr) {
+fn send_batch(
+    sender: &mut latch_proto::transport::SendBatch,
+    udp: &UdpSocket,
+    session: &Session,
+    batch: &[Vec<u8>],
+    to: SocketAddr,
+) {
     let mut sent = 0;
     let mut failures = 0;
     while sent < batch.len() && !session.stopping() {
-        match latch_proto::transport::send_batch(udp, &batch[sent..], to) {
+        match sender.send(udp, &batch[sent..], to) {
             Ok(n) if n > 0 => {
                 let bytes: usize = batch[sent..sent + n].iter().map(Vec::len).sum();
                 session.bytes.fetch_add(bytes as u64, Ordering::Relaxed);

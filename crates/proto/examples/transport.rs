@@ -21,9 +21,32 @@ fn cpu() -> f64 {
             + (r.ru_utime.tv_usec + r.ru_stime.tv_usec) as f64 / 1e6
     }
 }
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn cpu() -> f64 {
-    0.0
+    use windows_sys::Win32::{
+        Foundation::FILETIME,
+        System::Threading::{GetCurrentProcess, GetProcessTimes},
+    };
+    // SAFETY: GetProcessTimes writes four live FILETIMEs for this process.
+    unsafe {
+        let mut times: [FILETIME; 4] = std::mem::zeroed();
+        if GetProcessTimes(
+            GetCurrentProcess(),
+            &mut times[0],
+            &mut times[1],
+            &mut times[2],
+            &mut times[3],
+        ) == 0
+        {
+            return f64::NAN;
+        }
+        times[2..]
+            .iter()
+            .map(|t| {
+                ((u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)) as f64 / 1e7
+            })
+            .sum()
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -123,6 +146,7 @@ fn main() -> io::Result<()> {
                 std::thread::sleep(Duration::from_micros(50));
             }
         }
+        eprintln!("coalesced_datagrams={}", batch.coalesced_datagrams);
         start = first.unwrap();
         eprintln!("reassembly {:?}", rx.stats());
     } else {
@@ -139,6 +163,7 @@ fn main() -> io::Result<()> {
             .map(|i| (i.wrapping_mul(131) >> 3) as u8)
             .collect();
         let mut tx = Packetizer::new(1);
+        let mut sender = transport::SendBatch::default();
         let frame = OutFrame {
             data: &data,
             keyframe: true,
@@ -149,7 +174,7 @@ fn main() -> io::Result<()> {
             tx.packetize_batches(&frame, |batch| {
                 let mut sent = 0;
                 while sent < batch.len() {
-                    match transport::send_batch(&udp, &batch[sent..], peer) {
+                    match sender.send(&udp, &batch[sent..], peer) {
                         Ok(n) => {
                             sent += n;
                             packets += n as u64;
@@ -170,6 +195,7 @@ fn main() -> io::Result<()> {
                 }
             }
         }
+        eprintln!("segmented_batches={}", sender.segmented_batches);
     }
     let elapsed = start.elapsed().as_secs_f64() - if receiving { 0.3 } else { 0.0 };
     let cpu_seconds = cpu() - cpu_start;
