@@ -6,6 +6,18 @@ use std::ffi::c_void;
 use std::ptr;
 
 pub type Ref = *const c_void;
+
+/// An opaque `CGColorRef`, typed only so that an Objective-C send carries
+/// the `^{CGColor=}` its method declares (debug builds check it).
+#[repr(C)]
+pub struct CGColor {
+    _private: [u8; 0],
+}
+// SAFETY: CGColor is an opaque CoreFoundation struct named CGColor.
+unsafe impl objc2::encode::RefEncode for CGColor {
+    const ENCODING_REF: objc2::encode::Encoding =
+        objc2::encode::Encoding::Pointer(&objc2::encode::Encoding::Struct("CGColor", &[]));
+}
 pub const NV12: u32 = u32::from_be_bytes(*b"420v");
 
 /// Owns one Create/Copy reference, including on an error path.
@@ -249,7 +261,7 @@ extern "C" {
     pub fn CGMainDisplayID() -> u32;
     pub fn CGDisplayBounds(display: u32) -> objc2_core_foundation::CGRect;
     pub static kCGColorBlack: Ref;
-    pub fn CGColorGetConstantColor(name: Ref) -> Ref;
+    pub fn CGColorGetConstantColor(name: Ref) -> *const CGColor;
 }
 #[link(name = "CoreMedia", kind = "framework")]
 extern "C" {
