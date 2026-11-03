@@ -21,6 +21,7 @@ use capture::{Capture, Converter};
 use encode::Encoder as MfEncoder;
 use runtime::Runtime;
 use std::{
+    collections::VecDeque,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -86,6 +87,11 @@ struct MfPipeline {
     pacer: Pacer,
     last_sent: Instant,
     last_capture: Instant,
+    /// AMF inputs whose output is still to come, oldest first: when each
+    /// was captured, and whether it was forced to be a keyframe.
+    ahead: VecDeque<(Instant, bool)>,
+    /// The display changed while a frame was ahead; reopen before the next.
+    moved: bool,
 }
 impl MfPipeline {
     fn info(&self) -> VideoInfo {
@@ -114,12 +120,33 @@ impl MfPipeline {
                 encode::nv12_sample(surface, stride, width, height)
             })?
     }
+    /// A new converter, encoder and samples for the display's new device or size.
+    fn reopen(&mut self) -> Result<()> {
+        self.converter = Converter::new(
+            &self.capture.gpu,
+            (self.capture.display.width, self.capture.display.height),
+            (self.config.width, self.config.height),
+            self.config.fps,
+        )?;
+        self.samples = vec![None; capture::RING];
+        self.ahead.clear();
+        self.encoder = VideoEncoder::new(&self.config, &self.capture.gpu)
+            .context("reopen encoder after display change")?;
+        Ok(())
+    }
     fn next(&mut self, keyframe: bool, idle: Duration) -> Result<EncodedVideo> {
+        if !self.ahead.is_empty() {
+            return self.collect();
+        }
         // Frames go out on the pacer's grid, so the time spent capturing,
         // converting and encoding one comes out of its interval.
         self.pacer.wait();
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut force = keyframe;
+        if std::mem::take(&mut self.moved) {
+            self.reopen()?;
+            force = true;
+        }
         let mut buffered = false;
         loop {
             let timeout = if self.capture.has_frame && (force || buffered) {
@@ -137,15 +164,7 @@ impl MfPipeline {
             if device != self.capture.gpu.device.as_raw()
                 || size != (self.capture.display.width, self.capture.display.height)
             {
-                self.converter = Converter::new(
-                    &self.capture.gpu,
-                    (self.capture.display.width, self.capture.display.height),
-                    (self.config.width, self.config.height),
-                    self.config.fps,
-                )?;
-                self.samples = vec![None; capture::RING];
-                self.encoder = VideoEncoder::new(&self.config, &self.capture.gpu)
-                    .context("reopen encoder after display change")?;
+                self.reopen()?;
                 force = true;
             }
             if changed {
@@ -163,17 +182,16 @@ impl MfPipeline {
                     self.pacer.taken(Instant::now());
                 }
                 let picture = self.converter.convert(&self.capture.frame)?;
-                let encoded = match &mut self.encoder {
-                    VideoEncoder::Amf(encoder) => Some(encoder.encode(&picture.texture, force)?),
-                    VideoEncoder::Mf(_) => {
-                        let sample = self.sample(&picture)?;
-                        let VideoEncoder::Mf(encoder) = &mut self.encoder else {
-                            unreachable!()
-                        };
-                        encoder.encode(&sample, force)?
-                    }
+                if let VideoEncoder::Amf(encoder) = &mut self.encoder {
+                    encoder.submit(&picture.texture, force)?;
+                    self.ahead.push_back((self.last_capture, force));
+                    return self.collect();
+                }
+                let sample = self.sample(&picture)?;
+                let VideoEncoder::Mf(encoder) = &mut self.encoder else {
+                    unreachable!("AMF returned above")
                 };
-                if let Some((data, idr)) = encoded {
+                if let Some((data, idr)) = encoder.encode(&sample, force)? {
                     if force && !idr {
                         bail!("Media Foundation encoder did not honour force-IDR");
                     }
@@ -198,6 +216,64 @@ impl MfPipeline {
         }
     }
 }
+impl MfPipeline {
+    /// The oldest AMF frame's access unit. While the encoder works on it,
+    /// the next picture is captured and handed over as soon as the grid
+    /// says it is due, so a stream faster than one-at-a-time encoding keeps
+    /// the encoder busy and runs at what the GPU can do. A stream the
+    /// encoder keeps up with never has a picture due before its output,
+    /// so nothing waits behind anything.
+    fn collect(&mut self) -> Result<EncodedVideo> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let VideoEncoder::Amf(encoder) = &mut self.encoder else {
+                bail!("frames ahead without an AMF encoder");
+            };
+            // Waits up to the encoder's 1 ms query timeout.
+            if let Some((data, idr)) = encoder.receive(Duration::ZERO)? {
+                let (captured, forced) =
+                    self.ahead.pop_front().context("AMF output without input")?;
+                if forced && !idr {
+                    bail!("AMF encoder did not honour force-IDR");
+                }
+                self.last_sent = Instant::now();
+                return Ok(EncodedVideo {
+                    data,
+                    keyframe: idr,
+                    captured,
+                });
+            }
+            if self.ahead.len() < AHEAD
+                && !self.moved
+                && self.pacer.due().is_some_and(|due| due <= Instant::now())
+            {
+                let device = self.capture.gpu.device.as_raw();
+                let size = (self.capture.display.width, self.capture.display.height);
+                // Only a new picture goes ahead; repeats wait their turn.
+                if self.capture.grab(Duration::ZERO)? {
+                    if device != self.capture.gpu.device.as_raw()
+                        || size != (self.capture.display.width, self.capture.display.height)
+                    {
+                        self.moved = true;
+                    } else {
+                        self.pacer.taken(Instant::now());
+                        self.last_capture = self.capture.captured;
+                        let picture = self.converter.convert(&self.capture.frame)?;
+                        encoder.submit(&picture.texture, false)?;
+                        self.ahead.push_back((self.last_capture, false));
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                bail!("AMF output timed out");
+            }
+        }
+    }
+}
+/// AMF inputs in flight at most: the encoder's input queue, and fewer than
+/// the converter's ring so no slot is rewritten while it is read.
+const AHEAD: usize = 2;
+const _: () = assert!(AHEAD < capture::RING);
 enum Pipeline {
     Mf(Box<MfPipeline>),
     Software(Box<SoftwarePipeline<Capture>>),
@@ -228,6 +304,8 @@ impl Pipeline {
                         pacer: Pacer::new(config.fps),
                         last_sent: Instant::now() - Duration::from_secs(1),
                         last_capture: Instant::now(),
+                        ahead: VecDeque::new(),
+                        moved: false,
                     })))
                 }
                 Err(e) if matches!(config.codec, Codec::Hevc | Codec::Av1) => {
@@ -265,6 +343,7 @@ impl Pipeline {
                         return Err(error);
                     }
                     tracing::warn!("AMF pipeline failed; reopening Media Foundation: {error:#}");
+                    p.ahead.clear();
                     p.encoder =
                         VideoEncoder::Mf(Box::new(MfEncoder::new(&p.config, &p.capture.gpu)?));
                     p.next(true, idle)
