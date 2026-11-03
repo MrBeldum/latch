@@ -399,9 +399,30 @@ pub trait Decoder: Send {
     fn name(&self) -> &'static str;
 }
 
-/// What this machine decodes, best first, gated by platform hardware probes.
-/// Baseline always remains available through `latch-codec`.
+/// Codecs whose decoder failed on a stream since this process started:
+/// they are not offered again until it restarts.
+static FAILED: Mutex<Vec<Codec>> = Mutex::new(Vec::new());
+
+/// Stop offering `codec`: its decoder failed on a stream. Baseline stays,
+/// since `latch-codec` decodes it whatever the platform's decoder does.
+pub fn decoder_failed(codec: Codec) {
+    let mut failed = FAILED.lock();
+    if codec != Codec::H264Baseline && !failed.contains(&codec) {
+        failed.push(codec);
+    }
+}
+
+/// What this machine decodes, best first, gated by platform hardware probes
+/// and by decoders that failed on a stream. Baseline always remains
+/// available through `latch-codec`.
 pub fn decodable() -> Vec<Codec> {
+    let failed = FAILED.lock().clone();
+    let mut codecs = probed();
+    codecs.retain(|c| !failed.contains(c));
+    codecs
+}
+
+fn probed() -> Vec<Codec> {
     #[cfg(target_os = "macos")]
     {
         [
@@ -438,7 +459,19 @@ pub fn new_decoder(codec: Codec) -> Result<Box<dyn Decoder>> {
 }
 
 /// Negotiated dimensions are hints for MFTs that need them before parsing SPS/OBUs.
-pub fn new_decoder_for_stream(codec: Codec, _width: u32, _height: u32) -> Result<Box<dyn Decoder>> {
+pub fn new_decoder_for_stream(codec: Codec, width: u32, height: u32) -> Result<Box<dyn Decoder>> {
+    let decoder = platform_decoder_for_stream(codec, width, height)?;
+    Ok(match Broken::wanted(codec) {
+        Some(silent) => Box::new(Broken { decoder, silent }),
+        None => decoder,
+    })
+}
+
+fn platform_decoder_for_stream(
+    codec: Codec,
+    _width: u32,
+    _height: u32,
+) -> Result<Box<dyn Decoder>> {
     #[cfg(windows)]
     match mediafoundation::MfDecoder::with_size(codec, _width, _height) {
         Ok(d) if codec == Codec::H264Baseline => {
@@ -573,6 +606,47 @@ impl Decoder for Fallback {
             Some(platform) => platform.name(),
             None => "Latch H.264 (software)",
         }
+    }
+}
+
+/// A decoder broken on purpose, to test what a session does when a
+/// hardware decoder fails: `LATCH_TEST_BREAK_DECODER` names the codecs
+/// (`av1,hevc,h264-high`, or `all` for every one but Baseline), each
+/// failing every access unit, or giving no picture with `=silent`
+/// (`hevc=silent`).
+struct Broken {
+    decoder: Box<dyn Decoder>,
+    silent: bool,
+}
+
+impl Broken {
+    /// Whether to break `codec`'s decoder, and whether silently.
+    fn wanted(codec: Codec) -> Option<bool> {
+        if codec == Codec::H264Baseline {
+            return None;
+        }
+        let spec = std::env::var("LATCH_TEST_BREAK_DECODER").ok()?;
+        spec.split(',').find_map(|entry| {
+            let (name, mode) = entry.trim().split_once('=').unwrap_or((entry.trim(), ""));
+            let named = name == "all"
+                || serde_json::from_value::<Codec>(serde_json::Value::String(name.into()))
+                    .is_ok_and(|c| c == codec);
+            named.then_some(mode == "silent")
+        })
+    }
+}
+
+impl Decoder for Broken {
+    fn decode(&mut self, annexb: &[u8], idr: bool, spare: Option<Frame>) -> Result<Option<Frame>> {
+        // The real decoder still runs, so the test costs what a failing
+        // one would.
+        let _ = self.decoder.decode(annexb, idr, spare);
+        anyhow::ensure!(self.silent, "broken by LATCH_TEST_BREAK_DECODER");
+        Ok(None)
+    }
+
+    fn name(&self) -> &'static str {
+        self.decoder.name()
     }
 }
 
