@@ -1,6 +1,7 @@
 //! Gamepads on Windows, through Windows.Gaming.Input, read every
 //! millisecond on one thread: Xbox pads (and anything else Windows maps to
-//! one) as `Gamepad`s, with both motors and both trigger motors; every
+//! one, a DualShock 4 among them) as `Gamepad`s, with both motors and both
+//! trigger motors; every
 //! other pad as a `RawGameController`, laid out as a DualShock 4 or
 //! DualSense reports itself when it is a Sony pad, and by position
 //! otherwise. Windows passes pads' input only to the app in front.
@@ -10,6 +11,9 @@ use latch_proto::gamepad::button;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Sony's USB vendor id.
+const SONY: u16 = 0x054c;
 use std::time::{Duration, Instant};
 use windows::Gaming::Input::{
     GameControllerSwitchPosition, Gamepad, GamepadButtons, GamepadVibration, RawGameController,
@@ -115,11 +119,20 @@ fn rescan(shared: &Shared, gamepads: &Mutex<HashMap<u8, Gamepad>>, pads: &mut Ve
             .DisplayName()
             .map_or_else(|_| "gamepad".into(), |n| n.to_string());
         let vendor = raw.HardwareVendorId().unwrap_or(0);
+        let sony = vendor == SONY;
         let (kind, reader) = match Gamepad::FromGameController(&raw) {
-            Ok(gamepad) => (PadKind::Xbox, Reader::Gamepad(gamepad)),
+            // Windows maps a DualShock 4 to a `Gamepad` too; it is still
+            // a PlayStation pad to the host.
+            Ok(gamepad) => (
+                if sony {
+                    PadKind::PlayStation
+                } else {
+                    PadKind::Xbox
+                },
+                Reader::Gamepad(gamepad),
+            ),
             Err(_) => {
                 let count = |n: windows::core::Result<i32>| n.unwrap_or(0).max(0) as usize;
-                let sony = vendor == 0x054c;
                 (
                     if sony {
                         PadKind::PlayStation
