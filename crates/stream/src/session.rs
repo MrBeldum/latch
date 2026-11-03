@@ -957,7 +957,7 @@ fn receive(
             link.flush(now);
         }
         #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-        match batch.receive(&udp, |bytes, from| {
+        match receive_ready(&ready_socket, &mut batch, &udp, |bytes, from| {
             if from.ip() == host.ip() {
                 if let Ok(datagram) = wire::parse(bytes) {
                     if datagram.session() == session {
@@ -1307,9 +1307,72 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn receive_ready(
+    ready: &mio::net::UdpSocket,
+    batch: &mut latch_proto::transport::ReceiveBatch,
+    udp: &UdpSocket,
+    handle: impl FnMut(&[u8], SocketAddr),
+) -> std::io::Result<usize> {
+    // Mio must see WouldBlock even when I/O uses the standard-socket clone:
+    // on Windows this rearms the interests disabled by the readable event.
+    ready.try_io(|| batch.receive(udp, handle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn batch_receive_rearms_after_a_drained_burst() {
+        for offload in [false, true] {
+            let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+            udp.set_nonblocking(true).unwrap();
+            let mut ready = mio::net::UdpSocket::from_std(udp.try_clone().unwrap());
+            let mut poll = mio::Poll::new().unwrap();
+            poll.registry()
+                .register(&mut ready, mio::Token(0), mio::Interest::READABLE)
+                .unwrap();
+            let mut events = mio::Events::with_capacity(4);
+            let mut batch = latch_proto::transport::ReceiveBatch::with_offload(offload);
+            let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let addr = udp.local_addr().unwrap();
+            for burst in 0..4 {
+                let sender = tx.try_clone().unwrap();
+                let child = std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(10));
+                    for _ in 0..8 {
+                        sender.send_to(&[burst], addr).unwrap();
+                    }
+                });
+                let start = Instant::now();
+                poll.poll(&mut events, Some(Duration::from_secs(1)))
+                    .unwrap();
+                assert!(
+                    events.iter().any(|event| event.is_readable()),
+                    "missed burst {burst}, offload={offload}"
+                );
+                assert!(
+                    start.elapsed() < Duration::from_millis(200),
+                    "timer-driven receive"
+                );
+                child.join().unwrap();
+                let mut count = 0;
+                loop {
+                    match receive_ready(&ready, &mut batch, &udp, |bytes, _| {
+                        assert_eq!(bytes, &[burst]);
+                        count += 1;
+                    }) {
+                        Ok(_) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(e) => panic!("{e}"),
+                    }
+                }
+                assert_eq!(count, 8);
+            }
+        }
+    }
 
     #[test]
     fn video_health_distinguishes_missing_black_frozen_and_recovered_video() {
