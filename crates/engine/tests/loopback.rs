@@ -90,6 +90,7 @@ fn connect(port: u16, cursor: bool) -> (Session, Arc<FrameSlot>, mpsc::Receiver<
             audio: false,
             name: "loopback test".into(),
             cursor,
+            mic: false,
         },
         frames.clone(),
         tx,

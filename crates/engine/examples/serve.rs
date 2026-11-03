@@ -5,6 +5,8 @@
 //!     serve [--bind 100.x.y.z] [--port 47860] [--telemetry]
 //!
 //! `LATCH_TEST_PATTERN=still|sweep|noise` streams the synthetic desktop.
+//! A viewer's microphone plays into `LATCH_MIC_DEVICE` (or the first
+//! virtual cable) on Windows and macOS, as the host does.
 
 use latch_core::http::{self, Response};
 use latch_engine::server::{Options, Server};
@@ -37,6 +39,7 @@ fn main() -> anyhow::Result<()> {
         Options {
             prepare: None,
             log: Box::new(|line| eprintln!("{line}")),
+            mic: mic_opener(),
         },
     )?;
     eprintln!("serving on {bind}:{port} (TCP and UDP)");
@@ -84,4 +87,23 @@ fn main() -> anyhow::Result<()> {
         },
     );
     Ok(())
+}
+
+fn mic_opener() -> Option<latch_engine::mic::MicOpener> {
+    if cfg!(target_os = "linux") {
+        return None;
+    }
+    Some(Box::new(|format| {
+        let device = std::env::var("LATCH_MIC_DEVICE")
+            .ok()
+            .or_else(latch_stream::audio::virtual_mic_output)
+            .ok_or_else(|| anyhow::anyhow!("no virtual cable to play it into"))?;
+        let (describe, push) = latch_stream::audio::mic_sink(
+            format.rate,
+            format.channels as usize,
+            format.frame_samples as usize,
+            &device,
+        )?;
+        Ok(latch_engine::mic::MicOut { describe, push })
+    }))
 }

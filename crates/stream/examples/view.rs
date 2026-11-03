@@ -133,6 +133,7 @@ fn main() -> anyhow::Result<()> {
             audio: flag("--audio"),
             name: "view example".into(),
             cursor: false,
+            mic: flag("--mic"),
         },
         frames.clone(),
         tx,
@@ -264,6 +265,9 @@ fn main() -> anyhow::Result<()> {
                 "        audio: queued {:.1} ms, device {:.1} ms, jitter {:.1} ms, {} underruns; {} clicks at {mean:.1} ms",
                 a.queued_ms, a.device_ms, a.jitter_ms, a.underruns, probe.len()
             );
+        }
+        if !s.mic.is_empty() {
+            eprintln!("        {}", s.mic);
         }
         clicks.extend(probe.iter().map(|&ms| f64::from(ms)));
         eprintln!(

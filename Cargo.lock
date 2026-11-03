@@ -2072,6 +2072,7 @@ dependencies = [
  "latch-core",
  "latch-engine",
  "latch-proto",
+ "latch-stream",
  "latch-ui",
  "parking_lot",
  "rand",

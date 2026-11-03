@@ -56,6 +56,7 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         transport: TransportState::new(1000),
         keyframe_request: Mutex::new(None),
         audio_enabled: false,
+        mic: Mutex::new(None),
         cursor_supported: false,
         draw_cursor: AtomicBool::new(true),
         control_writer: Mutex::new(None),
@@ -132,6 +133,8 @@ fn a_viewer_that_does_not_read_cannot_block_the_control_writer() {
         encoder: "x".repeat(60_000),
         audio: None,
         audio_problem: String::new(),
+        mic: None,
+        mic_problem: String::new(),
     };
     let (tx, rx) = mpsc::channel();
     let worker = std::thread::spawn(move || {
@@ -400,6 +403,8 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
             codec: "lpcm-rice".into(),
         }),
         audio_problem: String::new(),
+        mic: None,
+        mic_problem: String::new(),
     };
     let worker = {
         let server = server.clone();

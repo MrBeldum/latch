@@ -149,6 +149,34 @@ impl Player {
         samples_per_frame: usize,
         gain: Arc<AtomicU32>,
     ) -> Result<Self> {
+        Self::open(sample_rate, channels, samples_per_frame, gain, None)
+    }
+
+    /// A player on the output device whose name contains `device` (case
+    /// ignored) instead of the default one: a host playing a viewer's
+    /// microphone into a virtual cable.
+    pub fn on_device(
+        sample_rate: u32,
+        channels: usize,
+        samples_per_frame: usize,
+        device: &str,
+    ) -> Result<Self> {
+        Self::open(
+            sample_rate,
+            channels,
+            samples_per_frame,
+            Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            Some(device.to_lowercase()),
+        )
+    }
+
+    fn open(
+        sample_rate: u32,
+        channels: usize,
+        samples_per_frame: usize,
+        gain: Arc<AtomicU32>,
+        device: Option<String>,
+    ) -> Result<Self> {
         if channels == 0 || channels > MAX_CHANNELS {
             bail!("audio with {channels} channels is not something Latch plays");
         }
@@ -172,6 +200,7 @@ impl Player {
                 pulled: pulled.clone(),
                 gain: gain.clone(),
                 link: link.clone(),
+                device,
             },
             stopped,
         );
@@ -414,6 +443,49 @@ struct Shared {
     pulled: Arc<AtomicU64>,
     gain: Arc<AtomicU32>,
     link: Arc<Link>,
+    /// Lowercase part of the output device's name; the default when none.
+    device: Option<String>,
+}
+
+/// Output devices that are a virtual cable's playing end, best first:
+/// what is played into them, programs record as a microphone.
+const VIRTUAL_CABLES: [&str; 5] = [
+    "cable input",
+    "voicemeeter input",
+    "blackhole",
+    "loopback audio",
+    "virtual",
+];
+
+/// The first output device that is a virtual cable, by name.
+pub fn virtual_mic_output() -> Option<String> {
+    let names: Vec<String> = cpal::default_host()
+        .output_devices()
+        .ok()?
+        .map(|d| d.to_string())
+        .collect();
+    VIRTUAL_CABLES.iter().find_map(|cable| {
+        names
+            .iter()
+            .find(|n| n.to_lowercase().contains(cable))
+            .cloned()
+    })
+}
+
+/// A host's player for a viewer's microphone on the output `device`: where
+/// it plays, and what takes its coded frames (empty for a lost one).
+#[allow(clippy::type_complexity)]
+pub fn mic_sink(
+    rate: u32,
+    channels: usize,
+    samples_per_frame: usize,
+    device: &str,
+) -> Result<(String, Box<dyn FnMut(&[u8]) + Send>)> {
+    let mut player = Player::on_device(rate, channels, samples_per_frame, device)?;
+    Ok((
+        device.to_string(),
+        Box::new(move |frame| player.push(frame)),
+    ))
 }
 
 /// The channel count to ask a host for: the default output device's 5.1 or
@@ -448,7 +520,7 @@ fn output_thread(source_rate: u32, source_channels: u16, shared: Shared, stop: m
 /// Holds what `open` returns until `stop` disconnects (the player was
 /// dropped). Opens again at once when `rebuild` is raised, and `retry`
 /// after `open` failed.
-fn keep_open<S>(
+pub(crate) fn keep_open<S>(
     stop: &mpsc::Receiver<()>,
     rebuild: &AtomicBool,
     retry: Duration,
@@ -523,8 +595,18 @@ fn open_output(
         }
         *state = Output::Failed(why);
     };
-    let Some(device) = cpal::default_host().default_output_device() else {
-        fail("this Mac has no audio output device".into());
+    let device = match &shared.device {
+        None => cpal::default_host().default_output_device(),
+        Some(part) => cpal::default_host()
+            .output_devices()
+            .ok()
+            .and_then(|mut all| all.find(|d| d.to_string().to_lowercase().contains(part))),
+    };
+    let Some(device) = device else {
+        fail(match &shared.device {
+            None => "this machine has no audio output device".into(),
+            Some(part) => format!("no output device is named like {part:?}"),
+        });
         return None;
     };
     let name = {

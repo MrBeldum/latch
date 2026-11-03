@@ -981,6 +981,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             audio: true,
             name: latch_core::config::machine_name(),
             cursor: true,
+            mic: settings.mic,
         },
         frames.clone(),
         tx,

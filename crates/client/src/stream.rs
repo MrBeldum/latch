@@ -2571,6 +2571,7 @@ pub(crate) mod tests {
                 audio: true,
                 name: "UI test".into(),
                 cursor: true,
+                mic: false,
             },
             frames.clone(),
             tx,

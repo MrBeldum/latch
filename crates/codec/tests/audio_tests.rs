@@ -212,7 +212,7 @@ fn surround_signal(kind: usize, channels: usize, n: usize, state: &mut u64) -> V
                 // Every channel the same: pairs decorrelate to silence.
                 2 => ((t * 0.07).sin() * 20_000.0) as i16,
                 3 => {
-                    if (i / channels + c) % 2 == 0 {
+                    if (i / channels + c).is_multiple_of(2) {
                         i16::MIN
                     } else {
                         i16::MAX
@@ -227,7 +227,7 @@ fn surround_signal(kind: usize, channels: usize, n: usize, state: &mut u64) -> V
 
 #[test]
 fn every_channel_count_round_trips_bit_exact_within_its_bound() {
-    let mut state = 0x5eed_0f_5ca1ab1eu64;
+    let mut state = 0x005e_ed0f_5ca1_ab1e_u64;
     for channels in 1..=MAX_CHANNELS {
         for n in [0, 1, 2, 3, 17, 60, 96, 120, 240, 480, MAX_SAMPLES] {
             for kind in 0..6 {

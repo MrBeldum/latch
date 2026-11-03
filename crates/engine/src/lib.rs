@@ -12,6 +12,7 @@ mod bitstream;
 mod congestion;
 pub mod display;
 pub mod input;
+pub mod mic;
 mod pacing;
 pub mod pattern;
 pub mod priority;

@@ -144,6 +144,13 @@ pub fn stream_controls(ui: &mut egui::Ui, s: &mut StreamSettings, native: (u32, 
         },
     );
     ui::row_separator(ui);
+    ui::toggle_row(
+        ui,
+        &mut s.mic,
+        "Send my microphone",
+        Some("The PC hears it as a microphone: on Linux by itself, on Windows and macOS through a virtual cable (VB-CABLE, BlackHole) installed there."),
+    );
+    ui::row_separator(ui);
     let effective = crate::path::effective(s);
     let (w, h) = effective.resolution.pixels(native);
     ui.add_space(space::MD);

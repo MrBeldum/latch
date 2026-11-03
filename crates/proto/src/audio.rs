@@ -19,6 +19,7 @@ pub struct AudioPacketizer {
     session: u32,
     seq: u32,
     parity: Vec<u8>,
+    write: fn(&mut Vec<u8>, u32, &AudioPacket<'_>),
 }
 
 impl AudioPacketizer {
@@ -27,6 +28,15 @@ impl AudioPacketizer {
             session,
             seq: 0,
             parity: Vec::new(),
+            write: crate::wire::write_audio,
+        }
+    }
+
+    /// The same for the viewer's microphone (datagram kind 9).
+    pub fn mic(session: u32) -> Self {
+        Self {
+            write: crate::wire::write_mic,
+            ..Self::new(session)
         }
     }
 
@@ -40,7 +50,7 @@ impl AudioPacketizer {
         }
         let mut emit = emit;
         let mut buf = Vec::new();
-        crate::wire::write_audio(
+        (self.write)(
             &mut buf,
             self.session,
             &AudioPacket {
@@ -59,7 +69,7 @@ impl AudioPacketizer {
             *a ^= b;
         }
         if self.seq % GROUP == GROUP - 1 {
-            crate::wire::write_audio(
+            (self.write)(
                 &mut buf,
                 self.session,
                 &AudioPacket {

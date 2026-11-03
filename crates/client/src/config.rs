@@ -135,6 +135,9 @@ pub struct StreamSettings {
     pub custom_fps: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_bitrate_kbps: Option<u32>,
+    /// Send this machine's microphone to the host. Off until asked for.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mic: bool,
 }
 
 impl Default for StreamSettings {
@@ -149,6 +152,7 @@ impl Default for StreamSettings {
             custom_resolution: None,
             custom_fps: None,
             custom_bitrate_kbps: None,
+            mic: false,
         }
     }
 }

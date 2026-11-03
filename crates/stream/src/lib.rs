@@ -5,6 +5,7 @@
 
 pub mod audio;
 pub mod input;
+pub mod mic;
 #[path = "../../engine/src/priority.rs"]
 mod priority;
 pub mod session;

@@ -99,6 +99,11 @@ pub enum Datagram<'a> {
         session: u32,
         time: u64,
     },
+    /// The viewer's microphone: an [`AudioPacket`] going the other way.
+    Mic {
+        session: u32,
+        packet: AudioPacket<'a>,
+    },
 }
 
 impl Datagram<'_> {
@@ -111,7 +116,8 @@ impl Datagram<'_> {
             | Datagram::InputAck { session, .. }
             | Datagram::KeyframeRequest { session, .. }
             | Datagram::Ping { session, .. }
-            | Datagram::Pong { session, .. } => *session,
+            | Datagram::Pong { session, .. }
+            | Datagram::Mic { session, .. } => *session,
         }
     }
 }
@@ -198,18 +204,20 @@ pub fn parse(buf: &[u8]) -> Result<Datagram<'_>, WireError> {
                 },
             })
         }
-        3 => {
+        3 | 9 => {
             if buf.len() < 16 {
                 return Err(WireError::Length);
             }
-            Ok(Datagram::Audio {
-                session,
-                packet: AudioPacket {
-                    parity: flags != 0,
-                    seq: u32at(8),
-                    pts: u32at(12),
-                    payload: &buf[16..],
-                },
+            let packet = AudioPacket {
+                parity: flags != 0,
+                seq: u32at(8),
+                pts: u32at(12),
+                payload: &buf[16..],
+            };
+            Ok(if kind == 3 {
+                Datagram::Audio { session, packet }
+            } else {
+                Datagram::Mic { session, packet }
             })
         }
         4 => {
@@ -315,7 +323,15 @@ pub fn write_video(out: &mut Vec<u8>, session: u32, shard: &VideoShard<'_>) {
 }
 
 pub fn write_audio(out: &mut Vec<u8>, session: u32, p: &AudioPacket<'_>) {
-    header(out, 3, p.parity as u8, 0, session);
+    write_audio_kind(out, 3, session, p);
+}
+
+pub fn write_mic(out: &mut Vec<u8>, session: u32, p: &AudioPacket<'_>) {
+    write_audio_kind(out, 9, session, p);
+}
+
+fn write_audio_kind(out: &mut Vec<u8>, kind: u8, session: u32, p: &AudioPacket<'_>) {
+    header(out, kind, p.parity as u8, 0, session);
     out.extend(p.seq.to_le_bytes());
     out.extend(p.pts.to_le_bytes());
     out.extend(p.payload);

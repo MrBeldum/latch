@@ -10,7 +10,7 @@
 use crate::audio::{self, AudioCapture};
 use crate::input::{self, DisplayRect, InputSink};
 use crate::video::{self, Codec, VideoConfig, VideoInfo, VideoPipeline};
-use latch_proto::audio::AudioPacketizer;
+use latch_proto::audio::{AudioOut, AudioPacketizer, AudioReceiver};
 use latch_proto::control::{self, end, Accept, AudioFormat, End, Message, Notice, StreamRequest};
 use latch_proto::input::InputReceiver;
 use latch_proto::rtt::RttEstimator;
@@ -65,6 +65,9 @@ pub struct Options {
     pub prepare: Option<Prepare>,
     /// Lines for the owner's log (the host window shows them).
     pub log: Box<dyn Fn(String) + Send + Sync>,
+    /// Plays a viewer's microphone where the engine has no player of its
+    /// own (Windows, macOS). See [`crate::mic`].
+    pub mic: Option<crate::mic::MicOpener>,
 }
 
 impl Default for Options {
@@ -72,6 +75,7 @@ impl Default for Options {
         Self {
             prepare: None,
             log: Box::new(|line| tracing::info!("{line}")),
+            mic: None,
         }
     }
 }
@@ -237,6 +241,8 @@ impl Server {
             pipeline: None,
             audio: None,
             audio_problem: String::new(),
+            mic: None,
+            mic_problem: String::new(),
             input: None,
             input_problem: None,
             info: None,
@@ -261,6 +267,12 @@ impl Server {
             match audio::open_with(audio::Layout::UpTo(channels)) {
                 Ok(capture) => prepared.audio = Some(capture),
                 Err(e) => prepared.audio_problem = format!("{e:#}"),
+            }
+        }
+        if prepared.req.mic {
+            match crate::mic::open(self.options.mic.as_ref()) {
+                Ok(mic) => prepared.mic = Some(mic),
+                Err(e) => prepared.mic_problem = format!("{e:#}"),
             }
         }
         match input::open() {
@@ -311,6 +323,13 @@ impl Server {
             transport: TransportState::new(config.bitrate_kbps),
             keyframe_request: Mutex::new(None),
             audio_enabled: prepared.audio.is_some(),
+            mic: Mutex::new(prepared.mic.take().map(|out| {
+                let format = crate::mic::format();
+                (
+                    AudioReceiver::with_format(id, format.frame_samples, format.rate),
+                    out,
+                )
+            })),
             cursor_supported,
             draw_cursor: AtomicBool::new(!cursor_supported),
             control_writer: Mutex::new(None),
@@ -353,9 +372,11 @@ impl Server {
             }),
             audio_problem: prepared.audio_problem.clone(),
             cursor: cursor_supported,
+            mic: session.mic.lock().as_ref().map(|_| crate::mic::format()),
+            mic_problem: prepared.mic_problem.clone(),
         };
         self.log(format!(
-            "{} is watching: {}×{} at {} fps, {} kb/s, {}{}",
+            "{} is watching: {}×{} at {} fps, {} kb/s, {}{}{}",
             session.viewer,
             info.width,
             info.height,
@@ -368,6 +389,12 @@ impl Server {
                 format!("; no sound ({})", prepared.audio_problem)
             } else {
                 String::new()
+            },
+            match session.mic.lock().as_ref() {
+                Some((_, out)) => format!("; their microphone → {}", out.describe),
+                None if prepared.req.mic =>
+                    format!("; not their microphone ({})", prepared.mic_problem),
+                None => String::new(),
             }
         ));
         let started = Instant::now();
@@ -653,6 +680,8 @@ pub struct Prepared {
     pipeline: Option<(Box<dyn VideoPipeline>, VideoConfig)>,
     audio: Option<Box<dyn AudioCapture>>,
     audio_problem: String,
+    mic: Option<crate::mic::MicOut>,
+    mic_problem: String,
     input: Option<Box<dyn InputSink>>,
     input_problem: Option<String>,
     info: Option<VideoInfo>,
@@ -718,6 +747,8 @@ struct Session {
     transport: TransportState,
     keyframe_request: Mutex<Option<(u32, Instant)>>,
     audio_enabled: bool,
+    /// The viewer's microphone: its packets put in order, and where they play.
+    mic: Mutex<Option<(AudioReceiver, crate::mic::MicOut)>>,
     cursor_supported: bool,
     draw_cursor: AtomicBool,
     control_writer: Mutex<Option<TcpStream>>,
@@ -812,7 +843,12 @@ fn receive(server: Weak<Server>) {
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                continue
+                // A lost microphone packet at the end of speech is given
+                // up on by time.
+                if let Some(session) = server.current.lock().clone() {
+                    play_mic(&session, None);
+                }
+                continue;
             }
             // A reset from an earlier datagram to a closed port (Windows
             // reports those on the next receive).
@@ -888,6 +924,7 @@ fn receive(server: Weak<Server>) {
                 wire::write_pong(&mut out, session.id, time);
                 let _ = server.udp.send_to(&out, from);
             }
+            Datagram::Mic { packet, .. } => play_mic(&session, Some(&packet)),
             Datagram::Pong { time, .. } => {
                 let rtt = Duration::from_micros(server.now_us().saturating_sub(time));
                 session.rtt.lock().sample(rtt);
@@ -895,6 +932,24 @@ fn receive(server: Weak<Server>) {
                 *low = Some(low.map_or(rtt, |low| low.min(rtt)));
             }
             _ => {}
+        }
+    }
+}
+
+/// Puts a microphone packet in order and plays what is ready.
+fn play_mic(session: &Session, packet: Option<&latch_proto::wire::AudioPacket<'_>>) {
+    let mut mic = session.mic.lock();
+    let Some((receiver, out)) = mic.as_mut() else {
+        return;
+    };
+    let now = Instant::now();
+    if let Some(packet) = packet {
+        receiver.push(packet, now);
+    }
+    while let Some(frame) = receiver.pop(now) {
+        match frame {
+            AudioOut::Frame { payload, .. } => (out.push)(&payload),
+            AudioOut::Missing { .. } => (out.push)(&[]),
         }
     }
 }

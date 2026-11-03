@@ -5,6 +5,7 @@ mod audio;
 mod capture;
 mod display;
 mod input;
+mod mic;
 
 use crate::audio::AudioCapture;
 use crate::input::InputSink;
@@ -29,6 +30,9 @@ pub fn open_video(config: &VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>
 }
 pub fn open_audio(layout: crate::audio::Layout) -> anyhow::Result<Box<dyn AudioCapture>> {
     Ok(Box::new(audio::PulseCapture::new(layout)?))
+}
+pub fn open_mic(format: &latch_proto::control::AudioFormat) -> anyhow::Result<crate::mic::MicOut> {
+    mic::open(format)
 }
 pub fn open_input() -> anyhow::Result<Box<dyn InputSink>> {
     Ok(Box::new(input::X11Input::new()?))
