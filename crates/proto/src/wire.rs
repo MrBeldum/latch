@@ -1,6 +1,7 @@
 //! UDP datagram parse and write functions, strict checks per protocol.
 //! See `docs/PROTOCOL.md`, "UDP datagram format".
 
+use crate::gamepad::{Ack, FeedbackUpdate, PadUpdate, ACK_LEN, FEEDBACK_LEN};
 use crate::input::Event;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +66,56 @@ impl<'a> InputEvents<'a> {
     }
 }
 
+/// The snapshots of a `Pad` datagram, checked when it was parsed.
+pub struct PadUpdates<'a> {
+    slice: &'a [u8],
+    count: usize,
+}
+
+impl<'a> PadUpdates<'a> {
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = PadUpdate> + 'a {
+        let mut rest = self.slice;
+        std::iter::from_fn(move || {
+            let (update, len) = PadUpdate::read(rest)?;
+            rest = &rest[len..];
+            Some(update)
+        })
+    }
+}
+
+/// The fixed-size entries of a `PadAck`, `PadFeedback` or `PadFeedbackAck`.
+pub struct Entries<'a, T> {
+    slice: &'a [u8],
+    len: usize,
+    read: fn(&[u8]) -> T,
+}
+
+impl<'a, T: 'a> Entries<'a, T> {
+    pub fn count(&self) -> usize {
+        self.slice.len() / self.len
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = T> + 'a {
+        let read = self.read;
+        self.slice.chunks_exact(self.len).map(read)
+    }
+}
+
+fn read_ack(b: &[u8]) -> Ack {
+    Ack {
+        slot: b[0],
+        seq: u32::from_le_bytes([b[1], b[2], b[3], b[4]]),
+    }
+}
+
+fn read_feedback(b: &[u8]) -> FeedbackUpdate {
+    FeedbackUpdate::read(b).expect("checked when parsed")
+}
+
 pub enum Datagram<'a> {
     Hello {
         session: u32,
@@ -99,6 +150,22 @@ pub enum Datagram<'a> {
         session: u32,
         time: u64,
     },
+    Pad {
+        session: u32,
+        updates: PadUpdates<'a>,
+    },
+    PadAck {
+        session: u32,
+        acks: Entries<'a, Ack>,
+    },
+    PadFeedback {
+        session: u32,
+        updates: Entries<'a, FeedbackUpdate>,
+    },
+    PadFeedbackAck {
+        session: u32,
+        acks: Entries<'a, Ack>,
+    },
 }
 
 impl Datagram<'_> {
@@ -111,7 +178,11 @@ impl Datagram<'_> {
             | Datagram::InputAck { session, .. }
             | Datagram::KeyframeRequest { session, .. }
             | Datagram::Ping { session, .. }
-            | Datagram::Pong { session, .. } => *session,
+            | Datagram::Pong { session, .. }
+            | Datagram::Pad { session, .. }
+            | Datagram::PadAck { session, .. }
+            | Datagram::PadFeedback { session, .. }
+            | Datagram::PadFeedbackAck { session, .. } => *session,
         }
     }
 }
@@ -274,8 +345,70 @@ pub fn parse(buf: &[u8]) -> Result<Datagram<'_>, WireError> {
                 time: u64at(8),
             })
         }
+        9 => {
+            let count = *buf.get(8).ok_or(WireError::Length)? as usize;
+            if count == 0 || count > crate::gamepad::MAX_PADS {
+                return Err(WireError::Field("count"));
+            }
+            let mut rest = &buf[9..];
+            for _ in 0..count {
+                let (_, len) = PadUpdate::read(rest).ok_or(WireError::Field("pad"))?;
+                rest = &rest[len..];
+            }
+            if !rest.is_empty() {
+                return Err(WireError::Length);
+            }
+            Ok(Datagram::Pad {
+                session,
+                updates: PadUpdates {
+                    slice: &buf[9..],
+                    count,
+                },
+            })
+        }
+        10 | 12 => {
+            let acks = entries(buf, ACK_LEN, read_ack)?;
+            if acks.iter().any(|a| a.slot as usize >= crate::gamepad::MAX_PADS) {
+                return Err(WireError::Field("slot"));
+            }
+            Ok(if kind == 10 {
+                Datagram::PadAck { session, acks }
+            } else {
+                Datagram::PadFeedbackAck { session, acks }
+            })
+        }
+        11 => {
+            let updates = entries(buf, FEEDBACK_LEN, read_feedback)?;
+            if buf[9..]
+                .chunks_exact(FEEDBACK_LEN)
+                .any(|c| FeedbackUpdate::read(c).is_none())
+            {
+                return Err(WireError::Field("feedback"));
+            }
+            Ok(Datagram::PadFeedback { session, updates })
+        }
         k => Err(WireError::UnknownKind(k)),
     }
+}
+
+/// `u8 count` at offset 8, then exactly `count` entries of `len` bytes.
+fn entries<'a, T>(
+    buf: &'a [u8],
+    len: usize,
+    read: fn(&[u8]) -> T,
+) -> Result<Entries<'a, T>, WireError> {
+    let count = *buf.get(8).ok_or(WireError::Length)? as usize;
+    if count == 0 || count > crate::gamepad::MAX_PADS {
+        return Err(WireError::Field("count"));
+    }
+    if buf.len() != 9 + count * len {
+        return Err(WireError::Length);
+    }
+    Ok(Entries {
+        slice: &buf[9..],
+        len,
+        read,
+    })
 }
 
 fn header(out: &mut Vec<u8>, kind: u8, flags: u8, aux: u16, session: u32) {
@@ -355,4 +488,42 @@ pub fn write_ping(out: &mut Vec<u8>, session: u32, time: u64) {
 pub fn write_pong(out: &mut Vec<u8>, session: u32, time: u64) {
     header(out, 8, 0, 0, session);
     out.extend(time.to_le_bytes());
+}
+
+/// At most [`crate::gamepad::MAX_PADS`] snapshots, one per slot, so they
+/// always fit.
+pub fn write_pad(out: &mut Vec<u8>, session: u32, updates: &[PadUpdate]) {
+    debug_assert!(!updates.is_empty() && updates.len() <= crate::gamepad::MAX_PADS);
+    header(out, 9, 0, 0, session);
+    out.push(updates.len() as u8);
+    for u in updates {
+        u.write(out);
+    }
+}
+
+fn write_acks(out: &mut Vec<u8>, kind: u8, session: u32, acks: &[Ack]) {
+    debug_assert!(!acks.is_empty() && acks.len() <= crate::gamepad::MAX_PADS);
+    header(out, kind, 0, 0, session);
+    out.push(acks.len() as u8);
+    for a in acks {
+        out.push(a.slot);
+        out.extend(a.seq.to_le_bytes());
+    }
+}
+
+pub fn write_pad_ack(out: &mut Vec<u8>, session: u32, acks: &[Ack]) {
+    write_acks(out, 10, session, acks);
+}
+
+pub fn write_pad_feedback(out: &mut Vec<u8>, session: u32, updates: &[FeedbackUpdate]) {
+    debug_assert!(!updates.is_empty() && updates.len() <= crate::gamepad::MAX_PADS);
+    header(out, 11, 0, 0, session);
+    out.push(updates.len() as u8);
+    for u in updates {
+        u.write(out);
+    }
+}
+
+pub fn write_pad_feedback_ack(out: &mut Vec<u8>, session: u32, acks: &[Ack]) {
+    write_acks(out, 12, session, acks);
 }

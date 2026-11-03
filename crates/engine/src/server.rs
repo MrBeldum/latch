@@ -348,6 +348,9 @@ impl Server {
             }),
             audio_problem: prepared.audio_problem.clone(),
             cursor: cursor_supported,
+            gamepads: 0,
+            gamepad_kinds: Vec::new(),
+            gamepad_problem: String::new(),
         };
         self.log(format!(
             "{} is watching: {}×{} at {} fps, {} kb/s, {}{}",

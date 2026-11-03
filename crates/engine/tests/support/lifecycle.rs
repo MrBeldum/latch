@@ -122,6 +122,9 @@ fn a_viewer_that_does_not_read_cannot_block_the_control_writer() {
     host.set_nonblocking(false).unwrap();
     let accept = Accept {
         cursor: false,
+        gamepads: 0,
+        gamepad_kinds: Vec::new(),
+        gamepad_problem: String::new(),
         session: session.id,
         token: control::token_hex(&session.token),
         codec: Codec::H264Baseline,
@@ -385,6 +388,9 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
     let (host, mut client) = sockets();
     let accept = Accept {
         cursor: false,
+        gamepads: 0,
+        gamepad_kinds: Vec::new(),
+        gamepad_problem: String::new(),
         session: session.id,
         token: control::token_hex(&session.token),
         codec: Codec::H264Baseline,

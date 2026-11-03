@@ -545,6 +545,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         audio: settings.audio,
         name: settings.name.clone(),
         cursor: settings.cursor,
+        gamepads: false,
     };
     let body = serde_json::to_vec(&request).unwrap_or_default();
     let host = SocketAddr::new(server.address, server.port);
