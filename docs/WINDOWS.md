@@ -190,8 +190,10 @@ on hardware encoders. Four cached NV12 textures and their views are reused.
 - **Latency and rate.** MF requests low-latency mode, CBR, no B-frames, the
   longest GOP (infinite where supported), and one frame of VBV bits. AMF
   uses ultra-low-latency usage, speed preset, CBR/HRD, no frame skipping,
-  infinite GOP, a one-frame VBV, and no pre-analysis/pre-encode. Only one
-  frame is outstanding. Driver refusals of optional settings are logged;
+  infinite GOP, a one-frame VBV, and no pre-analysis/pre-encode. At most two
+  AMF inputs are outstanding so capture/conversion can overlap encoding. A
+  recovery IDR drains the old outputs first; converter slots stay owned until
+  their output arrives. Driver refusals of optional settings are logged;
   VBV is a request, not a guarantee on keyframe size. Bitrate updates retain
   the same buffer duration. Windows no longer clamps requests to 240 fps
   or 500 Mbps; MF's u32 bits/sec representation and the encoder's own
