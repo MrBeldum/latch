@@ -77,6 +77,8 @@ fn found() -> &'static [(Codec, Backend)] {
             if !present {
                 continue;
             }
+            let mut first_error = None;
+            let before = found.len();
             for codec in [
                 Codec::Av1,
                 Codec::Hevc,
@@ -91,7 +93,17 @@ fn found() -> &'static [(Codec, Backend)] {
                         tracing::info!("{backend:?} encodes {codec:?}");
                         found.push((codec, backend));
                     }
-                    Err(e) => tracing::debug!("{backend:?} {codec:?}: {e:#}"),
+                    Err(e) => {
+                        tracing::debug!("{backend:?} {codec:?}: {e:#}");
+                        first_error.get_or_insert(e);
+                    }
+                }
+            }
+            // A driver that is installed but encodes nothing (no encoder, or
+            // a render node this user may not open) is worth one line.
+            if found.len() == before {
+                if let Some(e) = first_error {
+                    tracing::info!("{backend:?} encodes nothing here: {e:#}");
                 }
             }
         }
