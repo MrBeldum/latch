@@ -55,7 +55,7 @@ KeyframeRequest on loss ──────────────────�
 
 | Host | Capture | Encode |
 | --- | --- | --- |
-| macOS | ScreenCaptureKit, NV12 IOSurface at the stream size, cursor included | VideoToolbox (HEVC, H.264 High, or Constrained Baseline), real time, no frame reordering |
+| macOS | ScreenCaptureKit, NV12 IOSurface at the stream size and up to the display's refresh, cursor included | VideoToolbox (HEVC, H.264 High, or Constrained Baseline; HEVC Main10 from P010 plumbed), real time, no frame reordering, two frames in flight ([MACOS.md](MACOS.md#sharing-this-mac-the-video-pipeline)) |
 | Windows | DXGI Desktop Duplication, BGRA texture; cursor drawn in; Direct3D 11 video processor to NV12 at the stream size | AMF HEVC on AMD, or the GPU's Media Foundation HEVC/AV1/H.264 encoder (Microsoft's CPU encoder for H.264 if needed) ([WINDOWS.md](WINDOWS.md#the-video-pipeline)); `latch-codec` if neither works |
 | Linux (X11) | MIT-SHM `GetImage` through `x11rb`, cursor from XFixes | `latch-codec` software encoder, threads by slice |
 
@@ -149,7 +149,8 @@ captured ones, which lets tests check audio bit for bit. Opus is gone.
 * **Display sizing** stays where it was: a Linux desktop that follows its
   viewer is resized by the engine (`xrandr` semantics through RandR) or by
   the owner's prep command; Windows sets the virtual display's mode; macOS
-  captures the main display and lets ScreenCaptureKit scale it.
+  captures the main display (or `LATCH_MAC_DISPLAY`) and lets
+  ScreenCaptureKit scale it.
 
 ## Compatibility
 
