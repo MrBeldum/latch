@@ -422,7 +422,10 @@ mod tests {
     fn the_software_ceiling_is_measured() {
         let fps = measure_fps(320, 240, Duration::from_millis(200));
         assert!(fps > 0, "a small picture encodes at some rate");
-        assert!(fps <= latch_proto::control::MAX_FPS + 10, "{fps} fps");
+        // Paced at MAX_FPS on a grid 1% fast; a 200 ms sample on a fast
+        // machine lands a little above it (CI's x64 runners measured 511).
+        let max = latch_proto::control::MAX_FPS;
+        assert!(fps <= max + max / 10, "{fps} fps");
         assert_eq!(
             measure_fps(3, 3, Duration::from_millis(10)),
             0,
