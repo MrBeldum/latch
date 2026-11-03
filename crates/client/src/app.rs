@@ -52,7 +52,7 @@ enum ConfigEdit {
 }
 
 /// A PC's fixed desktop size and frame-rate ceiling, from its last status.
-type HostLimits = (Option<[u32; 2]>, u32);
+use session::HostLimits;
 
 /// A question about one machine, waiting for a second click. The machine
 /// is its node id: names are not unique on a tailnet.
@@ -328,6 +328,16 @@ impl ClientApp {
                 ))));
             }
         }
+    }
+
+    /// This display's refresh rate where asking costs nothing on the UI
+    /// thread; 0 (taken as 60) where it would block (Linux asks X in a
+    /// child process; a connect asks there instead).
+    pub(crate) fn display_hz() -> u32 {
+        #[cfg(not(target_os = "linux"))]
+        return crate::refresh::hz().unwrap_or(0);
+        #[cfg(target_os = "linux")]
+        return 0;
     }
 
     pub(crate) fn native_pixels(ctx: &egui::Context) -> (u32, u32) {
@@ -736,15 +746,14 @@ impl ClientApp {
             Some((candidate, at))
                 if candidate == size && at.elapsed() >= Duration::from_secs(1) =>
             {
-                let changes = limits.is_none_or(|(capture_size, max_fps)| {
+                let changes = limits.is_none_or(|limits| {
                     #[cfg(not(target_os = "linux"))]
                     let hz = crate::refresh::hz().unwrap_or(60);
                     // Do not make a blocking X11 query on the UI thread. A
                     // reconnect refreshes it on the connection worker.
                     #[cfg(target_os = "linux")]
                     let hz = asked.2;
-                    session::request_for_hz(&self.cfg.stream, size, hz, capture_size, max_fps)
-                        != asked
+                    session::request_for_hz(&self.cfg.stream, size, hz, &limits) != asked
                 });
                 if changes {
                     self.disconnect();
@@ -1019,7 +1028,7 @@ impl eframe::App for ClientApp {
                     l.requested,
                     pc_now
                         .and_then(|p| p.host.as_ref())
-                        .map(|h| (h.streamer.capture_size, h.streamer.max_fps)),
+                        .map(|h| HostLimits::of(&h.streamer)),
                 );
                 drop(guard);
                 for a in actions {
@@ -1605,15 +1614,19 @@ impl ClientApp {
 
     /// What the next stream asks for, and a way to change it.
     fn next_stream(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let s = path::effective(&self.cfg.stream);
-        let (w, h) = s.resolution.pixels(Self::native_pixels(ctx));
+        let p = session::plan(
+            &self.cfg.stream,
+            Self::native_pixels(ctx),
+            Self::display_hz(),
+            &HostLimits::default(),
+        );
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(space::SM, space::SM);
             ui::section_label(ui, "Next stream");
             ui.add_space(space::XS);
-            ui::tag(ui, None, &format!("{w} × {h}"));
-            ui::tag(ui, None, &format!("{} fps", s.fps));
-            ui::tag(ui, None, &format!("{} Mbps", s.bitrate_kbps / 1000));
+            ui::tag(ui, None, &format!("{} × {}", p.width, p.height));
+            ui::tag(ui, None, &format!("{} fps", p.fps));
+            ui::tag(ui, None, &crate::settings::mbps_label(p.bitrate_kbps));
             ui.add_space(space::XS);
             if ui::link(ui, "Change").clicked() {
                 self.page = Page::Settings;
@@ -1772,12 +1785,7 @@ impl ClientApp {
             } else {
                 format!("Couldn't connect to {pc}")
             };
-            let lighter = self.stream_failed
-                && self
-                    .cfg
-                    .stream
-                    .preset()
-                    .is_none_or(|p| p != crate::config::Preset::Smooth);
+            let lighter = self.stream_failed && !self.cfg.stream.is_lighter();
             ui::banner(ui, Tone::Danger, &title, Some(e), |ui| {
                 if let Some(last) = self.last_pc.clone() {
                     if ui::primary_button(ui, "Try again").clicked() {
@@ -1788,10 +1796,10 @@ impl ClientApp {
                     // network, not the machine, ended the last one.
                     if lighter
                         && ui::secondary_button(ui, "Try at 1080p, 20 Mbps")
-                            .on_hover_text("Switches Settings to the Smooth profile.")
+                            .on_hover_text("Switches Settings to Custom: 1080p, 60 fps, 20 Mbps.")
                             .clicked()
                     {
-                        self.cfg.stream.apply_preset(crate::config::Preset::Smooth);
+                        self.cfg.stream.lighter();
                         self.dirty = true;
                         self.reconnect = Some(last);
                         self.progress.lock().step = Step::Idle;
@@ -1844,7 +1852,12 @@ impl ClientApp {
         );
         let native = Self::native_pixels(ctx);
         ui::section(ui, "Stream", |ui| {
-            if crate::settings::stream_controls(ui, &mut self.cfg.stream, native) {
+            if crate::settings::stream_controls(
+                ui,
+                &mut self.cfg.stream,
+                native,
+                Self::display_hz(),
+            ) {
                 self.dirty = true;
             }
         });
@@ -3281,8 +3294,10 @@ pub(crate) mod snapshots {
             (
                 "settings-custom",
                 Setup::new(pcs()).page(Page::Settings).tweak(|app| {
-                    app.cfg.stream.apply_preset(crate::config::Preset::Sharp);
-                    app.cfg.stream.fps = 120;
+                    app.cfg.stream.choose(crate::config::Quality::Custom);
+                    app.cfg.stream.resolution = crate::config::Resolution::P1440;
+                    app.cfg.stream.fps = 165;
+                    app.cfg.stream.bitrate_kbps = 250_000;
                     app.cfg.auto_update = false;
                 }),
             ),
@@ -4276,7 +4291,8 @@ mod live_snapshot {
                         app.cfg.stream.codec = match codec.as_str() {
                             "h264" => Codec::H264,
                             "hevc" => Codec::Hevc,
-                            _ => panic!("LATCH_TEST_CODEC must be h264 or hevc"),
+                            "av1" => Codec::Av1,
+                            _ => panic!("LATCH_TEST_CODEC must be h264, hevc or av1"),
                         };
                     }
                     app

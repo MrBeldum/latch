@@ -186,7 +186,7 @@ impl Server {
 
     /// Opens what a session needs, after ending the one running. A refusal
     /// is for the HTTP reply; nothing is left open after one.
-    pub fn prepare(&self, req: StreamRequest, peer: SocketAddr) -> Result<Prepared, Refusal> {
+    pub fn prepare(&self, mut req: StreamRequest, peer: SocketAddr) -> Result<Prepared, Refusal> {
         if req.protocol != latch_proto::PROTOCOL {
             return Err(Refusal::new(
                 426,
@@ -207,6 +207,32 @@ impl Server {
                 ),
             ));
         };
+        // What the encoder for that codec takes here, before the desktop is
+        // sized for it: a larger request is scaled down in proportion.
+        let limits = video::limits(codec);
+        let (mut width, mut height, mut fps) = limits.fit(
+            even(req.width.clamp(64, control::MAX_SIDE)),
+            even(req.height.clamp(64, control::MAX_SIDE)),
+            req.fps.clamp(1, control::MAX_FPS),
+        );
+        // A host encoding in software, as it measured its CPU (or, until
+        // then, conservatively): whatever the viewer fitted, or did not.
+        if let Some(ceiling) = crate::software::ceiling() {
+            (width, height, fps) = ceiling.fit(width, height, fps);
+        }
+        if (width, height, fps) != (req.width, req.height, req.fps) {
+            self.log(format!(
+                "{} × {} at {} fps is past what {} encodes here; streaming {width} × {height} at {fps} fps",
+                req.width,
+                req.height,
+                req.fps,
+                codec.name()
+            ));
+        }
+        req.width = width;
+        req.height = height;
+        req.fps = fps;
+        req.bitrate_kbps = req.bitrate_kbps.clamp(500, limits.max_kbps);
         let opening = self.opening.lock();
         let running = self.current.lock().clone();
         if let Some(old) = running {
@@ -242,10 +268,10 @@ impl Server {
             opening: Some(opening),
         };
         let config = VideoConfig {
-            width: even(prepared.req.width.clamp(64, 8192)),
-            height: even(prepared.req.height.clamp(64, 8192)),
-            fps: prepared.req.fps.clamp(1, 240),
-            bitrate_kbps: prepared.req.bitrate_kbps.clamp(500, 500_000),
+            width: prepared.req.width,
+            height: prepared.req.height,
+            fps: prepared.req.fps,
+            bitrate_kbps: prepared.req.bitrate_kbps,
             codec,
         };
         let pipeline = video::open(&config)
@@ -1237,6 +1263,7 @@ fn names(codecs: &[Codec]) -> String {
         .iter()
         .map(|c| match c {
             Codec::Hevc => "HEVC",
+            Codec::Av1 => "AV1",
             Codec::H264High => "H.264 High",
             Codec::H264Baseline => "H.264 Baseline",
         })

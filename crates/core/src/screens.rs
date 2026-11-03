@@ -6,14 +6,16 @@
 /// The standard sizes behind the quality choices, smallest first: 540p,
 /// 720p and 900p for a PC that cannot encode many pixels quickly (software
 /// encoding on a small CPU) or a network that cannot carry them, then
-/// 1080p, 1440p and 4K.
-pub const STANDARD: [(u32, u32); 6] = [
+/// 1080p, 1440p, 4K, 5K and 8K.
+pub const STANDARD: [(u32, u32); 8] = [
     (960, 540),
     (1280, 720),
     (1600, 900),
     (1920, 1080),
     (2560, 1440),
     (3840, 2160),
+    (5120, 2880),
+    (7680, 4320),
 ];
 
 /// Native pixel sizes of Apple displays since 2015, then the common
@@ -39,8 +41,11 @@ pub const SCREENS: &[(u32, u32)] = &[
     (3440, 1440),
     (3840, 1600),
     (3840, 2160),
+    (3840, 1080),
     (5120, 1440),
     (5120, 2160),
+    (7680, 2160),
+    (7680, 4320),
 ];
 
 /// `native` with both sides even (video codecs need that) and never
@@ -48,6 +53,17 @@ pub const SCREENS: &[(u32, u32)] = &[
 pub fn even(native: (u32, u32)) -> (u32, u32) {
     let round = |v: u32| (v / 2 * 2).max(2);
     (round(native.0), round(native.1))
+}
+
+/// `native` scaled down in proportion until it fits inside `bound`, sides
+/// even; `native` itself (made even) when it already fits.
+pub fn within(native: (u32, u32), bound: (u32, u32)) -> (u32, u32) {
+    let (w, h) = even(native);
+    if w <= bound.0 && h <= bound.1 {
+        return (w, h);
+    }
+    let scale = (f64::from(bound.0) / f64::from(w)).min(f64::from(bound.1) / f64::from(h));
+    even(((f64::from(w) * scale) as u32, (f64::from(h) * scale) as u32))
 }
 
 /// Every size a Mac may ask for: each screen as it is and the standard
@@ -75,6 +91,16 @@ mod tests {
     }
 
     #[test]
+    fn within_scales_down_in_proportion_only_when_needed() {
+        let uhd = (3840, 2160);
+        assert_eq!(within((3024, 1964), uhd), (3024, 1964));
+        assert_eq!(within((5120, 2880), uhd), (3840, 2160));
+        assert_eq!(within((6016, 3384), uhd), (3840, 2160));
+        assert_eq!(within((5120, 1440), uhd), (3840, 1080));
+        assert_eq!(within((3456, 2234), uhd), (3340, 2160));
+    }
+
+    #[test]
     fn stream_modes_cover_every_screen_and_standard_size_without_repeats() {
         let modes = stream_modes();
         assert!(modes.contains(&(3024, 1964)));
@@ -88,7 +114,7 @@ mod tests {
         let mut sorted = modes.clone();
         sorted.dedup();
         assert_eq!(sorted, modes, "no repeats");
-        assert_eq!(modes[0], (6016, 3384), "largest first");
+        assert_eq!(modes[0], (7680, 4320), "largest first");
         assert!(
             modes.len() < 90,
             "{} modes is more than a display driver should be asked to list",
