@@ -378,7 +378,10 @@ fn open_output(
             let mut m = mixer();
             device.build_output_stream(
                 config,
-                move |out: &mut [f32], _| m.fill(out),
+                move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                    m.device_delay = device_delay(info);
+                    m.fill(out)
+                },
                 err_fn.clone(),
                 None,
             )
@@ -387,7 +390,10 @@ fn open_output(
             let mut m = mixer();
             device.build_output_stream(
                 config,
-                move |out: &mut [i16], _| m.fill_i16(out),
+                move |out: &mut [i16], info: &cpal::OutputCallbackInfo| {
+                    m.device_delay = device_delay(info);
+                    m.fill_i16(out)
+                },
                 err_fn.clone(),
                 None,
             )
@@ -396,7 +402,10 @@ fn open_output(
             let mut m = mixer();
             device.build_output_stream(
                 config,
-                move |out: &mut [i32], _| m.fill_i32(out),
+                move |out: &mut [i32], info: &cpal::OutputCallbackInfo| {
+                    m.device_delay = device_delay(info);
+                    m.fill_i32(out)
+                },
                 err_fn.clone(),
                 None,
             )
@@ -406,7 +415,10 @@ fn open_output(
             let mut m = mixer();
             match device.build_output_stream(
                 config,
-                move |out: &mut [f32], _| m.fill(out),
+                move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                    m.device_delay = device_delay(info);
+                    m.fill(out)
+                },
                 err_fn.clone(),
                 None,
             ) {
@@ -416,7 +428,10 @@ fn open_output(
                     let mut m = mixer();
                     device.build_output_stream(
                         config,
-                        move |out: &mut [i16], _| m.fill_i16(out),
+                        move |out: &mut [i16], info: &cpal::OutputCallbackInfo| {
+                            m.device_delay = device_delay(info);
+                            m.fill_i16(out)
+                        },
                         err_fn.clone(),
                         None,
                     )
@@ -446,6 +461,23 @@ fn open_output(
     Some(stream)
 }
 
+/// How long after this callback its first frame reaches the speaker.
+fn device_delay(info: &cpal::OutputCallbackInfo) -> Duration {
+    let t = info.timestamp();
+    t.playback.saturating_duration_since(t.callback)
+}
+
+/// `LATCH_AUDIO_PROBE` set: the wall-clock moment each click of a host's
+/// `LATCH_TEST_AUDIO=clicks` reaches the speaker, as milliseconds past the
+/// quarter second the host made it on. Measurement only.
+static PROBE: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+const PROBE_EVERY_NS: u128 = 250_000_000;
+
+/// The click delays measured since the last call, in ms.
+pub fn take_probe() -> Vec<f32> {
+    std::mem::take(&mut *PROBE.lock())
+}
+
 /// Pulls stream frames from the queue for the device: linear
 /// interpolation between rates, left and right onto whatever channels the
 /// device has (the mean onto a mono one), silence when the queue is empty.
@@ -471,6 +503,10 @@ struct Mixer {
     preroll: usize,
     started: bool,
     scratch: Vec<f32>,
+    /// From the device's callback timestamps.
+    device_delay: Duration,
+    /// Output frames since the last loud one, while probing.
+    probe_quiet: Option<usize>,
 }
 
 impl Mixer {
@@ -500,6 +536,8 @@ impl Mixer {
             preroll,
             started: false,
             scratch: Vec::new(),
+            device_delay: Duration::ZERO,
+            probe_quiet: std::env::var_os("LATCH_AUDIO_PROBE").map(|_| 0),
         }
     }
 
@@ -532,6 +570,10 @@ impl Mixer {
             self.step * (1.0 + (2.0 * MAX_TRIM * error).clamp(-MAX_TRIM, MAX_TRIM))
         };
         let gain = f32::from_bits(self.gain.load(Ordering::Relaxed));
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            + self.device_delay;
         let mut frames = 0u64;
         for frame in out.chunks_mut(self.out_channels) {
             while self.pos >= 1.0 {
@@ -561,6 +603,15 @@ impl Mixer {
                     0.0
                 };
                 *o = sample * gain;
+            }
+            if let Some(quiet) = &mut self.probe_quiet {
+                let level = sample(0).abs();
+                if level > 0.2 && *quiet as f64 >= self.out_rate / 10.0 {
+                    let at =
+                        wall.as_nanos() + frames as u128 * 1_000_000_000 / self.out_rate as u128;
+                    PROBE.lock().push((at % PROBE_EVERY_NS) as f32 / 1e6);
+                }
+                *quiet = if level < 0.05 { *quiet + 1 } else { 0 };
             }
             self.pos += step;
             frames += 1;

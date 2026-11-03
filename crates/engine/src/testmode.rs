@@ -109,3 +109,87 @@ impl InputSink for PatternInput {
 
     fn release_all(&mut self) {}
 }
+
+/// `LATCH_TEST_AUDIO=clicks` (or `clicks:<ms>` for a device period other
+/// than 10 ms) replaces the desktop's sound with a 1 ms click on every
+/// quarter second of this machine's wall clock, delivered a device period
+/// at a time as a loopback device delivers it. A viewer that notes the wall
+/// clock when it plays each click (`LATCH_AUDIO_PROBE`) has measured the
+/// whole path after capture, without a microphone.
+pub fn open_audio() -> Option<anyhow::Result<Box<dyn crate::audio::AudioCapture>>> {
+    let spec = std::env::var("LATCH_TEST_AUDIO").ok()?;
+    let period_ms = match spec.split_once(':') {
+        None if spec == "clicks" => 10,
+        Some(("clicks", ms)) => match ms.parse::<u32>() {
+            Ok(ms) if (1..=100).contains(&ms) => ms,
+            _ => return Some(Err(anyhow::anyhow!("LATCH_TEST_AUDIO: bad period {ms:?}"))),
+        },
+        _ => return Some(Err(anyhow::anyhow!("LATCH_TEST_AUDIO: unknown {spec:?}"))),
+    };
+    let wall = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    Some(Ok(Box::new(Clicks {
+        start: Instant::now(),
+        wall_ns: wall.as_nanos() as u64,
+        produced: 0,
+        period: crate::audio::RATE as u64 * u64::from(period_ms) / 1000,
+        pending: std::collections::VecDeque::new(),
+    })))
+}
+
+/// Click spacing on the wall clock, and how long each lasts.
+pub const CLICK_EVERY_NS: u64 = 250_000_000;
+const CLICK_NS: u64 = 1_000_000;
+
+struct Clicks {
+    start: Instant,
+    /// The wall clock at `start`, in ns since the Unix epoch.
+    wall_ns: u64,
+    /// Samples per channel made so far.
+    produced: u64,
+    /// Samples per channel per device period.
+    period: u64,
+    pending: std::collections::VecDeque<i16>,
+}
+
+impl crate::audio::AudioCapture for Clicks {
+    fn read(
+        &mut self,
+        out: &mut [i16; crate::audio::FRAME * crate::audio::CHANNELS],
+        timeout: Duration,
+    ) -> anyhow::Result<bool> {
+        use crate::audio::{CHANNELS, RATE};
+        let deadline = Instant::now() + timeout;
+        while self.pending.len() < out.len() {
+            // A period is captured once its last sample has been played.
+            let due = self.start
+                + Duration::from_nanos((self.produced + self.period) * 1_000_000_000 / RATE as u64);
+            let now = Instant::now();
+            if due > deadline {
+                std::thread::sleep(deadline.saturating_duration_since(now));
+                return Ok(false);
+            }
+            std::thread::sleep(due.saturating_duration_since(now));
+            for k in self.produced..self.produced + self.period {
+                let at = self.wall_ns + k * 1_000_000_000 / RATE as u64;
+                let v = if at % CLICK_EVERY_NS < CLICK_NS {
+                    16_000
+                } else {
+                    0
+                };
+                self.pending.extend([v; CHANNELS]);
+            }
+            self.produced += self.period;
+        }
+        let n = out.len();
+        for (o, s) in out.iter_mut().zip(self.pending.drain(..n)) {
+            *o = s;
+        }
+        Ok(true)
+    }
+
+    fn describe(&self) -> String {
+        "test clicks".into()
+    }
+}

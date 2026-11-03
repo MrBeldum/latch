@@ -25,6 +25,9 @@ pub trait AudioCapture: Send {
 
 /// Opens loopback capture of the default output device.
 pub fn open() -> anyhow::Result<Box<dyn AudioCapture>> {
+    if let Some(clicks) = crate::testmode::open_audio() {
+        return clicks;
+    }
     #[cfg(target_os = "macos")]
     return crate::mac::open_audio();
     #[cfg(windows)]
