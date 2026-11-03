@@ -9,7 +9,7 @@ fn parses_lengths_and_rejects_truncated_output() {
     }
 }
 
-use std::{fs, io::Write, process::Command, sync::Mutex as StdMutex};
+use std::{fs, io::Write, process::Command, sync::Mutex as StdMutex, time::Duration};
 static ENCODER_TEST: StdMutex<()> = StdMutex::new(());
 const WIDTH: usize = 960;
 const HEIGHT: usize = 540;
@@ -673,4 +673,352 @@ fn sessions_are_real_time_without_reordering_and_tagged_bt709() {
             }
         }
     }
+}
+
+/// Real-time encode at a stream's pace: frames are submitted on the stream's
+/// grid from a pool of prefilled IOSurfaces (as ScreenCaptureKit hands them
+/// over), so the numbers are VideoToolbox's alone. Run with
+/// `cargo test --release -p latch-engine --lib realtime_benchmark -- --ignored --nocapture`;
+/// `LATCH_VT_BENCH=hevc:1920x1080@240:50000,...` picks the cases.
+#[test]
+#[ignore]
+fn realtime_benchmark() {
+    let cases: Vec<(Codec, u32, u32, u32, u32)> = match std::env::var("LATCH_VT_BENCH") {
+        Ok(list) => list
+            .split(',')
+            .map(|case| {
+                let (codec, rest) = case.split_once(':').unwrap();
+                let (size, rest) = rest.split_once('@').unwrap();
+                let (fps, kbps) = rest.split_once(':').unwrap();
+                let (w, h) = size.split_once('x').unwrap();
+                let codec = match codec {
+                    "hevc" => Codec::Hevc,
+                    "high" => Codec::H264High,
+                    _ => Codec::H264Baseline,
+                };
+                (
+                    codec,
+                    w.parse().unwrap(),
+                    h.parse().unwrap(),
+                    fps.parse().unwrap(),
+                    kbps.parse().unwrap(),
+                )
+            })
+            .collect(),
+        Err(_) => [Codec::Hevc, Codec::H264High, Codec::H264Baseline]
+            .into_iter()
+            .flat_map(|codec| {
+                [
+                    (codec, 1920, 1080, 60, 50_000),
+                    (codec, 1920, 1080, 120, 50_000),
+                    (codec, 1920, 1080, 240, 80_000),
+                    (codec, 3024, 1964, 120, 100_000),
+                ]
+            })
+            .collect(),
+    };
+    let seconds: f64 = std::env::var("LATCH_VT_SECONDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4.0);
+    println!(
+        "\n{:<14} {:>10} {:>4} {:>5} | {:>6} {:>6} {:>6} | {:>6} | {:>8} {:>8} {:>6} {:>5}",
+        "codec", "size", "fps", "Mbps", "p50", "p95", "max", "got", "IDR B", "P B", "IDR/P", "kbps"
+    );
+    for (codec, width, height, fps, kbps) in cases {
+        let r = realtime_case(codec, width, height, fps, kbps, seconds);
+        println!(
+            "{:<14} {:>10} {:>4} {:>5} | {:>6.2} {:>6.2} {:>6.2} | {:>6.1} | {:>8.0} {:>8.0} {:>6.1} {:>5.0}",
+            format!("{codec:?}"),
+            format!("{width}x{height}"),
+            fps,
+            kbps / 1000,
+            r.p50,
+            r.p95,
+            r.max,
+            r.fps,
+            r.keyframe_bytes,
+            r.pframe_bytes,
+            r.keyframe_bytes / r.pframe_bytes.max(1.0),
+            r.kbps,
+        );
+    }
+}
+struct Realtime {
+    p50: f64,
+    p95: f64,
+    max: f64,
+    fps: f64,
+    keyframe_bytes: f64,
+    pframe_bytes: f64,
+    kbps: f64,
+}
+fn realtime_case(
+    codec: Codec,
+    width: u32,
+    height: u32,
+    fps: u32,
+    kbps: u32,
+    seconds: f64,
+) -> Realtime {
+    let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let (w, h) = (width as usize, height as usize);
+    let mut base = vec![128u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut hash = (x as u32).wrapping_mul(0x45d9f3b) ^ (y as u32).wrapping_mul(0x119de1f3);
+            hash ^= hash >> 16;
+            hash = hash.wrapping_mul(0x45d9f3b);
+            hash ^= hash >> 16;
+            let noise = (hash % 17) as i32 - 8;
+            let gradient = 48 + ((x / 8 + y / 8) % 128) as i32;
+            base[y * w + x] = (gradient + noise).clamp(16, 235) as u8;
+        }
+    }
+    let pool: Vec<Owned> = (0..12)
+        .map(|f| {
+            let image = create_surface_sized(w, h);
+            fill_surface_pattern(&image, &base, f, w, h);
+            image
+        })
+        .collect();
+    let mut encoder = Encoder::create(
+        &VideoConfig {
+            width,
+            height,
+            fps,
+            bitrate_kbps: kbps,
+            codec,
+        },
+        true,
+    )
+    .expect("hardware encoder");
+    let frames = (seconds * f64::from(fps)) as usize;
+    let mut pacer = crate::video::Pacer::new(fps);
+    let mut latencies = Vec::with_capacity(frames);
+    let (mut keyframes, mut pframes) = (Vec::new(), Vec::new());
+    let mut bytes = 0usize;
+    // Warm the session up; a stream's first IDR is not what is measured.
+    for image in pool.iter().take(4) {
+        let _ = encoder.encode(image.0, Instant::now(), false).unwrap();
+    }
+    // As the pipeline does: a picture at each slot once there is room for it.
+    let depth: usize = std::env::var("LATCH_VT_IN_FLIGHT")
+        .ok()
+        .and_then(|d| d.parse().ok())
+        .unwrap_or(super::super::IN_FLIGHT);
+    let mut outputs = Vec::with_capacity(frames);
+    let start = Instant::now();
+    for f in 0..frames {
+        pacer.wait();
+        while encoder.in_flight() >= depth {
+            outputs.extend(encoder.collect(Duration::from_secs(1)));
+        }
+        let now = Instant::now();
+        pacer.taken(now);
+        // An IDR once a second, as a viewer's loss recovery might ask.
+        let keyframe = f % fps as usize == 0;
+        encoder
+            .submit(pool[f % pool.len()].0, now, keyframe)
+            .unwrap();
+        outputs.extend(std::iter::from_fn(|| encoder.collect(Duration::ZERO)));
+    }
+    while encoder.in_flight() > 0 {
+        outputs.extend(encoder.collect(Duration::from_secs(1)));
+    }
+    for (_, finished, frame) in outputs {
+        let Some(frame) = frame.map(Result::unwrap) else {
+            continue;
+        };
+        latencies.push((finished - frame.captured).as_secs_f64() * 1000.0);
+        bytes += frame.data.len();
+        if frame.keyframe {
+            keyframes.push(frame.data.len());
+        } else {
+            pframes.push(frame.data.len());
+        }
+    }
+    let wall = start.elapsed().as_secs_f64();
+    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let at = |q: f64| latencies[((latencies.len() as f64 * q) as usize).min(latencies.len() - 1)];
+    let mean = |v: &[usize]| v.iter().sum::<usize>() as f64 / v.len().max(1) as f64;
+    Realtime {
+        p50: at(0.5),
+        p95: at(0.95),
+        max: *latencies.last().unwrap(),
+        fps: (keyframes.len() + pframes.len()) as f64 / wall,
+        keyframe_bytes: mean(&keyframes),
+        pframe_bytes: mean(&pframes),
+        kbps: bytes as f64 * 8.0 / wall / 1000.0,
+    }
+}
+
+#[test]
+fn pipelined_frames_come_out_in_order_with_their_capture_times() {
+    let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let config = VideoConfig {
+        width: WIDTH as u32,
+        height: HEIGHT as u32,
+        fps: FPS,
+        bitrate_kbps: 10_000,
+        codec: Codec::Hevc,
+    };
+    let mut encoder = Encoder::create(&config, true).unwrap();
+    let woken = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = woken.clone();
+    encoder.on_output(move || {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
+    let images: Vec<_> = (0..3)
+        .map(|i| {
+            let image = surface();
+            fill(&image, &pattern(i));
+            image
+        })
+        .collect();
+    let base = Instant::now();
+    let mut stamps = Vec::new();
+    for (i, image) in images.iter().enumerate() {
+        let captured = base + Duration::from_millis(i as u64);
+        stamps.push(captured);
+        assert_eq!(encoder.submit(image.0, captured, i == 0).unwrap(), i as i64);
+    }
+    let mut out = Vec::new();
+    while out.len() < 3 {
+        let (index, _, frame) = encoder
+            .collect(Duration::from_secs(2))
+            .expect("frame out of the encoder");
+        out.push((index, frame.expect("not dropped").unwrap()));
+    }
+    assert_eq!(encoder.in_flight(), 0);
+    for (i, (index, frame)) in out.iter().enumerate() {
+        assert_eq!(*index, i as i64);
+        assert_eq!(frame.captured, stamps[i]);
+        assert_eq!(frame.keyframe, i == 0);
+    }
+    assert_eq!(woken.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+/// HEVC Main10 from P010 IOSurfaces, for an HDR capture to hand over.
+#[test]
+fn main10_iosurface_roundtrip() {
+    let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(ffmpeg) = ffmpeg() else {
+        eprintln!("no ffmpeg on this machine; skipping the independent decode of Main10");
+        return;
+    };
+    let config = VideoConfig {
+        width: WIDTH as u32,
+        height: HEIGHT as u32,
+        fps: FPS,
+        bitrate_kbps: 20_000,
+        codec: Codec::Hevc,
+    };
+    assert!(Encoder::open(&config, true, Depth::Ten)
+        .map(|_| ())
+        .and_then(|()| {
+            Encoder::open(
+                &VideoConfig {
+                    codec: Codec::H264High,
+                    ..config.clone()
+                },
+                true,
+                Depth::Ten,
+            )
+        })
+        .is_err());
+    let mut encoder = Encoder::open(&config, true, Depth::Ten).unwrap();
+    // SAFETY: as surface(), in P010; each plane is written at its own stride.
+    let image = unsafe {
+        let empty = dictionary(&[]);
+        let attrs = dictionary(&[(kCVPixelBufferIOSurfacePropertiesKey, empty.0)]);
+        let mut image = ptr::null();
+        check(
+            CVPixelBufferCreate(ptr::null(), WIDTH, HEIGHT, P010, attrs.0, &mut image),
+            "create synthetic P010 IOSurface",
+        )
+        .unwrap();
+        Owned::new(image).unwrap()
+    };
+    let frames = 10;
+    let mut sources = Vec::new();
+    let mut stream = Vec::new();
+    for f in 0..frames {
+        // A 10-bit ramp: steps an 8-bit picture could not hold.
+        let luma: Vec<u16> = (0..WIDTH * HEIGHT)
+            .map(|i| 64 + ((i % WIDTH + f * 5 + (i / WIDTH) / 4) % 876) as u16)
+            .collect();
+        // SAFETY: the buffer is locked while both planes are written within their strides.
+        unsafe {
+            check(CVPixelBufferLockBaseAddress(image.0, 0), "lock").unwrap();
+            for plane in 0..2 {
+                let stride = CVPixelBufferGetBytesPerRowOfPlane(image.0, plane);
+                let base = CVPixelBufferGetBaseAddressOfPlane(image.0, plane);
+                let rows = if plane == 0 { HEIGHT } else { HEIGHT / 2 };
+                for row in 0..rows {
+                    let line = base.add(row * stride).cast::<u16>();
+                    for x in 0..WIDTH {
+                        let v = if plane == 0 {
+                            luma[row * WIDTH + x]
+                        } else {
+                            512
+                        };
+                        line.add(x).write_unaligned(v << 6);
+                    }
+                }
+            }
+            check(CVPixelBufferUnlockBaseAddress(image.0, 0), "unlock").unwrap();
+        }
+        let frame = encoder
+            .encode(image.0, Instant::now(), f == 0)
+            .unwrap()
+            .expect("Main10 frame");
+        stream.extend_from_slice(&frame.data);
+        sources.push(luma);
+    }
+    let dir = std::env::temp_dir().join(format!("latch-mac-main10-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("stream.hevc");
+    fs::write(&path, &stream).unwrap();
+    let probe = Command::new(&ffmpeg)
+        .args(["-hide_banner", "-i"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    let info = String::from_utf8_lossy(&probe.stderr);
+    assert!(
+        info.contains("Main 10") && info.contains("yuv420p10le"),
+        "{info}"
+    );
+    let decoded = dir.join("decoded.yuv");
+    let output = Command::new(&ffmpeg)
+        .args(["-v", "error", "-y", "-i"])
+        .arg(&path)
+        .args(["-pix_fmt", "yuv420p10le", "-f", "rawvideo"])
+        .arg(&decoded)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pixels = fs::read(&decoded).unwrap();
+    let frame_bytes = WIDTH * HEIGHT * 3;
+    assert_eq!(pixels.len(), frame_bytes * frames);
+    let mut mse = 0.0;
+    for (f, luma) in sources.iter().enumerate() {
+        let plane = &pixels[f * frame_bytes..f * frame_bytes + WIDTH * HEIGHT * 2];
+        for (i, source) in luma.iter().enumerate() {
+            let got = u16::from_le_bytes([plane[2 * i], plane[2 * i + 1]]);
+            mse += (f64::from(got) - f64::from(*source)).powi(2);
+        }
+    }
+    let psnr = 10.0 * (1023.0f64.powi(2) / (mse / (WIDTH * HEIGHT * frames) as f64)).log10();
+    eprintln!(
+        "Main10: hardware={}, luma PSNR {psnr:.2} dB",
+        encoder.hardware
+    );
+    assert!(psnr > 40.0, "Main10 luma PSNR {psnr:.2}");
+    fs::remove_dir_all(dir).unwrap();
 }
