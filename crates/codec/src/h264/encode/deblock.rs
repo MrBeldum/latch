@@ -1,17 +1,22 @@
 //! Filtering follows H.264 section 8.7, including edges between slices.
 use super::{transform::chroma_qp, worker::Mb};
 use crate::h264::loopfilter::{self, Edge, ALPHA, BETA, TC0};
-use crate::Yuv420;
-pub(super) fn filter(p: &mut Yuv420, mbs: &[Mb]) {
+pub(super) fn filter(p: &mut super::worker::Rows, mbs: &[Mb]) {
     let w = p.padded_width() / 16;
     let h = p.padded_height() / 16;
     for my in 0..h {
         for mx in 0..w {
             let index = my * w + mx;
             let cur = &mbs[index];
+            // Inside an inter macroblock without coefficients every boundary
+            // strength is 0: one motion vector, nothing coded.
+            let plain = !cur.intra && cur.nz == [0; 16];
             for vertical in [true, false] {
                 for edge in 0..4 {
                     if edge == 0 && if vertical { mx == 0 } else { my == 0 } {
+                        continue;
+                    }
+                    if edge > 0 && plain {
                         continue;
                     }
                     let other = if edge > 0 {
@@ -48,6 +53,9 @@ pub(super) fn filter(p: &mut Yuv420, mbs: &[Mb]) {
                             0
                         }
                     });
+                    if strengths == [0; 4] {
+                        continue;
+                    }
                     let edge_config = |qp: usize| Edge {
                         alpha: ALPHA[qp],
                         beta: BETA[qp],
@@ -63,7 +71,7 @@ pub(super) fn filter(p: &mut Yuv420, mbs: &[Mb]) {
                     let x = mx * 16 + if vertical { edge * 4 } else { 0 };
                     let y = my * 16 + if vertical { 0 } else { edge * 4 };
                     loopfilter::luma(
-                        &mut p.y,
+                        p.y,
                         p.y_stride,
                         y * p.y_stride + x,
                         vertical,
@@ -72,8 +80,8 @@ pub(super) fn filter(p: &mut Yuv420, mbs: &[Mb]) {
                     if edge % 2 == 0 {
                         let chroma = edge_config(cqp);
                         loopfilter::chroma(
-                            &mut p.u,
-                            &mut p.v,
+                            p.u,
+                            p.v,
                             p.c_stride,
                             y / 2 * p.c_stride + x / 2,
                             vertical,

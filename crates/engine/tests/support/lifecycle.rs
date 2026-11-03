@@ -211,6 +211,40 @@ fn video_reopen_failure_uses_remaining_budget() {
     assert_eq!(attempts, VIDEO_RECOVERIES);
 }
 
+/// A codec whose encoder cannot go on (HEVC after a resize to a size its
+/// only encoder does not take) ends the session at once, as an encoder
+/// failure the viewer reconnects from, not after the reopen budget as a
+/// capture failure.
+#[test]
+fn a_codec_that_cannot_go_on_ends_the_session_for_a_new_negotiation() {
+    let server = Server::bind(0, Options::default()).unwrap();
+    for during_reopen in [false, true] {
+        let session = session("127.0.0.1:9".parse().unwrap());
+        let mut attempts = 0;
+        let pipeline = Box::new(Video {
+            info: info(),
+            held: Arc::new(AtomicBool::new(true)),
+            next: Box::new(move |_, _, _| {
+                if during_reopen {
+                    anyhow::bail!("capture lost");
+                }
+                Err(video::Unencodable("1366 × 768 is not whole coding blocks".into()).into())
+            }),
+        });
+        send_video(&server, &session, pipeline, config(), |_| {
+            attempts += 1;
+            Err(
+                anyhow::Error::from(video::Unencodable("no HEVC at this size".into()))
+                    .context("open the HEVC encoder"),
+            )
+        });
+        assert_eq!(attempts, usize::from(during_reopen));
+        let ended = session.ended.lock().clone().unwrap();
+        assert_eq!(ended.code, end::ENCODER_FAILED);
+        assert!(ended.message.contains("reconnecting"), "{}", ended.message);
+    }
+}
+
 #[test]
 fn repeated_video_errors_release_exclusive_capture_and_have_a_retry_budget() {
     let server = Server::bind(0, Options::default()).unwrap();
