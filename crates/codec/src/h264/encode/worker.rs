@@ -15,6 +15,9 @@ pub(super) struct Mb {
     pub modes: [u8; 16],
     pub qp: u8,
     pub quality: u8,
+    /// The reconstruction here is the reference's, untouched by the
+    /// deblocking filter: the next frame may leave it where it is.
+    pub kept: bool,
 }
 pub(super) struct Job {
     pub source: Arc<Yuv420>,
@@ -22,6 +25,11 @@ pub(super) struct Job {
     pub reference: Arc<Yuv420>,
     /// Where this band's reconstruction goes: its rows of the next reference.
     pub target: Target,
+    /// Macroblocks that may differ from `previous`; the others are equal.
+    pub dirty: Option<Arc<Vec<bool>>>,
+    /// Macroblocks whose pixels `target` already holds as the reference
+    /// does (it holds the frame before the reference, and these were kept).
+    pub kept: Option<Arc<Vec<bool>>>,
     pub half_pel: Option<Arc<predict::HalfPelPlanes>>,
     pub quality: Arc<Vec<u8>>,
     pub first: usize,
@@ -833,10 +841,9 @@ pub(super) fn encode(job: Job) -> Band {
         let gi = job.first * w + index;
         mbs[index].modes = [2; 16];
         let same = !job.idr
-            && job
-                .previous
-                .as_ref()
-                .is_some_and(|old| equal_mb(&job.source, old, x, gy));
+            && job.previous.as_ref().is_some_and(|old| {
+                job.dirty.as_ref().is_some_and(|d| !d[gi]) || equal_mb(&job.source, old, x, gy)
+            });
         let mut reuse = if same {
             Some(((0, 0), job.quality[gi]))
         } else {
@@ -876,15 +883,19 @@ pub(super) fn encode(job: Job) -> Band {
         let pred = mv_predict(&mbs, w, index, false);
         let skip_mv = mv_predict(&mbs, w, index, true);
         if let Some((mv, quality)) = reuse.filter(|_| !refine) {
-            copy_mc(
-                &mut rec,
-                &job.reference,
-                job.half_pel.as_deref(),
-                x,
-                y,
-                gy,
-                mv,
-            );
+            let held = mv == (0, 0) && job.kept.as_ref().is_some_and(|k| k[gi]);
+            if !held {
+                copy_mc(
+                    &mut rec,
+                    &job.reference,
+                    job.half_pel.as_deref(),
+                    x,
+                    y,
+                    gy,
+                    mv,
+                );
+            }
+            mbs[index].kept = mv == (0, 0);
             mbs[index].mv = mv;
             mbs[index].qp = qpy;
             mbs[index].quality = quality;
@@ -1283,6 +1294,23 @@ pub(super) fn encode(job: Job) -> Band {
     let deblock_started = Instant::now();
     super::deblock::filter(&mut rec, &mbs);
     let deblock_ms = deblock_started.elapsed().as_secs_f64() * 1000.;
+    // A copied macroblock stays the reference's only if no edge the filter
+    // touched it through had any strength: its neighbours in the slice
+    // must be uncoded and unmoved too.
+    let plain = |m: &Mb| !m.intra && m.mv == (0, 0) && m.nz == [0; 16];
+    let kept: Vec<bool> = (0..mbs.len())
+        .map(|i| {
+            let (mx, my) = (i % w, i / w);
+            mbs[i].kept
+                && (mx == 0 || plain(&mbs[i - 1]))
+                && (mx + 1 == w || plain(&mbs[i + 1]))
+                && (my == 0 || plain(&mbs[i - w]))
+                && (my + 1 == rows || plain(&mbs[i + w]))
+        })
+        .collect();
+    for (m, k) in mbs.iter_mut().zip(kept) {
+        m.kept = k;
+    }
     Band {
         deblock_ms,
         elapsed_ms: started.elapsed().as_secs_f64() * 1000.,

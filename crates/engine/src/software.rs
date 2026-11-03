@@ -75,6 +75,18 @@ pub trait PictureEncoder: Send {
         keyframe: bool,
         out: &mut Vec<u8>,
     ) -> anyhow::Result<bool>;
+    /// [`PictureEncoder::encode`], told where `picture` may differ from
+    /// the last picture given (pixel rectangles; `None`: anywhere).
+    fn encode_changed(
+        &mut self,
+        picture: &Yuv420,
+        changed: Option<&[Rect]>,
+        keyframe: bool,
+        out: &mut Vec<u8>,
+    ) -> anyhow::Result<bool> {
+        let _ = changed;
+        self.encode(picture, keyframe, out)
+    }
     /// From the next frame.
     fn set_bitrate(&mut self, kbps: u32);
 }
@@ -115,6 +127,18 @@ impl PictureEncoder for LatchEncoder {
         out: &mut Vec<u8>,
     ) -> anyhow::Result<bool> {
         Ok(self.0.encode(picture, keyframe, out)?.keyframe)
+    }
+    fn encode_changed(
+        &mut self,
+        picture: &Yuv420,
+        changed: Option<&[Rect]>,
+        keyframe: bool,
+        out: &mut Vec<u8>,
+    ) -> anyhow::Result<bool> {
+        Ok(self
+            .0
+            .encode_changed(picture, changed, keyframe, out)?
+            .keyframe)
     }
     fn set_bitrate(&mut self, kbps: u32) {
         self.0.set_bitrate(kbps);
@@ -289,6 +313,9 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
             self.picture = Yuv420::new(self.frame.width, self.frame.height);
         }
         let started = Instant::now();
+        // What differs from the picture encoded last: a repeat changes
+        // nothing.
+        let mut damage = Some(Vec::new());
         if changed || resized {
             let whole = [Rect {
                 x: 0,
@@ -296,7 +323,7 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
                 width: self.frame.width,
                 height: self.frame.height,
             }];
-            let damage = if resized { None } else { self.capture.damage() };
+            damage = if resized { None } else { self.capture.damage() };
             latch_codec::color::bgra_to_yuv420_rects(
                 &self.frame.data,
                 self.frame.width,
@@ -319,7 +346,12 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
             .encoder
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("encoder unavailable"))?
-            .encode(&self.picture, keyframe || resized, &mut data)?;
+            .encode_changed(
+                &self.picture,
+                damage.as_deref(),
+                keyframe || resized,
+                &mut data,
+            )?;
         self.timings.encode = started.elapsed();
         self.last_sent = Some(self.captured);
         Ok(EncodedVideo {
