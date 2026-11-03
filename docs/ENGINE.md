@@ -81,9 +81,15 @@ Baseline. Windows probes actual pictures through the installed synchronous
 MFT and D3D11 manager, caching the result; missing codec extensions or drivers
 leave that codec out of negotiation. Mac checks `VTIsHardwareDecodeSupported` and requires a decoded hardware
 picture too; a capability query alone can succeed on an unusable decoder.
-Only Baseline streams have the ten-access-unit `latch-codec` safety net;
-High, HEVC and AV1 require a working platform decoder. Unknown codec names
-in an offer are skipped by protocol-1 hosts.
+Only Baseline streams have the ten-access-unit `latch-codec` safety net.
+High, HEVC and AV1 have the session's instead (`session::HARDWARE_PROBATION`):
+a decoder that cannot be created, gives no picture for ten access units, or
+fails three times without one ends that attempt, and the session asks the
+host again without the codec (down to Baseline), with a notice saying why;
+the codec is not offered again until the viewer restarts.
+`LATCH_TEST_BREAK_DECODER=hevc,h264-high` (or `all`; `hevc=silent` for a
+decoder that gives nothing) breaks decoders on purpose to test this.
+Unknown codec names in an offer are skipped by protocol-1 hosts.
 
 Main10 input is supported by the platform decoders. Mac callers can choose
 P010 with `new_decoder_with_format`; its two 16-bit Metal planes retain ten

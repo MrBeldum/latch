@@ -15,6 +15,13 @@ GitHub release notes, so each version gets a heading of the form
   fenced GPU copies and CPU-readback fallback.
 - Retain native surfaces until GPU work completes; add a native present
   measurement example and decode-to-render timestamps.
+- A viewer whose AV1, HEVC or H.264 High decoder fails (no picture for ten
+  frames, or three errors without one) asks the PC again without that
+  codec, down to Baseline, and says why, instead of asking for keyframes
+  forever: a picture returns within a second or two.
+- A Media Foundation decoder without transform attributes runs without the
+  low-latency hint instead of failing; a Windows renderer that cannot open
+  a shared picture stops drawing the last one.
 - No Latch-imposed ceilings on a stream. The viewer allowed 30–240 fps and
   2–150 Mbps and the host clamped every request to 240 fps, 500 Mbps and
   8192 pixels; the software H.264 encoder refused anything over 240 fps.
