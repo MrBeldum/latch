@@ -108,7 +108,8 @@ version words checked against nvEncodeAPI.h 12.0 and libva 2.x).
   driver encodes): H.264 Constrained Baseline or High and HEVC Main, the
   low-power entry point first, driver-written headers, one reference, CBR
   with a one-frame HRD. AV1 is not offered: VA-API leaves its headers to
-  the application.
+  the application. The host's user must be able to open the node (the
+  `render` group on Ubuntu); the log says so when it cannot.
 
 Each backend and codec is probed once per process, at the first stream
 (open, an IDR that must carry its parameter sets, a P-frame); anything
@@ -117,8 +118,9 @@ missing or failing leaves `latch-codec`. `LATCH_LINUX_ENCODER=auto`
 that asks for Constrained Baseline keeps `latch-codec`, whose output that
 decoder is tested against. An encoder that fails for a session is not
 offered again: H.264 falls back to `latch-codec`, HEVC and AV1 fail the
-session, as on Windows. Neither backend has run on a GPU yet; the host
-used for testing has libva and a virtio render node but no encoder.
+session, as on Windows. Neither backend has run on a GPU yet: the Linux
+host used for testing has libva and a virtio render node its user may not
+open, so only the fallback has run.
 
 **Wayland** is not captured. It takes the ScreenCast portal (D-Bus, which
 pure Rust can speak) and a PipeWire stream, whose Rust bindings are

@@ -487,12 +487,20 @@ impl Device {
         nodes.extend((128..136).map(|n| format!("/dev/dri/renderD{n}").into()));
         let mut last = anyhow::anyhow!("no DRM render node");
         for node in nodes {
-            let Ok(file) = std::fs::OpenOptions::new()
+            let file = match std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open(&node)
-            else {
-                continue;
+            {
+                Ok(file) => file,
+                Err(e) => {
+                    // A node that exists but cannot be opened (not in the
+                    // `render` group) is worth saying so.
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        last = anyhow::anyhow!("{}: {e}", node.display());
+                    }
+                    continue;
+                }
             };
             let fd = OwnedFd::from(file);
             // SAFETY: `fd` stays open for as long as the display lives.

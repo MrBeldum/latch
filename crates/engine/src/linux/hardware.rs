@@ -299,7 +299,7 @@ mod tests {
         let codecs = encodable();
         assert_eq!(codecs.last(), Some(&Codec::H264Baseline));
         // With no NVIDIA driver and no VA-API driver (CI, stuzha: libva and
-        // a virtio render node, but no encoder) nothing else is.
+        // a render node it cannot use) nothing else is.
         if !nvenc::present() && !vaapi::opens() {
             assert_eq!(codecs, [Codec::H264Baseline]);
             assert_eq!(backend(Codec::Hevc), None);
