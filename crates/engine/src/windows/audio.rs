@@ -7,7 +7,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use windows::core::Interface;
 use windows::Win32::{
     Foundation::*,
     Media::{Audio::*, KernelStreaming::*, Multimedia::*},
@@ -47,14 +46,13 @@ struct Loopback {
     float: bool,
     resampler: Resampler,
     pending: VecDeque<f32>,
-    /// The engine period this client runs at, in frames, when it asked
-    /// IAudioClient3 for the smallest one.
-    period: Option<u32>,
     trace: Option<Trace>,
 }
 
 /// `LATCH_AUDIO_TRACE` set: how big loopback packets are and how old
-/// their first frame is when read, logged every five seconds.
+/// their first frame is when read, logged every five seconds. (Negative:
+/// a packet's QPC stamp is when the endpoint will play it, and loopback
+/// hands the mix over before the device buffer does.)
 struct Trace {
     since: Instant,
     frames: Vec<u32>,
@@ -97,22 +95,11 @@ fn qpc_100ns() -> i64 {
 }
 
 impl Loopback {
-    /// Low latency first: the smallest shared engine period the endpoint
-    /// offers (IAudioClient3), so loopback packets come every few ms
-    /// rather than every 10. `LATCH_AUDIO_PERIOD=default` skips it.
+    /// Loopback runs at the endpoint's engine period (10 ms on most
+    /// drivers) and cannot ask for a smaller one: IAudioClient3's
+    /// low-latency streams refuse the loopback flag
+    /// (AUDCLNT_E_INVALID_STREAM_FLAG).
     fn open(event_driven: bool, layout: Layout) -> Result<Self> {
-        let small =
-            event_driven && std::env::var("LATCH_AUDIO_PERIOD").map_or(true, |v| v != "default");
-        if small {
-            match Self::open_with(true, true, layout) {
-                Ok(l) => return Ok(l),
-                Err(e) => tracing::debug!("WASAPI low-latency loopback unavailable: {e:#}"),
-            }
-        }
-        Self::open_with(event_driven, false, layout)
-    }
-
-    fn open_with(event_driven: bool, small_period: bool, layout: Layout) -> Result<Self> {
         // SAFETY: Called in the audio worker's MTA; COM objects stay on it.
         unsafe {
             let enumerator: IMMDeviceEnumerator =
@@ -173,29 +160,12 @@ impl Loopback {
                 } else {
                     0
                 };
-            let mut period = None;
-            let initialized = if !valid {
-                Err(anyhow::anyhow!("unsupported mix format: tag={tag}, bits={bits}, channels={channels}, rate={rate}"))
-            } else if small_period {
-                (|| {
-                    let client3: IAudioClient3 = client.cast()?;
-                    let (mut default, mut fundamental, mut min, mut max) = (0, 0, 0, 0);
-                    client3.GetSharedModeEnginePeriod(
-                        format,
-                        &mut default,
-                        &mut fundamental,
-                        &mut min,
-                        &mut max,
-                    )?;
-                    client3.InitializeSharedAudioStream(flags, min, format, None)?;
-                    period = Some(min);
-                    Ok::<_, anyhow::Error>(())
-                })()
-                .context("initialize low-latency WASAPI loopback")
-            } else {
+            let initialized = if valid {
                 client
                     .Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 0, 0, format, None)
                     .context("initialize WASAPI loopback")
+            } else {
+                Err(anyhow::anyhow!("unsupported mix format: tag={tag}, bits={bits}, channels={channels}, rate={rate}"))
             };
             CoTaskMemFree(Some(format.cast()));
             initialized?;
@@ -222,7 +192,6 @@ impl Loopback {
                 float,
                 resampler: Resampler::with_layout(rate, channels, mask, layout.pick(channels)),
                 pending: VecDeque::new(),
-                period,
                 trace: std::env::var_os("LATCH_AUDIO_TRACE").map(|_| Trace {
                     since: Instant::now(),
                     frames: Vec::new(),
@@ -414,13 +383,8 @@ pub(super) fn open(layout: Layout) -> Result<Box<dyn AudioCapture>> {
             };
             let channels = capture.out_channels();
             let description = format!(
-                "WASAPI default render loopback ({} Hz, {} channels{})",
-                capture.rate,
-                capture.channels,
-                capture.period.map_or(String::new(), |p| format!(
-                    ", {:.2} ms period",
-                    f64::from(p) * 1000.0 / f64::from(capture.rate)
-                ))
+                "WASAPI default render loopback ({} Hz, {} channels)",
+                capture.rate, capture.channels
             );
             if ready.send(Ok((description, channels))).is_err() {
                 return;
