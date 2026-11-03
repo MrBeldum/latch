@@ -51,6 +51,13 @@ const VIDEO_RECOVERIES: usize = 3;
 /// Samples per channel in one audio packet: the capture's 5 ms frame when
 /// its worst case fits a datagram (stereo: 965 of 1 182 bytes), else the
 /// frame split evenly into parts that do (5.1: 80, 7.1: 60).
+/// Lossless sound grows with its channels: the encoder budget keeps 1.2
+/// Mbps for stereo, and this keeps as much again for each further pair
+/// (centre/LFE, rears, sides), which codes to no more than a stereo pair.
+fn surround_kbps(channels: usize) -> u32 {
+    (channels.saturating_sub(2) as u32).div_ceil(2) * 1200
+}
+
 fn audio_packet_samples(channels: usize) -> usize {
     let fits = latch_codec::audio::frame_samples_within(channels, latch_proto::audio::MAX_PAYLOAD);
     audio::FRAME / audio::FRAME.div_ceil(fits.max(1))
@@ -323,6 +330,10 @@ impl Server {
             transport: TransportState::new(config.bitrate_kbps),
             keyframe_request: Mutex::new(None),
             audio_enabled: prepared.audio.is_some(),
+            surround_kbps: prepared
+                .audio
+                .as_ref()
+                .map_or(0, |capture| surround_kbps(capture.channels())),
             mic: Mutex::new(prepared.mic.take().map(|out| {
                 let format = crate::mic::format();
                 (
@@ -747,6 +758,9 @@ struct Session {
     transport: TransportState,
     keyframe_request: Mutex<Option<(u32, Instant)>>,
     audio_enabled: bool,
+    /// What surround sound needs beyond the stereo allowance the encoder
+    /// budget already keeps for audio.
+    surround_kbps: u32,
     /// The viewer's microphone: its packets put in order, and where they play.
     mic: Mutex<Option<(AudioReceiver, crate::mic::MicOut)>>,
     cursor_supported: bool,
@@ -984,7 +998,11 @@ fn encode_video(
     let mut applied = 0;
     while !session.stopping() {
         let target = crate::congestion::video_budget(
-            session.transport.budget.load(Ordering::Relaxed),
+            session
+                .transport
+                .budget
+                .load(Ordering::Relaxed)
+                .saturating_sub(session.surround_kbps),
             session.fec.load(Ordering::Relaxed),
             audio,
         );

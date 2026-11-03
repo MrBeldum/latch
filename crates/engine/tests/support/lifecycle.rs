@@ -56,6 +56,7 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         transport: TransportState::new(1000),
         keyframe_request: Mutex::new(None),
         audio_enabled: false,
+        surround_kbps: 0,
         mic: Mutex::new(None),
         cursor_supported: false,
         draw_cursor: AtomicBool::new(true),
@@ -501,4 +502,12 @@ fn audio_packets_split_the_frame_evenly_and_always_fit() {
             latch_codec::audio::max_coded_len(channels, samples) <= latch_proto::audio::MAX_PAYLOAD
         );
     }
+}
+
+#[test]
+fn surround_keeps_more_of_the_wire_for_sound_and_stereo_no_more_than_before() {
+    assert_eq!(surround_kbps(1), 0);
+    assert_eq!(surround_kbps(2), 0);
+    assert_eq!(surround_kbps(6), 2400);
+    assert_eq!(surround_kbps(8), 3600);
 }
