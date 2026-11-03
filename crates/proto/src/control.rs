@@ -11,11 +11,24 @@ pub const PATH: &str = "/v1/stream";
 /// Largest control message, type byte included.
 pub const MAX_MESSAGE: usize = 65_536;
 
+/// The widest range a [`StreamRequest`] is taken in. These are bounds on
+/// what is asked, not limits of Latch: a host still meets each request
+/// with what its capture and encoder can do (`latch_core::api::Caps`).
+/// Sides are bounded by the largest picture any codec level defines
+/// (AV1 level 6.x: 16384 × 8704).
+pub const MAX_SIDE: u32 = 16_384;
+/// Frames a second: the fastest gaming monitors run at 500 Hz.
+pub const MAX_FPS: u32 = 500;
+/// Kilobits a second: 1 Gbps, the highest any codec level allows.
+pub const MAX_BITRATE_KBPS: u32 = 1_000_000;
+
 /// A video codec, as named on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Codec {
     #[serde(rename = "hevc")]
     Hevc,
+    #[serde(rename = "av1")]
+    Av1,
     #[serde(rename = "h264-high")]
     H264High,
     #[serde(rename = "h264-baseline")]
@@ -26,6 +39,7 @@ impl Codec {
     pub fn name(self) -> &'static str {
         match self {
             Codec::Hevc => "HEVC",
+            Codec::Av1 => "AV1",
             Codec::H264High | Codec::H264Baseline => "H.264",
         }
     }

@@ -1,4 +1,10 @@
-//! Desktop sizing and a conservative ceiling for software encoding.
+//! Desktop sizing and what this host's encoders can do.
+
+use latch_core::api::CodecCaps;
+use latch_engine::video::{Codec, Limits};
+use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 pub fn capture_size() -> Option<[u32; 2]> {
@@ -31,21 +37,98 @@ pub fn encoder_description() -> &'static str {
     }
 }
 
-/// Small CPUs keep room for the desktop by limiting software encoding at 1080p.
-pub fn max_fps(encoder: &str, cores: usize) -> u32 {
-    if encoder.to_ascii_lowercase().contains("software") && cores < 4 {
-        30
-    } else {
-        0
+/// What this host's encoders take, as measured: the software path's frame
+/// rate when it is the one in use (at the capture size, or 1920 × 1080),
+/// and each codec's limits. Looked at again on a thread when the encoder
+/// or the capture size changes, never while `streaming`; until the first
+/// look ends nothing is known and nothing is limited.
+pub fn capacity(encoder: &str, streaming: bool) -> (u32, Vec<CodecCaps>) {
+    static MEASURED: Mutex<Option<Measured>> = Mutex::new(None);
+    static LOOKING: AtomicBool = AtomicBool::new(false);
+    let software = is_software(encoder);
+    let size = capture_size().unwrap_or([1920, 1080]);
+    let measured = MEASURED.lock().clone();
+    let stale = measured
+        .as_ref()
+        .is_none_or(|m| m.size != size || m.software != software);
+    if stale && !streaming && !LOOKING.swap(true, Ordering::AcqRel) {
+        let spawned = std::thread::Builder::new()
+            .name("latch-capacity".into())
+            .spawn(move || {
+                let codecs = latch_engine::video::encodable()
+                    .into_iter()
+                    .map(|codec| caps(codec, latch_engine::video::limits(codec)))
+                    .collect();
+                let max_fps = if software {
+                    latch_engine::software::measure_fps(size[0], size[1], MEASURE_FOR)
+                } else {
+                    0
+                };
+                tracing::info!("encoder capacity: {max_fps} fps in software at {size:?} (0: not measured), {codecs:?}");
+                *MEASURED.lock() = Some(Measured {
+                    size,
+                    software,
+                    max_fps,
+                    codecs,
+                });
+                LOOKING.store(false, Ordering::Release);
+            });
+        if spawned.is_err() {
+            LOOKING.store(false, Ordering::Release);
+        }
+    }
+    measured.map_or((0, Vec::new()), |m| (m.max_fps, m.codecs))
+}
+
+/// How long the software path is timed for.
+const MEASURE_FOR: Duration = Duration::from_millis(1500);
+
+#[derive(Debug, Clone)]
+struct Measured {
+    size: [u32; 2],
+    software: bool,
+    max_fps: u32,
+    codecs: Vec<CodecCaps>,
+}
+
+/// The engine's software H.264, as the running or last session named it
+/// or as [`encoder_description`] expects it.
+fn is_software(encoder: &str) -> bool {
+    encoder.starts_with("Latch software")
+}
+
+fn caps(codec: Codec, limits: Limits) -> CodecCaps {
+    CodecCaps {
+        codec: serde_json::to_value(codec)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default(),
+        max_side: limits.max_side,
+        max_pixels: limits.max_pixels,
+        max_pixel_rate: limits.max_pixel_rate,
+        max_kbps: limits.max_kbps,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn software_on_a_small_cpu_has_a_ceiling() {
-        assert_eq!(super::max_fps("Latch software H.264", 2), 30);
-        assert_eq!(super::max_fps("Latch software H.264", 4), 0);
-        assert_eq!(super::max_fps("VideoToolbox HEVC", 2), 0);
+    fn only_the_software_encoder_is_measured() {
+        assert!(is_software("Latch software H.264"));
+        assert!(is_software("Latch software H.264 (X11)"));
+        assert!(!is_software(
+            "Media Foundation H.264, with Latch software H.264 fallback"
+        ));
+        assert!(!is_software("VideoToolbox HEVC"));
+    }
+
+    #[test]
+    fn codec_caps_carry_the_wire_name() {
+        let c = caps(Codec::H264High, Limits::level(Codec::H264High));
+        assert_eq!(c.codec, "h264-high");
+        assert_eq!(c.max_kbps, 1_000_000);
+        assert_eq!(caps(Codec::Av1, Limits::level(Codec::Av1)).codec, "av1");
     }
 }

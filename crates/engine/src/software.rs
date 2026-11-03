@@ -130,6 +130,39 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
     }
 }
 
+/// Frames a second this machine's CPU takes through the software path at
+/// `width` × `height`: the test pattern's moving bar drawn, converted and
+/// encoded as a session would, at no frame-rate limit, for about
+/// `budget`. A host that encodes in software reports this as its ceiling,
+/// so a viewer asks for what it keeps up with rather than what a core
+/// count suggests. 0 when the pipeline cannot be opened.
+pub fn measure_fps(width: u32, height: u32, budget: Duration) -> u32 {
+    let fps = latch_proto::control::MAX_FPS;
+    let pattern = crate::pattern::Pattern::new(width, height, fps, crate::pattern::Motion::Sweep);
+    let config = VideoConfig {
+        width,
+        height,
+        fps,
+        bitrate_kbps: 20_000,
+        codec: Codec::H264Baseline,
+    };
+    let Ok(mut pipeline) = SoftwarePipeline::new(pattern, &config) else {
+        return 0;
+    };
+    // The first frame is an IDR and sets up the encoder: not counted.
+    if pipeline.next(true, Duration::ZERO).is_err() {
+        return 0;
+    }
+    let (start, mut frames) = (Instant::now(), 0u32);
+    while start.elapsed() < budget {
+        if pipeline.next(false, Duration::ZERO).is_err() {
+            return 0;
+        }
+        frames += 1;
+    }
+    (f64::from(frames) / start.elapsed().as_secs_f64()) as u32
+}
+
 fn validate_size(width: u32, height: u32) -> anyhow::Result<()> {
     ensure!(
         width > 0 && height > 0 && width <= 16384 && height <= 16384,
@@ -319,6 +352,18 @@ mod tests {
         p.set_bitrate(2000);
         assert_eq!(p.config.bitrate_kbps, 2000);
     }
+    #[test]
+    fn the_software_ceiling_is_measured() {
+        let fps = measure_fps(320, 240, Duration::from_millis(200));
+        assert!(fps > 0, "a small picture encodes at some rate");
+        assert!(fps <= latch_proto::control::MAX_FPS + 10, "{fps} fps");
+        assert_eq!(
+            measure_fps(3, 3, Duration::from_millis(10)),
+            0,
+            "odd sizes cannot open"
+        );
+    }
+
     #[test]
     fn rejects_bad_frames_and_config() {
         let mut p = pipeline();

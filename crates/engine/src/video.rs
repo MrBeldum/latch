@@ -127,6 +127,71 @@ impl Pacer {
 /// The grid runs this much of a nominal interval per frame: 1% fast.
 const PACE: f64 = 0.99;
 
+/// What one codec's encoder takes on this machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Longest side of a picture, in pixels.
+    pub max_side: u32,
+    /// Largest picture, in pixels.
+    pub max_pixels: u64,
+    /// Pixels a second: picture size times frame rate.
+    pub max_pixel_rate: u64,
+    /// Kilobits a second.
+    pub max_kbps: u32,
+}
+
+impl Limits {
+    /// The codec's own ceiling: its highest level (H.264 6.2, HEVC Main
+    /// 6.2 High tier, AV1 6.3 High tier), which every encoder stays
+    /// within. All three allow 8192 × 4352 pixels a picture and 4.28
+    /// billion a second (4K at 515 fps, 1080p at 2063).
+    pub const fn level(codec: Codec) -> Self {
+        Self {
+            max_side: latch_proto::control::MAX_SIDE,
+            max_pixels: 35_651_584,
+            max_pixel_rate: 4_278_190_080,
+            max_kbps: match codec {
+                // High's coded picture buffer is 1.25 times Baseline's.
+                Codec::H264High => 1_000_000,
+                Codec::H264Baseline | Codec::Hevc | Codec::Av1 => 800_000,
+            },
+        }
+    }
+
+    /// `width` × `height` at `fps`, scaled down in proportion until the
+    /// picture fits, then the frame rate lowered until the pixel rate
+    /// does. Sides stay even.
+    pub fn fit(&self, width: u32, height: u32, fps: u32) -> (u32, u32, u32) {
+        let (w, h) = (u64::from(width.max(2)), u64::from(height.max(2)));
+        let side = self.max_side.max(2) as f64 / w.max(h) as f64;
+        let area = (self.max_pixels.max(4) as f64 / (w * h) as f64).sqrt();
+        let scale = side.min(area).min(1.0);
+        let even = |v: u64| ((v as f64 * scale) as u32 / 2 * 2).max(2);
+        let (w, h) = if scale < 1.0 {
+            (even(w), even(h))
+        } else {
+            (width, height)
+        };
+        let ceiling = self.max_pixel_rate / (u64::from(w) * u64::from(h)).max(1);
+        (
+            w,
+            h,
+            fps.min(u32::try_from(ceiling).unwrap_or(u32::MAX)).max(1),
+        )
+    }
+}
+
+/// What the encoder for `codec` takes here.
+pub fn limits(codec: Codec) -> Limits {
+    if crate::testmode::motion().is_some() {
+        return Limits::level(codec);
+    }
+    #[cfg(target_os = "macos")]
+    return crate::mac::limits(codec);
+    #[cfg(not(target_os = "macos"))]
+    return Limits::level(codec);
+}
+
 /// What this machine can encode, best first.
 pub fn encodable() -> Vec<Codec> {
     if crate::testmode::motion().is_some() {
@@ -156,6 +221,41 @@ pub fn open(config: &VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limits_scale_a_picture_down_in_proportion_and_then_the_frame_rate() {
+        let h264 = Limits {
+            max_side: 4096,
+            max_pixels: 4096 * 2160,
+            ..Limits::level(Codec::H264High)
+        };
+        assert_eq!(
+            h264.fit(3024, 1964, 120),
+            (3024, 1964, 120),
+            "fits as asked"
+        );
+        let (w, h, fps) = h264.fit(5120, 2880, 60);
+        assert!(
+            u64::from(w) * u64::from(h) <= h264.max_pixels && fps == 60,
+            "5K shrinks"
+        );
+        assert!(
+            (w as f32 / h as f32 - 16.0 / 9.0).abs() < 0.01,
+            "in proportion"
+        );
+        assert_eq!(h264.fit(5120, 1440, 60), (4096, 1152, 60), "the long side");
+        let (w, h, _) = h264.fit(3840, 2400, 60);
+        assert!(u64::from(w) * u64::from(h) <= h264.max_pixels && w % 2 == 0 && h % 2 == 0);
+        let level = Limits::level(Codec::Hevc);
+        assert_eq!(level.fit(3840, 2160, 500), (3840, 2160, 500));
+        assert_eq!(
+            level.fit(7680, 4320, 240),
+            (7680, 4320, 128),
+            "8K at the pixel rate"
+        );
+        assert_eq!(Limits::level(Codec::H264High).max_kbps, 1_000_000);
+        assert_eq!(Limits::level(Codec::H264Baseline).max_kbps, 800_000);
+    }
 
     #[test]
     fn work_comes_out_of_the_interval() {

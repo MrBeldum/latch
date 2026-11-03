@@ -139,13 +139,14 @@ impl Service {
         } else {
             status.encoder
         };
-        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let (max_fps, codecs) = streamer::capacity(&encoder, status.viewer.is_some());
         Streamer {
             kind: latch_core::STREAMER_KIND.into(),
             installed: true,
             running: server.is_some(),
             api_ok: true,
-            max_fps: streamer::max_fps(&encoder, cores),
+            max_fps,
+            codecs,
             encoder,
             audio_problem: status.audio_problem,
             requested_bitrate_kbps: status.requested_bitrate_kbps,
