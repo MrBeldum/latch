@@ -76,9 +76,10 @@ pub struct EncodedInfo {
 }
 
 enum Task {
-    Scroll {
+    Prepare {
         source: Arc<Yuv420>,
-        previous: Arc<Yuv420>,
+        previous: Option<Arc<Yuv420>>,
+        scroll: bool,
         first: usize,
         end: usize,
     },
@@ -88,7 +89,7 @@ enum Task {
 struct Worker {
     tx: Option<mpsc::Sender<Task>>,
     rx: mpsc::Receiver<worker::Band>,
-    scroll_rx: mpsc::Receiver<(i32, i32)>,
+    prepared_rx: mpsc::Receiver<worker::Prepared>,
     handle: Option<JoinHandle<()>>,
 }
 impl Drop for Worker {
@@ -107,6 +108,9 @@ pub struct Encoder {
     workers: Vec<Worker>,
     reconstruction: Arc<Yuv420>,
     source: Option<Arc<Yuv420>>,
+    /// Pictures no frame refers to any more, reused rather than allocated.
+    spare_reconstruction: Option<Yuv420>,
+    spare_source: Option<Yuv420>,
     quality: Arc<Vec<u8>>,
     frame_num: u32,
     idr_id: u32,
@@ -157,7 +161,7 @@ impl Encoder {
         for i in 0..threads {
             let (tx, rx) = mpsc::channel();
             let (out_tx, out_rx) = mpsc::channel();
-            let (scroll_tx, scroll_rx) = mpsc::channel();
+            let (prepared_tx, prepared_rx) = mpsc::channel();
             let handle = thread::Builder::new()
                 .name(format!("h264-{i}"))
                 .spawn(move || {
@@ -166,13 +170,20 @@ impl Encoder {
                     while let Ok(task) = rx.recv() {
                         let sent = match task {
                             Task::Encode(job) => out_tx.send(worker::encode(job)).is_ok(),
-                            Task::Scroll {
+                            Task::Prepare {
                                 source,
                                 previous,
+                                scroll,
                                 first,
                                 end,
-                            } => scroll_tx
-                                .send(worker::scroll(&source, &previous, first, end))
+                            } => prepared_tx
+                                .send(worker::prepare(
+                                    &source,
+                                    previous.as_deref(),
+                                    scroll,
+                                    first,
+                                    end,
+                                ))
                                 .is_ok(),
                         };
                         if !sent {
@@ -184,7 +195,7 @@ impl Encoder {
             workers.push(Worker {
                 tx: Some(tx),
                 rx: out_rx,
-                scroll_rx,
+                prepared_rx,
                 handle: Some(handle),
             });
         }
@@ -196,6 +207,8 @@ impl Encoder {
             workers,
             reconstruction,
             source: None,
+            spare_reconstruction: None,
+            spare_source: None,
             quality: Arc::new(vec![45; total]),
             frame_num: 0,
             idr_id: 0,
@@ -231,9 +244,31 @@ impl Encoder {
             return Ok(result);
         }
         let frame_num = if idr { 0 } else { self.frame_num };
-        let source = Arc::new(picture.clone());
+        let source = Arc::new(match self.spare_source.take() {
+            Some(mut spare) => {
+                spare.copy_from(picture);
+                spare
+            }
+            None => picture.clone(),
+        });
         let budget = self.config.bitrate_kbps as f64 * 1000. / self.config.fps as f64;
-        let complexity = complexity(picture, self.source.as_deref());
+        // Scroll detection, the change count and the complexity estimate
+        // read every band of the picture: the slice workers do them.
+        let rows = picture.padded_height() / 16;
+        let bands = self.workers.len();
+        let prepared = self.round_trip(
+            |i| Task::Prepare {
+                source: source.clone(),
+                previous: self.source.clone(),
+                scroll: !idr,
+                first: i * rows / bands,
+                end: (i + 1) * rows / bands,
+            },
+            |worker| worker.prepared_rx.recv().ok(),
+        )?;
+        let complexity = prepared.iter().map(|p| p.complexity).sum::<u64>() as f64;
+        let changed_mbs = prepared.iter().map(|p| p.changed_mbs).sum::<usize>();
+        let globals: Vec<_> = prepared.iter().map(|p| p.global).collect();
         let debt =
             self.window.iter().sum::<usize>() as f64 * 8. - budget * self.window.len() as f64;
         let target = (budget - debt * 0.5).clamp(budget * 0.5, budget * 1.5);
@@ -260,56 +295,8 @@ impl Encoder {
         } else {
             0
         };
-        let changed_mbs = if let Some(old) = &self.source {
-            let pw = picture.padded_width();
-            let ph = picture.padded_height();
-            let mb_cols = pw / 16;
-            let mb_rows = ph / 16;
-            let mut changed_mbs = 0;
-            for my in 0..mb_rows {
-                let y = my * 16 + 8;
-                let s_row = y * picture.y_stride;
-                let o_row = y * old.y_stride;
-                for mx in 0..mb_cols {
-                    let x = mx * 16 + 8;
-                    if picture.y[s_row + x] != old.y[o_row + x] {
-                        changed_mbs += 1;
-                    }
-                }
-            }
-            changed_mbs
-        } else {
-            0
-        };
-        let rows = picture.padded_height() / 16;
         let total_mbs = rows * picture.padded_width() / 16;
         let is_motion = changed_mbs * 2 > total_mbs;
-        let globals = if idr {
-            vec![(0, 0); self.workers.len()]
-        } else {
-            for (i, worker) in self.workers.iter().enumerate() {
-                worker
-                    .tx
-                    .as_ref()
-                    .unwrap()
-                    .send(Task::Scroll {
-                        source: source.clone(),
-                        previous: self.source.as_ref().unwrap().clone(),
-                        first: i * rows / self.workers.len(),
-                        end: (i + 1) * rows / self.workers.len(),
-                    })
-                    .map_err(|_| CodecError::Config("encoder worker stopped"))?;
-            }
-            self.workers
-                .iter()
-                .map(|worker| {
-                    worker
-                        .scroll_rx
-                        .recv()
-                        .map_err(|_| CodecError::Config("encoder worker stopped"))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
         // At high QP fractional search costs more than its quality gain; also skip tiny updates and scrolls.
         let refine_motion = self.governor.level == 0
             && self.subpixel
@@ -327,20 +314,22 @@ impl Encoder {
             None
         };
         self.timing.preparation_ms = started.elapsed().as_secs_f64() * 1000.;
-        let (data, rec, mbs, skipped, qp_sum) = loop {
+        let mut next = self
+            .spare_reconstruction
+            .take()
+            .unwrap_or_else(|| Yuv420::new(self.config.width, self.config.height));
+        let target_rows = worker::Target::new(&mut next);
+        let (data, mbs, skipped, qp_sum) = loop {
             self.timing.passes += 1;
-            let rows = picture.padded_height() / 16;
             let width = picture.padded_width() / 16;
             let refresh = (budget / 128.).max(1.) as usize;
-            for (i, worker) in self.workers.iter().enumerate() {
-                worker
-                    .tx
-                    .as_ref()
-                    .unwrap()
-                    .send(Task::Encode(worker::Job {
+            let bands = self.round_trip(
+                |i| {
+                    Task::Encode(worker::Job {
                         source: source.clone(),
                         previous: self.source.clone(),
                         reference: self.reconstruction.clone(),
+                        target: target_rows,
                         half_pel: half_pel.clone(),
                         quality: self.quality.clone(),
                         first: i * rows / self.workers.len(),
@@ -356,56 +345,23 @@ impl Encoder {
                         idr_id: self.idr_id,
                         refresh,
                         refresh_start: self.refresh_start,
-                    }))
-                    .map_err(|_| CodecError::Config("encoder worker stopped"))?;
-            }
+                    })
+                },
+                |worker| worker.rx.recv().ok(),
+            )?;
             let mut data = Vec::new();
             if idr {
                 parameter_sets(&self.config, &mut data)?;
             }
-            let mut rec = Yuv420::new(self.config.width, self.config.height);
             let mut mbs = Vec::with_capacity(width * rows);
             let mut skipped = 0;
             let mut qp_sum = 0;
-            for (i, worker) in self.workers.iter().enumerate() {
-                let band = worker
-                    .rx
-                    .recv()
-                    .map_err(|_| CodecError::Config("encoder worker stopped"))?;
+            for (i, band) in bands.into_iter().enumerate() {
                 self.timing.band_ms[i] += band.elapsed_ms;
                 self.timing.deblock_ms += band.deblock_ms;
                 data.extend_from_slice(&band.nal);
                 skipped += band.skipped;
                 qp_sum += band.qp_sum;
-                let first = band.first * 16;
-                for (dp, sp, ds, ss, n) in [
-                    (
-                        &mut rec.y,
-                        &band.picture.y,
-                        rec.y_stride,
-                        band.picture.y_stride,
-                        1,
-                    ),
-                    (
-                        &mut rec.u,
-                        &band.picture.u,
-                        rec.c_stride,
-                        band.picture.c_stride,
-                        2,
-                    ),
-                    (
-                        &mut rec.v,
-                        &band.picture.v,
-                        rec.c_stride,
-                        band.picture.c_stride,
-                        2,
-                    ),
-                ] {
-                    for row in 0..band.picture.padded_height() / n {
-                        let d = (first / n + row) * ds;
-                        dp[d..d + ds].copy_from_slice(&sp[row * ss..row * ss + ds]);
-                    }
-                }
                 mbs.extend(band.mbs);
             }
             // Under pressure, spend the next frame's feedback correcting a soft
@@ -430,15 +386,19 @@ impl Encoder {
             }
             // Refusing an impossible access unit preserves the reference and the caller's output.
             if data.len() as f64 * 8. > budget * 8. {
+                self.spare_reconstruction = Some(next);
                 return Err(CodecError::Config(
                     "frame exceeds eight bitrate intervals at the allowed QP",
                 ));
             }
-            break (data, rec, mbs, skipped, qp_sum);
+            break (data, mbs, skipped, qp_sum);
         };
         // Filtering was completed independently by each slice worker.
-        self.reconstruction = Arc::new(rec);
-        self.source = Some(source);
+        let old = std::mem::replace(&mut self.reconstruction, Arc::new(next));
+        self.spare_reconstruction = Arc::try_unwrap(old).ok();
+        if let Some(old) = self.source.replace(source) {
+            self.spare_source = Arc::try_unwrap(old).ok();
+        }
         self.quality = Arc::new(mbs.iter().map(|m| m.quality).collect());
         self.frame_num = (frame_num + 1) & 65535;
         if idr {
@@ -469,6 +429,37 @@ impl Encoder {
             total_mbs: mbs.len() as u32,
             bytes,
         })
+    }
+
+    /// Hands every worker its task and collects every answer, in band order.
+    /// Answers are awaited even after a failure: a band still running may be
+    /// writing into the picture being reconstructed.
+    fn round_trip<T>(
+        &self,
+        task: impl Fn(usize) -> Task,
+        answer: impl Fn(&Worker) -> Option<T>,
+    ) -> Result<Vec<T>, CodecError> {
+        let sent: Vec<bool> = self
+            .workers
+            .iter()
+            .enumerate()
+            .map(|(i, worker)| {
+                worker
+                    .tx
+                    .as_ref()
+                    .is_some_and(|tx| tx.send(task(i)).is_ok())
+            })
+            .collect();
+        let answers: Vec<_> = self
+            .workers
+            .iter()
+            .zip(&sent)
+            .map(|(worker, &sent)| if sent { answer(worker) } else { None })
+            .collect();
+        answers
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or(CodecError::Config("encoder worker stopped"))
     }
 
     /// Timings and effort actually used, before the next feedback adjustment.
@@ -562,20 +553,6 @@ impl Encoder {
     }
 }
 
-fn complexity(p: &Yuv420, old: Option<&Yuv420>) -> f64 {
-    let mut sum = 0u64;
-    for y in (0..p.height as usize).step_by(4) {
-        for x in (0..p.width as usize).step_by(4) {
-            let v = p.y[y * p.y_stride + x];
-            sum += if let Some(o) = old {
-                v.abs_diff(o.y[y * o.y_stride + x]) as u64
-            } else {
-                v.abs_diff(128) as u64
-            } + 1;
-        }
-    }
-    sum as f64
-}
 fn level(c: &EncoderConfig) -> Result<u8, CodecError> {
     let fs = (c.width as u64).div_ceil(16) * (c.height as u64).div_ceil(16);
     for (id, mbps, maxfs, kbps) in [

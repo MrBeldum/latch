@@ -1,17 +1,22 @@
 //! Filtering follows H.264 section 8.7, including edges between slices.
 use super::{transform::chroma_qp, worker::Mb};
 use crate::h264::loopfilter::{self, Edge, ALPHA, BETA, TC0};
-use crate::Yuv420;
-pub(super) fn filter(p: &mut Yuv420, mbs: &[Mb]) {
+pub(super) fn filter(p: &mut super::worker::Rows, mbs: &[Mb]) {
     let w = p.padded_width() / 16;
     let h = p.padded_height() / 16;
     for my in 0..h {
         for mx in 0..w {
             let index = my * w + mx;
             let cur = &mbs[index];
+            // Inside an inter macroblock without coefficients every boundary
+            // strength is 0: one motion vector, nothing coded.
+            let plain = !cur.intra && cur.nz == [0; 16];
             for vertical in [true, false] {
                 for edge in 0..4 {
                     if edge == 0 && if vertical { mx == 0 } else { my == 0 } {
+                        continue;
+                    }
+                    if edge > 0 && plain {
                         continue;
                     }
                     let other = if edge > 0 {
@@ -48,6 +53,9 @@ pub(super) fn filter(p: &mut Yuv420, mbs: &[Mb]) {
                             0
                         }
                     });
+                    if strengths == [0; 4] {
+                        continue;
+                    }
                     let edge_config = |qp: usize| Edge {
                         alpha: ALPHA[qp],
                         beta: BETA[qp],

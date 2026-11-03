@@ -20,6 +20,8 @@ pub(super) struct Job {
     pub source: Arc<Yuv420>,
     pub previous: Option<Arc<Yuv420>>,
     pub reference: Arc<Yuv420>,
+    /// Where this band's reconstruction goes: its rows of the next reference.
+    pub target: Target,
     pub half_pel: Option<Arc<predict::HalfPelPlanes>>,
     pub quality: Arc<Vec<u8>>,
     pub first: usize,
@@ -37,14 +39,86 @@ pub(super) struct Job {
     pub refresh_start: usize,
 }
 pub(super) struct Band {
-    pub first: usize,
     pub elapsed_ms: f64,
     pub deblock_ms: f64,
-    pub picture: Yuv420,
     pub mbs: Vec<Mb>,
     pub nal: Vec<u8>,
     pub skipped: u32,
     pub qp_sum: u32,
+}
+/// The planes of the picture the encoder is reconstructing, for its slice
+/// workers to write into without copying. Each band writes only its own
+/// macroblock rows, and the encoder neither reads, writes nor frees the
+/// picture until every band it handed out has come back.
+#[derive(Clone, Copy)]
+pub(super) struct Target {
+    y: *mut u8,
+    u: *mut u8,
+    v: *mut u8,
+    y_len: usize,
+    c_len: usize,
+    y_stride: usize,
+    c_stride: usize,
+    width: u32,
+}
+// SAFETY: see the type's contract; the pointers are only dereferenced by
+// `rows`, for disjoint row ranges, while the encoder waits.
+unsafe impl Send for Target {}
+impl Target {
+    pub fn new(p: &mut Yuv420) -> Self {
+        let (y_len, c_len) = (
+            p.y_stride * p.padded_height(),
+            p.c_stride * p.padded_height() / 2,
+        );
+        assert!(p.y.len() >= y_len && p.u.len() >= c_len && p.v.len() >= c_len);
+        Self {
+            y: p.y.as_mut_ptr(),
+            u: p.u.as_mut_ptr(),
+            v: p.v.as_mut_ptr(),
+            y_len,
+            c_len,
+            y_stride: p.y_stride,
+            c_stride: p.c_stride,
+            width: p.width,
+        }
+    }
+    /// Macroblock rows `first..end`, as a picture of their own.
+    ///
+    /// # Safety
+    /// The picture `new` was given must outlive the result and nobody else
+    /// may access these rows meanwhile.
+    unsafe fn rows(&self, first: usize, end: usize) -> Rows<'_> {
+        let (ys, ye) = (first * 16 * self.y_stride, end * 16 * self.y_stride);
+        let (cs, ce) = (first * 8 * self.c_stride, end * 8 * self.c_stride);
+        assert!(first <= end && ye <= self.y_len && ce <= self.c_len);
+        Rows {
+            width: self.width,
+            height: ((end - first) * 16) as u32,
+            y: std::slice::from_raw_parts_mut(self.y.add(ys), ye - ys),
+            u: std::slice::from_raw_parts_mut(self.u.add(cs), ce - cs),
+            v: std::slice::from_raw_parts_mut(self.v.add(cs), ce - cs),
+            y_stride: self.y_stride,
+            c_stride: self.c_stride,
+        }
+    }
+}
+/// A band's rows of the reconstruction, indexed from the band's top.
+pub(super) struct Rows<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub y: &'a mut [u8],
+    pub u: &'a mut [u8],
+    pub v: &'a mut [u8],
+    pub y_stride: usize,
+    pub c_stride: usize,
+}
+impl Rows<'_> {
+    pub fn padded_width(&self) -> usize {
+        (self.width as usize).div_ceil(16) * 16
+    }
+    pub fn padded_height(&self) -> usize {
+        (self.height as usize).div_ceil(16) * 16
+    }
 }
 fn pos(i: usize) -> (usize, usize) {
     (
@@ -120,7 +194,7 @@ fn equal_at(a: &Yuv420, b: &Yuv420, (x, y): (usize, usize), (rx, ry): (usize, us
     true
 }
 fn copy_mc(
-    dst: &mut Yuv420,
+    dst: &mut Rows,
     reference: &Yuv420,
     hp: Option<&predict::HalfPelPlanes>,
     x: usize,
@@ -417,6 +491,60 @@ fn motion_cost(
     }
     cost
 }
+/// What the encoder learns from a band before coding it.
+pub(super) struct Prepared {
+    pub global: (i32, i32),
+    /// Sum over every fourth row and column of the visible picture of each
+    /// sample's distance from the previous picture (or from grey), plus one.
+    pub complexity: u64,
+    /// Macroblocks whose centre sample changed.
+    pub changed_mbs: usize,
+}
+pub(super) fn prepare(
+    src: &Yuv420,
+    old: Option<&Yuv420>,
+    scroll_search: bool,
+    first: usize,
+    end: usize,
+) -> Prepared {
+    let mut complexity = 0u64;
+    for y in (first * 16..(end * 16).min(src.height as usize)).step_by(4) {
+        let row = &src.y[y * src.y_stride..y * src.y_stride + src.width as usize];
+        complexity += if let Some(o) = old {
+            let old_row = &o.y[y * o.y_stride..y * o.y_stride + src.width as usize];
+            row.iter()
+                .step_by(4)
+                .zip(old_row.iter().step_by(4))
+                .map(|(&v, &o)| v.abs_diff(o) as u64 + 1)
+                .sum::<u64>()
+        } else {
+            row.iter()
+                .step_by(4)
+                .map(|&v| v.abs_diff(128) as u64 + 1)
+                .sum::<u64>()
+        };
+    }
+    let mut changed_mbs = 0;
+    if let Some(old) = old {
+        for my in first..end {
+            let y = my * 16 + 8;
+            let s_row = y * src.y_stride;
+            let o_row = y * old.y_stride;
+            for x in (8..src.padded_width()).step_by(16) {
+                changed_mbs += usize::from(src.y[s_row + x] != old.y[o_row + x]);
+            }
+        }
+    }
+    let global = match old {
+        Some(old) if scroll_search => scroll(src, old, first, end),
+        _ => (0, 0),
+    };
+    Prepared {
+        global,
+        complexity,
+        changed_mbs,
+    }
+}
 pub(super) fn scroll(src: &Yuv420, old: &Yuv420, first: usize, end: usize) -> (i32, i32) {
     let width = src.padded_width();
     let start = first * 16;
@@ -441,12 +569,15 @@ pub(super) fn scroll(src: &Yuv420, old: &Yuv420, first: usize, end: usize) -> (i
             })
     };
     let mut hist = [0u32; 257];
-    let old_hash: Vec<_> = (0..old.padded_height()).map(|y| hash(old, y)).collect();
+    // Only the rows a band's samples can be compared with.
+    let low = start.saturating_sub(128);
+    let high = (end + 128).min(old.padded_height());
+    let old_hash: Vec<_> = (low..high).map(|y| hash(old, y)).collect();
     for y in (start..end).step_by(8) {
         let h = hash(src, y);
         for dy in -128i32..=128 {
             let yy = y as i32 + dy;
-            if yy >= 0 && (yy as usize) < old_hash.len() && old_hash[yy as usize] == h {
+            if yy >= low as i32 && (yy as usize) < high && old_hash[yy as usize - low] == h {
                 hist[(dy + 128) as usize] += 1;
             }
         }
@@ -667,7 +798,9 @@ pub(super) fn encode(job: Job) -> Band {
     let started = Instant::now();
     let w = job.source.padded_width() / 16;
     let rows = job.end - job.first;
-    let mut rec = Yuv420::new(job.source.width, rows as u32 * 16);
+    // SAFETY: the encoder keeps the target alive and untouched until this
+    // band is returned, and gives no other band these rows.
+    let mut rec = unsafe { job.target.rows(job.first, job.end) };
     let mut mbs = vec![Mb::default(); w * rows];
     let mut b = header(
         job.first * w,
@@ -1145,8 +1278,6 @@ pub(super) fn encode(job: Job) -> Band {
     Band {
         deblock_ms,
         elapsed_ms: started.elapsed().as_secs_f64() * 1000.,
-        first: job.first,
-        picture: rec,
         mbs,
         nal,
         skipped,
@@ -1255,35 +1386,7 @@ mod tests {
                     ) as u8;
                 }
             }
-            let job = Job {
-                source: Arc::new(source),
-                previous: Some(Arc::new(old.clone())),
-                reference: Arc::new(old.clone()),
-                half_pel: None,
-                quality: Arc::new(vec![18; 40 * 23]),
-                first: 0,
-                end: 23,
-                qp: 30,
-                suppression: 0,
-                effort: 0,
-                subpixel: false,
-                is_motion: false,
-                global: (0, 0),
-                idr: false,
-                frame_num: 1,
-                idr_id: 0,
-                refresh: 0,
-                refresh_start: 0,
-            };
-            assert_eq!(
-                scroll(
-                    &job.source,
-                    job.previous.as_ref().unwrap(),
-                    job.first,
-                    job.end
-                ),
-                (delta.0 * 4, delta.1 * 4)
-            );
+            assert_eq!(scroll(&source, &old, 0, 23), (delta.0 * 4, delta.1 * 4));
         }
     }
 }
