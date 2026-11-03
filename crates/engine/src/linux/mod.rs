@@ -1,10 +1,11 @@
 //! Linux (X11): MIT-SHM capture with the XFixes cursor, RandR sizing,
-//! XTest input, PulseAudio/PipeWire monitor capture.
+//! XTest input, PulseAudio/PipeWire monitor capture, uinput gamepads.
 
 mod audio;
 mod capture;
 mod display;
 mod input;
+mod uinput;
 
 use crate::audio::AudioCapture;
 use crate::input::InputSink;
@@ -32,6 +33,9 @@ pub fn open_audio() -> anyhow::Result<Box<dyn AudioCapture>> {
 }
 pub fn open_input() -> anyhow::Result<Box<dyn InputSink>> {
     Ok(Box::new(input::X11Input::new()?))
+}
+pub fn open_pads(feedback: crate::gamepad::FeedbackFn) -> anyhow::Result<crate::gamepad::Opened> {
+    Ok(crate::gamepad::Pads::opened(uinput::open()?, feedback))
 }
 pub fn prepare_display(
     width: u32,

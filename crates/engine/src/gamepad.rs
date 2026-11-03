@@ -189,9 +189,228 @@ pub(crate) struct SessionPads {
     pub failing: [bool; MAX_PADS],
 }
 
+/// What each platform's virtual pads are sent, from a [`PadState`]. Pure,
+/// so every mapping is tested on every platform.
+pub(crate) mod map {
+    use latch_proto::gamepad::{button, PadState};
+
+    /// A d-pad's direction, from −1/0/1 per axis; opposite presses cancel.
+    #[cfg_attr(not(any(windows, target_os = "linux", test)), allow(dead_code))]
+    fn dpad(buttons: u32) -> (i32, i32) {
+        let axis = |neg, pos| (buttons & pos != 0) as i32 - (buttons & neg != 0) as i32;
+        (
+            axis(button::DPAD_LEFT, button::DPAD_RIGHT),
+            axis(button::DPAD_UP, button::DPAD_DOWN),
+        )
+    }
+
+    /// An Xbox 360 pad's `XUSB_REPORT`: buttons, triggers, sticks (up
+    /// positive, as XInput has them).
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    pub fn xusb(s: &PadState) -> [u8; 12] {
+        const TABLE: [(u32, u16); 16] = [
+            (button::DPAD_UP, 0x0001),
+            (button::DPAD_DOWN, 0x0002),
+            (button::DPAD_LEFT, 0x0004),
+            (button::DPAD_RIGHT, 0x0008),
+            (button::START, 0x0010),
+            (button::BACK, 0x0020),
+            // A PlayStation pad's touchpad click is its other select button.
+            (button::TOUCHPAD, 0x0020),
+            (button::LEFT_STICK, 0x0040),
+            (button::RIGHT_STICK, 0x0080),
+            (button::LEFT_SHOULDER, 0x0100),
+            (button::RIGHT_SHOULDER, 0x0200),
+            (button::GUIDE, 0x0400),
+            (button::SOUTH, 0x1000),
+            (button::EAST, 0x2000),
+            (button::WEST, 0x4000),
+            (button::NORTH, 0x8000),
+        ];
+        let buttons = TABLE
+            .iter()
+            .filter(|(b, _)| s.buttons & b != 0)
+            .fold(0u16, |n, (_, x)| n | x);
+        let mut out = [0u8; 12];
+        out[0..2].copy_from_slice(&buttons.to_le_bytes());
+        out[2] = (s.left_trigger >> 8) as u8;
+        out[3] = (s.right_trigger >> 8) as u8;
+        for (i, v) in [s.left_x, s.left_y, s.right_x, s.right_y]
+            .iter()
+            .enumerate()
+        {
+            out[4 + 2 * i..6 + 2 * i].copy_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+
+    /// A DualShock 4's `DS4_REPORT` (with C layout's padding: 10 bytes):
+    /// sticks 0–255 with 128 centred and down positive, buttons with the
+    /// d-pad as a hat in the low nibble, the PS and touchpad buttons, and
+    /// triggers.
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    pub fn ds4(s: &PadState) -> [u8; 10] {
+        let x = |v: i16| ((v as i32 + 32768) >> 8) as u8;
+        let y = |v: i16| x(v.saturating_neg());
+        const TABLE: [(u32, u16); 10] = [
+            (button::WEST, 1 << 4),
+            (button::SOUTH, 1 << 5),
+            (button::EAST, 1 << 6),
+            (button::NORTH, 1 << 7),
+            (button::LEFT_SHOULDER, 1 << 8),
+            (button::RIGHT_SHOULDER, 1 << 9),
+            (button::BACK, 1 << 12),
+            (button::START, 1 << 13),
+            (button::LEFT_STICK, 1 << 14),
+            (button::RIGHT_STICK, 1 << 15),
+        ];
+        let mut buttons = TABLE
+            .iter()
+            .filter(|(b, _)| s.buttons & b != 0)
+            .fold(0u16, |n, (_, x)| n | x);
+        // The digital L2 and R2 a real pad reports past the trigger's slack.
+        const PULLED: u16 = 0x0400;
+        if s.left_trigger > PULLED {
+            buttons |= 1 << 10;
+        }
+        if s.right_trigger > PULLED {
+            buttons |= 1 << 11;
+        }
+        buttons |= match dpad(s.buttons) {
+            (0, -1) => 0,
+            (1, -1) => 1,
+            (1, 0) => 2,
+            (1, 1) => 3,
+            (0, 1) => 4,
+            (-1, 1) => 5,
+            (-1, 0) => 6,
+            (-1, -1) => 7,
+            _ => 8,
+        };
+        let special = (s.buttons & button::GUIDE != 0) as u8
+            | ((s.buttons & button::TOUCHPAD != 0) as u8) << 1;
+        let b = buttons.to_le_bytes();
+        [
+            x(s.left_x),
+            y(s.left_y),
+            x(s.right_x),
+            y(s.right_y),
+            b[0],
+            b[1],
+            special,
+            (s.left_trigger >> 8) as u8,
+            (s.right_trigger >> 8) as u8,
+            0,
+        ]
+    }
+
+    /// Linux key codes (`input-event-codes.h`) of an Xbox-layout pad, as the
+    /// kernel's `xpad` driver reports them.
+    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+    pub const EV_KEYS: [(u32, u16); 11] = [
+        (button::SOUTH, 0x130),          // BTN_SOUTH
+        (button::EAST, 0x131),           // BTN_EAST
+        (button::NORTH, 0x133),          // BTN_NORTH
+        (button::WEST, 0x134),           // BTN_WEST
+        (button::LEFT_SHOULDER, 0x136),  // BTN_TL
+        (button::RIGHT_SHOULDER, 0x137), // BTN_TR
+        (button::BACK, 0x13a),           // BTN_SELECT
+        (button::START, 0x13b),          // BTN_START
+        (button::GUIDE, 0x13c),          // BTN_MODE
+        (button::LEFT_STICK, 0x13d),     // BTN_THUMBL
+        (button::RIGHT_STICK, 0x13e),    // BTN_THUMBR
+    ];
+
+    /// The axes an `xpad` pad reports, in `ABS_*` codes, with evdev's down
+    /// positive: X, Y, RX, RY (−32768 to 32767), Z and RZ (triggers, 0 to
+    /// 1023 as an Xbox One pad has them), HAT0X and HAT0Y (−1 to 1).
+    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+    pub fn ev_axes(s: &PadState) -> [(u16, i32); 8] {
+        let down = |v: i16| -(v as i32) - 1;
+        let (hx, hy) = dpad(s.buttons);
+        [
+            (0x00, s.left_x as i32),
+            (0x01, down(s.left_y)),
+            (0x03, s.right_x as i32),
+            (0x04, down(s.right_y)),
+            (0x02, (s.left_trigger >> 6) as i32),
+            (0x05, (s.right_trigger >> 6) as i32),
+            (0x10, hx),
+            (0x11, hy),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xbox_reports_carry_buttons_triggers_and_sticks_as_xinput_has_them() {
+        use latch_proto::gamepad::button;
+        let r = map::xusb(&PadState {
+            buttons: button::SOUTH | button::GUIDE | button::DPAD_RIGHT | button::TOUCHPAD,
+            left_x: -32768,
+            left_y: 32767,
+            right_x: 1,
+            right_y: -1,
+            left_trigger: 65535,
+            right_trigger: 0x80ff,
+            ..Default::default()
+        });
+        assert_eq!(
+            u16::from_le_bytes([r[0], r[1]]),
+            0x1000 | 0x0400 | 0x0008 | 0x0020
+        );
+        assert_eq!((r[2], r[3]), (255, 0x80));
+        assert_eq!(i16::from_le_bytes([r[4], r[5]]), -32768);
+        assert_eq!(i16::from_le_bytes([r[6], r[7]]), 32767);
+        assert_eq!(i16::from_le_bytes([r[10], r[11]]), -1);
+    }
+
+    #[test]
+    fn dualshock_reports_centre_sticks_flip_y_and_use_a_hat() {
+        use latch_proto::gamepad::button;
+        let neutral = map::ds4(&PadState::default());
+        assert_eq!(neutral, [128, 128, 128, 128, 8, 0, 0, 0, 0, 0]);
+        let r = map::ds4(&PadState {
+            buttons: button::SOUTH | button::DPAD_UP | button::DPAD_LEFT | button::GUIDE,
+            left_y: 32767,
+            right_y: -32768,
+            left_x: -32768,
+            right_trigger: 65535,
+            ..Default::default()
+        });
+        assert_eq!((r[0], r[1], r[3]), (0, 0, 255));
+        let buttons = u16::from_le_bytes([r[4], r[5]]);
+        assert_eq!(buttons & 0xf, 7, "north-west");
+        assert_ne!(buttons & 1 << 5, 0, "cross");
+        assert_ne!(buttons & 1 << 11, 0, "digital R2");
+        assert_eq!(buttons & 1 << 10, 0, "no L2");
+        assert_eq!((r[6], r[8]), (1, 255));
+        // Opposite directions cancel.
+        let r = map::ds4(&PadState {
+            buttons: button::DPAD_UP | button::DPAD_DOWN,
+            ..Default::default()
+        });
+        assert_eq!(r[4] & 0xf, 8);
+    }
+
+    #[test]
+    fn linux_axes_point_down_and_triggers_span_ten_bits() {
+        use latch_proto::gamepad::button;
+        let a = map::ev_axes(&PadState {
+            buttons: button::DPAD_DOWN | button::DPAD_LEFT,
+            left_y: 32767,
+            right_y: -32768,
+            left_trigger: 65535,
+            ..Default::default()
+        });
+        assert_eq!(a[1], (0x01, -32768));
+        assert_eq!(a[3], (0x04, 32767));
+        assert_eq!(a[4], (0x02, 1023));
+        assert_eq!((a[6].1, a[7].1), (-1, 1));
+    }
 
     struct Recorder(Arc<Mutex<Vec<String>>>);
     struct RecordedPad(Arc<Mutex<Vec<String>>>, u8);
