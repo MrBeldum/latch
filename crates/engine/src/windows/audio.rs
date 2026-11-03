@@ -463,7 +463,7 @@ pub(super) fn open(layout: Layout) -> Result<Box<dyn AudioCapture>> {
 mod tests {
     #[test]
     fn loopback_opens_when_audio_endpoint_exists() -> anyhow::Result<()> {
-        match super::open(Layout::UpTo(8)) {
+        match super::open(super::Layout::UpTo(8)) {
             Ok(capture) => eprintln!("{}", capture.describe()),
             Err(e) => {
                 if !super::super::unavailable(&e, "WASAPI loopback") {
