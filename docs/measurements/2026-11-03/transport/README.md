@@ -114,7 +114,9 @@ binaries from 9fe0ae9 ([review/compat.txt](review/compat.txt)):
 | new host → 5.1 viewer (250 ms reports) | 59.8 fps, exit 0, 0 send errors | 59.5 fps, exit 0, 0 send errors |
 | new ↔ new | 59.4 fps, exit 0 | 59.5 fps, exit 0 |
 
-No pair cut its applied bitrate during the run. No wire change.
+No pair cut its applied bitrate during the run. No wire change. Rerun at
+`e5ccfda` (after merging main and the half-close on End): the same six pairs
+ran 59.5–60.4 fps, exited 0 with zero send errors, and stopped in 15–38 ms.
 
 ### Reproduction
 
