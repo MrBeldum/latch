@@ -35,7 +35,7 @@ impl Encoder {
             "VideoToolbox requires positive, even picture dimensions"
         );
         ensure!(
-            (1..=240).contains(&config.fps) && config.bitrate_kbps > 0,
+            (1..=latch_proto::control::MAX_FPS).contains(&config.fps) && config.bitrate_kbps > 0,
             "invalid frame rate or bitrate"
         );
         let mut output = Box::new(Mutex::new(Output {
@@ -138,6 +138,7 @@ impl Encoder {
                 Codec::Hevc => kVTProfileLevel_HEVC_Main_AutoLevel,
                 Codec::H264High => kVTProfileLevel_H264_High_AutoLevel,
                 Codec::H264Baseline => kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel,
+                Codec::Av1 => anyhow::bail!("VideoToolbox does not encode AV1"),
             };
             if let Err(error) = encoder.set(kVTCompressionPropertyKey_ProfileLevel, profile) {
                 if config.codec != Codec::H264Baseline {
@@ -259,6 +260,47 @@ impl Encoder {
             self.config.bitrate_kbps = kbps;
             Ok(())
         }
+    }
+    /// Whether a hardware session encodes a `width` × `height` keyframe
+    /// without falling back to software: VideoToolbox accepts any size,
+    /// and a media engine past its own limit says so only by failing over.
+    pub fn hardware_encodes(codec: Codec, width: u32, height: u32) -> bool {
+        let config = VideoConfig {
+            width,
+            height,
+            fps: 60,
+            bitrate_kbps: 20_000,
+            codec,
+        };
+        let Ok(mut encoder) = Self::new(&config) else {
+            return false;
+        };
+        if !encoder.hardware {
+            return false;
+        }
+        // SAFETY: an owned, blank NV12 buffer of the probed size, alive for the encode.
+        let image = unsafe {
+            let empty = dictionary(&[]);
+            let attrs = dictionary(&[(kCVPixelBufferIOSurfacePropertiesKey, empty.0)]);
+            let mut image = ptr::null();
+            if CVPixelBufferCreate(
+                ptr::null(),
+                width as usize,
+                height as usize,
+                NV12,
+                attrs.0,
+                &mut image,
+            ) != 0
+            {
+                return false;
+            }
+            match Owned::new(image) {
+                Ok(image) => image,
+                Err(_) => return false,
+            }
+        };
+        let encoded = encoder.encode(image.0, Instant::now(), true);
+        matches!(encoded, Ok(Some(_))) && encoder.hardware
     }
     pub fn encode(
         &mut self,

@@ -65,7 +65,15 @@ KeyframeRequest on loss ──────────────────�
 | Windows | Media Foundation + D3D11/DXVA for hardware-probed AV1, HEVC and H.264 High; Baseline with `latch-codec` fallback. Shared NV12 D3D11 texture → D3D12/wgpu; staging readback when unavailable |
 | Linux | `latch-codec` |
 
-The viewer lists what it decodes; the host picks the first it can encode.
+The viewer lists what it decodes; the host picks the first it can encode,
+then fits the request to that encoder (`video::Limits`, reported to
+viewers as `streamer.codecs`; see `docs/PROTOCOL.md`, "Encoder limits").
+Latch adds no ceiling of its own beyond the request range (16384 pixels a
+side, 500 fps, 1 Gbps): the codec's top level, the encoder's own limit
+where it has one (VideoToolbox, found by trying), and on the software path
+the frame rate this CPU was measured to encode (`software::measure_fps`,
+held by the server through `software::ceiling`, 30 fps at 1080p until
+measured). Sizes are counted in coded 16-pixel blocks.
 `latch-codec` decodes Constrained Baseline only, so a host asked for
 `h264-baseline` configures its hardware encoder for that profile. A
 viewer probes platform codecs before offering AV1 > HEVC > H.264 High >

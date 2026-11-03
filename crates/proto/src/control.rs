@@ -11,6 +11,69 @@ pub const PATH: &str = "/v1/stream";
 /// Largest control message, type byte included.
 pub const MAX_MESSAGE: usize = 65_536;
 
+/// The widest range a [`StreamRequest`] is taken in. These are bounds on
+/// what is asked, not limits of Latch: a host still meets each request
+/// with what its capture and encoder can do (`latch_core::api::Caps`).
+/// Sides are bounded by the largest picture any codec level defines
+/// (AV1 level 6.x: 16384 × 8704).
+pub const MAX_SIDE: u32 = 16_384;
+/// Frames a second: the fastest gaming monitors run at 500 Hz.
+pub const MAX_FPS: u32 = 500;
+/// Kilobits a second: 1 Gbps, the highest any codec level allows.
+pub const MAX_BITRATE_KBPS: u32 = 1_000_000;
+
+/// `width` × `height` at `fps` within an encoder's limits (longest side,
+/// largest picture, pixels a second): scaled down in proportion until the
+/// picture fits, then the frame rate lowered until the pixel rate does.
+/// Sides stay even. A picture is counted as coded, in whole 16-pixel
+/// blocks ([`coded_pixels`]), as levels count it (H.264 in macroblocks)
+/// and as a media engine runs out of room: an M3 Pro takes 4096 × 2160
+/// and fails 3776 × 2352, which is fewer pixels but more blocks. A limit
+/// of 0 is none. The host and the viewer both fit with this, so a
+/// request a viewer fitted is one the host takes as it is.
+pub fn fit(
+    (max_side, max_pixels, max_pixel_rate): (u32, u64, u64),
+    width: u32,
+    height: u32,
+    fps: u32,
+) -> (u32, u32, u32) {
+    let (w0, h0) = (width.max(2), height.max(2));
+    let side = if max_side == 0 {
+        1.0
+    } else {
+        f64::from(max_side.max(2)) / f64::from(w0.max(h0))
+    };
+    let area = if max_pixels == 0 {
+        1.0
+    } else {
+        (max_pixels.max(4) as f64 / (f64::from(w0) * f64::from(h0))).sqrt()
+    };
+    let mut scale = side.min(area).min(1.0);
+    let even = |v: u32, scale: f64| ((f64::from(v) * scale) as u32 / 2 * 2).max(2);
+    let (mut w, mut h) = if scale < 1.0 {
+        (even(w0, scale), even(h0, scale))
+    } else {
+        (width, height)
+    };
+    // Rounding up to blocks can still leave it a few blocks over.
+    while max_pixels > 0 && coded_pixels(w, h) > max_pixels && w.max(h) > 16 {
+        scale *= 0.998;
+        (w, h) = (even(w0, scale), even(h0, scale));
+    }
+    let fps = if max_pixel_rate == 0 {
+        fps
+    } else {
+        let ceiling = max_pixel_rate / coded_pixels(w, h).max(1);
+        fps.min(u32::try_from(ceiling).unwrap_or(u32::MAX)).max(1)
+    };
+    (w, h, fps)
+}
+
+/// A picture's pixels as coded: each side rounded up to a 16-pixel block.
+pub fn coded_pixels(width: u32, height: u32) -> u64 {
+    u64::from(width.next_multiple_of(16)) * u64::from(height.next_multiple_of(16))
+}
+
 /// A video codec, as named on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Codec {
