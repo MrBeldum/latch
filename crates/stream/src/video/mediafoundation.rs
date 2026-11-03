@@ -303,7 +303,7 @@ struct Shared {
     pictures: u32,
     /// The visible area of the picture copied to `staging` with the previous
     /// sample, for the next picture to scan.
-    sampled: Option<Layout>,
+    sampled: Option<(Layout, ID3D11Texture2D, u32)>,
     black: bool,
     busy: bool,
 }
@@ -401,7 +401,10 @@ impl Gpu {
                 self.shared = None;
             }
             // The renderer has no ten-bit planar format to open P010 with.
-            if desc.Format == DXGI_FORMAT_NV12 {
+            if desc.Format == DXGI_FORMAT_NV12
+                && layout.width.is_multiple_of(2)
+                && layout.height.is_multiple_of(2)
+            {
                 if let Some(mut shared) = self.shared.take() {
                     match self.share(&mut shared, &texture, subresource, &desc, layout) {
                         Ok(Some(picture)) => {
@@ -476,13 +479,12 @@ impl Gpu {
     ) -> Result<Option<DecodedNv12>> {
         // The copy sampled with the previous picture finished before that
         // picture's fence, so this map does not wait for the GPU.
-        if let Some(sampled) = shared.sampled.take() {
-            let staging = self.staging(desc)?;
+        if let Some((sampled, staging, rows)) = shared.sampled.take() {
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             self.context
                 .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
                 .context("map sampled DXVA output")?;
-            let (pitch, rows) = (mapped.RowPitch as usize, desc.Height as usize);
+            let (pitch, rows) = (mapped.RowPitch as usize, rows as usize);
             let bytes = std::slice::from_raw_parts(mapped.pData.cast::<u8>(), pitch * rows * 3 / 2);
             let (left, top) = (sampled.left as usize, sampled.top as usize);
             shared.black = super::planes_black(
@@ -541,7 +543,7 @@ impl Gpu {
             let staging = self.staging(desc)?;
             self.context
                 .CopySubresourceRegion(&staging, 0, 0, 0, 0, texture, subresource, None);
-            shared.sampled = Some(layout);
+            shared.sampled = Some((layout, staging, desc.Height));
         }
         shared.value += 1;
         shared.context.Signal(&shared.fence, shared.value)?;
@@ -628,7 +630,7 @@ impl SharedSurface {
                 )
                 .context("share decoder texture")?;
             Ok(Self {
-                texture: texture,
+                texture,
                 handle,
                 id: IDS.fetch_add(1, Ordering::Relaxed),
                 width,
@@ -786,13 +788,7 @@ impl State {
     }
     /// `share`: the renderer's adapter, to decode on it and hand pictures
     /// over as [`SharedSurface`]s.
-    fn new(
-        codec: Codec,
-        dxva: bool,
-        share: Option<LUID>,
-        width: u32,
-        height: u32,
-    ) -> Result<Self> {
+    fn new(codec: Codec, dxva: bool, share: Option<LUID>, width: u32, height: u32) -> Result<Self> {
         // SAFETY: This runs only in the initialized decoder MTA.
         unsafe {
             let subtype = match codec {

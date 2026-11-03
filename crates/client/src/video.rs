@@ -279,7 +279,7 @@ struct Planes {
     bind_group: wgpu::BindGroup,
 }
 
-///// Lives in egui-wgpu's callback resources for the life of the window.
+/// Lives in egui-wgpu's callback resources for the life of the window.
 pub struct Resources {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
@@ -550,9 +550,8 @@ impl Resources {
                 // SAFETY: The raw device is only used to open the resource,
                 // which wgpu then owns like any texture it made.
                 let resource = unsafe {
-                    device.as_hal::<hal::api::Dx12, _, _>(|d| {
-                        d.map(|d| surface.open(d.raw_device()))
-                    })
+                    device
+                        .as_hal::<hal::api::Dx12, _, _>(|d| d.map(|d| surface.open(d.raw_device())))
                 }
                 .ok_or("the window does not draw with D3D12")?
                 .map_err(|e| format!("{e:#}"))?;
@@ -1015,17 +1014,17 @@ mod tests {
             (
                 latch_stream::Codec::H264High,
                 PixelFormat::Nv12,
-                include_bytes!("../../stream/tests/fixtures/gray-bars.h264").as_slice(),
+                include_bytes!("../../stream/tests/fixtures/decode-probe.h264").as_slice(),
             ),
             (
                 latch_stream::Codec::Hevc,
                 PixelFormat::Nv12,
-                include_bytes!("../../stream/tests/fixtures/gray-bars.hevc").as_slice(),
+                include_bytes!("../../stream/tests/fixtures/decode-probe.hevc").as_slice(),
             ),
             (
                 latch_stream::Codec::Av1,
                 PixelFormat::Nv12,
-                include_bytes!("../../stream/tests/fixtures/gray-bars.av1").as_slice(),
+                include_bytes!("../../stream/tests/fixtures/decode-probe.av1").as_slice(),
             ),
             (
                 latch_stream::Codec::Hevc,
@@ -1040,22 +1039,26 @@ mod tests {
                 continue;
             }
             let frames = Arc::new(FrameSlot::default());
-            let mut decoder = latch_stream::video::new_decoder_with_format(codec, format).unwrap();
-            let frame = decoder
-                .decode(encoded, true, None)
-                .unwrap()
-                .expect("decoded frame");
-            #[cfg(target_os = "macos")]
-            assert!(
-                frame.native.is_some(),
-                "decoded frame must have a native CVPixelBuffer"
-            );
-            frames.publish(frame);
             let mut harness = egui_kittest::Harness::builder()
                 .wgpu_setup(crate::native_options().wgpu_options.wgpu_setup)
                 .with_size(egui::vec2(128.0, 128.0))
                 .build_eframe(move |cc| {
                     install(cc.wgpu_render_state.as_ref().unwrap());
+                    // Create the decoder after install selects the renderer's
+                    // adapter, so Windows exercises shared NV12 plane import.
+                    let mut decoder = if format == PixelFormat::Nv12 {
+                        latch_stream::video::new_decoder_for_stream(codec, 256, 256)
+                    } else {
+                        latch_stream::video::new_decoder_with_format(codec, format)
+                    }
+                    .unwrap();
+                    let frame = decoder
+                        .decode(encoded, true, None)
+                        .unwrap()
+                        .expect("decoded frame");
+                    #[cfg(any(target_os = "macos", windows))]
+                    assert!(frame.native.is_some(), "native GPU picture required");
+                    frames.publish(frame);
                     TestApp(frames)
                 });
             harness.run_steps(2);
