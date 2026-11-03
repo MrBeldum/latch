@@ -777,17 +777,12 @@ pub fn plan(
     );
     let mut kbps = s.bitrate_kbps;
     if let Some(caps) = host.codec(&offer(settings.codec)) {
-        let side = caps.max_side.max(2) as f64 / f64::from(w.max(h));
-        let area = (caps.max_pixels.max(4) as f64 / (f64::from(w) * f64::from(h))).sqrt();
-        let scale = side.min(area);
-        if scale < 1.0 {
-            let even = |v: u32| ((f64::from(v) * scale) as u32 / 2 * 2).max(2);
-            (w, h) = (even(w), even(h));
-        }
-        if caps.max_pixel_rate > 0 {
-            let ceiling = caps.max_pixel_rate / (u64::from(w) * u64::from(h)).max(1);
-            fps = fps.min(u32::try_from(ceiling).unwrap_or(u32::MAX)).max(1);
-        }
+        (w, h, fps) = latch_proto::control::fit(
+            (caps.max_side, caps.max_pixels, caps.max_pixel_rate),
+            w,
+            h,
+            fps,
+        );
         kbps = settings.quality.bitrate_kbps(w, h, fps).unwrap_or(kbps);
         if caps.max_kbps > 0 {
             kbps = kbps.min(caps.max_kbps);
@@ -1776,6 +1771,13 @@ mod tests {
             "{p:?}: H.264 is scaled into what the hardware takes"
         );
         assert!((p.width as f32 / p.height as f32 - 16.0 / 9.0).abs() < 0.01);
+        // Counted in coded blocks, as the host and its media engine do:
+        // 3762 × 2350 would be under 4096 × 2160 in pixels, over in blocks.
+        let p = plan(&h264, (3840, 2400), 60, &mac);
+        assert!(
+            latch_proto::control::coded_pixels(p.width, p.height) <= 4096 * 2160,
+            "{p:?}"
+        );
         // Custom's bitrate is capped at the codec's ceiling, not Latch's.
         let custom = StreamSettings {
             quality: Quality::Custom,

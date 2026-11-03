@@ -158,28 +158,19 @@ impl Limits {
         }
     }
 
-    /// `width` × `height` at `fps`, scaled down in proportion until the
-    /// picture fits, then the frame rate lowered until the pixel rate
-    /// does. Sides stay even.
+    /// `width` × `height` at `fps` within these limits: see
+    /// [`latch_proto::control::fit`], which a viewer fits with too.
     pub fn fit(&self, width: u32, height: u32, fps: u32) -> (u32, u32, u32) {
-        let (w, h) = (u64::from(width.max(2)), u64::from(height.max(2)));
-        let side = self.max_side.max(2) as f64 / w.max(h) as f64;
-        let area = (self.max_pixels.max(4) as f64 / (w * h) as f64).sqrt();
-        let scale = side.min(area).min(1.0);
-        let even = |v: u64| ((v as f64 * scale) as u32 / 2 * 2).max(2);
-        let (w, h) = if scale < 1.0 {
-            (even(w), even(h))
-        } else {
-            (width, height)
-        };
-        let ceiling = self.max_pixel_rate / (u64::from(w) * u64::from(h)).max(1);
-        (
-            w,
-            h,
-            fps.min(u32::try_from(ceiling).unwrap_or(u32::MAX)).max(1),
+        latch_proto::control::fit(
+            (self.max_side, self.max_pixels, self.max_pixel_rate),
+            width,
+            height,
+            fps,
         )
     }
 }
+
+pub use latch_proto::control::coded_pixels;
 
 /// What the encoder for `codec` takes here.
 pub fn limits(codec: Codec) -> Limits {
@@ -245,7 +236,19 @@ mod tests {
         );
         assert_eq!(h264.fit(5120, 1440, 60), (4096, 1152, 60), "the long side");
         let (w, h, _) = h264.fit(3840, 2400, 60);
-        assert!(u64::from(w) * u64::from(h) <= h264.max_pixels && w % 2 == 0 && h % 2 == 0);
+        assert!(w % 2 == 0 && h % 2 == 0);
+        // 3762 × 2350 has fewer pixels than 4096 × 2160 but more blocks.
+        assert!(coded_pixels(w, h) <= h264.max_pixels, "{w} × {h}");
+        assert!(coded_pixels(3762, 2350) > h264.max_pixels);
+        assert!((w as f32 / h as f32 - 1.6).abs() < 0.01, "{w} × {h}");
+        for (width, height) in [(3840, 2400), (5120, 2880), (3456, 2234), (6016, 3384)] {
+            let (w, h, _) = h264.fit(width, height, 60);
+            assert!(
+                coded_pixels(w, h) <= h264.max_pixels,
+                "{width} × {height}: {w} × {h}"
+            );
+            assert!(w.max(h) <= h264.max_side && w % 2 == 0 && h % 2 == 0);
+        }
         let level = Limits::level(Codec::Hevc);
         assert_eq!(level.fit(3840, 2160, 500), (3840, 2160, 500));
         assert_eq!(
