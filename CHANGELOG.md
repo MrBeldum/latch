@@ -6,6 +6,22 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- Negotiate hardware-probed AV1, HEVC and H.264 High on the viewer; retain
+  Baseline's ten-access-unit software fallback and protocol-1 compatibility.
+- Decode AV1 through VideoToolbox on supported Macs, with selectable P010
+  Main10 output and IOSurface-to-Metal rendering.
+- Enumerate Windows Media Foundation decoders with D3D11/DXVA and accept
+  NV12/P010 output; import shared NV12 textures into D3D12/wgpu with
+  fenced GPU copies and CPU-readback fallback.
+- Retain native surfaces until GPU work completes; add a native present
+  measurement example and decode-to-render timestamps.
+- A viewer whose AV1, HEVC or H.264 High decoder fails (no picture for ten
+  frames, or three errors without one) asks the PC again without that
+  codec, down to Baseline, and says why, instead of asking for keyframes
+  forever: a picture returns within a second or two.
+- A Media Foundation decoder without transform attributes runs without the
+  low-latency hint instead of failing; a Windows renderer that cannot open
+  a shared picture stops drawing the last one.
 - No Latch-imposed ceilings on a stream. The viewer allowed 30–240 fps and
   2–150 Mbps and the host clamped every request to 240 fps, 500 Mbps and
   8192 pixels; the software H.264 encoder refused anything over 240 fps.

@@ -1,0 +1,7 @@
+decodable [Av1, Hevc, H264High, H264Baseline]
+renderer Dx12 AMD Radeon RX 6600
+Stage("Asking for the stream…")
+Failed { stage: "connecting", message: "A request to send or receive data was disallowed because the socket is not connected and (when sending on a datagram socket using a sendto call) no address was supplied. (os error 10057)" }
+stats Stats { fps: 0.0, mbps: 0.0, received_mbps: 0.0, rtt_ms: 0, rtt_var_ms: 0, decode_ms: 0.0, host_ms: 0.0, assembly_ms: 0.0, queue_ms: 0.0, width: 0, height: 0, decoder: "", encoder: "", codec: "", loss_pct: 0.0, fec_recovered: 0, audio: "", video_problem: None, applied_bitrate_kbps: 0, requested_bitrate_kbps: 0, pacing_queue_ms: 0.0, send_errors: 0, send_retries: 0, socket_send_bytes: 8388608, socket_receive_bytes: 8388608, host_socket_send_bytes: 0, host_socket_receive_bytes: 0, frames_lost: 0, window_ms: 0 }
+stats Stats { fps: 0.0, mbps: 0.0, received_mbps: 0.0, rtt_ms: 0, rtt_var_ms: 0, decode_ms: 0.0, host_ms: 0.0, assembly_ms: 0.0, queue_ms: 0.0, width: 0, height: 0, decoder: "", encoder: "", codec: "", loss_pct: 0.0, fec_recovered: 0, audio: "", video_problem: None, applied_bitrate_kbps: 0, requested_bitrate_kbps: 0, pacing_queue_ms: 0.0, send_errors: 0, send_retries: 0, socket_send_bytes: 8388608, socket_receive_bytes: 8388608, host_socket_send_bytes: 0, host_socket_receive_bytes: 0, frames_lost: 0, window_ms: 0 }
+render_summary decoded=0 rendered=0 decode_to_render_ms_p50=0.000 p95=0.000 p99=0.000

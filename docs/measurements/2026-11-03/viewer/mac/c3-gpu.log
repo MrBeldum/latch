@@ -1,0 +1,17 @@
+   Compiling latch-stream v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-ef4c7c36/crates/stream)
+   Compiling latch-client v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-ef4c7c36/crates/client)
+    Finished `test` profile [optimized + debuginfo] target(s) in 4.70s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (target/debug/deps/latch_client-06930d186041df60)
+
+running 1 test
+test video::tests::decoded_frame_reaches_the_render_target ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 0.19s
+
+     Running unittests src/main.rs (target/debug/deps/latch_client-2f4e8f0cf53b4dcc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
