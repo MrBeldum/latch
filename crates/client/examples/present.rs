@@ -255,6 +255,7 @@ fn main() -> anyhow::Result<()> {
                             fps,
                             bitrate_kbps: 50_000,
                             hevc: !args.iter().any(|a| a == "--h264"),
+                            av1: !args.iter().any(|a| a == "--h264"),
                             audio: false,
                             name: "present measurement".into(),
                             cursor: false,

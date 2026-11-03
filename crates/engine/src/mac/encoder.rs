@@ -134,7 +134,6 @@ impl Encoder {
                 number(0).0,
             );
             let profile = match config.codec {
-                Codec::Av1 => anyhow::bail!("VideoToolbox AV1 encoding is unavailable"),
                 Codec::Hevc => kVTProfileLevel_HEVC_Main_AutoLevel,
                 Codec::H264High => kVTProfileLevel_H264_High_AutoLevel,
                 Codec::H264Baseline => kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel,
