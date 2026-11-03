@@ -89,6 +89,8 @@ pub struct Settings {
     pub bitrate_kbps: u32,
     /// Ask for HEVC when both sides can; otherwise H.264.
     pub hevc: bool,
+    /// Ask for AV1 when both sides can.
+    pub av1: bool,
     pub audio: bool,
     /// This machine's name, for the host's log.
     pub name: String,
@@ -147,6 +149,20 @@ pub struct Stats {
     pub host_socket_receive_bytes: usize,
     pub frames_lost: u64,
     pub window_ms: u32,
+    /// Whole frames put together a second, before the decoder: what the
+    /// network brought, where [`Stats::fps`] is what was decoded.
+    pub received_fps: f32,
+    /// Share of video packets in the last second the network lost,
+    /// whether FEC rebuilt them or not; [`Stats::loss_pct`] is what was
+    /// left after FEC.
+    pub raw_loss_pct: f32,
+    /// Frames that arrived whole in the last second but were never
+    /// decoded: thrown away while the decoder caught up or while the
+    /// stream waited for a keyframe.
+    pub frames_dropped: u64,
+    /// How unevenly whole frames arrive: the mean distance of each gap
+    /// between two from the mean gap, in ms.
+    pub frame_jitter_ms: f32,
 }
 
 #[derive(Default)]
@@ -238,6 +254,10 @@ struct Inner {
     /// Video packets the network lost in the last second, rebuilt or not,
     /// in thousandths of a percent: what the host sizes its FEC by.
     raw_loss_milli: AtomicU64,
+    /// When the decoder last published a picture, µs since `epoch`.
+    published_us: AtomicU64,
+    /// Frames thrown away before decoding since the last stats window.
+    dropped: AtomicU64,
     connected: AtomicBool,
     stop: AtomicBool,
     finished: AtomicBool,
@@ -385,6 +405,8 @@ impl Session {
             epoch: Instant::now(),
             heard_us: AtomicU64::new(0),
             raw_loss_milli: AtomicU64::new(0),
+            published_us: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
             connected: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -461,6 +483,15 @@ impl Session {
         stats
     }
 
+    /// When the newest picture was published to the [`FrameSlot`]: the
+    /// renderer takes how long it waited from this.
+    pub fn published_at(&self) -> Option<Instant> {
+        match self.inner.published_us.load(Ordering::Relaxed) {
+            0 => None,
+            us => Some(self.inner.epoch + Duration::from_micros(us)),
+        }
+    }
+
     pub fn set_volume(&self, gain: f32) {
         self.inner
             .audio_gain
@@ -488,7 +519,7 @@ impl Drop for Session {
 fn offer(settings: &Settings) -> Vec<Codec> {
     video::decodable()
         .into_iter()
-        .filter(|&c| settings.hevc || c != Codec::Hevc)
+        .filter(|&c| (settings.hevc || c != Codec::Hevc) && (settings.av1 || c != Codec::Av1))
         .collect()
 }
 
@@ -926,6 +957,7 @@ fn receive(
     let mut last_ping = Instant::now();
     let mut window_start = Instant::now();
     let mut throughput = Throughput::default();
+    let mut arrivals = Arrivals::default();
     let mut window_base = reassembler.stats();
     let mut poor = false;
     let mut good_windows = 0u32;
@@ -1010,6 +1042,7 @@ fn receive(
             match event {
                 Reassembled::Frame(frame) => {
                     throughput.frame(&frame);
+                    arrivals.frame(now);
                     let mut q = inner.queue.lock();
                     if q.frames.len() >= DECODE_QUEUE
                         || q.frames.front().is_some_and(|(_, at)| {
@@ -1017,6 +1050,9 @@ fn receive(
                         })
                     {
                         tracing::warn!("the decoder fell behind; restarting at a keyframe");
+                        inner
+                            .dropped
+                            .fetch_add(q.frames.len() as u64, Ordering::Relaxed);
                         q.frames.clear();
                         q.want_keyframe = true;
                     }
@@ -1042,6 +1078,9 @@ fn receive(
             let stats = reassembler.stats();
             let (loss, recovered, raw_loss) = loss_in_window(&window_base, &stats);
             let lost_count = stats.frames_lost.saturating_sub(window_base.frames_lost);
+            let skipped = stats
+                .frames_skipped
+                .saturating_sub(window_base.frames_skipped);
             let lost_frames = lost_count > 0;
             window_base = stats;
             inner
@@ -1056,6 +1095,9 @@ fn receive(
                 s.window_ms = (secs * 1000.0) as u32;
                 s.frames_lost = lost_count;
                 s.fps = decode.frames as f32 / secs;
+                (s.received_fps, s.frame_jitter_ms) = arrivals.take(secs);
+                s.raw_loss_pct = raw_loss;
+                s.frames_dropped = skipped + inner.dropped.swap(0, Ordering::Relaxed);
                 (s.mbps, s.received_mbps) = throughput.take(secs);
                 s.decode_ms = decode.decode_us as f32 / frames / 1000.0;
                 s.queue_ms = decode.queue_us as f32 / frames / 1000.0;
@@ -1087,6 +1129,46 @@ fn receive(
                 }
             }
         }
+    }
+}
+
+/// When whole frames arrived in the current statistics window.
+#[derive(Default)]
+struct Arrivals {
+    last: Option<Instant>,
+    frames: u32,
+    /// Gaps between consecutive frames, in µs.
+    gaps: Vec<u64>,
+}
+
+impl Arrivals {
+    fn frame(&mut self, now: Instant) {
+        if let Some(last) = self.last.replace(now) {
+            self.gaps
+                .push(now.saturating_duration_since(last).as_micros() as u64);
+        }
+        self.frames += 1;
+    }
+
+    /// Frames a second over `secs`, and the mean absolute deviation of the
+    /// gaps between them in ms; the window starts again.
+    fn take(&mut self, secs: f32) -> (f32, f32) {
+        let fps = self.frames as f32 / secs.max(f32::EPSILON);
+        let jitter = if self.gaps.len() < 2 {
+            0.0
+        } else {
+            let mean = self.gaps.iter().sum::<u64>() as f64 / self.gaps.len() as f64;
+            let spread = self
+                .gaps
+                .iter()
+                .map(|&g| (g as f64 - mean).abs())
+                .sum::<f64>()
+                / self.gaps.len() as f64;
+            (spread / 1000.0) as f32
+        };
+        self.frames = 0;
+        self.gaps.clear();
+        (fps, jitter)
     }
 }
 
@@ -1202,11 +1284,15 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
                     .front()
                     .is_some_and(|(_, at)| at.elapsed() >= DECODE_MAX_AGE)
                 {
+                    inner
+                        .dropped
+                        .fetch_add(q.frames.len() as u64, Ordering::Relaxed);
                     q.frames.clear();
                     q.want_keyframe = true;
                 }
                 if let Some(next) = q.frames.pop_front() {
                     if q.want_keyframe && !next.0.keyframe {
+                        inner.dropped.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
                     if next.0.keyframe {
@@ -1238,6 +1324,9 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
                 }
                 let black = picture.is_black();
                 inner.frames.publish(picture);
+                inner
+                    .published_us
+                    .store(inner.now_us().max(1), Ordering::Relaxed);
                 (inner.wake)();
                 inner.video_health.lock().frame(decoded, black);
                 let mut w = inner.decode.lock();
@@ -1260,6 +1349,27 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arrivals_count_frames_and_how_unevenly_they_come() {
+        let mut a = Arrivals::default();
+        let t = Instant::now();
+        for ms in [0, 10, 20, 30, 40] {
+            a.frame(t + Duration::from_millis(ms));
+        }
+        let (fps, jitter) = a.take(0.05);
+        assert_eq!(fps, 100.0);
+        assert!(jitter < 0.01, "even gaps: {jitter}");
+        for ms in [50, 52, 70, 72, 90] {
+            a.frame(t + Duration::from_millis(ms));
+        }
+        let (_, jitter) = a.take(0.05);
+        assert!(
+            (jitter - 6.4).abs() < 0.01,
+            "gaps 10, 2, 18, 2, 18 ms: {jitter}"
+        );
+        assert_eq!(a.take(1.0), (0.0, 0.0), "a new window");
+    }
 
     #[test]
     fn video_health_distinguishes_missing_black_frozen_and_recovered_video() {
@@ -1378,6 +1488,7 @@ mod tests {
             fps: 60,
             bitrate_kbps: 20_000,
             hevc: false,
+            av1: false,
             audio: true,
             name: "test".into(),
         };
@@ -1406,6 +1517,7 @@ mod tests {
                 fps: 60,
                 bitrate_kbps: 10_000,
                 hevc: false,
+                av1: false,
                 audio: false,
                 name: "test".into(),
             },
@@ -1461,6 +1573,8 @@ mod tests {
             epoch: Instant::now(),
             heard_us: AtomicU64::new(0),
             raw_loss_milli: AtomicU64::new(0),
+            published_us: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
             connected: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             finished: AtomicBool::new(false),

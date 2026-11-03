@@ -6,6 +6,47 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- No Latch-imposed ceilings on a stream. The viewer allowed 30–240 fps and
+  2–150 Mbps and the host clamped every request to 240 fps, 500 Mbps and
+  8192 pixels; the software H.264 encoder refused anything over 240 fps.
+  Requests now run to 500 fps, 1 Gbps and 16384 pixels a side, and the host
+  meets them with what its encoder takes: each codec's top level, lowered
+  where the hardware has a smaller limit (VideoToolbox is tried at a ladder
+  of sizes: an M3 Pro takes H.264 to 4096 × 2160 and HEVC to 8192 × 4320).
+  Hosts report these limits in `/v1/status` (`streamer.codecs`), and a
+  viewer fits what it asks for to them, both counting a picture in coded
+  16-pixel blocks (3840 × 2400 on an M3 Pro's H.264 now fits to a size it
+  encodes in hardware, not to one it hands to software). A Linux host's
+  software frame rate is measured on its own CPU when the host starts,
+  instead of guessed from its core count (an M3 Pro: 67 fps at 1080p);
+  until then it reports and holds sessions to 30 fps at 1080p, and the
+  host itself holds every request to what it measured, so a viewer that
+  connects at once, or does not fit its request, cannot ask a slow CPU
+  for 4K at 120. Measured on the test pattern: 1280 × 720 asked
+  at 300 fps streams at 283 (was held at 240); 640 × 360 at 480 streams at
+  474 (was 240).
+- Quality profiles modelled on GeForce NOW's, which follow the display:
+  **Balanced** (the default: this screen's size at its own refresh rate,
+  so 120 fps on ProMotion and up to 500 on a fast monitor), **Competitive**
+  (1080p at the display's rate, up to 360), **Cinematic** (up to 4K and 120
+  fps at half again the bitrate) and **Custom** (30–500 fps, 2–1000 Mbps,
+  5K and 8K sizes). A profile's bitrate is a ceiling the host comes down
+  from: 40 Mbps at 1080p60, growing as pixels to the ¾ and frame rate to
+  the ½, never under 5.1's 50 (Cinematic 100). That is 50 Mbps at 1080p60,
+  87 at 1440p120, 113 at 4K60 and 160 at 4K120, one to two times
+  GeForce NOW's (25–35, 45–50, 75–100), for encoders tuned for latency
+  rather than size, H.264 where it would use AV1, and LAN or tailnet
+  paths.
+  AV1 is a codec choice (`"av1"` on the wire) for when both ends have it.
+  5.1's Smooth, Balanced and Sharp move to Competitive, Balanced and
+  Cinematic once.
+- A stats overlay, as in GeForce NOW: **Stats**, or the host key with S
+  (or F6), lays resolution, codec, frames received / decoded / drawn,
+  bitrate against its target, round trip, jitter, loss before and after
+  FEC, dropped frames, decode and present times and an estimated latency
+  breakdown over the picture's corner, without taking the mouse. The full
+  Stream performance panel moved to More.
+
 - Linux host: only what changed on screen is read, converted and encoded.
   X Damage rectangles are kept apart instead of merged into one box, only
   those are read from the X server and converted to YUV (split across

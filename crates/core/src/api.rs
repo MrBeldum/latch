@@ -193,10 +193,15 @@ pub struct Streamer {
     pub capture_size: Option<[u32; 2]>,
     /// The highest frame rate the engine keeps up with on this machine at
     /// `capture_size`, or at 1920 × 1080 when that is absent; 0 when
-    /// nothing limits it. Set for software encoding on a small CPU, where
-    /// asking for more only drops frames. A viewer asking for fewer pixels
+    /// nothing limits it. Set for software encoding, where asking for more
+    /// only drops frames: measured on this CPU (5.2+; older hosts guessed
+    /// 30 from a small core count). A viewer asking for fewer pixels
     /// raises it in proportion.
     pub max_fps: u32,
+    /// What each codec's encoder takes here, best first (5.2+). Empty
+    /// from older hosts, and until the host has looked: a viewer then
+    /// knows of no limit but its own.
+    pub codecs: Vec<CodecCaps>,
     /// A viewer is connected right now. A Mac
     /// holds a host update back while it is true, instead of sending the
     /// whole executable to be turned down. False from older hosts.
@@ -205,6 +210,24 @@ pub struct Streamer {
     /// from a Latch 4 host; that host needs an update.
     #[serde(default)]
     pub protocol: u32,
+}
+
+/// One codec's encoder on a host: the largest picture and the fastest
+/// stream it takes, from the codec's highest level and, where the
+/// hardware has a lower limit of its own, from trying it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CodecCaps {
+    /// The codec's wire name (`docs/PROTOCOL.md`): "hevc", "av1",
+    /// "h264-high", "h264-baseline".
+    pub codec: String,
+    /// Longest side of a picture, in pixels.
+    pub max_side: u32,
+    /// Largest picture, in pixels.
+    pub max_pixels: u64,
+    /// Pixels a second: picture size times frame rate.
+    pub max_pixel_rate: u64,
+    pub max_kbps: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,10 +301,19 @@ mod tests {
             serde_json::from_str(r#"{"streamer":{"running":true,"encoder":"software"}}"#).unwrap();
         assert_eq!(s.streamer.capture_size, None);
         assert_eq!(s.streamer.max_fps, 0);
+        assert!(s.streamer.codecs.is_empty(), "no encoder limits known");
         let mut s = s;
         s.streamer.capture_size = Some([1920, 1080]);
         s.streamer.max_fps = 30;
+        s.streamer.codecs = vec![CodecCaps {
+            codec: "hevc".into(),
+            max_side: 8192,
+            max_pixels: 8192 * 4320,
+            max_pixel_rate: 4_278_190_080,
+            max_kbps: 800_000,
+        }];
         let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""codec":"hevc""#), "{json}");
         assert!(json.contains(r#""capture_size":[1920,1080]"#), "{json}");
         let back: Status = serde_json::from_str(&json).unwrap();
         assert_eq!(back, s);

@@ -7,7 +7,7 @@ mod input;
 
 use crate::audio::{AudioCapture, CHANNELS, FRAME};
 use crate::input::InputSink;
-use crate::video::{Codec, EncodedVideo, Pacer, VideoConfig, VideoInfo, VideoPipeline};
+use crate::video::{Codec, EncodedVideo, Limits, Pacer, VideoConfig, VideoInfo, VideoPipeline};
 use anyhow::{bail, Result};
 use capture::Capture;
 use encoder::Encoder;
@@ -43,6 +43,45 @@ pub fn open_audio() -> Result<Box<dyn AudioCapture>> {
 pub fn open_input() -> Result<Box<dyn InputSink>> {
     input::open()
 }
+/// What VideoToolbox's hardware takes for `codec` on this Mac: the
+/// largest of a ladder of sizes that encodes without falling back to
+/// software, tried once per codec. Media engines differ (an M3 Pro takes
+/// H.264 up to 4096 × 2160 and HEVC up to 8192 × 4320) and VideoToolbox
+/// has no call that says.
+pub fn limits(codec: Codec) -> Limits {
+    static PROBED: parking_lot::Mutex<Vec<(Codec, Limits)>> = parking_lot::Mutex::new(Vec::new());
+    let mut probed = PROBED.lock();
+    if let Some((_, limits)) = probed.iter().find(|(c, _)| *c == codec) {
+        return *limits;
+    }
+    const LADDER: [(u32, u32); 7] = [
+        (8192, 4320),
+        (7680, 4320),
+        (6016, 3384),
+        (5120, 2880),
+        (4096, 2160),
+        (3840, 2160),
+        (2560, 1440),
+    ];
+    let level = Limits::level(codec);
+    let limits = LADDER
+        .iter()
+        .find(|&&(w, h)| Encoder::hardware_encodes(codec, w, h))
+        .map_or(level, |&(w, h)| Limits {
+            max_side: w.max(h),
+            max_pixels: u64::from(w) * u64::from(h),
+            ..level
+        });
+    tracing::info!(
+        "VideoToolbox {} takes up to {} pixels a side, {} a picture",
+        codec.name(),
+        limits.max_side,
+        limits.max_pixels
+    );
+    probed.push((codec, limits));
+    limits
+}
+
 pub fn encodable() -> Vec<Codec> {
     [Codec::Hevc, Codec::H264High, Codec::H264Baseline]
         .into_iter()

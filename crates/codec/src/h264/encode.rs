@@ -151,9 +151,9 @@ impl Encoder {
                 "dimensions must be even, nonzero, and at most 8192",
             ));
         }
-        if config.fps == 0 || config.fps > 240 || config.bitrate_kbps == 0 {
+        if config.fps == 0 || config.fps > 1000 || config.bitrate_kbps == 0 {
             return Err(CodecError::Config(
-                "fps must be 1..=240 and bitrate must be nonzero",
+                "fps must be 1..=1000 and bitrate must be nonzero",
             ));
         }
         level(&config)?;
