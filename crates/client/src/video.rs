@@ -520,6 +520,9 @@ impl Resources {
                     // to draw it from; later ones come through the CPU.
                     tracing::warn!("D3D12 cannot open decoded pictures ({reason}); copying them");
                     latch_stream::video::render_on_d3d12(None);
+                    // Nor draw the last shared picture again until a
+                    // copied one comes.
+                    self.shown = None;
                 }
             }
             return;
