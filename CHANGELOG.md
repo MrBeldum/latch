@@ -8,7 +8,9 @@ GitHub release notes, so each version gets a heading of the form
 
 - Mac host keyframe requests discard queued pictures until the requested
   IDR, coalesce retries, and clear on output. Bitrate changes start a fresh
-  reference chain after draining old-rate work.
+  reference chain when draining old-rate work discards queued output.
+  HEVC uses its quality path through the pixel rate of 1080p120, recovering
+  the quality lost to the speed hint; faster streams retain the fast path.
 
 - A Mac host keeps up with fast streams. VideoToolbox no longer uses its
   low-latency rate control, which doubled each frame's encode time,

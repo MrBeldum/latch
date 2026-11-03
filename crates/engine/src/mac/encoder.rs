@@ -180,10 +180,22 @@ impl Encoder {
                 kVTCompressionPropertyKey_AllowFrameReordering,
                 kCFBooleanFalse,
             )?;
+            // On M3 Pro the quality path restores 7 dB at 1080p120 while
+            // keeping pace. Above that pixel rate it misses frames (190/240
+            // at 1080p, 70/120 at 3024x1964), so retain the fast path there.
+            let quality = required_hardware
+                && config.codec == Codec::Hevc
+                && depth == Depth::Eight
+                && u64::from(config.width) * u64::from(config.height)
+                    <= 1920 * 1080 * 120 / u64::from(config.fps);
             let _ = VTSessionSetProperty(
                 encoder.session.0,
                 kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
-                kCFBooleanTrue,
+                if quality {
+                    kCFBooleanFalse
+                } else {
+                    kCFBooleanTrue
+                },
             );
             let _ = VTSessionSetProperty(
                 encoder.session.0,
@@ -277,15 +289,18 @@ impl Encoder {
             return Ok(());
         }
         if self.config.bitrate_kbps != 0 {
-            // Finish old-rate work before changing properties. Discard its output:
-            // the new reference chain starts at a fresh IDR at the new rate.
+            // Finish old-rate work before changing properties. If output is
+            // discarded, repair its reference chain with an IDR at the new rate.
+            // With no queued output, keep the chain (avoid IDRs at every ramp).
+            // SAFETY: the live session owns all outstanding submissions.
             check(
                 unsafe { VTCompressionSessionCompleteFrames(self.session.0, INVALID_TIME) },
                 "complete pictures before bitrate change",
             )?;
-            self.request_keyframe();
-            self.recovery = Some(self.index);
-            self.forced = None;
+            if !self.output.output.lock().done.is_empty() || self.recovery.is_some() {
+                self.recovery = Some(self.index);
+                self.forced = None;
+            }
         }
         let rate = number(i64::from(kbps) * 1000);
         let bytes = number(i64::from(kbps) * 1000 * 3 / 16);

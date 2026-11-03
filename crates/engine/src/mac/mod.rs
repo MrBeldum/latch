@@ -222,8 +222,8 @@ impl VideoPipeline for Video {
         }
     }
     fn set_bitrate(&mut self, kbps: u32) {
-        if kbps > 0 && kbps != self.config.bitrate_kbps {
-            self.pending = None;
+        if kbps > 0 && kbps != self.config.bitrate_kbps && self.pending.take().is_some() {
+            self.encoder.request_keyframe();
         }
         match self.encoder.bitrate(kbps) {
             Ok(()) => {

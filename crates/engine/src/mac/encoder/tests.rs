@@ -1045,6 +1045,7 @@ fn recovery_skips_queued_pictures_and_coalesces_retries() {
             encoder.submit(image.0, Instant::now(), false).unwrap();
         }
         // Both callbacks may already be queued when next(true) arrives.
+        // SAFETY: the test owns this live session and all source surfaces.
         check(
             unsafe { VTCompressionSessionCompleteFrames(encoder.session.0, INVALID_TIME) },
             "drain test pictures",
@@ -1089,6 +1090,7 @@ fn a_dropped_recovery_idr_is_retried_before_any_p_frame_leaves() {
     fill(&image, &pattern(0));
     encoder.request_keyframe();
     encoder.submit(image.0, Instant::now(), false).unwrap();
+    // SAFETY: the test owns this live session and its source surface.
     check(
         unsafe { VTCompressionSessionCompleteFrames(encoder.session.0, INVALID_TIME) },
         "drain test IDR",
@@ -1139,6 +1141,7 @@ fn bitrate_change_discards_old_output_and_starts_with_one_new_idr() {
         assert_eq!(index, idr);
         assert!(frame.unwrap().unwrap().keyframe);
         encoder.bitrate(5_000).unwrap(); // An unchanged rate does not reset recovery.
+        encoder.bitrate(6_000).unwrap(); // No output was lost: preserve this reference chain.
         encoder.submit(image.0, Instant::now(), false).unwrap();
         assert!(
             !encoder

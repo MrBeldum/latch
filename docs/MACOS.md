@@ -259,10 +259,15 @@ VideoToolbox encodes that surface; only compressed bytes reach Latch.
 - **Surfaces.** Five, so the two frames in the encoder and the newest
   picture never leave the window server without one to draw into.
 - **Encoder settings.** Hardware required (software only if it fails),
-  real time, no frame reordering, `MaxFrameDelayCount` 0, speed over
-  quality, the stream's rate as `ExpectedFrameRate` and (macOS 15+)
+  real time, no frame reordering, `MaxFrameDelayCount` 0, the stream's
+  rate as `ExpectedFrameRate` and (macOS 15+)
   `MaximumRealTimeFrameRate`, no periodic keyframes, BT.709 tags.
   Bitrate is whatever the server asks for; VideoToolbox took 1 Gbps.
+  For 8-bit hardware HEVC through 248,832,000 pixels/second (1080p120),
+  `PrioritizeEncodingSpeedOverQuality` is false; above that budget, and
+  for H.264, Main10 and software, it is true. This M3 Pro crossover
+  restores HEVC quality while retaining the fast path at 240 fps and
+  3024×1964@120. Other chips may have a different crossover.
 - **No low-latency rate control.** `EnableLowLatencyRateControl` sounds
   right but is built for calls: on an M3 Pro it made a 1080p frame take
   9.4 ms instead of 4.7, dropped frames (45 of 60 fps at 1080p60), and
@@ -279,8 +284,9 @@ A requested keyframe is the next picture returned to the server. Queued
 pre-request frames are discarded until the fresh IDR, so they cannot delay
 loss recovery or make the server request another IDR. Retries share that
 request until the IDR leaves. Bitrate changes complete old submissions
-before changing properties, discard their output and start a fresh IDR;
-an unchanged rate leaves the reference chain alone.
+before changing properties. If queued output is discarded they start a
+fresh IDR; with no output lost, the reference chain continues. An unchanged
+rate leaves it alone too.
 
 ### Measured limits (M3 Pro)
 
