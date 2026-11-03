@@ -346,8 +346,8 @@ it says what happened last. A copy that is not running from an app bundle
 ## Viewer decode and high refresh
 
 The viewer offers hardware-supported codecs in AV1 > HEVC > H.264 High >
-Baseline order. VideoToolbox's AV1 hardware probe gates the offer on M3 or
-newer hardware; older hosts skip the new name and negotiate HEVC/H.264.
+Baseline order. A cached probe requires both VideoToolbox's hardware query
+and a decoded hardware picture, including AV1 on M3 or newer hardware; older hosts skip the new name and negotiate HEVC/H.264.
 AV1 sized OBUs are submitted with an `av1C` format description. All codecs
 retain the IOSurface → Metal path. HEVC Main10 callers can select P010
 output without losing ten-bit samples; normal sessions still request NV12
