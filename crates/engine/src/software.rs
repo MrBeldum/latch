@@ -568,7 +568,9 @@ mod tests {
     fn the_software_ceiling_is_measured() {
         let fps = measure_fps(320, 240, Duration::from_millis(200));
         assert!(fps > 0, "a small picture encodes at some rate");
-        assert!(fps <= latch_proto::control::MAX_FPS + 10, "{fps} fps");
+        // The pacer's grid runs 1% fast, and over 200 ms the first frame,
+        // due at once, adds 5 fps: 500 asked measures up to about 511.
+        assert!(fps <= latch_proto::control::MAX_FPS + 25, "{fps} fps");
         assert_eq!(
             measure_fps(3, 3, Duration::from_millis(10)),
             0,
