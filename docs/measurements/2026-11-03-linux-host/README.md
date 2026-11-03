@@ -67,8 +67,11 @@ example copied into a main checkout for the "before" build) prints the
 same 24 lines on both builds: bitstream and reconstruction digests for
 six kinds of content, two sizes and two bitrates
 ([`encode-digest.txt`](encode-digest.txt)).
-`damage_hints_change_nothing_but_the_work` checks the damage path against
-a full comparison.
+`damage_hints_change_nothing_but_the_work` and
+`damage_over_an_unchanged_picture_changes_nothing` check the damage path
+against a full comparison. The digest does not cover the one change the
+encoder makes on purpose: a band where between 1/256 and 1/64 of the
+samples changed is no longer searched for a scroll.
 
 ## Hardware encoders
 
@@ -76,3 +79,35 @@ NVENC and VA-API are not measured: no GPU here. On `linux` libva loads,
 but `/dev/dri/renderD128` (virtio) is `root:render` and the host's user
 is not in `render`, so every probe stops at "Permission denied" and
 `latch-codec` is used, which is the fallback working, not the encoders.
+
+## After the review fixes
+
+The PR head before the review fixes (1f011ab, `after`) against the fixes
+merged with main (`h3`), [`matrix-review-fixes.sh`](matrix-review-fixes.sh)
+`2 15`, same host, viewer and port; every run is in
+[`runs-review-fixes.txt`](runs-review-fixes.txt). Medians of two runs:
+
+| 60 fps | 1f011ab | review fixes |
+| --- | --- | --- |
+| 1080p sweep, 20 Mb/s: host encode, CPU | 1.33 ms, 29% | 1.40 ms, 29% |
+| 1080p noise, 30 Mb/s: host encode, CPU | 6.02 ms, 60% | 6.01 ms, 60% |
+| 1440p sweep, 20 Mb/s: host encode, CPU | 1.76 ms, 45% | 1.82 ms, 45% |
+| 1080p X11 video window: host encode, CPU | 1.96 ms, 23% | 2.00 ms, 23% |
+
+All at 59.6–60.4 fps; the differences are within run-to-run noise. A
+mid-session resize of the Xvfb desktop (1920 × 1080 → 1366 × 768 → 1920 ×
+1080 with `xrandr --fb`) kept the session at 59–61 fps throughout.
+
+Colour conversion with kept threads instead of threads started per frame
+([`color_bench.rs`](color_bench.rs), 4 threads, best of 5 × 100 calls, three
+rounds on `linux`):
+
+| Converted | started per frame | kept |
+| --- | --- | --- |
+| 1080p, whole | 1351 µs | 1056–1069 µs |
+| 1080p, a 960 × 540 change | 528–565 µs | 454–507 µs |
+| 1440p, whole | 2189–2220 µs | 1932–1949 µs |
+| 4K, whole | 4359–4553 µs | 4109–4252 µs |
+
+(One round of the kept threads measured 1540 µs for the whole 1080p frame,
+with the machine's load rising; the other two agree.)

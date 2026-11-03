@@ -70,10 +70,12 @@ then fits the request to that encoder (`video::Limits`, reported to
 viewers as `streamer.codecs`; see `docs/PROTOCOL.md`, "Encoder limits").
 Latch adds no ceiling of its own beyond the request range (16384 pixels a
 side, 500 fps, 1 Gbps): the codec's top level, the encoder's own limit
-where it has one (VideoToolbox, found by trying), and on the software path
-the frame rate this CPU was measured to encode (`software::measure_fps`,
-held by the server through `software::ceiling`, 30 fps at 1080p until
-measured). Sizes are counted in coded 16-pixel blocks.
+where it has one (VideoToolbox, found by trying; NVENC and VA-API, as
+their drivers say), and on the software path the frame rate this CPU was
+measured to encode (`software::measure_fps`, held by the server through
+`software::ceiling`, 30 fps at 1080p until measured; on a Linux host
+whose hardware has some codecs, only the others are held, and the rate is
+in their `max_pixel_rate` rather than `max_fps`). Sizes are counted in coded 16-pixel blocks.
 `latch-codec` decodes Constrained Baseline only, so a host asked for
 `h264-baseline` configures its hardware encoder for that profile. A
 Windows viewer asks for Constrained Baseline only, so that when Media
@@ -112,23 +114,39 @@ version words checked against nvEncodeAPI.h 12.0 and libva 2.x).
   with a one-frame VBV, no B-frames, an infinite GOP with IDRs (and
   parameter sets) on request, BT.709 VUI; bitrate changes by
   reconfiguration.
-* **VA-API** (`libva.so.2`, `libva-drm.so.2`, the first render node whose
-  driver encodes): H.264 Constrained Baseline or High and HEVC Main, the
-  low-power entry point first, driver-written headers, one reference, CBR
-  with a one-frame HRD. AV1 is not offered: VA-API leaves its headers to
-  the application. The host's user must be able to open the node (the
+* **VA-API** (`libva.so.2`, `libva-drm.so.2`, for each codec the first
+  render node whose driver opens its encoder, so an Intel iGPU and an AMD
+  card each give what they have): H.264 Constrained Baseline or High and
+  HEVC Main, the low-power entry point first, driver-written headers, one
+  reference (marked `RPS_ST_CURR_BEFORE` for HEVC, as FFmpeg does), CBR
+  with a one-frame HRD, the level from size, rate and bitrate (HEVC's High
+  tier where Main's bitrate is too low). Without packed headers HEVC has
+  no conformance window, so it codes only sizes in whole minimum coding
+  blocks (8 pixels or the driver's): 1366 × 768 or 1600 × 900 are not
+  offered HEVC. AV1 is not offered: VA-API leaves its headers to the
+  application. The host's user must be able to open the node (the
   `render` group on Ubuntu); the log says so when it cannot.
 
-Each backend and codec is probed once per process, at the first stream
-(open, an IDR that must carry its parameter sets, a P-frame); anything
-missing or failing leaves `latch-codec`. `LATCH_LINUX_ENCODER=auto`
-(default) `| software | nvenc | vaapi` chooses; under `auto` a viewer
-that asks for Constrained Baseline keeps `latch-codec`, whose output that
-decoder is tested against. An encoder that fails for a session is not
-offered again: H.264 falls back to `latch-codec`, HEVC and AV1 fail the
-session, as on Windows. Neither backend has run on a GPU yet: the Linux
-host used for testing has libva and a virtio render node its user may not
-open, so only the fallback has run.
+Each backend and codec is probed once per process, on the host's
+capacity thread when its service starts (open, an IDR that must carry its
+parameter sets, a P-frame), and what it takes is asked of the driver then
+(NVENC's maximum width, height, macroblocks and macroblock rate; VA-API's
+maximum picture size and HEVC block sizes); anything missing or failing
+leaves `latch-codec`. `LATCH_LINUX_ENCODER=auto` (default) `| software |
+nvenc | vaapi` chooses; under `auto` a viewer that asks for Constrained
+Baseline keeps `latch-codec`, whose output that decoder is tested
+against, and hardware Baseline is not probed. A codec is given up for the
+process only when an open fails in a way that lasts (no such profile or
+entry point, a driver that does not initialize, a node the user may not
+open, NVENC's device and version errors); a GeForce card's session limit,
+memory or a size the encoder does not take fail only that open. H.264
+then encodes in `latch-codec`, for that session or that size; a codec
+that will not open when a session starts gives way to the next one the
+viewer takes, and one that cannot go on after the desktop is resized
+(`video::Unencodable`) ends the session as `ENCODER_FAILED`, which the
+viewer reconnects from to negotiate another. Neither backend has run on a
+GPU yet: the Linux host used for testing has libva and a virtio render
+node its user may not open, so only the fallback has run.
 
 **Wayland** is not captured. It takes the ScreenCast portal (D-Bus, which
 pure Rust can speak) and a PipeWire stream, whose Rust bindings are
