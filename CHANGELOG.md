@@ -6,6 +6,18 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- Linux host: only what changed on screen is read, converted and encoded.
+  X Damage rectangles are kept apart instead of merged into one box, only
+  those are read from the X server and converted to YUV (split across
+  cores), and the encoder skips the rest without comparing it.
+  Measurements: `docs/measurements/2026-11-03-linux-host/`.
+- Linux host: NVENC and VA-API hardware encoding (H.264, HEVC, and AV1 on
+  NVENC), loaded at run time and probed at the first stream, with
+  `latch-codec` as the fallback; `LATCH_LINUX_ENCODER` chooses. Not yet
+  run on a GPU.
+- The software H.264 encoder writes its reconstruction in place, searches
+  for scrolls only when enough of a band changed, and runs its analysis on
+  the slice workers; its output is unchanged.
 - One pointer while the mouse is captured. The Mac's arrow was hidden only
   by egui's cursor, which macOS applies when the pointer moves over the
   window; a captured pointer is held still, so the Mac's arrow could stay

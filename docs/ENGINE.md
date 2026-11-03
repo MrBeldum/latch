@@ -57,7 +57,7 @@ KeyframeRequest on loss ──────────────────�
 | --- | --- | --- |
 | macOS | ScreenCaptureKit, NV12 IOSurface at the stream size, cursor included | VideoToolbox (HEVC, H.264 High, or Constrained Baseline), real time, no frame reordering |
 | Windows | DXGI Desktop Duplication, BGRA texture; cursor drawn in; Direct3D 11 video processor to NV12 at the stream size | Media Foundation H.264 encoder (the GPU's MFT, else Microsoft's), or HEVC from the GPU's MFT when `LATCH_WINDOWS_HEVC=1` ([WINDOWS.md](WINDOWS.md#the-video-pipeline)); `latch-codec` if neither works |
-| Linux (X11) | MIT-SHM `GetImage` through `x11rb`, cursor from XFixes | `latch-codec` software encoder, threads by slice |
+| Linux (X11) | MIT-SHM `GetImage` through `x11rb` of only the rectangles X Damage reports, cursor from XFixes | NVENC or VA-API from NV12 the CPU converts, when a probe at start finds one ([below](#linux-hardware-encoding)); else `latch-codec`, threads by slice |
 
 | Viewer | Decode |
 | --- | --- |
@@ -87,7 +87,45 @@ its interval on the wire. Its hot loops (colour conversion, SAD, residual
 reconstruction, deblocking) use NEON or SSE/AVX2 through `std::arch`, and
 a governor keeps each frame's encode under 65% of the frame interval by
 trading search effort, not frames, so a slow or busy host still sends
-every frame it was asked for.
+every frame it was asked for. The Linux host hands it what X Damage says
+changed: only those rectangles are read from the X server and converted
+(split across cores), and outside them macroblocks are skipped without
+being compared; the bitstream is the one a full comparison gives.
+
+### Linux hardware encoding
+
+`latch-engine/src/linux/{nvenc,vaapi,hardware}.rs`. Both are loaded with
+`libloading` when first needed; nothing is linked, and the structures
+mirror the vendors' headers (sizes, offsets, bit positions, GUIDs and
+version words checked against nvEncodeAPI.h 12.0 and libva 2.x).
+
+* **NVENC** (`libnvidia-encode.so.1`, `libcuda.so.1`): H.264 Baseline or
+  High, HEVC Main, AV1 Main; preset P1 with ultra-low-latency tuning, CBR
+  with a one-frame VBV, no B-frames, an infinite GOP with IDRs (and
+  parameter sets) on request, BT.709 VUI; bitrate changes by
+  reconfiguration.
+* **VA-API** (`libva.so.2`, `libva-drm.so.2`, the first render node whose
+  driver encodes): H.264 Constrained Baseline or High and HEVC Main, the
+  low-power entry point first, driver-written headers, one reference, CBR
+  with a one-frame HRD. AV1 is not offered: VA-API leaves its headers to
+  the application.
+
+Each backend and codec is probed once per process, at the first stream
+(open, an IDR that must carry its parameter sets, a P-frame); anything
+missing or failing leaves `latch-codec`. `LATCH_LINUX_ENCODER=auto`
+(default) `| software | nvenc | vaapi` chooses; under `auto` a viewer
+that asks for Constrained Baseline keeps `latch-codec`, whose output that
+decoder is tested against. An encoder that fails for a session is not
+offered again: H.264 falls back to `latch-codec`, HEVC and AV1 fail the
+session, as on Windows. Neither backend has run on a GPU yet; the host
+used for testing has libva and a virtio render node but no encoder.
+
+**Wayland** is not captured. It takes the ScreenCast portal (D-Bus, which
+pure Rust can speak) and a PipeWire stream, whose Rust bindings are
+generated from and compiled against libpipewire's C headers, outside the
+boundary above; the portal also asks a person to approve each session,
+which an unattended host cannot. Under a Wayland session only Xwayland
+windows are seen.
 
 ### Audio
 
