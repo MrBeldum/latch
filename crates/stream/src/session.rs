@@ -89,6 +89,8 @@ pub struct Settings {
     pub bitrate_kbps: u32,
     /// Ask for HEVC when both sides can; otherwise H.264.
     pub hevc: bool,
+    /// Ask for AV1 when both sides can.
+    pub av1: bool,
     pub audio: bool,
     /// This machine's name, for the host's log.
     pub name: String,
@@ -488,7 +490,7 @@ impl Drop for Session {
 fn offer(settings: &Settings) -> Vec<Codec> {
     video::decodable()
         .into_iter()
-        .filter(|&c| settings.hevc || c != Codec::Hevc)
+        .filter(|&c| (settings.hevc || c != Codec::Hevc) && (settings.av1 || c != Codec::Av1))
         .collect()
 }
 
@@ -1378,6 +1380,7 @@ mod tests {
             fps: 60,
             bitrate_kbps: 20_000,
             hevc: false,
+            av1: false,
             audio: true,
             name: "test".into(),
         };
@@ -1406,6 +1409,7 @@ mod tests {
                 fps: 60,
                 bitrate_kbps: 10_000,
                 hevc: false,
+                av1: false,
                 audio: false,
                 name: "test".into(),
             },

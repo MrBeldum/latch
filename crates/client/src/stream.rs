@@ -821,6 +821,7 @@ impl View {
                             ui,
                             settings,
                             crate::app::ClientApp::native_pixels(ctx),
+                            crate::app::ClientApp::display_hz(),
                         );
                     },
                 );
@@ -2241,10 +2242,9 @@ fn desktop_per_stream_pixel(desktop: Option<(u32, u32)>, stream: (u32, u32)) -> 
 
 /// The quality profile a stream runs at, named as Settings names it.
 fn profile_label(s: &StreamSettings) -> String {
-    match (s.quality, s.preset()) {
-        (crate::config::Quality::Auto, _) => "Recommended".into(),
-        (_, Some(p)) => p.label().into(),
-        _ => format!("Custom · {}", s.describe()),
+    match s.quality {
+        crate::config::Quality::Custom => format!("Custom · {}", s.describe()),
+        q => q.label().into(),
     }
 }
 
@@ -2568,6 +2568,7 @@ pub(crate) mod tests {
                 fps: 60,
                 bitrate_kbps: 50_000,
                 hevc: true,
+                av1: true,
                 audio: true,
                 name: "UI test".into(),
                 cursor: true,

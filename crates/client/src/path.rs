@@ -8,7 +8,7 @@
 //! Path latency and capacity are independent. Show the route as diagnostics;
 //! never turn a high RTT or the presence of a relay into a quality cap.
 
-use crate::config::{Quality, Resolution, StreamSettings};
+use crate::config::StreamSettings;
 use latch_core::api::NatReport;
 use latch_core::tailscale::derp_city;
 use latch_ui::Tone;
@@ -87,20 +87,23 @@ impl Path {
     }
 }
 
-/// Recommended starting quality. RTT measures delay, not throughput: neither
-/// a VPS relay nor a distant direct connection implies a bandwidth cap.
-pub fn effective(settings: &StreamSettings) -> StreamSettings {
-    effective_for(settings, settings.fps)
-}
-
-/// Recommended starting quality taking into account the local display's refresh rate (Hz).
-pub fn effective_for(settings: &StreamSettings, display_hz: u32) -> StreamSettings {
+/// What the quality setting asks for on a display of `native` pixels
+/// refreshing at `display_hz` (60 when unknown), before the PC's limits:
+/// a profile's resolution, frame rate and bitrate ceiling, or Custom's
+/// values as set. RTT measures delay, not throughput: neither a VPS relay
+/// nor a distant direct connection implies a bandwidth cap.
+pub fn effective_for(
+    settings: &StreamSettings,
+    native: (u32, u32),
+    display_hz: u32,
+) -> StreamSettings {
     let mut s = settings.clone();
-    if s.quality == Quality::Auto {
-        s.resolution = Resolution::Native;
-        s.bitrate_kbps = 50_000;
-        let hz = if display_hz > 0 { display_hz } else { 60 };
-        s.fps = hz.clamp(30, 240);
+    let hz = if display_hz > 0 { display_hz } else { 60 };
+    if let Some((resolution, fps)) = s.quality.values(hz) {
+        s.resolution = resolution;
+        s.fps = fps;
+        let (w, h) = resolution.pixels(native);
+        s.bitrate_kbps = s.quality.bitrate_kbps(w, h, fps).unwrap_or(s.bitrate_kbps);
     }
     s
 }
@@ -185,6 +188,7 @@ pub fn explain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Quality, Resolution};
 
     fn nat(udp: bool, hard: Option<bool>, portmap: bool, ipv6: bool) -> NatReport {
         NatReport {
@@ -295,34 +299,68 @@ mod tests {
     /// what Auto asks for.
     #[test]
     fn auto_is_the_recommended_quality_and_custom_is_left_alone() {
-        let auto = StreamSettings {
-            fps: 120,
-            ..Default::default()
-        };
-        let s = effective(&auto);
+        let auto = StreamSettings::default();
+        let s = effective_for(&auto, (3024, 1964), 120);
         assert_eq!(
             (s.resolution, s.fps, s.bitrate_kbps),
-            (Resolution::Native, 120, 50_000)
+            (Resolution::Native, 120, 178_174),
+            "the display's size and refresh rate, a quarter bit a pixel"
+        );
+        assert_eq!(
+            effective_for(&auto, (1920, 1080), 60).bitrate_kbps,
+            50_000,
+            "never under what 5.1 asked for"
         );
         let custom = StreamSettings {
             quality: Quality::Custom,
             bitrate_kbps: 150_000,
+            fps: 90,
             ..auto
         };
-        assert_eq!(effective(&custom), custom);
+        assert_eq!(effective_for(&custom, (3024, 1964), 120), custom);
     }
 
     #[test]
     fn effective_quality_uses_display_refresh_rate() {
         let default_settings = StreamSettings::default();
+        let native = (2560, 1440);
         // 120 Hz display capability (e.g. ProMotion)
-        let s120 = effective_for(&default_settings, 120);
+        let s120 = effective_for(&default_settings, native, 120);
         assert_eq!(s120.fps, 120);
         assert_eq!(s120.resolution, Resolution::Native);
+        // Fast monitors are asked for at their own rate; nothing under 30.
+        assert_eq!(effective_for(&default_settings, native, 360).fps, 360);
+        assert_eq!(effective_for(&default_settings, native, 500).fps, 500);
+        assert_eq!(effective_for(&default_settings, native, 15).fps, 30);
+        assert_eq!(
+            effective_for(&default_settings, native, 0).fps,
+            60,
+            "unknown"
+        );
+    }
 
-        // Clamping to max 240 fps and min 30 fps
-        assert_eq!(effective_for(&default_settings, 360).fps, 240);
-        assert_eq!(effective_for(&default_settings, 15).fps, 30);
+    #[test]
+    fn the_profiles_follow_the_display() {
+        let with = |quality| StreamSettings {
+            quality,
+            ..Default::default()
+        };
+        let competitive = effective_for(&with(Quality::Competitive), (3024, 1964), 480);
+        assert_eq!(
+            (competitive.resolution.pixels((3024, 1964)), competitive.fps),
+            ((1920, 1080), 360)
+        );
+        let cinematic = effective_for(&with(Quality::Cinematic), (5120, 2880), 144);
+        assert_eq!(
+            (cinematic.resolution.pixels((5120, 2880)), cinematic.fps),
+            ((3840, 2160), 120)
+        );
+        assert_eq!(
+            cinematic.bitrate_kbps, 497_664,
+            "twice Balanced's bits a pixel"
+        );
+        let cinematic = effective_for(&with(Quality::Cinematic), (3024, 1964), 60);
+        assert_eq!(cinematic.resolution.pixels((3024, 1964)), (3024, 1964));
     }
 
     #[test]

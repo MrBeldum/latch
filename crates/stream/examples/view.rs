@@ -124,6 +124,7 @@ fn main() -> anyhow::Result<()> {
             fps,
             bitrate_kbps: kbps,
             hevc: flag("--hevc"),
+            av1: flag("--av1"),
             audio: flag("--audio"),
             name: "view example".into(),
             cursor: false,
