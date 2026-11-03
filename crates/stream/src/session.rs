@@ -578,14 +578,13 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
             return;
         }
         video::decoder_failed(codec);
-        let next = offer(settings).first().map_or("H.264", |c| c.name());
-        tracing::warn!(
-            "{} decoding failed ({why}); asking the host again, for {next} at best",
-            codec.name()
-        );
+        let codec = match codec {
+            Codec::H264High => "H.264 High",
+            other => other.name(),
+        };
+        tracing::warn!("{codec} decoding failed ({why}); asking the host again without it");
         inner.emit(Event::Notice(format!(
-            "This computer could not decode {} ({why}); the stream goes on in {next} or another codec.",
-            codec.name()
+            "This computer could not decode {codec} ({why}), so the stream starts again without it."
         )));
         inner.attempt.fetch_add(1, Ordering::AcqRel);
         *inner.queue.lock() = DecodeQueue::default();
