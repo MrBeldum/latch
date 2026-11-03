@@ -5,7 +5,8 @@
 //! the device's own thread plays out and turns into motor levels.
 //!
 //! Opening `/dev/uinput` needs write access to it, which most systems give
-//! only to root. Setup grants it (see `docs/LINUX.md`, "Gamepads").
+//! only to root (and Ubuntu to the `input` group); `deploy/native/README.md`,
+//! "Gamepads", has the udev rule that grants it.
 
 use crate::gamepad::{map, Feedback, FeedbackFn, PadKind, PadState, VirtualBus};
 use anyhow::{Context, Result};
@@ -32,7 +33,7 @@ pub fn open() -> Result<Bus> {
         .open(UINPUT)
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::PermissionDenied => anyhow::anyhow!(
-                "this user may not create gamepads ({UINPUT} is not writable); run `sudo latch-host --setup` to allow it"
+                "this user may not create gamepads ({UINPUT} is not writable; Latch's Linux notes, \"Gamepads\", have the udev rule)"
             ),
             std::io::ErrorKind::NotFound => {
                 anyhow::anyhow!("{UINPUT} is missing (the uinput kernel module is not loaded)")

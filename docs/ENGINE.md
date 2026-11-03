@@ -41,6 +41,8 @@ reassemble ─▶ decode ─▶ FrameSlot ─▶ wgpu
                       ◀── Audio + parity ───  loopback capture ─▶ lpcm-rice
 cpal ◀─ jitter buffer ◀─ decode
 Input (redundant until acked) ──────────────▶ inject (SendInput / CGEvent / XTest)
+Pad snapshots (newest, until acked) ────────▶ virtual pads (ViGEmBus / uinput)
+                      ◀── PadFeedback ──────  the game's rumble and lights
 KeyframeRequest on loss ────────────────────▶ next frame is IDR
 ```
 
@@ -97,6 +99,33 @@ Silence costs a few bytes a frame and a desktop's sound about 0.5–1 Mbps;
 coding it costs microseconds. The decoded samples are exactly the
 captured ones, which lets tests check audio bit for bit. Opus is gone.
 
+### Gamepads
+
+A viewer that offers gamepads gets as many slots as the host can emulate
+(`Accept.gamepads`) and sends each pad's whole state whenever it changes;
+the host plugs a virtual pad in on a slot's first state, applies only the
+newest state of each slot, and unplugs every pad when the session ends.
+Rumble and light-bar colours come back the same way ([PROTOCOL.md](PROTOCOL.md#gamepads-912)).
+
+| Host | Virtual pads |
+| --- | --- |
+| Windows | ViGEmBus (installed by setup, [WINDOWS.md](WINDOWS.md#gamepads)), spoken to through `DeviceIoControl`: Xbox 360 pads (XInput) and DualShock 4 pads, up to 8; rumble, the player LED and the light bar come back from the driver's notifications |
+| Linux | `/dev/uinput` devices identical to what `xpad` makes for an Xbox 360 pad, up to 16, with `FF_RUMBLE`; needs write access to `/dev/uinput` ([deploy/native/README.md](../deploy/native/README.md#gamepads)) |
+| macOS | none: a Mac cannot add a gamepad without a driver, so `Accept` says why in `gamepad_problem` |
+
+| Viewer | Reading pads |
+| --- | --- |
+| macOS | GameController (Xbox, DualSense, DualShock 4, Switch Pro, MFi), value-changed handlers on Latch's own dispatch queue; rumble through Core Haptics, an engine per handle and trigger motor |
+| Windows | Windows.Gaming.Input polled every millisecond: `Gamepad` (with trigger motors), and Sony pads as `RawGameController` in their DirectInput layout |
+| Linux | evdev, a thread per pad blocked in `read`; `FF_RUMBLE`; the host's own virtual pads are skipped |
+
+A pad keeps its slot while it is connected, across streams. A test-pattern
+host (`LATCH_TEST_PATTERN`) plugs pads into an in-memory bus that rumbles
+back each pad's triggers, unless `LATCH_TEST_GAMEPADS=system` sends them to
+the platform's own. None of this compiles C: ViGEmBus's IOCTL layouts are
+declared in Rust from its MIT-licensed headers, and evdev/uinput are ioctls
+through `libc`.
+
 ## Decisions
 
 * **No pairing.** The control service's authorization (same Tailscale
@@ -152,6 +181,11 @@ A Latch 5 viewer that finds a Latch 4 host (no `streamer.protocol` in
 machine to update. A Latch 4 viewer finds no GameStream port on a Latch 5
 host and offers its own update. Pairing data, Sunshine's configuration and
 the engine folders of Latch 4 are removed by Latch 5's setup.
+
+Gamepads are negotiated inside protocol 1: a viewer before them never
+asks (`StreamRequest.gamepads` defaults to false), and a host before them
+never answers with slots (`Accept.gamepads` defaults to 0), so neither side
+ever sends datagram kinds 9–12 to a peer that does not know them.
 
 ## Evidence
 

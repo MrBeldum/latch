@@ -777,7 +777,7 @@ if ((Get-ItemProperty -LiteralPath $latchSaved -Name '{mark}' -ErrorAction Silen
     $vigem = {entry}
     $removed = $true
     if ($vigem -and $vigem.PSChildName -match '^\{{[0-9A-Fa-f-]{{36}}\}}$') {{
-        $p = Start-Process -FilePath msiexec.exe -ArgumentList '/x', $vigem.PSChildName, '/qn', '/norestart' -Wait -PassThru
+        $p = Start-Process -FilePath msiexec.exe -ArgumentList '/x', $vigem.PSChildName, '/qn', '/norestart', 'REBOOT=ReallySuppress' -Wait -PassThru
         if ($p.ExitCode -notin 0, 1605, 3010) {{ Write-Output "  msiexec exited with $($p.ExitCode)"; $removed = $false }}
     }} elseif ($vigem) {{ Write-Output "  no product code in '$($vigem.PSChildName)'"; $removed = $false }}
     if ($removed) {{ Remove-ItemProperty -LiteralPath $latchSaved -Name '{mark}' -ErrorAction SilentlyContinue }} else {{ $setupFailed = $true }}
@@ -984,7 +984,8 @@ mod tests {
             .nth(1)
             .unwrap();
         assert!(removal.find(VIGEM_MARK).unwrap() < removal.find("msiexec.exe").unwrap());
-        assert!(removal.contains("'/x', $vigem.PSChildName, '/qn', '/norestart'"));
+        assert!(removal
+            .contains("'/x', $vigem.PSChildName, '/qn', '/norestart', 'REBOOT=ReallySuppress'"));
         assert!(removal.contains("not installed by Latch; left alone"));
         // Read before the power restore deletes the saved key.
         assert!(

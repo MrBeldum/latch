@@ -119,6 +119,7 @@ the Mac cursor's position is sent 1:1 instead and nothing is captured.
 | **PC** (or **Mac**, **Machine**) | Sleep…, Restart…, Shut down…, each asking first, when the machine's owner allows them; Sleep only on a Windows PC, the one kind a wake packet can bring back. **Update Latch Host…** for a PC whose host is older than 3.1 |
 | **Stream settings** | The same controls as Settings: quality profile, resolution, frame rate, bitrate and codec. **Apply and reconnect** restarts the session with them in a second or two; Escape or the close button leaves them as they were |
 | **Disconnect** | End the session |
+| **2 gamepads** | Shown while gamepads are connected to this Mac; hover for which, and whether the host takes them (green), or why not (amber) |
 
 On a narrow window everything but **Stream settings** and **Disconnect**
 folds into one **More** menu.
@@ -131,6 +132,16 @@ Command. While the stream has the keys, ⌘Q, ⌘H and ⌘+/⌘−/⌘0 go to th
 too (⌘Q closes the PC's window, not Latch): quit or hide Latch from the menu
 bar or the Dock, after **Disconnect**, or while the toolbar or a panel has
 the focus. ⌘Tab and ⌘Space stay on the Mac.
+
+### Gamepads
+
+Gamepads connected to the Mac (Xbox Wireless, DualSense, DualShock 4,
+Switch Pro and other MFi pads, over USB or Bluetooth) go to the host as
+they are: a Windows PC gets an Xbox 360 pad for an Xbox pad and a
+DualShock 4 for a PlayStation one, a Linux host an Xbox 360 pad for each.
+The game's rumble comes back to the pad, on each handle and, on pads that
+have them, the triggers. macOS gives gamepads to the frontmost app only,
+so keep the stream's window in front. A Mac host takes no gamepads.
 
 ### Clipboard
 
