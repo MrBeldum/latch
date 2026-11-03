@@ -1,0 +1,31 @@
+
+running 25 tests
+test base64::tests::base64_roundtrip_binary ... ok
+test control::tests::accept_backward_compatible ... ok
+test control::tests::cursor_json_format_matches_spec ... ok
+test base64::tests::preserves_dimensions_within_96 ... ok
+test control::tests::cursor_max_shape_fits_max_message ... ok
+test base64::tests::base64_rfc_vectors ... ok
+test base64::tests::downscales_when_exceeding_96 ... ok
+test control::tests::cursor_messages_wire_roundtrip ... ok
+test fec::tests::benchmark_fec ... ignored
+test control::tests::draw_cursor_message_wire_roundtrip ... ok
+test control::tests::stream_request_backward_compatible ... ok
+test control::tests::unknown_message_type_ignored ... ok
+test fec::tests::mismatched_lengths ... ok
+test fec::tests::parity_only_reconstruction ... ok
+test fec::tests::exhaustive_small ... ok
+test fec::tests::test_encode_matches_scalar ... ok
+test fec::tests::too_few_shards ... ok
+test input::fallible_tests::an_event_that_never_injects_is_dropped_and_the_rest_go_on ... ok
+test input::fallible_tests::failed_release_is_retried_before_acknowledging ... ok
+test transport::tests::batches_preserve_boundaries_and_never_wait_for_more ... ok
+test fec::tests::random_patterns_large ... ok
+test video::tests::every_data_shard_goes_out_before_any_parity ... ok
+segmented batches 2, coalesced datagrams 0
+test transport::tests::segmented_runs_arrive_as_separate_datagrams ... ok
+test fec::tests::multiply_accumulate_matches_scalar_for_all_coefficients ... ok
+test fec::tests::test_simd_addmul_matches_scalar ... ok
+
+test result: ok. 24 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.10s
+

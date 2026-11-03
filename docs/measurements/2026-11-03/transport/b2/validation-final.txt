@@ -1,0 +1,11 @@
+Final validation, 2026-11-03, macOS M3 Pro
+
+cargo fmt --all -- --check: PASS
+cargo clippy --locked --workspace --all-targets -- -D warnings: PASS
+cargo test --locked --workspace --all-targets: 603 passed, 25 ignored, 0 failed
+bash scripts/audit-native.sh: PASS
+Release transport_scenarios: 6 passed
+Windows 2e7fbbb (production code unchanged in final commits): release transport build PASS; proto unit and integration tests 53 passed, 2 ignored; cargo check -p latch-engine -p latch-stream PASS
+Linux ARM64 release transport cross-build PASS; proto binary 24 passed, 1 ignored
+Both mixed-version compatibility pairs repeated, 10 seconds each: connected, decoded, zero reported loss. Sweep payload was below requested 20 Mbps; not a saturation test.
+No LatchGfnB scheduled tasks remain. Deployed Windows host on TCP 47850 is PID 6084, %LOCALAPPDATA%\Latch\latch-host.exe. No display/driver changes made in this continuation.

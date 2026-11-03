@@ -16,16 +16,23 @@ successfully sent media for senders. It includes packetization/FEC/reassembly.
 
 | Loopback, 300 Mbps, 120 fps | CPU µs/Mbit before | After |
 | --- | ---: | ---: |
-| Linux ARM64 sender | 593.39 | 148.55 |
-| Linux ARM64 receiver | 346.24 | 71.54 |
-| Windows x64 sender | 614.58 | 281.25 |
-| Windows x64 receiver | 291.67 | 239.58 |
+| Linux ARM64 sender (final repeat) | 582.36 | 168.19 |
+| Linux ARM64 receiver (final repeat) | 319.25 | 89.30 |
+| Windows x64 sender (final repeat) | 833.33 | 482.38 |
+| Windows x64 receiver (final repeat) | 375.00 | 281.25 |
 
-All loopback runs delivered 600/600 frames with no send errors. Linux is the
+The retained initial loopback runs delivered 600/600 frames with no send errors.
+The final Windows repeat delivered 600/600 except enabled run 3, which sent and
+delivered 596 frames (297.451 Mbps sent, 296.295 Mbps received); no send errors.
+The final repeat medians supersede the initial Windows medians, which were
+614.58→281.25 sender and 291.67→239.58 receiver. Both sets are retained. The final Linux repeat delivered 600/600 throughout;
+its initial medians were 593.39→148.55 sender and 346.24→71.54 receiver. Linux is the
 shared Oracle A1; Windows is the RX 6600 PC. Windows process CPU accounting is
 coarse over five seconds and individual runs vary substantially. Raw logs:
 [b2/linux-loopback.txt](b2/linux-loopback.txt),
-[b2/windows-loopback.txt](b2/windows-loopback.txt).
+[b2/linux-loopback-repeat.txt](b2/linux-loopback-repeat.txt),
+[b2/windows-loopback.txt](b2/windows-loopback.txt),
+[b2/windows-loopback-repeat.txt](b2/windows-loopback-repeat.txt).
 
 | Tailscale, 50 Mbps offered, 120 fps | CPU µs/Mbit before | After |
 | --- | ---: | ---: |
@@ -66,21 +73,31 @@ the follow-up stays at 100000 kbps throughout.
 The 100→20 Mbps step at 10 ms RTT first reaches ≤20 Mbps in **160→60 ms**;
 queue p95 11.23→10.60 ms, lost frames 19→7, recovery 960→910 ms.
 This measures first crossing, not permanent settlement. Subsequent capacity
-probing can still cause cuts: the final scenario log counts cuts during
-2.5–8 seconds. Oscillation-free convergence is not established.
+probing still caused **16 cuts during 2.5–8 seconds** in the final regression.
+The ≤60 ms target is met only for first crossing; oscillation-free convergence
+remains unmet. Holding a remembered queue capacity would need separate route-change
+and jitter validation before trading away the current fast recovery.
 Tests now enforce the 60-ms first-crossing bound. Simulations still exclude
 sender pacing, codec overshoot and hardware IDR spikes.
 
 [b2/compat.txt](b2/compat.txt) retains ten-second 720p60 H.264 runs for main
 `9fe0ae9` serve ↔ new view and new serve ↔ main view, plus both matching pairs.
 All connected and decoded around 60 fps with zero reported loss. Final repeat
-results and validation are recorded alongside these logs.
+results are in [b2/compat-repeat.txt](b2/compat-repeat.txt). The repeat connected
+and decoded in both directions with zero reported loss; the synthetic sweep
+was below the requested 20 Mbps, so this is not a saturation test.
+Final [validation](b2/validation-final.txt): fmt, CI clippy, workspace all-target
+tests (603 passed, 25 ignored), native audit, Linux proto tests and Windows
+release proto build/tests plus engine/stream check passed. Windows source is
+`2e7fbbb`; subsequent commits change only tests/docs. No `LatchGfnB*` tasks
+remain; installed Windows host still listens on 47850. No display or driver
+settings were changed during this continuation.
 
 ### Datagram size and reproduction
 
 `crates/client/src/path.rs`'s “Direct” is direct **Tailscale**, not a separate
 LAN transport; PeerRelay and DERP also traverse Tailscale. Discovery uses peer
-Tailscale addresses (`Node::ip` in `crates/core/src/tailscale.rs`), and the
+Tailscale addresses (`Node::ipv4` in `crates/core/src/tailscale.rs`), and the
 production host authorizes nonlocal clients through Tailscale whois. Loopback
 test examples bypass authorization, but do not establish a supported non-Tailscale
 remote connection. Both measured tailnet interfaces have MTU 1280. Retain 1200-byte
