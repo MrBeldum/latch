@@ -41,7 +41,8 @@ const PING_EVERY: Duration = Duration::from_millis(500);
 /// rather than the picture falling further and further behind.
 const DECODE_QUEUE: usize = 8;
 const DECODE_MAX_AGE: Duration = Duration::from_millis(50);
-const REPORT_EVERY: Duration = Duration::from_millis(250);
+const REPORT_EVERY: Duration = Duration::from_millis(50);
+const STATS_EVERY: Duration = Duration::from_millis(250);
 /// How long a stopping session waits for a decode in progress. A platform
 /// decoder can block inside the OS (VideoToolbox after a sleep or a GPU
 /// reset); the window must still be able to leave the stream.
@@ -237,7 +238,7 @@ struct Inner {
     heard_us: AtomicU64,
     /// Video packets the network lost in the last second, rebuilt or not,
     /// in thousandths of a percent: what the host sizes its FEC by.
-    raw_loss_milli: AtomicU64,
+    feedback: Mutex<Report>,
     connected: AtomicBool,
     stop: AtomicBool,
     finished: AtomicBool,
@@ -384,7 +385,7 @@ impl Session {
             tcp: Mutex::new(None),
             epoch: Instant::now(),
             heard_us: AtomicU64::new(0),
-            raw_loss_milli: AtomicU64::new(0),
+            feedback: Mutex::new(Report::default()),
             connected: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -840,19 +841,7 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
         }
         if now - last_report >= REPORT_EVERY {
             last_report = now;
-            let stats = inner.stats.lock().clone();
-            let report = Report {
-                fps: stats.fps,
-                loss_pct: inner.raw_loss_milli.load(Ordering::Relaxed) as f32 / 1000.0,
-                decode_ms: stats.decode_ms,
-                rtt_ms: stats.rtt_ms as f32,
-                received_kbps: (stats.received_mbps * 1000.0) as u32,
-                frames_lost: stats.frames_lost,
-                unrecovered_loss_pct: Some(stats.loss_pct),
-                queue_ms: stats.queue_ms,
-                window_ms: stats.window_ms,
-                ..Default::default()
-            };
+            let report = inner.feedback.lock().clone();
             if !send_control(inner, &Message::Report(report)) && !inner.stopping() {
                 return Outcome::Ended(-1, "The connection to the host broke.".into());
             }
@@ -912,7 +901,10 @@ fn receive(
     }
     let mut events = mio::Events::with_capacity(4);
     let accepted = Instant::now();
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let mut buf = vec![0u8; latch_proto::MAX_DATAGRAM + 1];
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let mut batch = latch_proto::transport::ReceiveBatch::default();
     let mut out = Vec::with_capacity(64);
     let mut reassembler = Reassembler::new(session);
     let mut audio_rx = accept.audio.as_ref().map_or_else(
@@ -927,6 +919,8 @@ fn receive(
     let mut window_start = Instant::now();
     let mut throughput = Throughput::default();
     let mut window_base = reassembler.stats();
+    let mut report_start = Instant::now();
+    let mut report_base = window_base;
     let mut poor = false;
     let mut good_windows = 0u32;
     // The socket ran dry on the last pass, after which everything that had
@@ -962,6 +956,34 @@ fn receive(
         if let Some(link) = inner.link.lock().as_mut() {
             link.flush(now);
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        match batch.receive(&udp, |bytes, from| {
+            if from.ip() == host.ip() {
+                if let Ok(datagram) = wire::parse(bytes) {
+                    if datagram.session() == session {
+                        inner.heard();
+                        handle(
+                            inner,
+                            &datagram,
+                            &udp,
+                            from,
+                            &mut out,
+                            &mut reassembler,
+                            &mut audio_rx,
+                            &mut rtt,
+                            &mut media_seen,
+                            &mut throughput,
+                            bytes.len(),
+                        );
+                        hand_off_video(inner, &mut reassembler, &mut throughput, Instant::now());
+                    }
+                }
+            }
+        }) {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => drained = true,
+            _ => {}
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         // Drain a bounded batch before timers and feedback bookkeeping.
         for _ in 0..64 {
             match ready_socket.recv_from(&mut buf) {
@@ -1006,29 +1028,7 @@ fn receive(
                 }
             }
         }
-        while let Some(event) = reassembler.poll(now) {
-            match event {
-                Reassembled::Frame(frame) => {
-                    throughput.frame(&frame);
-                    let mut q = inner.queue.lock();
-                    if q.frames.len() >= DECODE_QUEUE
-                        || q.frames.front().is_some_and(|(_, at)| {
-                            now.saturating_duration_since(*at) >= DECODE_MAX_AGE
-                        })
-                    {
-                        tracing::warn!("the decoder fell behind; restarting at a keyframe");
-                        q.frames.clear();
-                        q.want_keyframe = true;
-                    }
-                    q.frames.push_back((frame, now));
-                    drop(q);
-                    inner.queue_cv.notify_one();
-                }
-                Reassembled::Lost { frame } => {
-                    tracing::debug!("video frame {frame} lost");
-                }
-            }
-        }
+        hand_off_video(inner, &mut reassembler, &mut throughput, now);
         let waiting = reassembler.needs_keyframe(accepted, now) || inner.queue.lock().want_keyframe;
         if keyframes.due(waiting, now, rtt.srtt()) {
             wire::write_keyframe_request(
@@ -1038,15 +1038,32 @@ fn receive(
             );
             let _ = udp.send_to(&out, host);
         }
-        if now - window_start >= REPORT_EVERY {
+        if now - report_start >= REPORT_EVERY {
             let stats = reassembler.stats();
-            let (loss, recovered, raw_loss) = loss_in_window(&window_base, &stats);
+            let (loss, _, raw_loss) = loss_in_window(&report_base, &stats);
+            let secs = (now - report_start).as_secs_f32();
+            *inner.feedback.lock() = Report {
+                fps: (stats.frames_delivered - report_base.frames_delivered) as f32 / secs,
+                loss_pct: raw_loss,
+                decode_ms: inner.stats.lock().decode_ms,
+                rtt_ms: rtt.srtt().map_or(0.0, |d| d.as_secs_f32() * 1000.0),
+                received_kbps: (std::mem::take(&mut throughput.feedback_received) as f32 * 8.0
+                    / secs
+                    / 1000.0) as u32,
+                frames_lost: stats.frames_lost - report_base.frames_lost,
+                unrecovered_loss_pct: Some(loss),
+                window_ms: (secs * 1000.0) as u32,
+                ..Default::default()
+            };
+            report_start = now;
+            report_base = stats;
+        }
+        if now - window_start >= STATS_EVERY {
+            let stats = reassembler.stats();
+            let (loss, recovered, _) = loss_in_window(&window_base, &stats);
             let lost_count = stats.frames_lost.saturating_sub(window_base.frames_lost);
             let lost_frames = lost_count > 0;
             window_base = stats;
-            inner
-                .raw_loss_milli
-                .store((raw_loss * 1000.0) as u64, Ordering::Relaxed);
             let secs = (now - window_start).as_secs_f32();
             window_start = now;
             let decode = std::mem::take(&mut *inner.decode.lock());
@@ -1090,11 +1107,43 @@ fn receive(
     }
 }
 
+fn hand_off_video(
+    inner: &Arc<Inner>,
+    reassembler: &mut Reassembler,
+    throughput: &mut Throughput,
+    now: Instant,
+) {
+    while let Some(event) = reassembler.poll(now) {
+        match event {
+            Reassembled::Frame(frame) => {
+                throughput.frame(&frame);
+                let mut q = inner.queue.lock();
+                if q.frames.len() >= DECODE_QUEUE
+                    || q.frames
+                        .front()
+                        .is_some_and(|(_, at)| now.saturating_duration_since(*at) >= DECODE_MAX_AGE)
+                {
+                    tracing::warn!("the decoder fell behind; restarting at a keyframe");
+                    q.frames.clear();
+                    q.want_keyframe = true;
+                }
+                q.frames.push_back((frame, now));
+                drop(q);
+                inner.queue_cv.notify_one();
+            }
+            Reassembled::Lost { frame } => {
+                tracing::debug!("video frame {frame} lost");
+            }
+        }
+    }
+}
+
 /// Media bytes in the current statistics window.
 #[derive(Default)]
 struct Throughput {
     /// Video and audio datagrams as received.
     received: u64,
+    feedback_received: u64,
     /// Encoded video in the frames put back together.
     video: u64,
 }
@@ -1103,6 +1152,7 @@ impl Throughput {
     fn datagram(&mut self, datagram: &Datagram<'_>, len: usize) {
         if matches!(datagram, Datagram::Video { .. } | Datagram::Audio { .. }) {
             self.received += len as u64;
+            self.feedback_received += len as u64;
         }
     }
 
@@ -1460,7 +1510,7 @@ mod tests {
             tcp: Mutex::new(None),
             epoch: Instant::now(),
             heard_us: AtomicU64::new(0),
-            raw_loss_milli: AtomicU64::new(0),
+            feedback: Mutex::new(Report::default()),
             connected: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             finished: AtomicBool::new(false),

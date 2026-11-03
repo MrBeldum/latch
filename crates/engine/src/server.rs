@@ -36,9 +36,9 @@ const KEEPALIVE: Duration = Duration::from_secs(1);
 /// A viewer heard from neither over TCP nor UDP for this long is gone.
 const SILENT: Duration = Duration::from_secs(10);
 const HELLO_EVERY: Duration = Duration::from_millis(50);
-/// Often enough that each viewer report (once a second) has round trips
+/// Often enough that each viewer report has round trips
 /// to tell a filling queue from the path's base; a ping is 16 bytes.
-const PING_EVERY: Duration = Duration::from_millis(100);
+const PING_EVERY: Duration = Duration::from_millis(20);
 /// Keyframes for requests at most this often: a burst of requests for one
 /// loss must not turn into a burst of keyframes.
 const KEYFRAME_GAP: Duration = Duration::from_millis(50);
@@ -464,6 +464,7 @@ impl Server {
         let mut controller =
             crate::congestion::Controller::new(accept.bitrate_kbps, Instant::now());
         let requested_bitrate = accept.bitrate_kbps;
+        let mut fec_loss = 0.0;
         let mut last_keepalive = Instant::now();
         let mut last_hello = Instant::now() - HELLO_EVERY;
         let mut last_ping = Instant::now();
@@ -506,7 +507,7 @@ impl Server {
                     let now = Instant::now();
                     let (then, before) = std::mem::replace(&mut sent_mark, (now, bytes));
                     let secs = now.duration_since(then).as_secs_f64();
-                    if secs >= 0.1 {
+                    if secs >= 0.025 {
                         controller.observe_sent(
                             (bytes.saturating_sub(before) as f64 * 8.0 / 1000.0 / secs) as u32,
                         );
@@ -529,14 +530,16 @@ impl Server {
                         );
                     }
                     session.pace_kbps.store(
-                        if controller.pacing() || r.loss_pct >= 1.5 {
+                        if controller.pacing() {
                             controller.budget()
                         } else {
                             0
                         },
                         Ordering::Relaxed,
                     );
-                    let fec = fec_percent_for(r.loss_pct, controller.base_rtt()).min(30);
+                    fec_loss =
+                        latch_proto::video::fec_loss_sample(fec_loss, r.loss_pct, now - then);
+                    let fec = fec_percent_for(fec_loss, controller.base_rtt()).min(30);
                     session.fec.store(fec, Ordering::Relaxed);
                     let status = self.status();
                     let report = control::Report {
@@ -905,6 +908,11 @@ fn send_video(
     });
 }
 
+fn recovery_due(last: Option<Instant>, now: Instant, rtt: Option<Duration>) -> bool {
+    let gap = rtt.unwrap_or_default().max(KEYFRAME_GAP);
+    last.is_none_or(|at| now.saturating_duration_since(at) >= gap)
+}
+
 fn encode_video(
     server: &Server,
     session: &Session,
@@ -932,7 +940,7 @@ fn encode_video(
             session.transport.applied.store(target, Ordering::Relaxed);
         }
         pipeline.set_cursor_drawn(session.draw_cursor.load(Ordering::Relaxed));
-        let due = last_keyframe.is_none_or(|t| t.elapsed() >= KEYFRAME_GAP);
+        let due = recovery_due(last_keyframe, Instant::now(), session.rtt.lock().srtt());
         let keyframe = due && session.keyframe.swap(false, Ordering::AcqRel);
         // Short idle repeats bound how long a request arriving inside next
         // waits. Send every returned frame: discarding an encoded repeat
@@ -1041,22 +1049,34 @@ fn paced_video(
             host_delay: delay,
         };
         let pace = session.pace_kbps.load(Ordering::Relaxed);
-        packetizer.packetize(&out, |datagram| {
-            loop {
-                if session.stopping() {
-                    return;
+        packetizer.packetize_batches(&out, |batch| {
+            if pace == 0 {
+                if !session.stopping() {
+                    session
+                        .transport
+                        .queue_us
+                        .fetch_max(queued.elapsed().as_micros() as u64, Ordering::Relaxed);
+                    send_batch(&server.udp, session, batch, addr);
                 }
-                session
-                    .transport
-                    .queue_us
-                    .fetch_max(queued.elapsed().as_micros() as u64, Ordering::Relaxed);
-                let wait = pacer.delay(Instant::now(), datagram.len(), pace);
-                if wait.is_zero() {
-                    break;
-                }
-                std::thread::sleep(wait.min(Duration::from_millis(5)));
+                return;
             }
-            send(&server.udp, session, datagram, addr);
+            for datagram in batch {
+                loop {
+                    if session.stopping() {
+                        return;
+                    }
+                    session
+                        .transport
+                        .queue_us
+                        .fetch_max(queued.elapsed().as_micros() as u64, Ordering::Relaxed);
+                    let wait = pacer.delay(Instant::now(), datagram.len(), pace);
+                    if wait.is_zero() {
+                        break;
+                    }
+                    std::thread::sleep(wait.min(Duration::from_millis(5)));
+                }
+                send(&server.udp, session, datagram, addr);
+            }
         });
         session.frames.fetch_add(1, Ordering::Relaxed);
     }
@@ -1145,6 +1165,35 @@ fn send_audio(
 fn audio_problem(server: &Server, session: &Session, message: String) {
     server.status.lock().audio_problem = message.clone();
     *session.audio_notice.lock() = Some(message);
+}
+
+/// Retry only an unsent suffix: batch syscalls can succeed partially.
+fn send_batch(udp: &UdpSocket, session: &Session, batch: &[Vec<u8>], to: SocketAddr) {
+    let mut sent = 0;
+    let mut failures = 0;
+    while sent < batch.len() && !session.stopping() {
+        match latch_proto::transport::send_batch(udp, &batch[sent..], to) {
+            Ok(n) if n > 0 => {
+                let bytes: usize = batch[sent..sent + n].iter().map(Vec::len).sum();
+                session.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+                sent += n;
+                failures = 0;
+            }
+            result => {
+                session.transport.errors.fetch_add(1, Ordering::Relaxed);
+                failures += 1;
+                let retry = result
+                    .err()
+                    .is_some_and(|e| latch_proto::transport::send_buffer_full(&e));
+                if !retry || failures >= 3 {
+                    session.keyframe.store(true, Ordering::Release);
+                    return;
+                }
+                session.transport.retries.fetch_add(1, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_micros(200));
+            }
+        }
+    }
 }
 
 /// One datagram, retried briefly when the socket's buffer is full (macOS

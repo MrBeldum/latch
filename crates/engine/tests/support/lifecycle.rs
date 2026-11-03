@@ -494,3 +494,24 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
         }
     }
 }
+
+#[test]
+fn requested_idrs_cannot_exceed_one_per_rtt_even_when_last_delivered_advances() {
+    let start = Instant::now();
+    for rtt_ms in [10, 100, 300] {
+        let rtt = Duration::from_millis(rtt_ms);
+        let mut last = None;
+        let mut produced = Vec::new();
+        for ms in 0..1000 {
+            let now = start + Duration::from_millis(ms);
+            if super::recovery_due(last, now, Some(rtt)) {
+                last = Some(now);
+                produced.push(now);
+            }
+        }
+        assert!(produced
+            .windows(2)
+            .all(|pair| pair[1] - pair[0] >= rtt.max(KEYFRAME_GAP)));
+        assert!(produced.len() >= 3, "recovery must not stall");
+    }
+}
