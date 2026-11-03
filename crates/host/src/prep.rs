@@ -11,9 +11,9 @@ type Undo = Option<Box<dyn FnOnce() + Send>>;
 
 pub fn prepare(cfg: &HostConfig, req: &StreamRequest) -> Result<Undo> {
     let size = [
-        req.width.clamp(64, 8192) & !1,
-        req.height.clamp(64, 8192) & !1,
-        req.fps.clamp(1, 240),
+        req.width.clamp(64, latch_proto::control::MAX_SIDE) & !1,
+        req.height.clamp(64, latch_proto::control::MAX_SIDE) & !1,
+        req.fps.clamp(1, latch_proto::control::MAX_FPS),
     ];
     if !cfg.prep_do.trim().is_empty() {
         let undo = cfg.prep_undo.clone();
