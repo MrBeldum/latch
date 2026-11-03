@@ -10,19 +10,38 @@ use crate::input::InputSink;
 use crate::video::{Codec, EncodedVideo, Limits, Pacer, VideoConfig, VideoInfo, VideoPipeline};
 use anyhow::{bail, Result};
 use capture::Capture;
-use encoder::Encoder;
+use encoder::{Depth, Encoder};
 use std::time::{Duration, Instant};
 
 /// How often a running capture asks whether its display changed.
 const GEOMETRY_CHECK: Duration = Duration::from_millis(250);
 
+/// How many frames may be in VideoToolbox at once. Two let the media engine
+/// overlap a frame with the next, so a stream whose interval is shorter
+/// than one frame's encode time keeps its rate; more would only queue.
+const IN_FLIGHT: usize = 2;
+/// `LATCH_MAC_DISPLAY=<CGDirectDisplayID>` shares that display instead of
+/// the main one; the stream request does not name a display yet.
+fn wanted_display() -> Option<u32> {
+    std::env::var("LATCH_MAC_DISPLAY").ok()?.trim().parse().ok()
+}
+
 pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
     capture::permission()?;
-    let encoder = Encoder::new(config)?;
-    let capture = Capture::new(config.width, config.height, config.fps, false)?;
+    let depth = Depth::Eight;
+    let encoder = Encoder::new(config, depth)?;
+    let request = capture::Request {
+        width: config.width,
+        height: config.height,
+        fps: config.fps,
+        display: wanted_display(),
+        pixel_format: depth.pixel_format(),
+    };
+    let capture = Capture::video(request)?;
     let mut video = Video {
         capture,
         encoder,
+        request,
         config: config.clone(),
         generation: 0,
         sent: None,
@@ -30,6 +49,7 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
         pending: None,
         checked: Instant::now(),
     };
+    video.wake();
     // Some virtual Macs advertise hardware that fails only on the first encode.
     // Resolve that fallback before the server snapshots VideoInfo for status.
     video.pending = Some(video.next(true, Duration::ZERO)?);
@@ -37,7 +57,7 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
 }
 pub fn open_audio() -> Result<Box<dyn AudioCapture>> {
     Ok(Box::new(Audio {
-        capture: Capture::new(2, 2, 1, true)?,
+        capture: Capture::audio()?,
     }))
 }
 pub fn open_input() -> Result<Box<dyn InputSink>> {
@@ -86,13 +106,16 @@ pub fn encodable() -> Vec<Codec> {
     [Codec::Hevc, Codec::H264High, Codec::H264Baseline]
         .into_iter()
         .filter(|codec| {
-            Encoder::new(&VideoConfig {
-                width: 640,
-                height: 480,
-                fps: 60,
-                bitrate_kbps: 10_000,
-                codec: *codec,
-            })
+            Encoder::new(
+                &VideoConfig {
+                    width: 640,
+                    height: 480,
+                    fps: 60,
+                    bitrate_kbps: 10_000,
+                    codec: *codec,
+                },
+                Depth::Eight,
+            )
             .is_ok()
         })
         .collect()
@@ -100,12 +123,43 @@ pub fn encodable() -> Vec<Codec> {
 struct Video {
     capture: Capture,
     encoder: Encoder,
+    request: capture::Request,
     config: VideoConfig,
     generation: u64,
     sent: Option<Instant>,
     pacer: Pacer,
     pending: Option<EncodedVideo>,
     checked: Instant,
+}
+impl Video {
+    /// A frame coming out of the encoder wakes `next` as a new picture does.
+    fn wake(&self) {
+        let shared = self.capture.shared.clone();
+        self.encoder.on_output(move || {
+            // Taking the lock orders this after next()'s check for output.
+            let _state = shared.state.lock();
+            shared.ready.notify_all();
+        });
+    }
+    fn restart_capture(&mut self) -> Result<()> {
+        self.capture = Capture::video(self.request)?;
+        self.wake();
+        self.generation = 0;
+        self.encoder.request_keyframe();
+        Ok(())
+    }
+    /// A hardware session that failed is replaced in software; a software
+    /// failure ends the stream.
+    fn recover(&mut self, error: anyhow::Error) -> Result<()> {
+        if !self.encoder.hardware {
+            return Err(error);
+        }
+        tracing::warn!(%error, "VideoToolbox hardware encode failed; continuing in software");
+        self.encoder.software()?;
+        self.wake();
+        self.encoder.request_keyframe();
+        Ok(())
+    }
 }
 impl VideoPipeline for Video {
     fn info(&self) -> VideoInfo {
@@ -125,9 +179,12 @@ impl VideoPipeline for Video {
             display: self.capture.display,
         }
     }
-    fn next(&mut self, mut keyframe: bool, idle: Duration) -> Result<EncodedVideo> {
+    fn next(&mut self, keyframe: bool, idle: Duration) -> Result<EncodedVideo> {
         if let Some(frame) = self.pending.take() {
             return Ok(frame);
+        }
+        if keyframe {
+            self.encoder.request_keyframe();
         }
         let interval = self.pacer.interval();
         if self.checked.elapsed() >= GEOMETRY_CHECK {
@@ -136,30 +193,28 @@ impl VideoPipeline for Video {
             // the display's new place for input.
             if self.capture.moved() {
                 tracing::info!("display changed size or place; restarting screen capture");
-                self.capture = Capture::new(
-                    self.config.width,
-                    self.config.height,
-                    self.config.fps,
-                    false,
-                )?;
-                self.generation = 0;
-                keyframe = true;
+                self.restart_capture()?;
             }
         }
         let start = Instant::now();
         loop {
             let mut state = self.capture.shared.state.lock();
+            // Finished frames leave first, oldest first, as soon as they are out.
+            if let Some((.., frame)) = self.encoder.collect(Duration::ZERO) {
+                drop(state);
+                match frame {
+                    Some(Ok(frame)) => return Ok(frame),
+                    Some(Err(error)) => self.recover(error)?,
+                    // A real-time encoder may drop under load; the next
+                    // picture carries any keyframe that one was.
+                    None => self.encoder.request_keyframe(),
+                }
+                continue;
+            }
             if let Some(error) = state.stopped.take() {
                 drop(state);
                 tracing::warn!(%error, "reopening stopped screen capture");
-                self.capture = Capture::new(
-                    self.config.width,
-                    self.config.height,
-                    self.config.fps,
-                    false,
-                )?;
-                self.generation = 0;
-                keyframe = true;
+                self.restart_capture()?;
                 continue;
             }
             let now = Instant::now();
@@ -167,10 +222,13 @@ impl VideoPipeline for Video {
             // A new picture or a keyframe goes at the pacer's next slot; an
             // idle repeat once `idle` has passed since the last frame.
             let ready_at = match self.sent {
-                Some(sent) if !keyframe && !changed => sent + idle.max(interval),
+                Some(sent) if !self.encoder.needs_keyframe() && !changed => {
+                    sent + idle.max(interval)
+                }
                 _ => self.pacer.due().unwrap_or(now),
             };
-            if now >= ready_at {
+            let room = self.encoder.in_flight() < IN_FLIGHT;
+            if now >= ready_at && room {
                 if let Some(picture) = &state.picture {
                     let image = ffi::Owned::retain(picture.image.0);
                     // A repeat is stamped when it is sent again, so the
@@ -179,33 +237,37 @@ impl VideoPipeline for Video {
                     self.generation = state.generation;
                     drop(state);
                     self.pacer.taken(now);
-                    let first = self.sent.is_none();
+                    let keyframe = self.sent.is_none();
                     self.sent = Some(now);
-                    let frame = self.encoder.encode(image.0, captured, keyframe || first)?;
-                    // A real-time encoder may drop under load. Pace the retry and
-                    // preserve a pending IDR request until a picture is emitted.
-                    if let Some(frame) = frame {
-                        return Ok(frame);
+                    if let Err(error) = self.encoder.submit(image.0, captured, keyframe) {
+                        self.recover(error)?;
+                        self.encoder.request_keyframe();
                     }
-                    self.pacer.wait();
-                    keyframe = true;
                     continue;
                 }
             }
             if state.picture.is_none() && start.elapsed() >= Duration::from_secs(10) {
                 bail!("ScreenCaptureKit produced no complete picture in 10 seconds");
             }
+            // A frame coming out, a new picture or the next slot wakes this.
             let wait = if state.picture.is_none() {
                 Duration::from_millis(100)
+            } else if now >= ready_at {
+                Duration::from_secs(1)
             } else {
-                ready_at.saturating_duration_since(now)
+                ready_at - now
             };
             self.capture.shared.ready.wait_for(&mut state, wait);
         }
     }
     fn set_bitrate(&mut self, kbps: u32) {
+        if kbps > 0 && kbps != self.config.bitrate_kbps && self.pending.take().is_some() {
+            self.encoder.request_keyframe();
+        }
         match self.encoder.bitrate(kbps) {
-            Ok(()) => self.config.bitrate_kbps = kbps,
+            Ok(()) => {
+                self.config.bitrate_kbps = kbps;
+            }
             Err(error) => tracing::warn!(%error, "update VideoToolbox bitrate"),
         }
     }
