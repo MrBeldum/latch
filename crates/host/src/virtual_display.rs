@@ -144,7 +144,7 @@ pub fn setup_ps() -> String {
     $vddWriter = [System.Xml.XmlWriter]::Create($vddFile, $vddWriterSettings)
     try {{ $vddXml.Save($vddWriter) }} finally {{ $vddWriter.Close() }}
     if ($vddRelocated) {{
-        New-Item -Path '{reg}' -Force | Out-Null
+        if (-not (Test-Path -LiteralPath '{reg}')) {{ New-Item -Path '{reg}' -Force | Out-Null }}
         New-ItemProperty -Path '{reg}' -Name 'VDDPATH' -Value $vddDir -PropertyType String -Force | Out-Null
     }}
     Write-Output "  updated $($vddMissing.Count) resolutions to $vddFile; restarting the virtual display"

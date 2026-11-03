@@ -1225,22 +1225,37 @@ mod timing_tests {
                     gpu.context.End(&disjoint);
                     gpu.context.Flush();
                     let deadline = Instant::now() + Duration::from_secs(3);
+                    let read = |query: &ID3D11Query,
+                                data: *mut std::ffi::c_void,
+                                size: u32|
+                     -> Result<()> {
+                        loop {
+                            // Preserve S_FALSE: the generated Result<()> wrapper
+                            // considers it success while query data is not ready.
+                            let status = (gpu.context.vtable().GetData)(
+                                gpu.context.as_raw(),
+                                query.as_raw(),
+                                data,
+                                size,
+                                0,
+                            );
+                            if status == S_OK {
+                                return Ok(());
+                            }
+                            status.ok()?;
+                            anyhow::ensure!(Instant::now() < deadline, "GPU timestamps timed out");
+                            thread::yield_now();
+                        }
+                    };
                     let mut timing = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT::default();
-                    while timing.Frequency == 0 {
-                        gpu.context.GetData(
-                            &disjoint,
-                            Some((&mut timing as *mut D3D11_QUERY_DATA_TIMESTAMP_DISJOINT).cast()),
-                            std::mem::size_of_val(&timing) as u32,
-                            0,
-                        )?;
-                        anyhow::ensure!(Instant::now() < deadline, "GPU timestamps timed out");
-                        thread::yield_now();
-                    }
+                    read(
+                        &disjoint,
+                        (&mut timing as *mut D3D11_QUERY_DATA_TIMESTAMP_DISJOINT).cast(),
+                        std::mem::size_of_val(&timing) as u32,
+                    )?;
                     let (mut start, mut end) = (0u64, 0u64);
-                    gpu.context
-                        .GetData(&before, Some((&mut start as *mut u64).cast()), 8, 0)?;
-                    gpu.context
-                        .GetData(&after, Some((&mut end as *mut u64).cast()), 8, 0)?;
+                    read(&before, (&mut start as *mut u64).cast(), 8)?;
+                    read(&after, (&mut end as *mut u64).cast(), 8)?;
                     if i >= 10 && !timing.Disjoint.as_bool() {
                         times.push((end - start) as f64 * 1000.0 / timing.Frequency as f64);
                     }
