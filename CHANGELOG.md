@@ -6,12 +6,14 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
-- Sound arrives sooner. The host sends each 5 ms of sound as soon as it is
-  captured, and the viewer's fixed 40 ms preroll is gone: its buffer holds
-  what the measured jitter of the path needs (11–15 ms on a quiet LAN),
-  widens after an underrun and narrows again slowly, and asks the output
-  device for a 2.5 ms buffer where it allows one. The 30-minute ±300 ppm
-  clock-drift simulation still plays with no gaps and no cuts.
+- The viewer no longer holds a fixed 40 ms of sound. The host sends each
+  5 ms of sound as soon as it is captured, and the viewer's buffer holds
+  what the measured jitter of the path needs (11–15 ms on a quiet LAN in
+  simulation, about 27 ms where 5.1.0 held 45), widens after an underrun
+  and narrows again slowly, and asks the output device for a 2.5 ms
+  buffer where it allows one. The 30-minute ±300 ppm clock-drift
+  simulation still plays with no gaps and no cuts. Measurements:
+  `docs/measurements/2026-11-03-audio/`.
 - 5.1 and 7.1 sound. A viewer whose speakers have more than two channels
   asks for them, and the PC sends its own layout up to that, still
   lossless (`lpcm-rice` version 2; stereo is unchanged, so older viewers
