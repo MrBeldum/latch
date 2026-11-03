@@ -1193,3 +1193,29 @@ fn a_bitrate_change_keeps_the_reference_chain_and_applies_to_the_next_picture() 
 
 #[path = "quality.rs"]
 mod quality;
+
+/// A display past the probed limit is fitted to a size the media engine
+/// still encodes, counted in whole blocks: 3840 × 2400 fitted by area
+/// alone was 3762 × 2350, which an M3 Pro's H.264 hands to software.
+#[test]
+fn a_fitted_picture_stays_in_hardware() {
+    let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    for codec in [Codec::H264High, Codec::Hevc] {
+        let limits = crate::mac::limits(codec);
+        if limits == crate::video::Limits::level(codec) {
+            eprintln!("no hardware {} limit here; skipping", codec.name());
+            continue;
+        }
+        for (width, height) in [(3840, 2400), (5120, 2880), (6016, 3384), (7680, 4800)] {
+            let (w, h, _) = limits.fit(width, height, 60);
+            if (w, h) == (width, height) {
+                continue;
+            }
+            assert!(
+                Encoder::hardware_encodes(codec, w, h),
+                "{} {width} × {height} fitted to {w} × {h} fell back to software",
+                codec.name()
+            );
+        }
+    }
+}

@@ -403,6 +403,53 @@ pub fn upgrade(
     upgrade_cancellable(addr, path, protocol, body, timeout, |_| Ok(()), || false)
 }
 
+/// Waits up to `wait` for a connecting socket to become writable (or to
+/// fail, which also ends the wait; `take_error` then says how).
+#[cfg(unix)]
+fn writable(stream: &TcpStream, wait: Duration) -> std::io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    let mut fd = libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd for the duration of the call.
+    match unsafe { libc::poll(&mut fd, 1, wait.as_millis() as libc::c_int) } {
+        -1 => {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == ErrorKind::Interrupted {
+                Ok(false)
+            } else {
+                Err(e)
+            }
+        }
+        0 => Ok(false),
+        _ => Ok(fd.revents & (libc::POLLOUT | libc::POLLERR | libc::POLLHUP) != 0),
+    }
+}
+
+#[cfg(windows)]
+fn writable(stream: &TcpStream, wait: Duration) -> std::io::Result<bool> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{
+        WSAGetLastError, WSAPoll, POLLERR, POLLHUP, POLLWRNORM, WSAPOLLFD,
+    };
+    let mut fd = WSAPOLLFD {
+        fd: stream.as_raw_socket() as usize,
+        events: POLLWRNORM,
+        revents: 0,
+    };
+    // SAFETY: one valid WSAPOLLFD for the duration of the call.
+    match unsafe { WSAPoll(&mut fd, 1, wait.as_millis() as i32) } {
+        // SAFETY: no preconditions.
+        -1 => Err(std::io::Error::from_raw_os_error(unsafe {
+            WSAGetLastError()
+        })),
+        0 => Ok(false),
+        _ => Ok(fd.revents & (POLLWRNORM | POLLERR | POLLHUP) != 0),
+    }
+}
+
 /// Handshake I/O checks cancellation between bounded socket waits. In
 /// particular, do not rely on shutdown of a clone to wake a blocking recv.
 struct UpgradeIo<'a, C> {
@@ -501,13 +548,19 @@ pub fn upgrade_cancellable(
             if let Some(e) = stream.take_error()? {
                 return Err(io_err(e));
             }
-            if stream.peer_addr().is_ok() {
+            // Writable means the handshake finished, one way or the other.
+            // Not `peer_addr`: Windows can name the peer while the SYN is
+            // still in flight, and the first write then fails with
+            // WSAENOTCONN on every path that isn't loopback.
+            if writable(&stream, Duration::from_millis(10)).map_err(io_err)? {
+                if let Some(e) = stream.take_error()? {
+                    return Err(io_err(e));
+                }
                 break;
             }
             if Instant::now() >= deadline {
                 bail!("timed out");
             }
-            std::thread::sleep(Duration::from_millis(10));
         }
     }
     stream.set_nonblocking(false)?;
