@@ -393,6 +393,56 @@ impl ClientApp {
         }
     }
 
+    /// `LATCH_TEST_EXERCISE=<seconds>`, with a test host: step through the
+    /// stats overlay, the toolbar and full screen, one change per interval,
+    /// and log focus changes, so the log puts any video presenter switch
+    /// beside what caused it. Focus and spaces are changed from outside.
+    fn exercise(&mut self, ctx: &egui::Context) {
+        const STEPS: [&str; 8] = [
+            "stats",
+            "toolbar",
+            "plain",
+            "full screen",
+            "stats",
+            "toolbar",
+            "plain",
+            "window",
+        ];
+        static NEXT: Mutex<Option<(Instant, usize, bool)>> = Mutex::new(None);
+        let Some(every) = std::env::var("LATCH_TEST_EXERCISE")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .map(Duration::from_secs_f32)
+        else {
+            return;
+        };
+        if self.live.lock().is_none() {
+            return;
+        }
+        let focused = ctx.input(|i| i.focused);
+        let mut next = NEXT.lock();
+        let (at, step, was_focused) = next.get_or_insert((Instant::now() + every, 0, focused));
+        if *was_focused != focused {
+            tracing::info!("test exercise: window focus {focused}");
+            *was_focused = focused;
+        }
+        if Instant::now() < *at {
+            ctx.request_repaint_after(*at - Instant::now());
+            return;
+        }
+        let name = STEPS[*step % STEPS.len()];
+        tracing::info!("test exercise: {name}");
+        match name {
+            "stats" => self.view.set_overlays(false, true),
+            "toolbar" => self.view.set_overlays(true, true),
+            "plain" => self.view.set_overlays(false, false),
+            "full screen" => self.set_fullscreen(ctx, true),
+            _ => self.set_fullscreen(ctx, false),
+        }
+        *step += 1;
+        *at = Instant::now() + every;
+    }
+
     /// Run `job` off the UI thread and show what it returns as the notice.
     fn notify_later(&mut self, job: impl FnOnce() -> (Tone, String) + Send + 'static) {
         let notice: Notice = Arc::default();
@@ -951,6 +1001,12 @@ fn spawn_tailscale_probe(ok: Arc<AtomicBool>, ctx: egui::Context, stop: Arc<Atom
 impl eframe::App for ClientApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         crate::video::begin_frame(_frame);
+        // A test host stands in for a PC: connect to it once, at start.
+        static TEST_SERVE: std::sync::Once = std::sync::Once::new();
+        if let Some(pc) = session::test_pc() {
+            TEST_SERVE.call_once(|| self.connect(ctx, &pc));
+            self.exercise(ctx);
+        }
         // The window's green button (or Globe-F) changes full screen behind
         // the app's back: what the system reports is what is true.
         if let Some(on) = ctx.input(|i| i.viewport().fullscreen) {
