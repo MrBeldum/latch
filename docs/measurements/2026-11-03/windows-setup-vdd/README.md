@@ -1,8 +1,9 @@
 # Windows virtual-display setup failure
 
 PC: Windows 11, RX 6600, MikeTheTech VDD 11.30.4.434. Base: `925123e`.
-Mac: M3 Pro, `view` example over Tailscale. Windows' clock was a day ahead
-of the Mac; the raw driver/setup logs retain its timestamps.
+Mac: M3 Pro, `view` example over Tailscale. Windows logs use UTC+09:00;
+the Mac uses Pacific time (UTC-08:00), with tracing timestamps in UTC.
+The transcripts retain their original timestamps.
 
 The wanted list appended `LARGE_MODES` after `stream_modes()`, which already
 contains 7680×4320 and 7680×2160. The existing PC XML has 42 resolutions,
@@ -157,3 +158,24 @@ was not deployed over the installed host.
   enumerated, not individually streamed. No reboot or driver upgrade tested.
 - Viewer decode stalls remain outside this setup fix. No codec, capture,
   protocol or input-injection behavior is changed.
+
+## Validation
+
+- Mac: `cargo fmt --all -- --check`,
+  `cargo clippy --locked --workspace --all-targets -- -D warnings`,
+  `cargo test --locked --workspace --all-targets`, and
+  `bash scripts/audit-native.sh` passed.
+- Windows release build passed with `-j 2`; no rustc crash retry was needed.
+- Windows: `cargo clippy --locked --workspace --all-targets -j 2 -- -D warnings`
+  passed. Generated setup, uninstall and VDD scripts parsed with Windows
+  PowerShell 5.1. `scripts/test-vdd-setup.ps1` passed on the real PC using
+  mocked PnP and isolated files/registry keys.
+- `restore.log` confirms the original XML bytes and helper binary, absent
+  VDDPATH/Display folder, and unchanged installed PID 37272. A subsequent
+  installed-host HEVC stream decoded successfully (`stream-restored.log`).
+- Committed text transcripts normalize line endings and trailing whitespace;
+  measurements, messages and full setup steps are retained.
+- Full Windows `cargo test --locked --workspace --all-targets -j 2` passed;
+  the combined check command reported `clippy=0 test=0`. All build/test
+  commands completed before handoff. Tested Rust code is `4b61ad6`; subsequent
+  commits contain documentation/transcripts only.
