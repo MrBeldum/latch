@@ -752,7 +752,6 @@ mod tests {
         }
         const W: i32 = 480;
         const H: i32 = 120;
-        const AT: (i32, i32) = (200, 200);
         let pump = |ms: u64| unsafe {
             let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
             while std::time::Instant::now() < end {
@@ -764,17 +763,19 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         };
-        unsafe {
+        // Top right of the primary display, clear of centred prompts.
+        let at = unsafe {
             SetThreadDpiAwarenessContext(-4);
-        }
+            (GetSystemMetrics(SM_CXSCREEN) - W - 40, 40)
+        };
         let parent = unsafe {
             CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 w!("STATIC"),
                 None,
                 WS_POPUP | WS_VISIBLE,
-                AT.0,
-                AT.1,
+                at.0,
+                at.1,
                 W,
                 H,
                 None,
@@ -786,6 +787,7 @@ mod tests {
         let result = (|| -> Result<()> {
             let mut hdr = Hdr10::new(parent)?;
             anyhow::ensure!(peak_nits() > 0, "the display is not in HDR mode");
+            eprintln!("display peak {} nits", peak_nits());
             let nits = [203.0, 400.0, 600.0, 1000.0];
             let code = |n: f64| (64.0 + 876.0 * latch_proto::color::pq_oetf(n)).round() as u16;
             let y: Vec<u8> = (0..H * W)
