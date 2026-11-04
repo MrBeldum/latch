@@ -750,8 +750,10 @@ mod tests {
         extern "system" {
             fn SetThreadDpiAwarenessContext(context: isize) -> isize;
         }
-        const W: i32 = 480;
-        const H: i32 = 120;
+        // Small, in the top-right corner: leftover prompts sit lower down.
+        const W: i32 = 320;
+        const H: i32 = 40;
+        const P: i32 = W / 4;
         let pump = |ms: u64| unsafe {
             let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
             while std::time::Instant::now() < end {
@@ -766,7 +768,7 @@ mod tests {
         // Top right of the primary display, clear of centred prompts.
         let at = unsafe {
             SetThreadDpiAwarenessContext(-4);
-            (GetSystemMetrics(SM_CXSCREEN) - W - 40, 40)
+            (GetSystemMetrics(SM_CXSCREEN) - W - 8, 8)
         };
         let parent = unsafe {
             CreateWindowExW(
@@ -791,7 +793,7 @@ mod tests {
             let nits = [203.0, 400.0, 600.0, 1000.0];
             let code = |n: f64| (64.0 + 876.0 * latch_proto::color::pq_oetf(n)).round() as u16;
             let y: Vec<u8> = (0..H * W)
-                .flat_map(|i| (code(nits[(i % W / 120) as usize]) << 6).to_le_bytes())
+                .flat_map(|i| (code(nits[(i % W / P) as usize]) << 6).to_le_bytes())
                 .collect();
             let uv: Vec<u8> = (0..H / 2 * W)
                 .flat_map(|_| (512u16 << 6).to_le_bytes())
@@ -825,8 +827,8 @@ mod tests {
             eprintln!("parent {outer:?}, video {inner:?}");
             let at = (inner.left, inner.top);
             let points: Vec<(i32, i32)> = (0..4)
-                .map(|i| (at.0 + 60 + 120 * i, at.1 + 90))
-                .chain([(at.0 + 420, at.1 + 30)])
+                .map(|i| (at.0 + P / 2 + P * i, at.1 + 3 * H / 4))
+                .chain([(at.0 + W - P / 2, at.1 + H / 4)])
                 .collect();
             if let Ok(dir) = std::env::var("LATCH_HDR_PATCH_DIR") {
                 // What the compositor shows, 1000 nits = white, for a look.
@@ -844,8 +846,8 @@ mod tests {
                 image.save(std::path::Path::new(&dir).join("window.png"))?;
             }
             let hole = [egui::Rect::from_min_max(
-                egui::pos2(360.0, 0.0),
-                egui::pos2(480.0, 60.0),
+                egui::pos2((W - P) as f32, 0.0),
+                egui::pos2(W as f32, (H / 2) as f32),
             )];
             let mut sample = |holes: &[egui::Rect]| -> Result<Vec<[f32; 4]>> {
                 hdr.draw(&frame, rect, 1.0)?;
