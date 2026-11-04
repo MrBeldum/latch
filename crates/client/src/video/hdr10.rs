@@ -27,7 +27,8 @@ const SHADER: &str = r#"
 cbuffer C:register(b0) { uint hdr; float chroma; uint2 pad; };
 Texture2D<float> y:register(t0); Texture2D<float2> uv:register(t1); SamplerState samp:register(s0);
 struct V { float4 p:SV_Position; float2 uv:TEXCOORD0; };
-V vs(uint id:SV_VertexID) { V v; float2 p=float2(int(id&1)*4-1,int(id>>1)*4-1); v.p=float4(p,0,1); v.uv=float2((p.x+1)*0.5,1-(p.y+1)*0.5); return v; }
+// Clockwise, D3D's front face: the default rasterizer culls the other.
+V vs(uint id:SV_VertexID) { V v; float2 p=float2(int(id>>1)*4-1,int(id&1)*4-1); v.p=float4(p,0,1); v.uv=float2((p.x+1)*0.5,1-(p.y+1)*0.5); return v; }
 float4 ps(V v):SV_Target {
     float yy=(y.Sample(samp,v.uv)*65535.0/64.0-64.0)/876.0;
     // chroma: siting, in chroma texels right of the centred position.
