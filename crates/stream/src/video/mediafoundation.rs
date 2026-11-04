@@ -1330,7 +1330,7 @@ mod hdr_tests {
     #[ignore = "requires HEVC decoder and LATCH_HDR_TEST_STREAM (one AMF HDR access unit)"]
     fn main10_decode_preserves_p010_luminance() -> Result<()> {
         let bytes = std::fs::read(std::env::var("LATCH_HDR_TEST_STREAM")?)?;
-        let mut decoder = MfDecoder::with_stream(Codec::Hevc, 0, 0, 10)?;
+        let mut decoder = MfDecoder::with_stream(Codec::Hevc, 960, 540, 10)?;
         let frame = decoder.decode(&bytes)?.context("no Main10 picture")?;
         assert_eq!(frame.bit_depth, 10);
         assert_eq!((frame.width, frame.height), (960, 540));
