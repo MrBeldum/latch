@@ -11,8 +11,9 @@ use latch_engine::server::{Options, Server};
 use latch_engine::software::{Bgra, CpuCapture};
 use latch_proto::control::{self, StreamRequest};
 use latch_stream::{Event, Frame, FrameSlot, Session, Settings};
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, TcpListener, UdpSocket};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 const W: u32 = 640;
@@ -177,12 +178,68 @@ fn square_is_white(f: &Frame) -> bool {
     sum / (32 * 32) > 128
 }
 
-static LOOPBACK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static LOOPBACK_LOCK: Mutex<()> = Mutex::new(());
+
+/// A test still running after this is stuck: every one here takes a few
+/// seconds, and each of its own waits gives up well within this.
+const WATCHDOG: Duration = Duration::from_secs(60);
+
+/// One loopback session at a time, with a watchdog. Test mode feeds input
+/// to the pattern the process opened last (see `testmode.rs`), so a second
+/// session opening alongside takes the first one's key presses: its square
+/// never flips. Past [`WATCHDOG`] the whole run fails, with every thread's
+/// stack where the platform can print them, instead of hanging CI.
+struct Exclusive {
+    _lock: MutexGuard<'static, ()>,
+    _armed: mpsc::Sender<()>,
+}
+
+fn exclusive(test: &'static str) -> Exclusive {
+    // A test that failed holding it leaves nothing behind for the next.
+    let lock = LOOPBACK_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    std::env::set_var("LATCH_TEST_PATTERN", "still");
+    let (armed, disarmed) = mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        if let Err(mpsc::RecvTimeoutError::Timeout) = disarmed.recv_timeout(WATCHDOG) {
+            // Straight to stderr: the harness captures `eprintln!` here.
+            let _ = writeln!(
+                std::io::stderr(),
+                "{test} has been running for over {WATCHDOG:?}; every thread's stack:"
+            );
+            print_stacks();
+            std::process::exit(101);
+        }
+    });
+    Exclusive {
+        _lock: lock,
+        _armed: armed,
+    }
+}
+
+/// This process's stacks on stderr, where a tool for it is at hand.
+fn print_stacks() {
+    use std::process::Command;
+    let pid = std::process::id().to_string();
+    if cfg!(target_os = "macos") {
+        let file = std::env::temp_dir().join(format!("loopback-{pid}.sample.txt"));
+        let sampled = Command::new("sample")
+            .args([pid.as_str(), "2", "-mayDie", "-file"])
+            .arg(&file)
+            .stdout(std::process::Stdio::null())
+            .status();
+        if let (Ok(_), Ok(text)) = (sampled, std::fs::read_to_string(&file)) {
+            let _ = std::io::stderr().write_all(text.as_bytes());
+        }
+    } else if cfg!(target_os = "linux") {
+        let _ = Command::new("gdb")
+            .args(["-batch", "-p", pid.as_str(), "-ex", "thread apply all bt"])
+            .status();
+    }
+}
 
 #[test]
 fn the_picture_arrives_and_keys_show_up_in_it() {
-    let _lock = LOOPBACK_LOCK.lock().unwrap();
-    std::env::set_var("LATCH_TEST_PATTERN", "still");
+    let _exclusive = exclusive("the_picture_arrives_and_keys_show_up_in_it");
     let port = host();
     let (session, frames, events) = connect(port, false);
     let (mut seq, first) =
@@ -210,7 +267,10 @@ fn the_picture_arrives_and_keys_show_up_in_it() {
         let pressed = Instant::now();
         input.key(0x41, true, 0);
         loop {
-            let (s, f) = next_frame(&frames, seq, Duration::from_secs(2))
+            // Frames keep coming while the square stays as it was: give up
+            // on the press, not on each frame.
+            let left = Duration::from_secs(2).saturating_sub(pressed.elapsed());
+            let (s, f) = next_frame(&frames, seq, left)
                 .unwrap_or_else(|| panic!("press {i}: the square never changed"));
             seq = s;
             let now = square_is_white(&f);
@@ -263,8 +323,7 @@ fn the_picture_arrives_and_keys_show_up_in_it() {
 
 #[test]
 fn local_cursor_negotiated_and_host_omits_pointer_when_asked() {
-    let _lock = LOOPBACK_LOCK.lock().unwrap();
-    std::env::set_var("LATCH_TEST_PATTERN", "still");
+    let _exclusive = exclusive("local_cursor_negotiated_and_host_omits_pointer_when_asked");
     let port = host();
     let (session, frames, _events) = connect(port, true);
 
@@ -380,7 +439,7 @@ fn local_cursor_negotiated_and_host_omits_pointer_when_asked() {
 #[test]
 fn gamepads_plug_in_follow_rumble_back_and_unplug() {
     use latch_proto::gamepad::{button, Feedback, PadKind, PadState};
-    std::env::set_var("LATCH_TEST_PATTERN", "still");
+    let _exclusive = exclusive("gamepads_plug_in_follow_rumble_back_and_unplug");
     let port = host();
     let (session, _frames, _events) = connect_with(port, false, true);
     let input = session.input();

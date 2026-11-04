@@ -617,8 +617,7 @@ fn unavailable(error: &anyhow::Error, facility: &str) -> bool {
 }
 
 #[cfg(test)]
-#[path = "../../../stream/src/video/mediafoundation.rs"]
-mod test_decoder;
+use latch_stream::video::mediafoundation as test_decoder;
 #[cfg(test)]
 mod tests {
     /// Run with a changing desktop to exercise the bounded AMF input queue.
