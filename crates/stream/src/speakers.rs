@@ -18,7 +18,7 @@ pub(crate) fn of_device(device: &cpal::Device, channels: usize) -> Vec<Speaker> 
 
 /// `named` cut or padded to `channels`; Latch's own layout when it names
 /// no speaker.
-fn fit(named: Option<Vec<Speaker>>, channels: usize) -> Vec<Speaker> {
+pub(crate) fn fit(named: Option<Vec<Speaker>>, channels: usize) -> Vec<Speaker> {
     match named {
         Some(mut s) if s.iter().any(Option::is_some) => {
             s.resize(channels, None);
@@ -47,7 +47,7 @@ pub(crate) fn describe(layout: &[Speaker]) -> String {
 /// A WAVEFORMATEXTENSIBLE channel mask: its set bits, lowest first, are
 /// the channels' speakers; channels past them have none.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn from_mask(mask: u32, channels: usize) -> Vec<Speaker> {
+pub(crate) fn from_mask(mask: u32, channels: usize) -> Vec<Speaker> {
     let mut out: Vec<Speaker> = (0..18u8)
         .filter(|b| mask & (1 << b) != 0)
         .map(Some)

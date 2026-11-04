@@ -15,6 +15,9 @@
 //! starting again after a gap, waits for about the right cushion at once.
 //! What the output side found is kept, so "no sound" comes with its reason.
 
+#[cfg(windows)]
+#[path = "audio_wasapi.rs"]
+mod wasapi;
 use anyhow::{bail, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
@@ -510,6 +513,13 @@ pub fn output_channels() -> u32 {
 /// cpal streams are not `Send` everywhere, so the output stream lives on a
 /// thread of its own for as long as the player does, opened again on the
 /// current default device when the one it played on goes away.
+/// An open output; dropping it stops the sound.
+enum Opened {
+    Cpal(#[allow(dead_code)] cpal::Stream),
+    #[cfg(windows)]
+    Wasapi(#[allow(dead_code)] wasapi::Render),
+}
+
 fn output_thread(source_rate: u32, source_channels: u16, shared: Shared, stop: mpsc::Receiver<()>) {
     std::thread::Builder::new()
         .name("audio-out".into())
@@ -590,7 +600,7 @@ fn open_output(
     source_channels: u16,
     shared: &Shared,
     rebuild: &Arc<AtomicBool>,
-) -> Option<cpal::Stream> {
+) -> Option<Opened> {
     let output = &shared.output;
     let fail = |why: String| {
         let mut state = output.lock();
@@ -622,6 +632,56 @@ fn open_output(
             s
         }
     };
+    #[cfg(windows)]
+    if std::env::var("LATCH_AUDIO_OUTPUT").as_deref() != Ok("cpal") {
+        use cpal::traits::DeviceTrait;
+        if let Ok(id) = device.id() {
+            let s = shared.clone();
+            let make = move |rate: u32, layout: &[latch_codec::audio::Speaker]| {
+                Mixer::new(
+                    source_rate,
+                    source_channels as usize,
+                    rate,
+                    layout.len(),
+                    s.queue.clone(),
+                    s.pulled.clone(),
+                    None,
+                    s.gain.clone(),
+                )
+                .linked(s.link.clone())
+                .on_speakers(layout)
+            };
+            match wasapi::open(
+                id.id().to_string(),
+                shared.device.is_none(),
+                make,
+                rebuild.clone(),
+            ) {
+                Ok((render, o)) => {
+                    let ms = |frames: u32| f64::from(frames) * 1000.0 / f64::from(o.rate.max(1));
+                    tracing::info!(
+                        "audio: playing on {name} at {} Hz, {} channels ({}), WASAPI period {} frames ({:.2} ms; default {:.2}, least {:.2})",
+                        o.rate,
+                        o.channels,
+                        crate::speakers::describe(&o.layout),
+                        o.period,
+                        ms(o.period),
+                        ms(o.default_period),
+                        ms(o.min_period),
+                    );
+                    *output.lock() = Output::Playing {
+                        device: name,
+                        rate: o.rate,
+                        channels: o.channels,
+                    };
+                    return Some(Opened::Wasapi(render));
+                }
+                Err(e) => tracing::info!(
+                    "audio output: {name}: no low-latency WASAPI stream ({e:#}); through cpal"
+                ),
+            }
+        }
+    }
     let supported = match device.default_output_config() {
         Ok(c) => c,
         Err(e) => {
@@ -762,7 +822,7 @@ fn open_output(
         rate,
         channels,
     };
-    Some(stream)
+    Some(Opened::Cpal(stream))
 }
 
 /// The small device buffer to ask for, in frames, if the device says which
