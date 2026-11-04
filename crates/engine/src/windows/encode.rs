@@ -304,6 +304,7 @@ pub(super) struct Encoder {
     kbps: u32,
     fps: u32,
     ltr: Option<super::mf_ltr::Ltr>,
+    idr_owed: bool,
     picture: u64,
     last: (u64, Option<u64>),
     #[cfg(test)]
@@ -591,6 +592,7 @@ impl Encoder {
                 kbps: config.bitrate_kbps,
                 fps: config.fps,
                 ltr: ltr.then(|| super::mf_ltr::Ltr::new(config.fps)),
+                idr_owed: false,
                 picture: 0,
                 last: (0, None),
                 #[cfg(test)]
@@ -630,6 +632,12 @@ impl Encoder {
     pub fn reset_ltr(&mut self, fps: u32) {
         self.ltr = Some(super::mf_ltr::Ltr::new(fps));
     }
+    /// After the self-test the next picture must be an IDR: anything else
+    /// could reference the test's pictures, which were never sent.
+    pub fn after_probe(&mut self, fps: u32) {
+        self.reset_ltr(fps);
+        self.idr_owed = true;
+    }
     /// Wait for one callback, bounded by the frame deadline.
     fn event(&mut self, deadline: Instant) -> Result<()> {
         let events = self
@@ -664,6 +672,7 @@ impl Encoder {
         sample: &IMFSample,
         keyframe: bool,
     ) -> Result<Option<(Vec<u8>, bool)>> {
+        let keyframe = keyframe || std::mem::take(&mut self.idr_owed);
         self.picture += 1;
         let (mark, use_ltr, recovery) = self
             .ltr
@@ -714,10 +723,17 @@ impl Encoder {
         }
         let output = self.output()?;
         if self.ltr.is_some() {
-            anyhow::ensure!(
-                output.is_some(),
-                "MFT buffered a picture after proving synchronous LTR output"
-            );
+            if output.is_none() {
+                // Its output no longer matches its input, so neither do the
+                // picture numbers: recovery requests take IDRs from here on,
+                // and the stream goes on as with any buffering MFT.
+                tracing::warn!(
+                    "MFT buffered a picture after its LTR self-test; recovering with IDRs"
+                );
+                self.ltr = None;
+                self.last.1 = None;
+                return Ok(None);
+            }
             if output.as_ref().is_some_and(|(_, idr)| *idr) {
                 self.last.1 = None;
                 if !keyframe {

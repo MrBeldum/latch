@@ -11,22 +11,40 @@ use windows::Win32::Graphics::{
     Direct3D11::D3D11_BIND_RENDER_TARGET, Dxgi::Common::DXGI_FORMAT_NV12,
 };
 
+/// Four application-controlled slots on two cadences: slots 0 and 1 take a
+/// picture every ~33 ms, so a short round trip recovers from a recent one;
+/// slots 2 and 3 every ~667 ms, so a base up to ⅔ s old (three round trips
+/// of the ~155 ms peer-relayed path to the Mac) still has a slot. No round
+/// trip reaches the pipeline, so the window is fixed.
 pub(super) struct Ltr {
     slots: [Option<u64>; 4],
-    next_slot: usize,
-    every: u64,
+    /// The picture that filled each slot since the IDR, or since a refresh
+    /// gave the slot up: until the viewer has it, its DPB holds one picture
+    /// fewer than the encoder's.
+    filled: [Option<u64>; 4],
+    fast: u64,
+    slow: u64,
     force: Option<(usize, u64)>,
 }
 impl Ltr {
     pub fn new(fps: u32) -> Self {
         Self {
             slots: [None; 4],
-            next_slot: 0,
-            every: u64::from(fps / 30).max(1),
+            filled: [None; 4],
+            fast: u64::from(fps / 30).max(1),
+            slow: u64::from(fps * 2 / 3).max(1),
             force: None,
         }
     }
     pub fn recover_from(&mut self, base: u64) -> bool {
+        // A slot first filled by a picture the viewer lost: the encoder
+        // replaces it when it marks the slot again, the viewer adds a
+        // picture, and after the frame_num gap that exceeds
+        // max_num_ref_frames (Apple's decoder blocks on it). An IDR instead.
+        if self.filled.iter().flatten().any(|&p| p > base) {
+            self.force = None;
+            return false;
+        }
         self.force = self
             .slots
             .iter()
@@ -39,30 +57,46 @@ impl Ltr {
     pub fn plan(&mut self, picture: u64, idr: bool) -> (Option<u32>, Option<u32>, Option<u64>) {
         if idr {
             *self = Self {
-                every: self.every,
+                fast: self.fast,
+                slow: self.slow,
                 ..Self::new(30)
             };
         }
         if let Some((slot, base)) = self.force.take() {
             for (i, p) in self.slots.iter_mut().enumerate() {
                 if i != slot {
+                    // The encoder may unmark these (the bitmap lists one
+                    // slot): count their next picture as a new one.
                     *p = None;
+                    self.filled[i] = None;
                 }
             }
             return (None, Some(0x10000 | (1 << slot)), Some(base));
         }
         // LTRBufferControl auto-marks the first four pictures after each IDR.
-        let mark = if idr
-            || self.slots.iter().any(Option::is_none)
-            || picture.is_multiple_of(self.every)
-        {
-            let slot = self.next_slot;
-            self.next_slot = (slot + 1) % self.slots.len();
-            self.slots[slot] = Some(picture);
-            Some(slot as u32)
+        let older = |a: usize, b: usize, slots: &[Option<u64>; 4]| {
+            if slots[a] <= slots[b] {
+                a
+            } else {
+                b
+            }
+        };
+        let slot = if let Some(empty) = self.slots.iter().position(Option::is_none) {
+            Some(empty)
+        } else if picture.is_multiple_of(self.slow) {
+            Some(older(2, 3, &self.slots))
+        } else if picture.is_multiple_of(self.fast) {
+            Some(older(0, 1, &self.slots))
         } else {
             None
         };
+        let mark = slot.map(|slot| {
+            if self.slots[slot].is_none() {
+                self.filled[slot] = Some(picture);
+            }
+            self.slots[slot] = Some(picture);
+            slot as u32
+        });
         (mark, None, None)
     }
 }
@@ -95,6 +129,9 @@ fn pixels(frame: &DecodedNv12, config: &VideoConfig) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Pictures the self-test encodes at every encoder open.
+const PROBE_FRAMES: u32 = 40;
+
 pub(super) fn prove(encoder: &mut Encoder, config: &VideoConfig, gpu: Option<&Gpu>) -> Result<()> {
     let mut full = MfDecoder::with_size(config.codec, config.width, config.height)?;
     let mut loss = MfDecoder::with_size(config.codec, config.width, config.height)?;
@@ -113,16 +150,27 @@ pub(super) fn prove(encoder: &mut Encoder, config: &VideoConfig, gpu: Option<&Gp
     let mut checked = 0;
     #[cfg(test)]
     let (mut full_bytes, mut loss_bytes, mut kept) = (Vec::new(), Vec::new(), Vec::new());
-    for n in 0..32u32 {
-        let dropping = (6..9).contains(&n) || (18..21).contains(&n);
-        if n == 9 || n == 21 {
+    // Three losses; the last spans both fast slots, so its refresh comes
+    // from an older slow one.
+    let dropping = |n: u32| (6..9).contains(&n) || (18..21).contains(&n) || (28..34).contains(&n);
+    for n in 0..PROBE_FRAMES {
+        if n == 9 || n == 21 || n == 34 {
             ensure!(encoder.recover_from(delivered), "MFT lost its marked LTR");
         }
+        // Two pictures in turn, each drifting: a picture is best predicted
+        // by the one two before it, so after a loss by a lost one, which a
+        // recovery frame and everything after it must not use.
         let mut input = vec![128; (config.width * config.height * 3 / 2) as usize];
+        let (phase, step) = (n % 2, n / 2);
         for y in 0..config.height {
             for x in 0..config.width {
-                input[(y * config.width + x) as usize] =
-                    16 + (((x + n * 13) ^ (y + n * 7)).wrapping_mul(37) % 220) as u8;
+                let (sx, sy) = (x + step * 13, y + step * 7);
+                let value = if phase == 0 {
+                    (sx ^ sy).wrapping_mul(37) % 220
+                } else {
+                    (sx.wrapping_mul(5) + (sy / 3).wrapping_mul(11) + (sx * sy) % 97) % 220
+                };
+                input[(y * config.width + x) as usize] = 16 + value as u8;
             }
         }
         let sample = if let (Some(gpu), Some(texture)) = (gpu, &texture) {
@@ -148,18 +196,18 @@ pub(super) fn prove(encoder: &mut Encoder, config: &VideoConfig, gpu: Option<&Gp
         #[cfg(test)]
         {
             full_bytes.extend_from_slice(&bytes);
-            if !dropping {
+            if !dropping(n) {
                 loss_bytes.extend_from_slice(&bytes);
                 kept.push(n);
             }
-            if n == 0 || n == 9 || n == 21 {
+            if n == 0 || n == 9 || n == 21 || n == 34 {
                 eprintln!("MFT probe frame {n}: {} B IDR={idr}", bytes.len());
             }
         }
         let expected = full
             .decode(&bytes)?
             .context("uninterrupted MFT decode produced no picture")?;
-        if !dropping {
+        if !dropping(n) {
             let actual = loss
                 .decode(&bytes)?
                 .context("LTR MFT decode produced no picture")?;
@@ -171,7 +219,10 @@ pub(super) fn prove(encoder: &mut Encoder, config: &VideoConfig, gpu: Option<&Gp
             delivered = encoder.last_picture().0;
         }
     }
-    ensure!(checked == 26, "incomplete MFT reference test");
+    ensure!(
+        checked == (0..PROBE_FRAMES).filter(|&n| !dropping(n)).count(),
+        "incomplete MFT reference test"
+    );
     #[cfg(test)]
     if let Some(dir) = std::env::var_os("LATCH_MF_RECOVERY_DUMP") {
         let dir = std::path::PathBuf::from(dir);
@@ -184,7 +235,7 @@ pub(super) fn prove(encoder: &mut Encoder, config: &VideoConfig, gpu: Option<&Gp
         )?;
     }
     // Start the real stream at a fresh IDR, with no test-picture identities.
-    encoder.reset_ltr(config.fps);
+    encoder.after_probe(config.fps);
     Ok(())
 }
 
@@ -222,7 +273,8 @@ mod tests {
         for p in 1..=12 {
             ltr.plan(p, p == 1);
         }
-        assert!(!ltr.recover_from(1));
+        // Slots 2 and 3 still hold pictures 3 and 4; 1 and 2 are gone.
+        assert!(!ltr.recover_from(2));
         assert!(ltr.recover_from(11));
         let (mark, used, base) = ltr.plan(13, false);
         assert!(mark.is_none());
@@ -232,6 +284,42 @@ mod tests {
         assert_eq!(ltr.plan(14, false).2, Some(11));
         ltr.plan(15, true);
         assert!(!ltr.recover_from(14));
+    }
+    /// A base ⅔ s old still has a slot at 60 and 240 fps, and the newest
+    /// slot at or before the base is chosen.
+    #[test]
+    fn slow_slots_cover_two_thirds_of_a_second() {
+        for fps in [30, 60, 120, 240] {
+            let mut ltr = Ltr::new(fps);
+            let window = u64::from(fps) * 2 / 3;
+            for p in 1..=u64::from(fps) * 5 {
+                ltr.plan(p, p == 1);
+                if p > window + 4 {
+                    assert!(ltr.recover_from(p - window), "{fps} fps, picture {p}");
+                    let chosen = ltr.force.unwrap().0;
+                    assert!(ltr.slots[chosen].unwrap() <= p - window);
+                    ltr.force = None;
+                }
+            }
+        }
+    }
+    /// The first pictures after an IDR fill empty slots; losing one of them
+    /// takes an IDR, since the viewer's DPB would later hold one too many.
+    #[test]
+    fn a_lost_first_fill_refuses_recovery() {
+        let mut ltr = Ltr::new(60);
+        ltr.plan(1, true);
+        ltr.plan(2, false);
+        // Pictures 3 and 4 fill slots 2 and 3; the viewer has only 1 and 2.
+        ltr.plan(3, false);
+        ltr.plan(4, false);
+        assert!(!ltr.recover_from(2));
+        assert!(ltr.recover_from(4));
+        // The refresh gives up slots 0, 1 and 2; the next fill is new again.
+        assert_eq!(ltr.plan(5, false).1, Some(0x10000 | 1 << 3));
+        assert_eq!(ltr.plan(6, false).0, Some(0));
+        assert!(!ltr.recover_from(5));
+        assert!(ltr.recover_from(6));
     }
 }
 
