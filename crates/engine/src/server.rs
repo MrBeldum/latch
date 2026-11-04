@@ -353,6 +353,7 @@ impl Server {
             pipeline.set_cursor_drawn(true);
         }
         let info = prepared.info.take().expect("prepared has video info");
+        let recovery = prepared.req.reference_invalidation && pipeline.recovers();
         let token: [u8; 16] = rand::random();
         let id: u32 = rand::random();
         let pads = prepared.pads.take();
@@ -394,6 +395,7 @@ impl Server {
             bytes: AtomicU64::new(0),
             transport: TransportState::new(config.bitrate_kbps),
             keyframe_request: Mutex::new(None),
+            recovery: RecoveryState::new(recovery),
             audio_enabled: prepared.audio.is_some(),
             cursor_supported,
             draw_cursor: AtomicBool::new(!cursor_supported),
@@ -440,6 +442,7 @@ impl Server {
             gamepads: pad_slots,
             gamepad_kinds: pad_kinds,
             gamepad_problem: prepared.pads_problem.clone(),
+            reference_invalidation: recovery,
         };
         self.log(format!(
             "{} is watching: {}×{} at {} fps, {} kb/s, {}{}",
@@ -842,10 +845,94 @@ struct Session {
     bytes: AtomicU64,
     transport: TransportState,
     keyframe_request: Mutex<Option<(u32, Instant)>>,
+    recovery: RecoveryState,
     audio_enabled: bool,
     cursor_supported: bool,
     draw_cursor: AtomicBool,
     control_writer: Mutex<Option<TcpStream>>,
+}
+
+/// Reference invalidation (`docs/PROTOCOL.md`, "RecoveryRequest"), when
+/// the viewer and the encoder both take it.
+#[derive(Default)]
+struct RecoveryState {
+    enabled: bool,
+    /// The newest request, for the encoder thread.
+    request: Mutex<Option<wire::RecoveryRequest>>,
+    /// The answer to the newest request, repeated to a repeat.
+    answer: Mutex<Option<wire::RecoveryAck>>,
+    /// The picture a recovery frame was asked from, and the request.
+    asked: Mutex<Option<(u64, u32)>>,
+    /// Frame numbers sent and the pipeline's numbers for their pictures,
+    /// newest last.
+    sent: Mutex<VecDeque<(u32, u64)>>,
+    /// Recovery frames sent and requests refused.
+    frames: AtomicU64,
+    refused: AtomicU64,
+}
+
+/// Frame numbers remembered for recovery: more than any encoder holds.
+const RECOVERY_SENT: usize = 256;
+
+impl RecoveryState {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            ..Default::default()
+        }
+    }
+
+    /// Answers request `id` (if it is still the newest) and remembers the
+    /// answer for repeats.
+    fn answer(&self, server: &Server, session: &Session, ack: wire::RecoveryAck) {
+        {
+            let mut answer = self.answer.lock();
+            if answer.is_some_and(|a| a.id != ack.id) {
+                return;
+            }
+            *answer = Some(ack);
+        }
+        if let Some(addr) = *session.addr.lock() {
+            let mut out = Vec::with_capacity(16);
+            wire::write_recovery_ack(&mut out, session.id, &ack);
+            let _ = server.udp.send_to(&out, addr);
+        }
+    }
+
+    /// The encoder thread, before each frame: hands the newest request to
+    /// the pipeline, or refuses it and asks for a keyframe.
+    fn take(&self, server: &Server, session: &Session, pipeline: &mut dyn VideoPipeline) {
+        let Some(request) = self.request.lock().take() else {
+            return;
+        };
+        let picture = self
+            .sent
+            .lock()
+            .iter()
+            .rev()
+            .find(|(frame, _)| *frame == request.last_delivered)
+            .map(|&(_, picture)| picture)
+            .filter(|&p| p != 0);
+        let keyframe_owed = session.keyframe.load(Ordering::Acquire);
+        match picture {
+            Some(picture) if !keyframe_owed && pipeline.recover_from(picture) => {
+                *self.asked.lock() = Some((picture, request.id));
+            }
+            _ => {
+                self.refused.fetch_add(1, Ordering::Relaxed);
+                session.keyframe.store(true, Ordering::Release);
+                self.answer(
+                    server,
+                    session,
+                    wire::RecoveryAck {
+                        id: request.id,
+                        status: wire::RecoveryStatus::Refused,
+                        frame: 0,
+                    },
+                );
+            }
+        }
+    }
 }
 
 struct TransportState {
@@ -1055,6 +1142,29 @@ fn receive(server: Weak<Server>) {
                     session.keyframe.store(true, Ordering::Release);
                 }
             }
+            Datagram::RecoveryRequest { request, .. } if session.recovery.enabled => {
+                let ack = {
+                    let mut answer = session.recovery.answer.lock();
+                    match *answer {
+                        Some(a) if a.id == request.id => Some(a),
+                        Some(a) if latch_proto::video::before(request.id, a.id) => None,
+                        _ => {
+                            let a = wire::RecoveryAck {
+                                id: request.id,
+                                status: wire::RecoveryStatus::Pending,
+                                frame: 0,
+                            };
+                            *answer = Some(a);
+                            *session.recovery.request.lock() = Some(request);
+                            Some(a)
+                        }
+                    }
+                };
+                if let Some(ack) = ack {
+                    wire::write_recovery_ack(&mut out, session.id, &ack);
+                    let _ = server.udp.send_to(&out, from);
+                }
+            }
             Datagram::Ping { time, .. } => {
                 wire::write_pong(&mut out, session.id, time);
                 let _ = server.udp.send_to(&out, from);
@@ -1116,6 +1226,9 @@ fn encode_video(
             session.transport.applied.store(target, Ordering::Relaxed);
         }
         pipeline.set_cursor_drawn(session.draw_cursor.load(Ordering::Relaxed));
+        if session.recovery.enabled {
+            session.recovery.take(server, session, pipeline.as_mut());
+        }
         let due = recovery_due(last_keyframe, Instant::now(), session.rtt.lock().srtt());
         let keyframe = due && session.keyframe.swap(false, Ordering::AcqRel);
         // Short idle repeats bound how long a request arriving inside next
@@ -1229,6 +1342,14 @@ fn paced_video(
             continue;
         };
         packetizer.set_fec_percent(session.fec.load(Ordering::Relaxed));
+        let recovery = &session.recovery;
+        let asked = frame.recovery.and_then(|base| {
+            let (picture, id) = recovery.asked.lock().take_if(|(p, _)| *p == base)?;
+            let sent = recovery.sent.lock();
+            let &(number, _) = sent.iter().rev().find(|(_, p)| *p == picture)?;
+            packetizer.mark_recovery(number);
+            Some(id)
+        });
         let delay = (frame.captured.elapsed().as_micros() / 100).min(u16::MAX as u128) as u16;
         let out = OutFrame {
             data: &frame.data,
@@ -1236,6 +1357,28 @@ fn paced_video(
             host_delay: delay,
         };
         let pace = session.pace_kbps.load(Ordering::Relaxed);
+        let number = packetizer.next_frame();
+        if recovery.enabled {
+            let mut sent = recovery.sent.lock();
+            if sent.len() >= RECOVERY_SENT {
+                sent.pop_front();
+            }
+            sent.push_back((number, frame.picture));
+        }
+        if let Some(id) = asked {
+            // Before the frame's datagrams, so the viewer hears it is
+            // coming even if the frame is lost.
+            recovery.frames.fetch_add(1, Ordering::Relaxed);
+            recovery.answer(
+                server,
+                session,
+                wire::RecoveryAck {
+                    id,
+                    status: wire::RecoveryStatus::Sent,
+                    frame: number,
+                },
+            );
+        }
         packetizer.packetize_batches(&out, |batch| {
             if pace == 0 {
                 if !session.stopping() {

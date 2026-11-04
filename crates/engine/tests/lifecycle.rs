@@ -22,6 +22,7 @@ fn request(name: &str) -> StreamRequest {
         name: name.into(),
         cursor: false,
         gamepads: false,
+        reference_invalidation: false,
     }
 }
 
@@ -142,6 +143,7 @@ fn post_accept_end_close_and_missing_media_are_reported_as_failures() {
                     gamepads: 0,
                     gamepad_kinds: Vec::new(),
                     gamepad_problem: String::new(),
+                    reference_invalidation: false,
                 }),
             )
             .unwrap();

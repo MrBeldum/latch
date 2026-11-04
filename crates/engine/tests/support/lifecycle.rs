@@ -62,6 +62,7 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         bytes: AtomicU64::new(0),
         transport: TransportState::new(1000),
         keyframe_request: Mutex::new(None),
+        recovery: Default::default(),
         audio_enabled: false,
         cursor_supported: false,
         draw_cursor: AtomicBool::new(true),
@@ -132,6 +133,7 @@ fn a_viewer_that_does_not_read_cannot_block_the_control_writer() {
         gamepads: 0,
         gamepad_kinds: Vec::new(),
         gamepad_problem: String::new(),
+        reference_invalidation: false,
         session: session.id,
         token: control::token_hex(&session.token),
         codec: Codec::H264Baseline,
@@ -267,6 +269,8 @@ fn repeated_video_errors_release_exclusive_capture_and_have_a_retry_budget() {
                     data: vec![1; 100],
                     keyframe: true,
                     captured: Instant::now(),
+                    picture: 0,
+                    recovery: None,
                 })
             }),
             held: held.clone(),
@@ -328,6 +332,8 @@ fn idle_requests_are_prompt_and_each_encoded_frame_updates_mapping_and_is_sent()
                 data: vec![calls; 100],
                 keyframe,
                 captured: Instant::now(),
+                picture: 0,
+                recovery: None,
             })
         }),
     };
@@ -432,6 +438,7 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
         gamepads: 0,
         gamepad_kinds: Vec::new(),
         gamepad_problem: String::new(),
+        reference_invalidation: false,
         session: session.id,
         token: control::token_hex(&session.token),
         codec: Codec::H264Baseline,

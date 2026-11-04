@@ -665,6 +665,8 @@ unsafe fn annex_b(sample: Ref, hevc: bool, captured: Instant) -> Result<EncodedV
             data,
             keyframe,
             captured,
+            picture: 0,
+            recovery: None,
         })
     }
 }

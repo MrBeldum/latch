@@ -208,6 +208,8 @@ impl MfPipeline {
                         data,
                         keyframe: idr,
                         captured: self.last_capture,
+                        picture: 0,
+                        recovery: None,
                     });
                 }
                 // A synchronous MFT may initially buffer an input despite low latency.
@@ -249,6 +251,8 @@ impl MfPipeline {
                     data,
                     keyframe: idr,
                     captured,
+                    picture: 0,
+                    recovery: None,
                 });
             }
             if allow_ahead

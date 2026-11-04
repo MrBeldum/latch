@@ -89,6 +89,21 @@ pub trait PictureEncoder: Send {
     }
     /// From the next frame.
     fn set_bitrate(&mut self, kbps: u32);
+    /// See [`VideoPipeline::recovers`].
+    fn recovers(&self) -> bool {
+        false
+    }
+    /// See [`VideoPipeline::recover_from`]: `picture` is a number
+    /// [`PictureEncoder::last_picture`] gave.
+    fn recover_from(&mut self, picture: u64) -> bool {
+        let _ = picture;
+        false
+    }
+    /// The last frame's number (0 where the encoder does not recover) and
+    /// the picture it predicts from when it is a recovery frame.
+    fn last_picture(&self) -> (u64, Option<u64>) {
+        (0, None)
+    }
 }
 
 /// Opens an encoder for pictures of `width × height` and `config`'s rate.
@@ -96,18 +111,35 @@ pub type OpenEncoder =
     Box<dyn FnMut(u32, u32, &VideoConfig) -> anyhow::Result<Box<dyn PictureEncoder>> + Send>;
 
 /// `latch-codec`'s H.264 Constrained Baseline encoder.
-pub struct LatchEncoder(Encoder);
+pub struct LatchEncoder(Encoder, (u64, Option<u64>));
 
 impl LatchEncoder {
     pub fn open(width: u32, height: u32, config: &VideoConfig) -> anyhow::Result<Self> {
-        Ok(Self(Encoder::new(EncoderConfig {
+        let mut encoder = Encoder::new(EncoderConfig {
             width,
             height,
             fps: config.fps,
             bitrate_kbps: config.bitrate_kbps,
             threads: std::thread::available_parallelism().map_or(1, |n| n.get().min(4)),
-        })?))
+        })?;
+        encoder.set_recovery_depth(recovery_depth(width, height, config.fps));
+        Ok(Self(encoder, (0, None)))
     }
+
+    fn keep(&mut self, info: latch_codec::h264::EncodedInfo) -> bool {
+        self.1 = (info.picture, info.recovery);
+        info.keyframe
+    }
+}
+
+/// Pictures the software encoder keeps for recovery frames: what was sent
+/// in the last 300 ms (a loss is noticed within about two frames and the
+/// request takes half a round trip), at least 4, and no more than 256 MB
+/// of pictures (each kept twice: reconstruction and source).
+pub fn recovery_depth(width: u32, height: u32, fps: u32) -> usize {
+    let picture = (width as usize).div_ceil(16) * (height as usize).div_ceil(16) * 256 * 3 / 2;
+    let by_memory = (256 << 20) / (2 * picture.max(1));
+    (fps as usize * 3 / 10).clamp(4, 32).min(by_memory.max(2))
 }
 
 impl PictureEncoder for LatchEncoder {
@@ -126,7 +158,8 @@ impl PictureEncoder for LatchEncoder {
         keyframe: bool,
         out: &mut Vec<u8>,
     ) -> anyhow::Result<bool> {
-        Ok(self.0.encode(picture, keyframe, out)?.keyframe)
+        let info = self.0.encode(picture, keyframe, out)?;
+        Ok(self.keep(info))
     }
     fn encode_changed(
         &mut self,
@@ -135,13 +168,20 @@ impl PictureEncoder for LatchEncoder {
         keyframe: bool,
         out: &mut Vec<u8>,
     ) -> anyhow::Result<bool> {
-        Ok(self
-            .0
-            .encode_changed(picture, changed, keyframe, out)?
-            .keyframe)
+        let info = self.0.encode_changed(picture, changed, keyframe, out)?;
+        Ok(self.keep(info))
     }
     fn set_bitrate(&mut self, kbps: u32) {
         self.0.set_bitrate(kbps);
+    }
+    fn recovers(&self) -> bool {
+        true
+    }
+    fn recover_from(&mut self, picture: u64) -> bool {
+        self.0.recover_from(picture)
+    }
+    fn last_picture(&self) -> (u64, Option<u64>) {
+        self.1
     }
 }
 
@@ -159,13 +199,17 @@ pub struct SoftwarePipeline<C: CpuCapture> {
     /// The size `encoder` was opened for.
     encoder_size: (u32, u32),
     open: OpenEncoder,
-    /// The encoder's name, whether it is hardware, and its codec.
-    describe: (String, bool, Codec),
+    /// The encoder's name, whether it is hardware, its codec, and whether
+    /// it makes recovery frames.
+    describe: (String, bool, Codec, bool),
     pacer: Pacer,
     last_sent: Option<Instant>,
     captured: Instant,
     timings: SoftwareTimings,
     threads: usize,
+    /// A recovery frame is owed: make the next frame without waiting
+    /// for the screen to change.
+    recovering: bool,
 }
 
 impl<C: CpuCapture> SoftwarePipeline<C> {
@@ -187,12 +231,18 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
             open: Box::new(|width, height, config| {
                 Ok(Box::new(LatchEncoder::open(width, height, config)?))
             }),
-            describe: ("Latch software H.264".into(), false, Codec::H264Baseline),
+            describe: (
+                "Latch software H.264".into(),
+                false,
+                Codec::H264Baseline,
+                true,
+            ),
             pacer: Pacer::new(config.fps),
             last_sent: None,
             captured: Instant::now(),
             timings: SoftwareTimings::default(),
             threads: std::thread::available_parallelism().map_or(1, |n| n.get().min(4)),
+            recovering: false,
         })
     }
 
@@ -206,7 +256,12 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
         let (width, height) = capture.size();
         let encoder = open(width, height, config)?;
         let mut this = Self::new(capture, config)?;
-        this.describe = (encoder.name(), encoder.hardware(), encoder.codec());
+        this.describe = (
+            encoder.name(),
+            encoder.hardware(),
+            encoder.codec(),
+            encoder.recovers(),
+        );
         this.encoder = Some(encoder);
         this.encoder_size = (width, height);
         this.open = open;
@@ -387,7 +442,7 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
         } else {
             (self.frame.width, self.frame.height)
         };
-        let (name, hardware, codec) = &self.describe;
+        let (name, hardware, codec, _) = &self.describe;
         VideoInfo {
             encoder: format!("{name} ({})", self.capture.name()),
             hardware: *hardware,
@@ -399,7 +454,8 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
     }
 
     fn next(&mut self, keyframe: bool, idle: Duration) -> anyhow::Result<EncodedVideo> {
-        let changed = self.acquire(keyframe, idle)?;
+        let changed = self.acquire(keyframe || self.recovering, idle)?;
+        self.recovering = false;
         let resized =
             (self.picture.width, self.picture.height) != (self.frame.width, self.frame.height);
         let size = (self.frame.width, self.frame.height);
@@ -408,7 +464,12 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
             let encoder = (self.open)(size.0, size.1, &self.config)?;
             // At another size the encoder may be another (software where
             // hardware does not take it).
-            self.describe = (encoder.name(), encoder.hardware(), encoder.codec());
+            self.describe = (
+                encoder.name(),
+                encoder.hardware(),
+                encoder.codec(),
+                encoder.recovers(),
+            );
             self.encoder = Some(encoder);
             self.encoder_size = size;
         }
@@ -457,11 +518,30 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
             )?;
         self.timings.encode = started.elapsed();
         self.last_sent = Some(self.captured);
+        let (picture, recovery) = self
+            .encoder
+            .as_ref()
+            .map_or((0, None), |e| e.last_picture());
         Ok(EncodedVideo {
             data,
             keyframe: sent_keyframe,
             captured: self.captured,
+            picture,
+            recovery: recovery.filter(|_| !sent_keyframe),
         })
+    }
+
+    fn recovers(&self) -> bool {
+        self.describe.3
+    }
+
+    fn recover_from(&mut self, picture: u64) -> bool {
+        let done = self
+            .encoder
+            .as_mut()
+            .is_some_and(|e| e.recover_from(picture));
+        self.recovering |= done;
+        done
     }
 
     fn set_bitrate(&mut self, kbps: u32) {

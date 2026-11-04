@@ -26,6 +26,10 @@ impl std::error::Error for WireError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoShard<'a> {
     pub keyframe: bool,
+    /// A recovery frame: how many frames back the one it predicts from
+    /// is; 0 for every other frame. Only to a viewer that negotiated
+    /// `reference_invalidation`.
+    pub recovery: u16,
     pub host_delay: u16,
     pub frame: u32,
     pub frame_len: u32,
@@ -116,6 +120,39 @@ fn read_feedback(b: &[u8]) -> FeedbackUpdate {
     FeedbackUpdate::read(b).expect("checked when parsed")
 }
 
+/// `RecoveryRequest` (13): see `docs/PROTOCOL.md`. Frame numbers wrap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveryRequest {
+    /// The last frame the viewer's reassembler handed to its decoder,
+    /// as in `KeyframeRequest`.
+    pub last_delivered: u32,
+    /// The lost frames, inclusive: the first is `last_delivered + 1`.
+    pub first_invalid: u32,
+    pub last_invalid: u32,
+    /// +1 per loss the viewer asks about; a repeat keeps its number.
+    pub id: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RecoveryStatus {
+    /// Received; the encoder will try.
+    Pending = 0,
+    /// `frame` is the recovery frame.
+    Sent = 1,
+    /// The encoder cannot: an IDR follows.
+    Refused = 2,
+}
+
+/// `RecoveryAck` (14): the host's answer to a `RecoveryRequest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveryAck {
+    pub id: u32,
+    pub status: RecoveryStatus,
+    /// The recovery frame's number when `Sent`, else 0.
+    pub frame: u32,
+}
+
 pub enum Datagram<'a> {
     Hello {
         session: u32,
@@ -141,6 +178,15 @@ pub enum Datagram<'a> {
     KeyframeRequest {
         session: u32,
         last: u32,
+    },
+    /// Frames after `last_delivered` are lost: predict from it instead.
+    RecoveryRequest {
+        session: u32,
+        request: RecoveryRequest,
+    },
+    RecoveryAck {
+        session: u32,
+        ack: RecoveryAck,
     },
     Ping {
         session: u32,
@@ -177,6 +223,8 @@ impl Datagram<'_> {
             | Datagram::Input { session, .. }
             | Datagram::InputAck { session, .. }
             | Datagram::KeyframeRequest { session, .. }
+            | Datagram::RecoveryRequest { session, .. }
+            | Datagram::RecoveryAck { session, .. }
             | Datagram::Ping { session, .. }
             | Datagram::Pong { session, .. }
             | Datagram::Pad { session, .. }
@@ -243,19 +291,25 @@ pub fn parse(buf: &[u8]) -> Result<Datagram<'_>, WireError> {
             let shard = u16at(16);
             let block = buf[18];
             let blocks = buf[19];
+            // Bit 1 marks a recovery frame, whose distance back to its
+            // reference fills the otherwise reserved field.
+            let recovery = u16at(26);
             if data == 0
                 || data as u32 + parity as u32 > 255
                 || shard as u32 >= data as u32 + parity as u32
                 || blocks == 0
                 || block >= blocks
-                || u16at(26) != 0
+                || flags & !3 != 0
+                || (flags & 2 != 0) != (recovery != 0)
+                || (flags & 3 == 3)
             {
                 return Err(WireError::Field("video"));
             }
             Ok(Datagram::Video {
                 session,
                 shard: VideoShard {
-                    keyframe: flags != 0,
+                    keyframe: flags & 1 != 0,
+                    recovery,
                     host_delay: aux,
                     frame: u32at(8),
                     frame_len: u32at(12),
@@ -325,6 +379,39 @@ pub fn parse(buf: &[u8]) -> Result<Datagram<'_>, WireError> {
             Ok(Datagram::KeyframeRequest {
                 session,
                 last: u32at(8),
+            })
+        }
+        13 => {
+            if buf.len() != 24 {
+                return Err(WireError::Length);
+            }
+            Ok(Datagram::RecoveryRequest {
+                session,
+                request: RecoveryRequest {
+                    last_delivered: u32at(8),
+                    first_invalid: u32at(12),
+                    last_invalid: u32at(16),
+                    id: u32at(20),
+                },
+            })
+        }
+        14 => {
+            if buf.len() != 16 {
+                return Err(WireError::Length);
+            }
+            let status = match flags {
+                0 => RecoveryStatus::Pending,
+                1 => RecoveryStatus::Sent,
+                2 => RecoveryStatus::Refused,
+                _ => return Err(WireError::Field("status")),
+            };
+            Ok(Datagram::RecoveryAck {
+                session,
+                ack: RecoveryAck {
+                    id: u32at(8),
+                    status,
+                    frame: u32at(12),
+                },
             })
         }
         7 => {
@@ -436,7 +523,7 @@ pub fn write_video(out: &mut Vec<u8>, session: u32, shard: &VideoShard<'_>) {
     out.reserve(28 + shard.bytes.len());
     let mut hdr = [0u8; 28];
     hdr[0] = 2;
-    hdr[1] = shard.keyframe as u8;
+    hdr[1] = shard.keyframe as u8 | if shard.recovery != 0 { 2 } else { 0 };
     hdr[2..4].copy_from_slice(&shard.host_delay.to_le_bytes());
     hdr[4..8].copy_from_slice(&session.to_le_bytes());
     hdr[8..12].copy_from_slice(&shard.frame.to_le_bytes());
@@ -447,7 +534,7 @@ pub fn write_video(out: &mut Vec<u8>, session: u32, shard: &VideoShard<'_>) {
     hdr[20..22].copy_from_slice(&shard.data.to_le_bytes());
     hdr[22..24].copy_from_slice(&shard.parity.to_le_bytes());
     hdr[24..26].copy_from_slice(&shard.shard_len.to_le_bytes());
-    hdr[26..28].copy_from_slice(&[0, 0]);
+    hdr[26..28].copy_from_slice(&shard.recovery.to_le_bytes());
     out.extend_from_slice(&hdr);
     out.extend_from_slice(shard.bytes);
 }
@@ -483,6 +570,19 @@ pub fn write_input_ack(out: &mut Vec<u8>, session: u32, next: u32) {
 pub fn write_keyframe_request(out: &mut Vec<u8>, session: u32, last: u32) {
     header(out, 6, 0, 0, session);
     out.extend(last.to_le_bytes());
+}
+
+pub fn write_recovery_request(out: &mut Vec<u8>, session: u32, r: &RecoveryRequest) {
+    header(out, 13, 0, 0, session);
+    for v in [r.last_delivered, r.first_invalid, r.last_invalid, r.id] {
+        out.extend(v.to_le_bytes());
+    }
+}
+
+pub fn write_recovery_ack(out: &mut Vec<u8>, session: u32, a: &RecoveryAck) {
+    header(out, 14, a.status as u8, 0, session);
+    out.extend(a.id.to_le_bytes());
+    out.extend(a.frame.to_le_bytes());
 }
 
 pub fn write_ping(out: &mut Vec<u8>, session: u32, time: u64) {

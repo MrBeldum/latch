@@ -116,6 +116,10 @@ pub struct StreamRequest {
     /// The viewer sends gamepads (`docs/PROTOCOL.md`, "Gamepads").
     #[serde(default)]
     pub gamepads: bool,
+    /// The viewer asks for recovery frames after a loss instead of a
+    /// keyframe (`docs/PROTOCOL.md`, "RecoveryRequest").
+    #[serde(default)]
+    pub reference_invalidation: bool,
 }
 
 fn known_codecs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Codec>, D::Error> {
@@ -167,6 +171,9 @@ pub struct Accept {
     /// Why the host takes no gamepads, when the viewer offered them.
     #[serde(default)]
     pub gamepad_problem: String,
+    /// The host answers `RecoveryRequest`s; only when the viewer asked.
+    #[serde(default)]
+    pub reference_invalidation: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
