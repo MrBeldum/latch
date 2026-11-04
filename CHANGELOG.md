@@ -42,8 +42,10 @@ GitHub release notes, so each version gets a heading of the form
 - A lost frame costs a small recovery frame instead of a keyframe, as on
   GeForce NOW. Viewer and host negotiate `reference_invalidation`; after a
   loss the viewer asks for a frame that predicts from the last one it
-  decoded (new datagrams 13 and 14), falling back to a keyframe when the
-  host cannot. The software H.264 encoder rolls back to that picture
+  decoded (new datagrams 14 and 15; 13 stays reserved for microphone audio), falling back to a keyframe when the
+  host cannot. Recovery identities include the pipeline generation, so a
+  queued frame from before a capture reopen cannot alias a new reference.
+  The software H.264 encoder rolls back to that picture
   (bit-exact) and AMD's AMF HEVC encoder uses long-term references; Media
   Foundation, VideoToolbox, VA-API and NVENC still send an IDR. Linux host
   → Mac at 1–3% induced burst loss: 34–51 IDRs a minute become 2–3 (the

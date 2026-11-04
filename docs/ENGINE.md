@@ -208,7 +208,9 @@ through `libc`.
   recovery frame that predicts from the last frame delivered, or a
   keyframe. The software encoder makes one by rolling back to that picture
   (bit-exact), AMF from a long-term reference; the others answer with an
-  IDR ([PROTOCOL.md](PROTOCOL.md#recoveryrequest-14-and-recoveryack-15)).
+  IDR. Recovery maps pair pipeline generation with picture identity, so
+  queued frames cannot alias a reference after capture reconstruction
+  ([PROTOCOL.md](PROTOCOL.md#recoveryrequest-14-and-recoveryack-15)).
 * **Frames on a fixed grid.** Every pipeline takes frames on a grid 1%
   faster than the asked-for rate (`video::Pacer`): capture and encode time
   comes out of the interval instead of adding to it, a screen refreshing at

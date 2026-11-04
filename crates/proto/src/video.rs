@@ -1025,6 +1025,7 @@ mod tests {
         };
         wire::write_recovery_request(&mut out, 3, &request);
         assert_eq!(out.len(), 24);
+        assert_eq!(out[0], 14);
         assert!(matches!(
             wire::parse(&out),
             Ok(Datagram::RecoveryRequest { session: 3, request: r }) if r == request
@@ -1040,6 +1041,7 @@ mod tests {
                 frame: 77,
             };
             wire::write_recovery_ack(&mut out, 3, &ack);
+            assert_eq!(out[0], 15);
             assert!(matches!(
                 wire::parse(&out),
                 Ok(Datagram::RecoveryAck { ack: a, .. }) if a == ack

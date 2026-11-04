@@ -297,7 +297,10 @@ before the next frame, and answers again with sent or refused. A repeated
 `id` gets the latest answer again; an older one is ignored. The encoder
 refuses when it no longer holds a picture the viewer has: the frame is
 older than what it keeps, an IDR was made after it, or the encoder has no
-reference control at all.
+reference control at all. It also refuses a base from an earlier capture/
+pipeline generation, even if that old frame was still queued when the
+pipeline reopened: generation accompanies the encoded frame through the
+sender queue and the wire-frame-to-picture map.
 
 The viewer sends a request as soon as a frame is lost, once more halfway to
 its answer deadline, max(100 ms, 1.5 × smoothed RTT), and falls back to
