@@ -710,12 +710,12 @@ unsafe extern "C" fn encoded(
                 if let Some(key) =
                     optional(c"kVTSampleAttachmentKey_RequireLTRAcknowledgementToken")
                 {
-                    let mut token = CMGetAttachment(sample, key, ptr::null_mut());
                     let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, false);
-                    if token.is_null() && !attachments.is_null() && CFArrayGetCount(attachments) > 0
-                    {
-                        token = CFDictionaryGetValue(CFArrayGetValueAtIndex(attachments, 0), key);
-                    }
+                    let token = if !attachments.is_null() && CFArrayGetCount(attachments) > 0 {
+                        CFDictionaryGetValue(CFArrayGetValueAtIndex(attachments, 0), key)
+                    } else {
+                        ptr::null()
+                    };
                     let mut value = 0i64;
                     if !token.is_null()
                         && CFNumberGetValue(token, 4, (&mut value as *mut i64).cast())

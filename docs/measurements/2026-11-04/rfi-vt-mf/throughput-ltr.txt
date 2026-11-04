@@ -1,0 +1,16 @@
+    Finished `release` profile [optimized] target(s) in 0.10s
+     Running unittests src/lib.rs (target/release/deps/latch_engine-ba871161630e97b6)
+
+running 1 test
+
+codec                size  fps  Mbps |    p50    p95    max |    got |    IDR B      P B  IDR/P  kbps
+create Hevc Eight hardware=true: 0
+Hevc            1920x1080  120    50 |  18.72  20.62  21.58 |  107.3 |   377159    12274   30.7 13146
+create Hevc Eight hardware=true: 0
+Hevc            1920x1080  240    80 |  19.69  20.86  21.85 |  101.6 |   284323    11874   23.9 10571
+create Hevc Eight hardware=true: 0
+Hevc            3024x1964  120   100 |  43.21  45.68  46.56 |   46.9 |   678518    26990   25.1 12162
+test mac::encoder::tests::realtime_benchmark ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 95 filtered out; finished in 12.78s
+

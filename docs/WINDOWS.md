@@ -246,6 +246,8 @@ on hardware encoders. Four cached NV12 textures and their views are reused.
   error, unexpected IDR, or pixel mismatch reopens the MFT without LTR and
   keeps IDR recovery. Four application-controlled slots use trust-until
   (`LTRBufferControl=0x10004`, `UseLTRFrame=0x10000 | slot_bitmap`).
+  The RX 6600 AMD H.264 MFT passed the pixel probe at 640×360/60/8 Mbps,
+  despite lacking readback ([validation and limits](measurements/2026-11-04/rfi-vt-mf/README.md)).
   The production path uses only AMF HEVC; AMF H.264 is not instantiated.
 - **Fallback.** H.264 High/Baseline keep the GPU MFT → Microsoft MFT →
   Latch software path. An AMF runtime failure reopens MF HEVC and starts

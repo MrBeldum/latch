@@ -1,0 +1,17 @@
+   Compiling latch-engine v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-14028ebb/crates/engine)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.20s
+     Running tests/recovery.rs (target/debug/deps/recovery-9bc13fd845afd7e7)
+
+running 1 test
+H264High burst 1% recover=false: 20 losses, IDRs/min 54, resume p50 50 ms p95 116 ms, freeze p50 103 ms p95 153 ms, IDR 23437 B, recovery 0 B, P 591 B, 1689 of 1800 frames delivered and checked
+H264High burst 1% recover=true: 16 losses, IDRs/min 0, resume p50 47 ms p95 50 ms, freeze p50 84 ms p95 101 ms, IDR 0 B, recovery 766 B, P 566 B, 1732 of 1800 frames delivered and checked
+H264High burst 3% recover=false: 25 losses, IDRs/min 78, resume p50 50 ms p95 167 ms, freeze p50 103 ms p95 220 ms, IDR 23306 B, recovery 0 B, P 604 B, 1644 of 1800 frames delivered and checked
+H264High burst 3% recover=true: 21 losses, IDRs/min 0, resume p50 47 ms p95 63 ms, freeze p50 84 ms p95 186 ms, IDR 0 B, recovery 850 B, P 566 B, 1689 of 1800 frames delivered and checked
+Hevc burst 1% recover=false: 15 losses, IDRs/min 40, resume p50 50 ms p95 100 ms, freeze p50 87 ms p95 136 ms, IDR 25123 B, recovery 0 B, P 680 B, 1722 of 1800 frames delivered and checked
+Hevc burst 1% recover=true: 17 losses, IDRs/min 0, resume p50 47 ms p95 49 ms, freeze p50 84 ms p95 101 ms, IDR 0 B, recovery 1037 B, P 671 B, 1728 of 1800 frames delivered and checked
+Hevc burst 3% recover=false: 22 losses, IDRs/min 64, resume p50 50 ms p95 117 ms, freeze p50 103 ms p95 153 ms, IDR 25188 B, recovery 0 B, P 686 B, 1672 of 1800 frames delivered and checked
+Hevc burst 3% recover=true: 26 losses, IDRs/min 0, resume p50 47 ms p95 66 ms, freeze p50 85 ms p95 187 ms, IDR 0 B, recovery 814 B, P 672 B, 1666 of 1800 frames delivered and checked
+test videotoolbox_impairment_simulator ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 41.24s
+

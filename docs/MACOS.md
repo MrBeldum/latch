@@ -386,7 +386,9 @@ remains opt-in because of its throughput/rate-control cost documented above.
 The IOSurface test `ltr_recovery_matches_uninterrupted_decoding` compares
 uninterrupted and dropped-frame output byte for byte in VideoToolbox and
 FFmpeg, including a lost recovery frame. No Screen Recording permission is
-needed. Unsupported sessions retain IDR recovery.
+needed. Unsupported sessions retain IDR recovery. On M3 Pro, measured HEVC
+1080p240 drops from 242.2 to 101.6 fps in LTR mode, which is why the switch
+stays opt-in ([full measurements](measurements/2026-11-04/rfi-vt-mf/README.md)).
 
 For a permission-free live host, add `LATCH_TEST_VIDEOTOOLBOX=1` to
 `LATCH_TEST_PATTERN=sweep` when running `serve`. It feeds synthetic NV12

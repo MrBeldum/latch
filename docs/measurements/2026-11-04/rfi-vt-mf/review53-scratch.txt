@@ -1,0 +1,91 @@
+   Compiling latch-engine v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-14028ebb/crates/engine)
+warning: method `summary` is never used
+  --> crates/engine/tests/review53_impairment_edges.rs:41:8
+   |
+40 | impl Outcome {
+   | ------------ method in this implementation
+41 |     fn summary(&self, name: &str) -> String {
+   |        ^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `latch-engine` (test "review53_impairment_edges") generated 1 warning
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.26s
+     Running tests/review53_h264_wrap.rs (target/debug/deps/review53_h264_wrap-19d382a55c1f5149)
+
+running 1 test
+test independent_wrap_and_idr ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+     Running tests/review53_impairment_edges.rs (target/debug/deps/review53_impairment_edges-4f17e3489a6e49c1)
+
+running 1 test
+seed 1: checked 252
+seed 2: checked 208
+seed 3: checked 215
+seed 4: checked 252
+seed 5: checked 259
+seed 6: checked 259
+seed 7: checked 260
+seed 8: checked 245
+seed 9: checked 233
+seed 10: checked 250
+seed 11: checked 289
+seed 12: checked 235
+seed 13: checked 253
+seed 14: checked 265
+seed 15: checked 214
+seed 16: checked 251
+seed 17: checked 253
+seed 18: checked 231
+seed 19: checked 241
+seed 20: checked 254
+seed 21: checked 191
+seed 22: checked 262
+seed 23: checked 268
+seed 24: checked 207
+seed 25: checked 238
+seed 26: checked 225
+seed 27: checked 242
+seed 28: checked 251
+seed 29: checked 215
+seed 30: checked 226
+seed 31: checked 220
+seed 32: checked 202
+seed 33: checked 260
+seed 34: checked 241
+seed 35: checked 232
+seed 36: checked 259
+seed 37: checked 224
+seed 38: checked 264
+seed 39: checked 230
+seed 40: checked 226
+seed 41: checked 259
+seed 42: checked 226
+seed 43: checked 229
+seed 44: checked 255
+seed 45: checked 263
+seed 46: checked 222
+seed 47: checked 230
+seed 48: checked 234
+seed 49: checked 247
+seed 50: checked 240
+seed 51: checked 244
+seed 52: checked 253
+seed 53: checked 210
+seed 54: checked 233
+seed 55: checked 222
+seed 56: checked 233
+seed 57: checked 231
+seed 58: checked 225
+seed 59: checked 228
+seed 60: checked 215
+seed 61: checked 233
+seed 62: checked 233
+seed 63: checked 243
+seed 64: checked 222
+test review_many_seeds ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.51s
+
