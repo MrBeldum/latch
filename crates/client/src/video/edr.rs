@@ -46,11 +46,24 @@ fragment float4 fs(V in [[stage_in]], texture2d<float> y [[texture(0)]], texture
 }
 "#;
 
+/// An opaque `CGColorSpaceRef`, typed only so that `setColorspace:` carries
+/// the `^{CGColorSpace=}` CAMetalLayer declares: debug builds check every
+/// send's argument types and panic on an untyped pointer.
+#[repr(C)]
+struct CGColorSpace {
+    _private: [u8; 0],
+}
+// SAFETY: CGColorSpace is an opaque CoreGraphics struct named CGColorSpace.
+unsafe impl objc2::encode::RefEncode for CGColorSpace {
+    const ENCODING_REF: objc2::encode::Encoding =
+        objc2::encode::Encoding::Pointer(&objc2::encode::Encoding::Struct("CGColorSpace", &[]));
+}
+
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     static kCGColorSpaceExtendedLinearDisplayP3: *const c_void;
-    fn CGColorSpaceCreateWithName(name: *const c_void) -> *const c_void;
-    fn CGColorSpaceRelease(space: *const c_void);
+    fn CGColorSpaceCreateWithName(name: *const c_void) -> *const CGColorSpace;
+    fn CGColorSpaceRelease(space: *const CGColorSpace);
 }
 
 type Pending = (
@@ -76,6 +89,9 @@ pub(super) struct Edr {
     /// then went to the other path instead (a flicker). An address, as
     /// these resources must be `Send`; only the main thread uses it.
     view: usize,
+    /// The last screen the view's window was on, kept while it is on none
+    /// (a space changing), so that is not a change of display.
+    screen: usize,
     /// Tests render into a texture at a given headroom instead of a window.
     #[cfg(test)]
     offscreen: Option<(Texture, f32)>,
@@ -115,34 +131,21 @@ impl Edr {
             }
         }
         let device = Device::system_default().ok_or("no Metal device")?;
-        let pipeline = pipeline(&device)?;
-        let layer = MetalLayer::new();
+        let layer = video_layer()?;
         layer.set_device(&device);
-        layer.set_pixel_format(MTLPixelFormat::RGBA16Float);
-        layer.set_wants_extended_dynamic_range_content(true);
-        layer.set_display_sync_enabled(false);
-        layer.set_maximum_drawable_count(2);
-        layer.set_opaque(true);
-        // SAFETY: CALayer and CGColorSpace calls on the window's main thread.
-        unsafe {
-            let object = &*(layer.as_ptr() as *const AnyObject);
-            let space = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearDisplayP3);
-            if space.is_null() {
-                return Err("no EDR colour space".into());
-            }
-            let _: () = msg_send![object,setColorspace: space];
-            CGColorSpaceRelease(space);
-            let _: () = msg_send![object,setHidden: true];
-        }
+        Self::with_layer(&device, layer)
+    }
+    fn with_layer(device: &Device, layer: MetalLayer) -> Result<Self, String> {
         let cache = MetalTextureCache::new(device.as_ptr().cast())
             .map_err(|e| format!("Metal texture cache: {e}"))?;
         Ok(Self {
             layer,
             queue: device.new_command_queue(),
-            pipeline,
+            pipeline: pipeline(device)?,
             cache,
             pending: VecDeque::new(),
             view: 0,
+            screen: 0,
             #[cfg(test)]
             offscreen: None,
         })
@@ -157,16 +160,9 @@ impl Edr {
         desc.set_height(height);
         desc.set_storage_mode(MTLStorageMode::Shared);
         desc.set_usage(MTLTextureUsage::ShaderRead | MTLTextureUsage::RenderTarget);
-        Ok(Self {
-            layer: MetalLayer::new(),
-            queue: device.new_command_queue(),
-            pipeline: pipeline(&device)?,
-            cache: MetalTextureCache::new(device.as_ptr().cast())
-                .map_err(|e| format!("Metal texture cache: {e}"))?,
-            pending: VecDeque::new(),
-            view: 0,
-            offscreen: Some((device.new_texture(&desc), headroom)),
-        })
+        let mut edr = Self::with_layer(&device, MetalLayer::new())?;
+        edr.offscreen = Some((device.new_texture(&desc), headroom));
+        Ok(edr)
     }
     /// The offscreen picture as linear extended-range RGBA.
     #[cfg(test)]
@@ -196,22 +192,26 @@ impl Edr {
         self.view as *mut AnyObject
     }
     /// The view's window and screen, as one number: the presenter is
-    /// chosen again when either changes. A window between screens (a
-    /// space changing) keeps the screen it had.
-    pub fn display(&self) -> u64 {
+    /// chosen again when either changes. A window on no screen for a
+    /// moment (a space changing) keeps the screen it had. None while the
+    /// view has no window, which the presenter takes as no change.
+    pub fn display(&mut self) -> Option<u64> {
         let view = self.view();
         if view.is_null() {
-            return 0;
+            return None;
         }
         // SAFETY: the view outlives these resources; AppKit getters on
         // the main thread, which runs egui.
         unsafe {
             let window: *mut AnyObject = msg_send![view, window];
             if window.is_null() {
-                return 0;
+                return None;
             }
             let screen: *mut AnyObject = msg_send![window, screen];
-            (window as u64) ^ (screen as u64).rotate_left(32)
+            if !screen.is_null() {
+                self.screen = screen as usize;
+            }
+            Some((window as u64) ^ (self.screen as u64).rotate_left(32))
         }
     }
     fn set_visible(&self, visible: bool) {
@@ -301,29 +301,8 @@ impl Edr {
                     Ordering::Relaxed,
                 );
             }
-            let object = &*(self.layer.as_ptr() as *const AnyObject);
-            let parent: *mut AnyObject = msg_send![object, superlayer];
-            if parent != root {
-                // Below wgpu's sublayer, which egui draws the controls into.
-                let _: () = msg_send![root,insertSublayer: object,atIndex: 0u32];
-            }
             let bounds: NSRect = msg_send![view, bounds];
-            let flipped: bool = msg_send![root, isGeometryFlipped];
-            let y = if flipped {
-                f64::from(rect.top())
-            } else {
-                bounds.size.height - f64::from(rect.bottom())
-            };
-            let area = NSRect::new(
-                NSPoint::new(f64::from(rect.left()), y),
-                NSSize::new(f64::from(rect.width()), f64::from(rect.height())),
-            );
-            let _: () = msg_send![object,setFrame: area];
-            self.layer.set_contents_scale(f64::from(pixels_per_point));
-            let mut size = self.layer.drawable_size();
-            size.width = area.size.width * f64::from(pixels_per_point);
-            size.height = area.size.height * f64::from(pixels_per_point);
-            self.layer.set_drawable_size(size);
+            self.place(root, bounds.size.height, rect, pixels_per_point);
             Ok(headroom.max(1.0) as f32)
         })?;
         self.show();
@@ -339,6 +318,42 @@ impl Edr {
         cmd.present_drawable(&drawable);
         cmd.commit();
         Ok(())
+    }
+    /// Puts the layer at the bottom of `root` (the view's layer, `height`
+    /// points tall) over `rect`, at `pixels_per_point`.
+    ///
+    /// # Safety
+    /// `root` is a live CALayer; on the main thread, or a layer tree only
+    /// this thread uses.
+    unsafe fn place(
+        &self,
+        root: *mut AnyObject,
+        height: f64,
+        rect: egui::Rect,
+        pixels_per_point: f32,
+    ) {
+        let object = &*(self.layer.as_ptr() as *const AnyObject);
+        let parent: *mut AnyObject = msg_send![object, superlayer];
+        if parent != root {
+            // Below wgpu's sublayer, which egui draws the controls into.
+            let _: () = msg_send![root,insertSublayer: object,atIndex: 0u32];
+        }
+        let flipped: bool = msg_send![root, isGeometryFlipped];
+        let y = if flipped {
+            f64::from(rect.top())
+        } else {
+            height - f64::from(rect.bottom())
+        };
+        let area = NSRect::new(
+            NSPoint::new(f64::from(rect.left()), y),
+            NSSize::new(f64::from(rect.width()), f64::from(rect.height())),
+        );
+        let _: () = msg_send![object,setFrame: area];
+        self.layer.set_contents_scale(f64::from(pixels_per_point));
+        let mut size = self.layer.drawable_size();
+        size.width = area.size.width * f64::from(pixels_per_point);
+        size.height = area.size.height * f64::from(pixels_per_point);
+        self.layer.set_drawable_size(size);
     }
     /// Draw `frame` into `target`; the returned buffer still has to be committed.
     fn encode(
@@ -379,6 +394,28 @@ impl Edr {
             .push_back((cmd.clone(), native.clone(), cy, cu));
         Ok(cmd)
     }
+}
+/// The hidden float layer the picture is drawn into, in extended linear
+/// Display P3.
+fn video_layer() -> Result<MetalLayer, String> {
+    let layer = MetalLayer::new();
+    layer.set_pixel_format(MTLPixelFormat::RGBA16Float);
+    layer.set_wants_extended_dynamic_range_content(true);
+    layer.set_display_sync_enabled(false);
+    layer.set_maximum_drawable_count(2);
+    layer.set_opaque(true);
+    // SAFETY: CALayer and CGColorSpace calls on a layer nothing else has yet.
+    unsafe {
+        let object = &*(layer.as_ptr() as *const AnyObject);
+        let space = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearDisplayP3);
+        if space.is_null() {
+            return Err("no EDR colour space".into());
+        }
+        let _: () = msg_send![object, setColorspace: space];
+        CGColorSpaceRelease(space);
+        let _: () = msg_send![object, setHidden: true];
+    }
+    Ok(layer)
 }
 fn pipeline(device: &Device) -> Result<RenderPipelineState, String> {
     let library = device.new_library_with_source(SHADER, &CompileOptions::new())?;
@@ -446,6 +483,62 @@ impl Drop for Edr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objc2::rc::Retained;
+
+    /// Debug builds check every Objective-C send's argument types against
+    /// the method's (an untyped colour space once panicked at startup), and
+    /// the offscreen tests never touch a layer: this sends each message the
+    /// window path sends to layers, in a layer tree of its own.
+    #[test]
+    fn layer_messages_carry_the_types_their_methods_declare() {
+        let layer = video_layer().unwrap();
+        let Some(device) = Device::system_default() else {
+            eprintln!("no Metal device; only the layer's own setup was sent");
+            return;
+        };
+        layer.set_device(&device);
+        let edr = Edr::with_layer(&device, layer).unwrap();
+        let object = edr.layer.as_ptr() as *mut AnyObject;
+        // SAFETY: CALayer calls on layers only this test uses.
+        unsafe {
+            let root: Retained<AnyObject> = objc2::msg_send_id![objc2::class!(CALayer), new];
+            let surface: Retained<AnyObject> =
+                objc2::msg_send_id![objc2::class!(CAMetalLayer), new];
+            let _: () = msg_send![&*root, addSublayer: &*surface];
+            let root_ptr = Retained::as_ptr(&root) as *mut AnyObject;
+            let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(320.0, 180.0));
+            without_animation(|| edr.place(root_ptr, 600.0, rect, 2.0));
+            let parent: *mut AnyObject = msg_send![object, superlayer];
+            assert_eq!(parent, root_ptr);
+            let sublayers: *mut AnyObject = msg_send![&*root, sublayers];
+            let first: *mut AnyObject = msg_send![sublayers, objectAtIndex: 0usize];
+            assert_eq!(first, object, "below the surface's layer");
+            let frame: NSRect = msg_send![object, frame];
+            assert_eq!(
+                (frame.origin.x, frame.origin.y, frame.size.width),
+                (10.0, 400.0, 320.0)
+            );
+            let size = edr.layer.drawable_size();
+            assert_eq!((size.width, size.height), (640.0, 360.0));
+            let count = || -> usize {
+                let sublayers: *mut AnyObject = msg_send![&*root, sublayers];
+                msg_send![sublayers, count]
+            };
+            // Placing it again leaves the tree as it is.
+            without_animation(|| edr.place(root_ptr, 600.0, rect, 2.0));
+            assert_eq!(count(), 2);
+            let state = || -> (bool, bool) {
+                (msg_send![object, isHidden], msg_send![&*surface, isOpaque])
+            };
+            edr.show();
+            assert_eq!(state(), (false, false), "shown under a translucent surface");
+            edr.hide();
+            assert_eq!(state(), (true, true));
+            drop(edr);
+            assert_eq!(count(), 1, "the layer leaves with its presenter");
+        }
+    }
+
     /// Render ten-bit planes (codes, not P010 words) through the shader.
     fn shade(
         (w, h): (u64, u64),
