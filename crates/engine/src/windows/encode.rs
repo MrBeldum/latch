@@ -112,7 +112,6 @@ pub(super) fn media_type(subtype: &GUID, config: &VideoConfig) -> Result<IMFMedi
         Ok(ty)
     }
 }
-#[cfg(test)]
 pub(super) fn memory_sample(bytes: &[u8]) -> Result<IMFSample> {
     let length = u32::try_from(bytes.len()).context("MF sample exceeds 4 GiB")?;
     // SAFETY: Buffer capacity equals length, Lock is balanced before return.
@@ -304,27 +303,47 @@ pub(super) struct Encoder {
     output_capacity: u32,
     kbps: u32,
     fps: u32,
+    ltr: Option<super::mf_ltr::Ltr>,
+    picture: u64,
+    last: (u64, Option<u64>),
 }
 impl Encoder {
     pub fn new(config: &VideoConfig, gpu: &Gpu) -> Result<Self> {
         let codec = config.codec;
         let label = codec.name();
         for (activation, name) in hardware(codec).unwrap_or_default() {
-            // SAFETY: Activation is performed on the worker's MTA.
-            let transform = unsafe { activation.ActivateObject::<IMFTransform>() };
-            let result = transform
-                .context("activate hardware encoder")
-                .and_then(|t| Self::configure(t, config, Some(gpu), name, true));
-            match result {
-                Ok(mut encoder) => {
-                    encoder.activation = Some(activation);
-                    return Ok(encoder);
-                }
-                Err(e) => {
-                    tracing::debug!("hardware {label} MFT rejected configuration: {e:#}");
-                    // SAFETY: Releases resources held by this failed activation.
-                    unsafe {
-                        let _ = activation.ShutdownObject();
+            for try_ltr in [true, false] {
+                // SAFETY: Activation is performed on the worker's MTA.
+                let transform = unsafe { activation.ActivateObject::<IMFTransform>() };
+                let result = transform
+                    .context("activate hardware encoder")
+                    .and_then(|t| {
+                        Self::configure(t, config, Some(gpu), name.clone(), true, try_ltr)
+                    });
+                match result {
+                    Ok(mut encoder) => {
+                        if encoder.ltr.is_some() {
+                            if let Err(error) =
+                                super::mf_ltr::prove(&mut encoder, config, Some(gpu))
+                            {
+                                tracing::info!(%error, %name, "MFT LTR probe failed; reopening with IDR recovery");
+                                drop(encoder);
+                                // SAFETY: probe instance is gone before reactivation.
+                                unsafe {
+                                    let _ = activation.ShutdownObject();
+                                }
+                                continue;
+                            }
+                        }
+                        encoder.activation = Some(activation.clone());
+                        return Ok(encoder);
+                    }
+                    Err(e) => {
+                        tracing::debug!("hardware {label} MFT rejected configuration: {e:#}");
+                        // SAFETY: Releases resources held by this failed activation.
+                        unsafe {
+                            let _ = activation.ShutdownObject();
+                        }
                     }
                 }
             }
@@ -335,6 +354,12 @@ impl Encoder {
         Self::software(config)
     }
     pub fn software(config: &VideoConfig) -> Result<Self> {
+        Self::software_trial(config, true).or_else(|error| {
+            tracing::debug!(%error, "Microsoft MFT LTR probe unavailable; keeping IDRs");
+            Self::software_trial(config, false)
+        })
+    }
+    fn software_trial(config: &VideoConfig, try_ltr: bool) -> Result<Self> {
         // SAFETY: Called only while the worker owns a COM/MF runtime guard.
         let transform =
             unsafe { CoCreateInstance(&CLSID_MSH264EncoderMFT, None, CLSCTX_INPROC_SERVER) }
@@ -349,7 +374,11 @@ impl Encoder {
                 .then_some(name)
             })
             .unwrap_or_else(|| "Microsoft H.264 Video Encoder MFT".into());
-        Self::configure(transform, config, None, name, false)
+        let mut encoder = Self::configure(transform, config, None, name, false, try_ltr)?;
+        if encoder.ltr.is_some() {
+            super::mf_ltr::prove(&mut encoder, config, None)?;
+        }
+        Ok(encoder)
     }
     /// Sets a property the encoder may lack.
     fn optional(api: &ICodecAPI, what: &str, key: &GUID, value: VARIANT) {
@@ -384,6 +413,7 @@ impl Encoder {
         gpu: Option<&Gpu>,
         name: String,
         hardware: bool,
+        try_ltr: bool,
     ) -> Result<Self> {
         let codec = config.codec;
         // SAFETY: All transform calls are serialized on its owning worker.
@@ -475,6 +505,14 @@ impl Encoder {
                     (config.codec == Codec::H264High).into(),
                 );
             }
+            let ltr = try_ltr
+                && matches!(codec, Codec::H264High | Codec::H264Baseline)
+                && api
+                    .SetValue(
+                        &CODECAPI_AVEncVideoLTRBufferControl,
+                        &VARIANT::from(0x10004u32),
+                    )
+                    .is_ok();
             let output = media_type(&subtype(codec), config)?;
             output.SetUINT32(&MF_MT_AVG_BITRATE, config.bitrate_kbps.saturating_mul(1000))?;
             if codec == Codec::Av1 {
@@ -550,6 +588,9 @@ impl Encoder {
                 output_capacity: 0,
                 kbps: config.bitrate_kbps,
                 fps: config.fps,
+                ltr: ltr.then(|| super::mf_ltr::Ltr::new(config.fps)),
+                picture: 0,
+                last: (0, None),
             })
         }
     }
@@ -570,6 +611,20 @@ impl Encoder {
         Self::rate(&self.api, kbps, self.fps);
         self.kbps = kbps;
         Ok(())
+    }
+    pub fn recovers(&self) -> bool {
+        self.ltr.is_some()
+    }
+    pub fn recover_from(&mut self, picture: u64) -> bool {
+        self.ltr
+            .as_mut()
+            .is_some_and(|ltr| ltr.recover_from(picture))
+    }
+    pub fn last_picture(&self) -> (u64, Option<u64>) {
+        self.last
+    }
+    pub fn reset_ltr(&mut self, fps: u32) {
+        self.ltr = Some(super::mf_ltr::Ltr::new(fps));
     }
     /// Wait for one callback, bounded by the frame deadline.
     fn event(&mut self, deadline: Instant) -> Result<()> {
@@ -605,6 +660,13 @@ impl Encoder {
         sample: &IMFSample,
         keyframe: bool,
     ) -> Result<Option<(Vec<u8>, bool)>> {
+        self.picture += 1;
+        let (mark, use_ltr, recovery) = self
+            .ltr
+            .as_mut()
+            .map(|ltr| ltr.plan(self.picture, keyframe))
+            .unwrap_or_default();
+        self.last = (self.picture, recovery);
         let deadline = Instant::now() + Duration::from_secs(3);
         if self.events.is_some() {
             while self.input_credit == 0 {
@@ -621,6 +683,16 @@ impl Encoder {
                     .SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(1u32))
                     .context("force encoder IDR")?;
             }
+            if let Some(slot) = mark {
+                self.api
+                    .SetValue(&CODECAPI_AVEncVideoMarkLTRFrame, &VARIANT::from(slot))
+                    .context("mark MFT LTR")?;
+            }
+            if let Some(bits) = use_ltr {
+                self.api
+                    .SetValue(&CODECAPI_AVEncVideoUseLTRFrame, &VARIANT::from(bits))
+                    .context("force MFT LTR")?;
+            }
             sample.SetSampleTime(self.time)?;
             sample.SetSampleDuration(self.duration)?;
             self.time += self.duration;
@@ -634,7 +706,20 @@ impl Encoder {
             }
             self.output_credit -= 1;
         }
-        self.output()
+        let output = self.output()?;
+        if self.ltr.is_some() {
+            anyhow::ensure!(
+                output.is_some(),
+                "MFT buffered a picture after proving synchronous LTR output"
+            );
+            if output.as_ref().is_some_and(|(_, idr)| *idr) {
+                self.last.1 = None;
+                if !keyframe {
+                    self.reset_ltr(self.fps);
+                }
+            }
+        }
+        Ok(output)
     }
     fn output(&mut self) -> Result<Option<(Vec<u8>, bool)>> {
         // SAFETY: ABI fields use ManuallyDrop, so release samples and event

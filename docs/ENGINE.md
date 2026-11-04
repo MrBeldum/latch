@@ -196,6 +196,11 @@ boundary above; the portal also asks a person to approve each session,
 which an unattended host cannot. Under a Wayland session only Xwayland
 windows are seen.
 
+VideoToolbox LTR recovery is runtime-gated (the low-latency mode is opt-in
+with `LATCH_MAC_LTR=1`). Windows H.264 MFTs must pass a loss/decode self-test
+at open before advertising recovery; the engine reuses `latch-stream`'s
+Media Foundation decoder for this check. See the platform documents.
+
 ### Audio
 
 48 kHz 16-bit, coded losslessly with `lpcm-rice` (fixed linear prediction

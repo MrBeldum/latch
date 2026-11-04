@@ -28,6 +28,8 @@ futures = "0.3"
 libloading = "0.8"
 
 [target.'cfg(windows)'.dependencies]
+# Reuse the platform decoder for the encoder-open LTR conformance probe.
+latch-stream.workspace = true
 windows-core = "0.58"
 windows = { version = "0.58", features = [
     # COM callbacks (#[implement]): the MFT event callback and the default-

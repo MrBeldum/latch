@@ -8,6 +8,7 @@ mod elevated;
 mod encode;
 mod input;
 mod mf;
+mod mf_ltr;
 mod runtime;
 mod vigem;
 
@@ -217,8 +218,8 @@ impl MfPipeline {
                         data,
                         keyframe: idr,
                         captured: self.last_capture,
-                        picture: 0,
-                        recovery: None,
+                        picture: encoder.last_picture().0,
+                        recovery: encoder.last_picture().1,
                     });
                 }
                 // A synchronous MFT may initially buffer an input despite low latency.
@@ -427,7 +428,10 @@ impl Pipeline {
     }
     fn recovers(&self) -> bool {
         match self {
-            Self::Mf(p) => matches!(&p.encoder, VideoEncoder::Amf(e) if e.recovers()),
+            Self::Mf(p) => match &p.encoder {
+                VideoEncoder::Amf(e) => e.recovers(),
+                VideoEncoder::Mf(e) => e.recovers(),
+            },
             Self::Software(p) => p.recovers(),
             Self::Failed(_) => false,
         }
@@ -435,10 +439,10 @@ impl Pipeline {
     fn recover_from(&mut self, picture: u64) -> bool {
         match self {
             Self::Mf(p) => {
-                let VideoEncoder::Amf(encoder) = &mut p.encoder else {
-                    return false;
+                let done = match &mut p.encoder {
+                    VideoEncoder::Amf(e) => e.recover_from(picture),
+                    VideoEncoder::Mf(e) => e.recover_from(picture),
                 };
-                let done = encoder.recover_from(picture);
                 p.prompt |= done;
                 done
             }

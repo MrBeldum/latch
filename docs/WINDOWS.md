@@ -238,10 +238,15 @@ on hardware encoders. Four cached NV12 textures and their views are reused.
   with four loss/recovery episodes across LTR slot reuse: all 112 delivered
   pictures match byte for byte in FFmpeg
   ([commands](measurements/2026-11-03/rfi/review-fixes/README.md)).
-  Media Foundation encoders refuse and send an IDR: the AMD H.264 MFT
-  accepts the LTR setters but reads none of them back, so nothing shows it
-  honours `CODECAPI_AVEncVideoUseLTRFrame`, and a frame that silently
-  ignored it would decode wrongly instead of failing.
+  Media Foundation H.264 enables LTR only after a probe at each encoder open:
+  32 moving synthetic pictures at the requested configuration, two forced
+  LTR recoveries with intervening frames dropped, and bit-exact comparison
+  with uninterrupted Media Foundation decoding. No property readback is
+  required; accepting setters is insufficient. A buffering encoder, decoder
+  error, unexpected IDR, or pixel mismatch reopens the MFT without LTR and
+  keeps IDR recovery. Four application-controlled slots use trust-until
+  (`LTRBufferControl=0x10004`, `UseLTRFrame=0x10000 | slot_bitmap`).
+  The production path uses only AMF HEVC; AMF H.264 is not instantiated.
 - **Fallback.** H.264 High/Baseline keep the GPU MFT → Microsoft MFT →
   Latch software path. An AMF runtime failure reopens MF HEVC and starts
   with an IDR. A hardware-only codec that fails through MF ends the stream

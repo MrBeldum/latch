@@ -334,7 +334,8 @@ frame and nothing after it. Encoders make it as follows:
 | Latch software H.264 | keeps the last 300 ms of pictures (at least 4, at most 256 MB) and rolls back to the reference: the next frame predicts from it with the `frame_num` that follows it, so to the decoder the lost frames never existed (bit-exact; tested against the decoder) |
 | AMF HEVC (AMD, Windows) | four long-term references, one picture marked every fps/30 frames round robin; the next frame is forced to predict from the newest one at or before the reference (`HevcForceLTRReferenceBitfield`) |
 | VideoToolbox | on sessions accepting `EnableLTR`, acknowledge tokens at or before the delivered base and force an LTR refresh; otherwise IDR ([macOS mode](MACOS.md)) |
-| Media Foundation, VA-API, NVENC | refused: an IDR, as before |
+| Media Foundation H.264 | four application-controlled LTR slots, only after an encoder-open loss/decode self-test passes; otherwise IDR |
+| Media Foundation HEVC/AV1, VA-API, NVENC | refused: an IDR, as before |
 
 
 
