@@ -1,0 +1,17 @@
+    Blocking waiting for file lock on package cache
+   Compiling latch-engine v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-0a0119b8/crates/engine)
+   Compiling latch-stream v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-0a0119b8/crates/stream)
+    Finished `test` profile [optimized + debuginfo] target(s) in 3.08s
+     Running tests/loopback.rs (target/debug/deps/loopback-8fe337b387212ece)
+
+running 3 tests
+test gamepads_plug_in_follow_rumble_back_and_unplug ... pad state arrived in 1.51125ms; rumble back after 1.51175ms
+ok
+test local_cursor_negotiated_and_host_omits_pointer_when_asked ... ok
+test the_picture_arrives_and_keys_show_up_in_it ... first frame: luma PSNR 51.1 dB against the drawn pattern
+input to decoded picture over loopback, 20 presses: min 8.0 ms, p50 12.1 ms, p95 22.2 ms, max 22.2 ms
+Stats { color: ColorDescription { primaries: 1, transfer: 1, matrix: 1, full_range: false, bit_depth: 8, hdr: None }, fps: 18.967077, mbps: 0.1298562, received_mbps: 0.2811983, rtt_ms: 0, rtt_var_ms: 0, decode_ms: 1.6898, host_ms: 0.74, assembly_ms: 0.0006, queue_ms: 0.023, width: 640, height: 360, decoder: "H.264 · hardware", encoder: "Latch software H.264 (test pattern)", codec: "H.264", loss_pct: 0.0, fec_recovered: 0, audio: "", video_problem: None, applied_bitrate_kbps: 6377, requested_bitrate_kbps: 8000, pacing_queue_ms: 0.207, send_errors: 0, send_retries: 0, socket_send_bytes: 8388608, socket_receive_bytes: 8388608, host_socket_send_bytes: 8388608, host_socket_receive_bytes: 8388608, frames_lost: 0, window_ms: 263, received_fps: 18.967077, raw_loss_pct: 0.0, frames_dropped: 0, frame_jitter_ms: 0.54632 }
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.84s
+

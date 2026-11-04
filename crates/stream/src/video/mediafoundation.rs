@@ -388,7 +388,13 @@ impl State {
                 None,
                 CLSCTX_INPROC_SERVER,
             )
-            .context("create Microsoft H.264 decoder")?;
+            .with_context(|| {
+                if hevc {
+                    "create Microsoft HEVC decoder"
+                } else {
+                    "create Microsoft H.264 decoder"
+                }
+            })?;
             // The H.264 decoder exposes this as a UINT32 transform attribute,
             // not the VT_BOOL encoder property on ICodecAPI. Set it before types.
             transform

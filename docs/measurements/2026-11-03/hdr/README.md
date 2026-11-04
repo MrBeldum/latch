@@ -40,10 +40,14 @@ processor. Before encoding it checks the actual GPU texture against ST 2084.
 Both AMF and the MF fallback encode sixty frames from that texture. No desktop
 colour setting is needed for this probe.
 
-| Encoder | encode p50 / p95, ms | bytes, 60 static frames |
+| Format / encoder | encode p50 / p95, ms | bytes, 60 static frames |
 | --- | ---: | ---: |
-| AMF HDR10 | 1.036 / 1.125 | 2,577 |
-| MF HDR10 fallback | 2.988 / 3.221 | 2,500,551 |
+| SDR8 / AMF | 1.056 / 1.443 | 2,535 |
+| SDR10 / AMF | 1.032 / 1.630 | 2,535 |
+| HDR10 / AMF | 1.037 / 1.090 | 2,577 |
+| SDR8 / MF | 2.986 / 3.542 | 2,500,511 |
+| SDR10 / MF | 2.991 / 3.517 | 2,500,511 |
+| HDR10 / MF | 2.987 / 3.501 | 2,500,551 |
 
 MF spends approximately the configured 20 Mbps even on these static stripes;
 AMF does not pad the stream to the budget. These are static-pattern results.
@@ -52,8 +56,10 @@ FFprobe independently confirms **Main 10, yuv420p10le, tv range, bt2020nc,
 bt2020, smpte2084**, mastering display metadata (1000-nit BT.2020, D65) and
 MaxCLL / MaxFALL of 1000. FFmpeg-decoded luma at the stripe centres is
 `[326,508,723]`, versus expected `[326.5364,509.0767,722.6005]`: maximum error
-**1.077 code values** on both encoders. The test was extended to print SDR8,
-SDR10 and HDR10 comparisons using the same GPU source.
+**1.077 code values** on both encoders. All three format comparisons above use the same FP16 GPU source. SDR
+highlights are clipped to SDR white; this is an encode latency comparison,
+not a perceptually matched bitrate benchmark. AMF median encode does not
+increase; SDR10 AMF p95 increases by 0.187 ms.
 
 An AMF first access unit was also decoded by Latch's P010 VideoToolbox path,
 uploaded through the Metal texture cache, rendered with the wgpu HDR-to-SDR
@@ -134,17 +140,26 @@ cargo test --locked -p latch-engine --lib hold_hdr_display_for_live_test -- --ig
 - Existing SDR CPU and zero-copy GPU renderer tests still pass. Controls and
   other overlays temporarily use wgpu presentation, so the native video
   layer cannot hide the toolbar, stats or dialogs.
-- Mac fmt, CI clippy command, workspace/all-target tests and native audit pass.
+- Mac fmt, CI clippy command, workspace/all-target tests and native audit pass
+  (675 passed in the final serial run).
   The timing-sensitive network impairment test failed twice with a temporary
   zero-fps report window, then passed on retry; archived main also passed its
-  comparison run. No transport changes or assertion weakening were made.
-- Windows compilation, clippy and workspace tests are run in the dedicated
-  checkout with `-j 2`; see PR validation for final results.
+  comparison run. A later parallel loopback run stalled in its existing
+  key-to-picture loop and was stopped; all three loopback tests passed in
+  1.84 s on serial retry, and the complete serial workspace run passed.
+  No transport changes or assertion weakening were made.
+- Windows compilation, CI clippy and workspace/all-target tests pass with
+  `-j 2` in the dedicated checkout.
+- The explicit Windows Main10 decode probe cannot run on this PC: the
+  Microsoft HEVC decoder COM class is not registered (`0x80040154`). The
+  viewer consequently does not advertise HEVC here, preserving Baseline
+  fallback. No codec-store installation or paid extension was installed.
+  [Decoder probe output](windows-main10-decoder.txt).
 
 Still unverified: live Mac ScreenCaptureKit HDR capture (this shell lacks
 Screen Recording permission), physical-panel EDR/HDR10 brightness/colour and
 native-window UI behaviour, Windows viewer hardware Main10 decode/presentation
-under a sustained live stream, and 4K/high-fps gaming throughput. The Mac's
+with the HEVC decoder extension installed, and 4K/high-fps gaming throughput. The Mac's
 advertised peak is an EDR budget relative to a 203-nit diffuse-white convention,
 not a photometer measurement. The measured native shader and live decoder paths
 do not replace those display tests. HDR cursors use PQ-domain blending; exact

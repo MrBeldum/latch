@@ -1,0 +1,15 @@
+
+running 1 test
+Error: create Microsoft H.264 decoder
+
+Caused by:
+    Class not registered (0x80040154)
+test video::mediafoundation::hdr_tests::main10_decode_preserves_p010_luminance ... FAILED
+
+failures:
+
+failures:
+    video::mediafoundation::hdr_tests::main10_decode_preserves_p010_luminance
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.00s
+
