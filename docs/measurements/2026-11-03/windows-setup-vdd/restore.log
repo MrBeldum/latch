@@ -1,0 +1,27 @@
+Microsoft PnP Utility
+
+Restarting device:         ROOT\DISPLAY\0000
+Device restarted successfully.
+
+
+Status  Class   FriendlyName                 InstanceId
+------  -----   ------------                 ----------
+OK      Display Virtual Display Driver       ROOT\DISPLAY\0000
+OK      Monitor Generic Monitor (VDD by MTT) DISPLAY\MTT1337\1&28A6823A&0&UID256
+Unknown Monitor Generic Monitor (27E1QA)     DISPLAY\HKC2775\7&3616118&1&UID256
+Unknown Monitor Generic Monitor (27E1QA)     DISPLAY\HKC2775\7&3616118&1&UID264
+OK      Display AMD Radeon RX 6600           PCI\VEN_1002&DEV_73FF&SUBSYS_2413148C&REV_C7\6&34C...
+Unknown Monitor Generic Monitor (27E1QA)     DISPLAY\HKC2775\7&3616118&0&UID264
+Unknown Monitor Generic Monitor (27E1QA)     DISPLAY\HKC2775\1&8713BCA&0&UID0
+
+
+original XML preserved: True
+VDDPATH:
+Display folder remains: False
+Input helper restored: True
+Installed process: 37272 C:\Users\Daniel\AppData\Local\Latch\latch-host.exe session=1
+
+Algorithm Hash                                                             Path
+--------- ----                                                             ----
+SHA256    E0BACD6AEBA6DA2E3ADC185175DC012E9C773507858643641754548A731CA525 C:\Users\Daniel\AppD...
+SHA256    E0BACD6AEBA6DA2E3ADC185175DC012E9C773507858643641754548A731CA525 C:\Program Files\Lat...
