@@ -31,8 +31,10 @@ pub(crate) struct Controller {
     /// The next probe train while idle, and how many this idle run sent.
     next_train: Instant,
     idle_trains: u8,
-    /// Recent viewer-measured probe train rates, newest last.
+    /// Recent viewer-measured probe train rates, newest last, and the
+    /// fastest of the last pair however old (it caps regrowth while idle).
     trains: Vec<(u32, Instant)>,
+    path: Option<u32>,
     /// The budget before probe trains measured a slower path while idle;
     /// later trains restore up to it.
     held: Option<u32>,
@@ -95,6 +97,7 @@ impl Controller {
             next_train: now,
             idle_trains: 0,
             trains: Vec::new(),
+            path: None,
             held: None,
             restore: None,
             previous_delay: 0.0,
@@ -410,8 +413,15 @@ impl Controller {
         if self.trains.len() > 2 {
             self.trains.remove(0);
         }
+        // Only a fresh train acts: an older pair must not cut a budget that
+        // has since grown under motion.
         let measured = self.trains.iter().map(|(kbps, _)| *kbps).max();
-        if let Some(path) = measured.filter(|_| self.trains.len() == 2 && !queued && !damaged) {
+        if report.probe_kbps > 0 {
+            self.path = measured;
+        }
+        if let Some(path) = measured
+            .filter(|_| report.probe_kbps > 0 && self.trains.len() == 2 && !queued && !damaged)
+        {
             let fits = (u64::from(path) * 9 / 10).min(u64::from(u32::MAX)) as u32;
             if path < self.budget / 4 * 3 {
                 self.held.get_or_insert(self.budget);
@@ -604,6 +614,24 @@ impl Controller {
                     self.restore = None;
                     self.budget = self.budget.max(rate.min(cap));
                     self.capacity = self.capacity.max(Some(rate));
+                } else if (self.idle_since.is_some() || app_limited && self.budget <= self.floor)
+                    && self.held.is_none()
+                    && now.duration_since(self.clean_since) >= Duration::from_secs(1)
+                {
+                    // An idle stream's trickle (or an underfilled one at the
+                    // floor) proves nothing either way:
+                    // a second after the last cut's signal clears, regrow
+                    // by time, as after a cut without throughput feedback,
+                    // but never past what the last probe trains measured
+                    // (a viewer without them gets main's regrowth).
+                    // The regrown rate then stands in for capacity, so
+                    // resumed motion probes from it in bounded steps.
+                    let measured = self.path.map_or(u32::MAX, |kbps| kbps / 10 * 9);
+                    let target = growth.min(cap).min(measured);
+                    if target > self.budget {
+                        self.budget = target;
+                        self.capacity = self.capacity.max(Some(target));
+                    }
                 } else if let Some(capacity) = self.capacity {
                     let safe = (capacity * margin / 100).max(self.floor).min(cap);
                     if self.budget < safe {
@@ -877,6 +905,52 @@ mod tests {
         }
         // Back to what it delivered before the delay, not further on faith.
         assert!(recovered.is_some_and(|ms| ms <= 3000), "{recovered:?}");
+    }
+
+    #[test]
+    fn a_sparse_stream_cut_by_loss_regrows_while_idle_up_to_its_trains() {
+        // Real-path shape: a 0.5 Mbps desktop stream under bursty loss is
+        // cut to the floor; it can never fill a probe, so once the loss is
+        // gone it regrows by time, but only to what probe trains measured.
+        for trains in [0, 20_000] {
+            let start = Instant::now();
+            let mut c = Controller::new(50_000, start);
+            let mut t = start;
+            let mut step = |c: &mut Controller, t: Instant, lost: u64, probe: u32| {
+                c.observe_sent(500);
+                c.update(
+                    t,
+                    &Report {
+                        rtt_ms: 10.0,
+                        received_kbps: if lost > 0 { 200 } else { 500 },
+                        loss_pct: if lost > 0 { 60.0 } else { 0.0 },
+                        unrecovered_loss_pct: Some(if lost > 0 { 60.0 } else { 0.0 }),
+                        frames_lost: lost,
+                        window_ms: 50,
+                        probe_kbps: probe,
+                        ..Default::default()
+                    },
+                    10.0,
+                    0.0,
+                );
+            };
+            for tick in 0..40 {
+                t += Duration::from_millis(50);
+                step(&mut c, t, 0, if tick % 20 == 19 { trains } else { 0 });
+            }
+            for _ in 0..30 {
+                t += Duration::from_millis(50);
+                step(&mut c, t, 2, 0);
+            }
+            assert_eq!(c.budget(), 1000);
+            // The loss's policer memory (3 s) holds it first.
+            for _ in 0..160 {
+                t += Duration::from_millis(50);
+                step(&mut c, t, 0, 0);
+            }
+            let regrown = if trains > 0 { 18_000 } else { 50_000 };
+            assert_eq!(c.budget(), regrown, "trains {trains}");
+        }
     }
 
     #[test]
