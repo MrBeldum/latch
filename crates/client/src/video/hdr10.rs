@@ -1,10 +1,7 @@
 //! Native HDR10 child swapchain. Egui's SDR surface stays on its existing path.
 use anyhow::{Context, Result};
 use latch_stream::Frame;
-use std::{
-    ffi::c_void,
-    sync::atomic::{AtomicU32, Ordering},
-};
+use std::sync::atomic::{AtomicU32, Ordering};
 use windows::{
     core::{s, w, Interface},
     Win32::{
@@ -14,7 +11,7 @@ use windows::{
             Direct3D11::*,
             Dxgi::{Common::*, *},
         },
-        UI::WindowsAndMessaging::*,
+        UI::{Input::KeyboardAndMouse::GetActiveWindow, WindowsAndMessaging::*},
     },
 };
 static PEAK: AtomicU32 = AtomicU32::new(0);
@@ -313,8 +310,10 @@ impl Hdr10 {
                 };
                 self.swap.cast::<IDXGISwapChain4>()?.SetHDRMetaData(
                     DXGI_HDR_METADATA_TYPE_HDR10,
-                    std::mem::size_of_val(&meta) as u32,
-                    Some((&meta as *const DXGI_HDR_METADATA_HDR10).cast::<c_void>()),
+                    Some(std::slice::from_raw_parts(
+                        (&meta as *const DXGI_HDR_METADATA_HDR10).cast::<u8>(),
+                        std::mem::size_of_val(&meta),
+                    )),
                 )?;
             }
             let buffer: ID3D11Texture2D = self.swap.GetBuffer(0)?;

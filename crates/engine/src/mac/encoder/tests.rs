@@ -1012,6 +1012,11 @@ fn main10_iosurface_roundtrip() {
             }
             assert!(mse / ((WIDTH * HEIGHT) as f64) < 100.0, "VT P010 fidelity");
         });
+        if f == 0 {
+            if let Ok(path) = std::env::var("LATCH_HDR_RENDER_STREAM") {
+                fs::write(path, &frame.data).unwrap();
+            }
+        }
         stream.extend_from_slice(&frame.data);
         sources.push(luma);
     }

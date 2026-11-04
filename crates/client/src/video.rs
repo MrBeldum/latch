@@ -935,6 +935,85 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires a GPU and LATCH_HDR_RENDER_STREAM from the Main10 encoder test"]
+    fn hdr_encode_decode_render_matches_source_numerically() {
+        struct TestApp(Arc<FrameSlot>);
+        impl eframe::App for TestApp {
+            fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| {
+                        let rect = ui.max_rect();
+                        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                            rect,
+                            Paint {
+                                rect,
+                                frames: self.0.clone(),
+                            },
+                        ));
+                    });
+            }
+        }
+        let data = std::fs::read(
+            std::env::var("LATCH_HDR_RENDER_STREAM").expect("run the Main10 encoder test first"),
+        )
+        .unwrap();
+        let color = latch_proto::color::ColorDescription::negotiate(
+            latch_proto::color::ColorCapabilities {
+                hdr: true,
+                ten_bit: true,
+                peak_nits: 1000,
+            },
+            true,
+            true,
+        );
+        let mut decoder =
+            latch_stream::video::new_decoder_color(latch_stream::Codec::Hevc, color).unwrap();
+        let mut frame = decoder
+            .decode(&data, true, None)
+            .unwrap()
+            .expect("HDR frame");
+        assert_eq!(frame.color.bit_depth, 10);
+        frame.color = color;
+        let frames = Arc::new(FrameSlot::default());
+        frames.publish(frame);
+        let mut harness = egui_kittest::Harness::builder()
+            .wgpu_setup(crate::native_options().wgpu_options.wgpu_setup)
+            .with_size(egui::vec2(960.0, 540.0))
+            .build_eframe(move |cc| {
+                install(cc.wgpu_render_state.as_ref().unwrap());
+                TestApp(frames)
+            });
+        harness.run_steps(2);
+        let image = harness.render().unwrap();
+        // The first encoded frame's known ten-bit ramp.
+        for y in [100, 270, 400] {
+            for x in [100, 300, 500, 700] {
+                let code = 64 + ((x + y / 4) % 876);
+                let linear = latch_proto::color::pq_eotf(f64::from(code - 64) / 876.0) / 203.0;
+                let mapped = if linear > 0.75 {
+                    0.75 + 0.25 * (1.0 - (-(linear - 0.75) / 0.25).exp())
+                } else {
+                    linear
+                };
+                let expected = 255.0
+                    * if mapped <= 0.0031308 {
+                        12.92 * mapped
+                    } else {
+                        1.055 * mapped.powf(1.0 / 2.4) - 0.055
+                    };
+                let pixel = image.get_pixel(x, y);
+                assert!(
+                    pixel.0[..3]
+                        .iter()
+                        .all(|&v| (f64::from(v) - expected).abs() < 7.0),
+                    "({x},{y}): {pixel:?}, expected {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "requires a GPU"]
     fn decoded_frame_reaches_the_render_target() {
         struct TestApp(Arc<FrameSlot>);
