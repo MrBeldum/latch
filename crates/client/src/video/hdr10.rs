@@ -832,12 +832,12 @@ mod tests {
                 .collect();
             if let Ok(dir) = std::env::var("LATCH_HDR_PATCH_DIR") {
                 // What the compositor shows, 1000 nits = white, for a look.
-                let all: Vec<(i32, i32)> = (-20..H + 20)
-                    .flat_map(|y| (-20..W + 20).map(move |x| (at.0 + x, at.1 + y)))
+                let all: Vec<(i32, i32)> = (0..H)
+                    .flat_map(|y| (0..W).map(move |x| (at.0 + x, at.1 + y)))
                     .collect();
                 let pixels = grab_scrgb(&all)?;
-                let image = image::RgbImage::from_fn(W as u32 + 40, H as u32 + 40, |x, y| {
-                    let p = pixels[(y * (W as u32 + 40) + x) as usize];
+                let image = image::RgbImage::from_fn(W as u32, H as u32, |x, y| {
+                    let p = pixels[(y * (W as u32) + x) as usize];
                     image::Rgb(
                         [0, 1, 2]
                             .map(|c| (255.0 * (p[c] / 12.5).clamp(0.0, 1.0).powf(1.0 / 2.2)) as u8),
