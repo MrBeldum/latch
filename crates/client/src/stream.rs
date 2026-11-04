@@ -547,6 +547,7 @@ impl View {
                         egui_wgpu::Callback::new_paint_callback(
                             video,
                             video::Paint {
+                                rect: video,
                                 frames: live.frames.clone(),
                             },
                         ),

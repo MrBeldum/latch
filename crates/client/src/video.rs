@@ -1,6 +1,8 @@
 //! Drawing decoded frames with wgpu inside an egui rect: two textures (Y and
 //! interleaved UV) and a shader that does the BT.709 conversion.
 
+#[cfg(target_os = "macos")]
+mod edr;
 use egui_wgpu::wgpu;
 #[cfg(target_os = "macos")]
 use egui_wgpu::wgpu::hal;
@@ -266,6 +268,10 @@ struct Planes {
 
 ///// Lives in egui-wgpu's callback resources for the life of the window.
 pub struct Resources {
+    #[cfg(target_os = "macos")]
+    edr: Option<edr::Edr>,
+    #[cfg(target_os = "macos")]
+    edr_active: bool,
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -364,6 +370,14 @@ impl Resources {
             mapped_at_creation: false,
         });
         Self {
+            #[cfg(target_os = "macos")]
+            edr: if objc2_foundation::MainThreadMarker::new().is_some() {
+                edr::Edr::new().map_err(|e| tracing::warn!("EDR: {e}")).ok()
+            } else {
+                None
+            },
+            #[cfg(target_os = "macos")]
+            edr_active: false,
             pipeline,
             layout,
             sampler,
@@ -468,8 +482,38 @@ impl Resources {
     }
 
     /// Upload the newest frame, if there is one.
-    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, slot: &FrameSlot) {
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        slot: &FrameSlot,
+        rect: egui::Rect,
+        pixels_per_point: f32,
+    ) {
+        #[cfg(target_os = "macos")]
+        if self.edr_active {
+            if let Some(edr) = &self.edr {
+                edr.show();
+            }
+        }
         let Some(frame) = slot.take() else { return };
+        #[cfg(not(target_os = "macos"))]
+        let _ = (rect, pixels_per_point);
+        #[cfg(target_os = "macos")]
+        if let Some(edr) = &mut self.edr {
+            if frame.color.is_hdr() && frame.native.is_some() {
+                match edr.draw(&frame, rect, pixels_per_point) {
+                    Ok(()) => {
+                        self.edr_active = true;
+                        slot.recycle(frame);
+                        return;
+                    }
+                    Err(e) => tracing::warn!("EDR presentation failed: {e}"),
+                }
+            }
+            edr.hide();
+            self.edr_active = false;
+        }
         #[cfg(target_os = "macos")]
         let mut frame = frame;
         #[cfg(target_os = "macos")]
@@ -769,6 +813,7 @@ impl Resources {
 
 /// The paint callback egui runs for the video rect.
 pub struct Paint {
+    pub rect: egui::Rect,
     pub frames: Arc<FrameSlot>,
 }
 
@@ -782,7 +827,13 @@ impl egui_wgpu::CallbackTrait for Paint {
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(r) = resources.get_mut::<Resources>() {
-            r.upload(device, queue, &self.frames);
+            r.upload(
+                device,
+                queue,
+                &self.frames,
+                self.rect,
+                _screen.pixels_per_point,
+            );
         }
         Vec::new()
     }
@@ -827,6 +878,7 @@ mod tests {
                         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                             ui.max_rect(),
                             Paint {
+                                rect: ui.max_rect(),
                                 frames: self.0.clone(),
                             },
                         ));
@@ -878,6 +930,7 @@ mod tests {
                         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                             ui.max_rect(),
                             Paint {
+                                rect: ui.max_rect(),
                                 frames: self.0.clone(),
                             },
                         ));
@@ -947,6 +1000,7 @@ mod tests {
                         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                             ui.max_rect(),
                             Paint {
+                                rect: ui.max_rect(),
                                 frames: self.0.clone(),
                             },
                         ));
@@ -1080,4 +1134,33 @@ mod tests {
             "3024x1964 upload and render: 50 frames in {elapsed:?} ({per_frame:.2} ms/frame)"
         );
     }
+}
+
+/// HDR is offered only after the native layer can be created. Headless tools
+/// must opt in explicitly; they cannot infer a display from a decoder.
+pub fn color_capabilities() -> latch_proto::color::ColorCapabilities {
+    #[cfg(target_os = "macos")]
+    let peak = edr::peak_nits();
+    #[cfg(not(target_os = "macos"))]
+    let peak = 0;
+    latch_proto::color::ColorCapabilities {
+        ten_bit: cfg!(any(target_os = "macos", windows)),
+        hdr: peak > 0,
+        peak_nits: peak,
+    }
+}
+
+/// Hide the video sublayer before egui decides whether this frame has a video
+/// callback. The callback makes it visible again, including idle repeats.
+pub fn begin_frame(frame: &eframe::Frame) {
+    #[cfg(target_os = "macos")]
+    if let Some(state) = frame.wgpu_render_state() {
+        if let Some(r) = state.renderer.read().callback_resources.get::<Resources>() {
+            if let Some(edr) = &r.edr {
+                edr.hide();
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = frame;
 }

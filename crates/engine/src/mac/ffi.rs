@@ -305,7 +305,6 @@ extern "C" {
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     pub static kCGColorSpaceITUR_2100_PQ: Ref;
-    pub fn CGColorSpaceCreateWithName(name: Ref) -> Ref;
 }
 #[link(name = "CoreVideo", kind = "framework")]
 unsafe extern "C" {

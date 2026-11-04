@@ -1369,3 +1369,118 @@ mod timing_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod hdr_probe {
+    use super::*;
+    use crate::video::{Codec, VideoConfig};
+
+    #[test]
+    #[ignore = "requires a hardware HEVC Main10 encoder; writes HDR probe artifacts"]
+    fn scrgb_pq_p010_hardware_roundtrip() -> Result<()> {
+        let _runtime = super::super::runtime::Runtime::new(true)?;
+        let output = display::select()?;
+        let gpu = Gpu::new(&output.adapter)?;
+        let color = latch_proto::color::ColorDescription::negotiate(
+            latch_proto::color::ColorCapabilities {
+                hdr: true,
+                ten_bit: true,
+                peak_nits: 1000,
+            },
+            true,
+            true,
+        );
+        let config = VideoConfig {
+            color,
+            codec: Codec::Hevc,
+            width: 960,
+            height: 540,
+            fps: 60,
+            bitrate_kbps: 20000,
+        };
+        let source = gpu.texture(
+            960,
+            540,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            false,
+        )?;
+        let target = gpu.texture(
+            960,
+            540,
+            DXGI_FORMAT_R10G10B10A2_UNORM,
+            D3D11_BIND_RENDER_TARGET.0 as u32,
+            false,
+        )?;
+        let pixels: Vec<u16> = (0..960 * 540)
+            .flat_map(|i| {
+                let v = [0x3000, 0x3d00, 0x4a40][(i % 960) / 320]; // 10, 100, 1000 cd/m² in scRGB.
+                [v, v, v, 0x3c00]
+            })
+            .collect();
+        // SAFETY: tightly packed complete FP16 image; the system shader reads it.
+        unsafe {
+            gpu.context
+                .UpdateSubresource(&source, 0, None, pixels.as_ptr().cast(), 960 * 8, 0);
+        }
+        let mut renderer = CursorRenderer::new(&gpu)?;
+        renderer.draw(
+            &gpu,
+            &source,
+            &target,
+            &Default::default(),
+            &Default::default(),
+            (DXGI_MODE_ROTATION_IDENTITY, 1.0),
+        )?;
+        let mut converter = Converter::with_color(&gpu, (960, 540), (960, 540), 60, color)?;
+        let picture = converter.convert(&target)?;
+        gpu.read(&mut None, &picture.texture, 540 * 3 / 2, |bytes, stride| {
+            for (x, nits) in [(160, 10.0), (480, 100.0), (800, 1000.0)] {
+                let offset = 270 * stride + x * 2;
+                let code = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]) >> 6;
+                let expected = 64.0 + 876.0 * latch_proto::color::pq_oetf(nits);
+                assert!(
+                    (f64::from(code) - expected).abs() < 4.0,
+                    "FP16 -> PQ P010: {nits} nits -> {code}, expected {expected}"
+                );
+            }
+        })?;
+        let dir = std::env::var("LATCH_HDR_PROBE_DIR").unwrap_or_else(|_| ".".into());
+        for mf in [false, true] {
+            let name = if mf { "mf" } else { "amf" };
+            let mut stream = latch_proto::color::hevc_hdr_sei(color.hdr.unwrap());
+            let mut times = Vec::new();
+            if mf {
+                let mut encoder = super::super::encode::Encoder::new(&config, &gpu)?;
+                let sample = super::super::encode::Encoder::texture_sample(&picture.texture)?;
+                for i in 0..60 {
+                    let at = Instant::now();
+                    if let Some((bytes, _)) = encoder.encode(&sample, i == 0)? {
+                        stream.extend(bytes);
+                    }
+                    times.push(at.elapsed().as_secs_f64() * 1000.0);
+                }
+            } else {
+                let mut encoder = super::super::amf::Encoder::new(&config, &gpu)?;
+                for i in 0..60 {
+                    let at = Instant::now();
+                    let (bytes, _) = encoder.encode(&picture.texture, i == 0)?;
+                    times.push(at.elapsed().as_secs_f64() * 1000.0);
+                    stream.extend(bytes);
+                }
+            }
+            times.sort_by(f64::total_cmp);
+            eprintln!(
+                "HDR {name}: frames=60 bytes={} encode_p50_ms={:.3} encode_p95_ms={:.3}",
+                stream.len(),
+                times[30],
+                times[57]
+            );
+            std::fs::write(
+                std::path::Path::new(&dir).join(format!("hdr-{name}.hevc")),
+                stream,
+            )?;
+        }
+        Ok(())
+    }
+}

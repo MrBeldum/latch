@@ -443,10 +443,9 @@ impl State {
                     Err(e) if e.code() == MF_E_NO_MORE_TYPES => break,
                     Err(e) => return Err(e).context("enumerate decoder output types"),
                 };
-                if matches!(
-                    ty.GetGUID(&MF_MT_SUBTYPE)?,
-                    MFVideoFormat_NV12 | MFVideoFormat_P010
-                ) {
+                if ty.GetGUID(&MF_MT_SUBTYPE)? == MFVideoFormat_NV12
+                    || ty.GetGUID(&MF_MT_SUBTYPE)? == MFVideoFormat_P010
+                {
                     match self.transform.SetOutputType(0, &ty, 0) {
                         Err(e) if e.code() == MF_E_UNSUPPORTED_D3D_TYPE && self.gpu.is_some() => {
                             self.transform

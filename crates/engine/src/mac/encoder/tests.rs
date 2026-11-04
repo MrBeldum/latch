@@ -914,7 +914,15 @@ fn main10_iosurface_roundtrip() {
         return;
     };
     let config = VideoConfig {
-        color: Default::default(),
+        color: latch_proto::color::ColorDescription::negotiate(
+            latch_proto::color::ColorCapabilities {
+                ten_bit: true,
+                hdr: true,
+                peak_nits: 1000,
+            },
+            true,
+            true,
+        ),
         width: WIDTH as u32,
         height: HEIGHT as u32,
         fps: FPS,
@@ -950,6 +958,9 @@ fn main10_iosurface_roundtrip() {
     };
     let frames = 10;
     let mut sources = Vec::new();
+    let mut decode_ms = Vec::new();
+    let mut encode_ms = Vec::new();
+    let mut decoder = latch_stream::video::new_decoder_color(Codec::Hevc, config.color).unwrap();
     let mut stream = Vec::new();
     for f in 0..frames {
         // A 10-bit ramp: steps an 8-bit picture could not hold.
@@ -977,10 +988,30 @@ fn main10_iosurface_roundtrip() {
             }
             check(CVPixelBufferUnlockBaseAddress(image.0, 0), "unlock").unwrap();
         }
+        let submitted = Instant::now();
         let frame = encoder
             .encode(image.0, Instant::now(), f == 0)
             .unwrap()
             .expect("Main10 frame");
+        encode_ms.push(submitted.elapsed().as_secs_f64() * 1000.0);
+        let submitted = Instant::now();
+        let picture = decoder
+            .decode(&frame.data, frame.keyframe, None)
+            .unwrap()
+            .expect("P010 decode");
+        decode_ms.push(submitted.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(picture.color.bit_depth, 10);
+        picture.with_planes(|y, ys, _, _| {
+            let mut mse = 0.0;
+            for row in 0..HEIGHT {
+                for x in 0..WIDTH {
+                    let offset = row * ys + x * 2;
+                    let got = u16::from_le_bytes([y[offset], y[offset + 1]]) >> 6;
+                    mse += (f64::from(got) - f64::from(luma[row * WIDTH + x])).powi(2);
+                }
+            }
+            assert!(mse / ((WIDTH * HEIGHT) as f64) < 100.0, "VT P010 fidelity");
+        });
         stream.extend_from_slice(&frame.data);
         sources.push(luma);
     }
@@ -994,6 +1025,10 @@ fn main10_iosurface_roundtrip() {
         .output()
         .unwrap();
     let info = String::from_utf8_lossy(&probe.stderr);
+    assert!(
+        info.contains("bt2020") && info.contains("smpte2084"),
+        "HDR VUI: {info}"
+    );
     assert!(
         info.contains("Main 10") && info.contains("yuv420p10le"),
         "{info}"
@@ -1028,6 +1063,10 @@ fn main10_iosurface_roundtrip() {
         encoder.hardware
     );
     assert!(psnr > 40.0, "Main10 luma PSNR {psnr:.2}");
+    eprintln!(
+        "HDR synthetic: bytes={}, encode_ms={encode_ms:?}, decode_ms={decode_ms:?}",
+        stream.len()
+    );
     fs::remove_dir_all(dir).unwrap();
 }
 

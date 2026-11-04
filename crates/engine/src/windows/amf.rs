@@ -157,7 +157,6 @@ const AMF_REPEAT: i32 = 24;
 /// AMF_SURFACE_NV12.
 const NV12: i32 = 1;
 /// AMF_SURFACE_P010.
-#[cfg(test)]
 const P010: i32 = 10;
 fn check(code: i32, action: &str) -> Result<()> {
     ensure!(code == 0, "AMF {action}: result {code}");

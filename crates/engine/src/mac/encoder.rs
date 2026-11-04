@@ -268,6 +268,9 @@ impl Encoder {
                 ),
             ] {
                 if let Err(error) = encoder.set(key, value) {
+                    if config.color.is_hdr() {
+                        return Err(error);
+                    }
                     tracing::debug!(%error, "VideoToolbox encoder does not take colour tags");
                 }
             }

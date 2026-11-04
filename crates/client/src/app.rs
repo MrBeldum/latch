@@ -950,6 +950,7 @@ fn spawn_tailscale_probe(ok: Arc<AtomicBool>, ctx: egui::Context, stop: Arc<Atom
 
 impl eframe::App for ClientApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        crate::video::begin_frame(_frame);
         // The window's green button (or Globe-F) changes full screen behind
         // the app's back: what the system reports is what is true.
         if let Some(on) = ctx.input(|i| i.viewport().fullscreen) {
