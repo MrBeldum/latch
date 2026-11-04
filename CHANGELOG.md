@@ -2,6 +2,7 @@
 
 ## Unreleased — native reference recovery
 
+- Idle probe estimates reject jitter, missing positions and reordering, deduplicate packets, and require independent delay/delivery evidence before lowering the encoder target. Unknown capacity only limits resume pacing; low retained budgets skip trains.
 - Add VideoToolbox LTR recovery behind runtime support (`LATCH_MAC_LTR=1`
   opts into the supporting low-latency mode), with exact VT/FFmpeg loss tests.
 - Media Foundation H.264 LTR recovery on Windows hosts, opt-in with

@@ -432,6 +432,8 @@ impl Server {
             feedback,
             rtt: Mutex::new(RttEstimator::new()),
             rtt_low: Mutex::new(None),
+            train_ping: AtomicU64::new(0),
+            train_rtt: Mutex::new(None),
             pace_kbps: AtomicU32::new(0),
             fec: AtomicU8::new(DEFAULT_FEC_PERCENT),
             fec_burst: AtomicU8::new(0),
@@ -707,7 +709,10 @@ impl Server {
                     }
                     let queue_ms =
                         session.transport.queue_us.swap(0, Ordering::Relaxed) as f32 / 1000.0;
-                    let changed = controller.update(Instant::now(), &r, host_rtt, queue_ms);
+                    if let Some(rtt) = session.train_rtt.lock().take() {
+                        controller.observe_train_rtt(rtt.as_secs_f32() * 1000.0, now);
+                    }
+                    let changed = controller.update(now, &r, host_rtt, queue_ms);
                     session
                         .transport
                         .budget
@@ -795,6 +800,12 @@ impl Server {
                         );
                         let _ = self.udp.send_to(&buf, addr);
                     }
+                    // This echo sits behind the burst in the FIFO. Its RTT
+                    // must corroborate dispersion before a target cut.
+                    let time = self.now_us();
+                    session.train_ping.store(time, Ordering::Relaxed);
+                    wire::write_ping(&mut buf, session.id, time);
+                    let _ = self.udp.send_to(&buf, addr);
                 }
             }
             let silent = self
@@ -953,6 +964,8 @@ struct Session {
     rtt: Mutex<RttEstimator>,
     /// The lowest round trip since the last viewer report.
     rtt_low: Mutex<Option<Duration>>,
+    train_ping: AtomicU64,
+    train_rtt: Mutex<Option<Duration>>,
     /// How fast to send a frame's datagrams; 0 sends each frame at once.
     pace_kbps: AtomicU32,
     fec: AtomicU8,
@@ -1322,6 +1335,14 @@ fn receive(server: Weak<Server>) {
             Datagram::Mic { packet, .. } => play_mic(&session, Some(&packet)),
             Datagram::Pong { time, .. } => {
                 let rtt = Duration::from_micros(server.now_us().saturating_sub(time));
+                if session
+                    .train_ping
+                    .compare_exchange(time, 0, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    *session.train_rtt.lock() = Some(rtt);
+                    continue;
+                }
                 session.rtt.lock().sample(rtt);
                 let mut low = session.rtt_low.lock();
                 *low = Some(low.map_or(rtt, |low| low.min(rtt)));

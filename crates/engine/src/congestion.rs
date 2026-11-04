@@ -12,7 +12,7 @@ const PROBE_PAIR: Duration = Duration::from_millis(200);
 /// Train rates older than this no longer describe the path.
 const PROBE_MEMORY: Duration = Duration::from_millis(2500);
 /// Below this budget a resumed frame is too small to need probing.
-const PROBE_MIN_KBPS: u32 = 4000;
+const PROBE_MIN_KBPS: u32 = 8000;
 /// Below this send rate a loss test has too few datagrams to mean anything.
 const LOSS_TEST_MIN_KBPS: u32 = 4000;
 
@@ -37,6 +37,11 @@ pub(crate) struct Controller {
     /// fastest of the last pair however old (it caps regrowth while idle).
     trains: Vec<(u32, Instant)>,
     path: Option<u32>,
+    /// Separate from the encoder target: cautiously spend uncertain idle
+    /// capacity until delivery at this pace validates another step.
+    resume: Option<u32>,
+    resume_step: Instant,
+    train_rtt: Option<(f32, Instant)>,
     /// The budget before probe trains measured a slower path while idle;
     /// later trains restore up to it.
     held: Option<u32>,
@@ -105,6 +110,9 @@ impl Controller {
             idle_trains: 0,
             trains: Vec::new(),
             path: None,
+            resume: None,
+            resume_step: now,
+            train_rtt: None,
             held: None,
             restore: None,
             previous_delay: 0.0,
@@ -147,17 +155,24 @@ impl Controller {
     }
 
     pub(crate) fn pacing(&self) -> bool {
-        self.pacing
+        self.pacing || self.resume.is_some()
     }
 
     /// Pacer rate: congestion spreads frame trains at 2.5x the budget; a
     /// clean path sends them at once.
     pub(crate) fn pace_kbps(&self) -> u32 {
-        if self.pacing {
+        let ordinary = if self.pacing {
             self.budget.saturating_mul(5) / 2
         } else {
             0
-        }
+        };
+        self.resume.map_or(ordinary, |rate| {
+            if ordinary == 0 {
+                rate
+            } else {
+                ordinary.min(rate)
+            }
+        })
     }
 
     /// Datagrams in a probe train to send now, if one is due. Idle keeps
@@ -186,6 +201,12 @@ impl Controller {
         // a short train still shows whether the old rate came back.
         let bytes = self.budget as usize * 3 / 8;
         Some((bytes / (latch_proto::MAX_DATAGRAM + 80)).clamp(6, 16) as u8)
+    }
+
+    /// A ping sent immediately behind a train independently measures its
+    /// queueing delay. Ordinary low-window RTT remains the baseline.
+    pub(crate) fn observe_train_rtt(&mut self, rtt_ms: f32, now: Instant) {
+        self.train_rtt = Some((rtt_ms, now));
     }
 
     pub(crate) fn base_rtt(&self) -> Option<Duration> {
@@ -428,11 +449,9 @@ impl Controller {
         }
         // Idle keeps the budget: a pause proves nothing about the path, and
         // a content-limited encoder must not spiral its own target down.
-        // Probe trains (see `probe_train`) measure it instead. Two recent
-        // trains both under 3/4 of the budget are a slower path, measured
-        // before motion resumes into it (or as it does): come down to the
-        // faster of them, and back up to the earlier budget when later
-        // trains allow.
+        // Train dispersion alone cannot distinguish a bottleneck from
+        // receiver jitter. It constrains resume pacing; a target cut also
+        // needs independent delivery or standing-delay evidence.
         let sent = self.sent_kbps.unwrap_or(0);
         if self.application_limited() && sent.saturating_mul(2) < self.budget {
             self.idle_since.get_or_insert(now);
@@ -454,11 +473,13 @@ impl Controller {
         if report.probe_kbps > 0 {
             self.path = measured;
         }
-        if let Some(path) = measured
-            .filter(|_| report.probe_kbps > 0 && self.trains.len() == 2 && !queued && !damaged)
-        {
+        if let Some(path) = measured.filter(|_| report.probe_kbps > 0 && self.trains.len() == 2) {
             let fits = (u64::from(path) * 9 / 10).min(u64::from(u32::MAX)) as u32;
-            if path < self.budget / 4 * 3 {
+            let train_queued = self.train_rtt.is_some_and(|(ms, at)| {
+                now.duration_since(at) < PROBE_MEMORY
+                    && ms - rtt.as_secs_f32() * 1000.0 > (self.jitter * 3.0).max(1.0)
+            });
+            if path < self.budget / 4 * 3 && (train_queued || queued || deficit && loss > 0.0) {
                 self.held.get_or_insert(self.budget);
                 self.budget = fits.max(self.floor);
                 self.capacity = Some(path);
@@ -474,10 +495,35 @@ impl Controller {
                 }
             }
         }
+        if measured.is_some_and(|path| path >= self.budget / 4 * 3) {
+            self.resume = None;
+        } else if self.idle_since.is_some() && self.idle_trains >= 2 {
+            // No usable trains is unknown, not a low encoder budget. The
+            // fallback is conservative; good delivery grows only the pace.
+            let rate = measured
+                .map_or(self.budget / 20, |path| path.saturating_mul(105) / 100)
+                .max(self.floor);
+            if self.resume.is_none_or(|old| rate < old) && queue_ms < 20.0 {
+                self.resume = Some(rate);
+                self.resume_step = now;
+            }
+        }
+        if let Some(rate) = self.resume {
+            if !queued
+                && !damaged
+                && sent >= rate * 85 / 100
+                && report.received_kbps >= sent * 95 / 100
+                && now.duration_since(self.resume_step) >= horizon
+            {
+                let next = rate.saturating_mul(5) / 4;
+                self.resume = (next < self.budget).then_some(next);
+                self.resume_step = now;
+            }
+        }
         // A local queue is a sender that cannot keep up; while pacing it is
         // mostly the pacer's own spreading of large frames at low budgets,
         // and cutting further only makes that pacer slower.
-        let pressure = queued || (queue_ms > 20.0 && !app_limited && !self.pacing) || damaged;
+        let pressure = queued || (queue_ms > 20.0 && !app_limited && !self.pacing()) || damaged;
         self.pressure_windows = if pressure {
             self.pressure_windows.saturating_add(1)
         } else {
@@ -577,6 +623,7 @@ impl Controller {
                 self.overload = Some(offered);
                 // Congestion replaces a probe-train measurement.
                 self.held = None;
+                self.resume = None;
                 // A delay that delivers everything an underfilled stream
                 // sends is someone else's queue (or a starved ping), not
                 // this stream's overload: remember the budget it had.
@@ -833,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_keeps_the_budget_and_only_measured_trains_lower_it() {
+    fn idle_trains_need_independent_congestion_to_lower_the_target() {
         let start = Instant::now();
         let mut c = Controller::new(50_000, start);
         let report = |received, probe_kbps| Report {
@@ -853,7 +900,7 @@ mod tests {
             c.update(t, &report(500, 0), 10.0, 0.0);
             trains += usize::from(c.probe_train(t).is_some());
             assert_eq!(c.budget(), 50_000, "idle keeps the target");
-            assert_eq!(c.pace_kbps(), 0);
+            // Unknown capacity may pace a resume, without changing its target.
         }
         // A pair after the 500 ms grace, then one a second; 3 ms of budget.
         assert!((20..=21).contains(&trains), "{trains}");
@@ -865,18 +912,23 @@ mod tests {
             c.update(t, &report(500, kbps), 10.0, 0.0);
             assert_eq!(c.budget(), 50_000);
         }
-        // Two slow trains: the path fell while idle.
+        // Two slow trains constrain pacing, not the encoder target.
         t += Duration::from_secs(1);
         c.observe_sent(500);
         c.update(t, &report(500, 5000), 10.0, 0.0);
-        assert_eq!(c.budget(), 4500);
-        assert!(c.pacing());
+        assert_eq!(c.budget(), 50_000);
+        assert!(c.pace_kbps() <= 5250);
         for _ in 0..20 {
             t += Duration::from_millis(50);
             c.observe_sent(500);
             c.update(t, &report(500, 0), 10.0, 0.0);
-            assert!(c.budget() <= 5000, "{}", c.budget());
+            assert_eq!(c.budget(), 50_000);
         }
+        // Independent ping delay behind the train confirms the slow path.
+        t += Duration::from_millis(50);
+        c.observe_train_rtt(35.0, t);
+        c.update(t, &report(500, 5000), 10.0, 0.0);
+        assert!(c.budget() <= 5000);
         // The path came back: two faster trains restore the old budget.
         for kbps in [60_000, 70_000] {
             t += Duration::from_secs(1);

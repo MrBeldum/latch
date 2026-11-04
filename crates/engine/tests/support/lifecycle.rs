@@ -57,6 +57,8 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         feedback: Default::default(),
         rtt: Mutex::new(RttEstimator::new()),
         rtt_low: Mutex::new(None),
+        train_ping: AtomicU64::new(0),
+        train_rtt: Mutex::new(None),
         pace_kbps: AtomicU32::new(0),
         fec_burst: AtomicU8::new(0),
         fec: AtomicU8::new(DEFAULT_FEC_PERCENT),

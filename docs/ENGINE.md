@@ -425,15 +425,29 @@ the path, and a content-limited encoder must not spiral its own target down;
 motion after it resumes at once, unpaced on a clean path, as on any frame.
 Instead the idle sender (below half its budget, application-limited) measures
 the path: after 500 ms, two probe trains 200 ms apart and then one a second,
-each 6 to 16 full datagrams (about 3 ms of the budget) sent back to back by the
-control thread, to viewers that time them (`docs/PROTOCOL.md`, "Probe"). The
-bottleneck spreads a train to its own rate. Two trains within 2.5 s both under
-3/4 of the budget mean the path got slower while idle: the budget drops to 90%
-of the faster train (that is its capacity; pacing on) before motion resumes
-into it, and later trains above 5/4 of that restore up to the earlier budget.
-Trains a viewer cannot time (one receive batch) read as fast, which changes
-nothing; a train with one gap over half its span timed a stalled receiver
-or relay and is dropped; an older viewer gets none, and idle then works as on main. An
+each 6 to 16 full datagrams, skipped below an 8 Mbps retained budget,
+to viewers that time them (`docs/PROTOCOL.md`, "Probe"). Sequence positions
+are deduplicated; only ordered contiguous prefixes count. The fastest
+four-position packet pair estimates capacity, gated by measured pair
+variation (dispersion ≥2× variation) and the dominant-stall rejection.
+Two fresh confident trains below 3/4 of the budget need corroborating
+queue delay or lossy delivery deficit to lower the target to 90% of the
+faster train. An ordinary ping immediately behind each burst independently
+measures its FIFO delay, relative to baseline RTT and learned ping jitter.
+It does not pollute the minimum-RTT samples. Without corroboration only
+resume pacing changes: 105% of a measured rate, or 1/20 of the budget when
+unknown. Lossless delivery filling that pace validates 25% increases once
+per feedback horizon. A fresh fast train removes this limit; later fast
+trains restore confirmed cuts. An older viewer gets no probes or limit.
+
+Probe datagrams bypass the pacer and **are outside the wire budget** and
+ordinary throughput statistics: up to ~330 kbps extra in the first idle
+second, then ≤164 kbps, in bursts of 7,680–20,480 B (including tunnel
+allowance); each trailing ping adds 96 modeled wire bytes. At 5 Mbps the
+largest burst occupies 32.8 ms of a 40 ms FIFO. Skipping low retained
+budgets reduces the burst cost but does not guarantee safety after a
+capacity drop or through a small token bucket. See the protocol for limits.
+An
 underfilled stream that a standing delay cut while it still delivered
 everything (someone else's queue, or pings starved on a loaded machine) gets
 back the budget it had once the delay has been gone for a second: it can

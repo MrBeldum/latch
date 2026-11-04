@@ -14,51 +14,70 @@ const QUIET: Duration = Duration::from_millis(50);
 struct Train {
     id: u16,
     count: u8,
-    /// Arrival times, and wire bytes after the first datagram.
+    len: usize,
     arrivals: Vec<Instant>,
-    bytes: usize,
+    seen: u16,
+    ordered: bool,
 }
 
-/// The viewer's side: the fastest train between two reports.
+/// The viewer's side: the fastest trustworthy train between two reports.
 #[derive(Default)]
 pub struct TrainMeter {
     current: Option<Train>,
+    last: Option<u16>,
     best: u32,
 }
 
 impl TrainMeter {
     /// One `Probe` datagram of `len` bytes, as it arrived.
     pub fn push(&mut self, train: u16, index: u8, count: u8, len: usize, now: Instant) {
+        if !(MIN_TRAIN as u8..=16).contains(&count) || index >= count {
+            return;
+        }
         if self.current.as_ref().is_none_or(|t| t.id != train) {
+            // Delayed tails and duplicates must not start a second sample.
+            if self
+                .last
+                .is_some_and(|last| train.wrapping_sub(last) >= 0x8000 || train == last)
+            {
+                return;
+            }
             self.finish();
+            self.last = Some(train);
             self.current = Some(Train {
                 id: train,
                 count,
-                arrivals: vec![now],
-                bytes: 0,
+                len,
+                arrivals: Vec::new(),
+                seen: 0,
+                ordered: true,
             });
-        } else if let Some(t) = self.current.as_mut() {
-            t.arrivals.push(now);
-            t.bytes += len + OVERHEAD;
         }
-        if index + 1 >= count {
+        if let Some(t) = self.current.as_mut() {
+            if t.seen & (1 << index) != 0 {
+                return;
+            }
+            t.ordered &= usize::from(index) == t.arrivals.len() && count == t.count && len == t.len;
+            t.seen |= 1 << index;
+            t.arrivals.push(now);
+        }
+        if index + 1 == count {
             self.finish();
         }
     }
 
     fn finish(&mut self) {
-        let Some(t) = self.current.take() else {
-            return;
-        };
+        let Some(t) = self.current.take() else { return };
         let received = t.arrivals.len();
-        if received < MIN_TRAIN.min(usize::from(t.count)) || received < 2 {
+        // A contiguous prefix can survive tail loss. Missing interior
+        // positions and reordering cannot establish a slower path.
+        if !t.ordered || received < MIN_TRAIN {
             return;
         }
-        // A bottleneck spaces datagrams about evenly; a stalled receiver
-        // (or relay) puts one long gap among near-zero ones. A train whose
-        // largest gap is over half its span timed the stall, not the path.
-        // Datagrams handled in one receive batch share an instant: such a
-        // train only shows the path is faster than this viewer can time.
+        // Use the fastest four-position packet pair, rather than total
+        // span: a late arrival must not lower the estimate. Wider pairs
+        // tolerate receive batching / coarse clocks. Their observed spread
+        // measures timing noise; serialization must clearly exceed it.
         let span = t.arrivals[received - 1].saturating_duration_since(t.arrivals[0]);
         let largest = t
             .arrivals
@@ -66,16 +85,29 @@ impl TrainMeter {
             .map(|w| w[1].saturating_duration_since(w[0]))
             .max()
             .unwrap_or_default();
-        if received > 2 && largest * 2 > span {
+        if largest * 2 > span {
             return;
         }
-        let secs = span.as_secs_f64().max(1e-4);
-        let kbps = (t.bytes as f64 * 8.0 / secs / 1000.0).min(f64::from(u32::MAX)) as u32;
+        let width = 4.min(received - 1);
+        let mut gaps: Vec<_> = t
+            .arrivals
+            .windows(width + 1)
+            .map(|w| w[width].saturating_duration_since(w[0]))
+            .collect();
+        gaps.sort_unstable();
+        let fastest = gaps[0];
+        let jitter = gaps[gaps.len() - 1] - fastest;
+        if fastest < jitter * 2 && !(fastest.is_zero() && jitter <= Duration::from_millis(1)) {
+            return;
+        }
+        // An entirely batched train only supplies a high lower bound.
+        let secs = fastest.as_secs_f64().max(1e-4);
+        let kbps = ((t.len + OVERHEAD) as f64 * width as f64 * 8.0 / secs / 1000.0)
+            .min(f64::from(u32::MAX)) as u32;
         self.best = self.best.max(kbps.max(1));
     }
 
-    /// The fastest train completed since the last call, in wire kbps; 0
-    /// when none was.
+    /// Fastest confident wire rate since the last call; 0 means unknown.
     pub fn take_kbps(&mut self, now: Instant) -> u32 {
         if self
             .current
@@ -92,6 +124,59 @@ impl TrainMeter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn damaged_positions_do_not_fabricate_capacity() {
+        let start = Instant::now();
+        for mode in 0..4 {
+            let mut events = Vec::new();
+            for i in 0..16u8 {
+                if mode == 0 && i % 2 == 1 && i != 15 || mode == 1 && (5..9).contains(&i) {
+                    continue;
+                }
+                let at = u64::from(i) * 102400
+                    + if mode == 3 && (8..15).contains(&i) {
+                        4_000_000
+                    } else {
+                        0
+                    };
+                events.push((at, i));
+                if mode == 2 {
+                    events.push((at + 1000, i));
+                }
+            }
+            events.sort_unstable();
+            let mut meter = TrainMeter::default();
+            for (at, i) in events {
+                meter.push(1, i, 16, 1200, start + Duration::from_nanos(at));
+            }
+            let rate = meter.take_kbps(start + Duration::from_secs(1));
+            assert_eq!(rate, if mode == 2 { 100_000 } else { 0 }, "mode {mode}");
+        }
+    }
+
+    #[test]
+    fn distributed_arrival_jitter_is_not_a_slow_bottleneck() {
+        let start = Instant::now();
+        let mut seed = 17u64;
+        for _ in 0..10_000 {
+            let mut events = Vec::new();
+            for i in 0..16u8 {
+                seed ^= seed >> 12;
+                seed ^= seed << 25;
+                seed ^= seed >> 27;
+                let jitter = seed.wrapping_mul(0x2545f4914f6cdd1d) % 4_000_000;
+                events.push((u64::from(i) * 102400 + jitter, i));
+            }
+            events.sort_unstable();
+            let mut meter = TrainMeter::default();
+            for (at, i) in events {
+                meter.push(1, i, 16, 1200, start + Duration::from_nanos(at));
+            }
+            let rate = meter.take_kbps(start + Duration::from_secs(1));
+            assert!(rate == 0 || rate >= 75_000, "jitter read {rate}");
+        }
+    }
 
     #[test]
     fn spread_measures_the_bottleneck_and_a_lost_tail_still_counts() {
@@ -122,7 +207,7 @@ mod tests {
         for i in 0..8u8 {
             meter.push(5, i, 8, 1200, start);
         }
-        assert!(meter.take_kbps(start) > 500_000);
+        assert!(meter.take_kbps(start) > 300_000);
         // A fast path through a receiver that stalled 60 ms mid-train: the
         // stall is not the path's rate, and the train says nothing.
         for i in 0..6u8 {

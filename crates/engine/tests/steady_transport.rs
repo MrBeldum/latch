@@ -114,6 +114,7 @@ fn transport_scenarios() {
         let mut train = 0u16;
         let mut probe = Vec::new();
         let mut first_frame_at = None;
+        let mut train_echoes = VecDeque::new();
         for ms in 0..35_000u64 {
             let now = start + Duration::from_millis(ms);
             let capacity = if (name == "step_loss" && ms < 5000)
@@ -187,6 +188,8 @@ fn transport_scenarios() {
                     );
                     link.send(now, &probe);
                 }
+                latch_proto::wire::write_ping(&mut probe, 1, ms * 1000);
+                link.send(now, &probe);
             }
             // The server's pacer: off on a clean proven path.
             while let Some((dg, _)) = pending.front() {
@@ -217,11 +220,18 @@ fn transport_scenarios() {
                     }) + queue,
                 );
             }
+            while train_echoes.front().is_some_and(|(at, _)| *at <= now) {
+                let (_, time) = train_echoes.pop_front().unwrap();
+                controller.observe_train_rtt((ms * 1000 - time) as f32 / 1000.0, now);
+            }
             for dg in link.receive(now) {
                 match latch_proto::wire::parse(&dg) {
                     Ok(Datagram::Video { shard, .. }) => {
                         wire_received += dg.len() + 80;
                         rx.push(&shard, now);
+                    }
+                    Ok(Datagram::Ping { time, .. }) => {
+                        train_echoes.push_back((now + Duration::from_millis(base / 2), time));
                     }
                     Ok(Datagram::Probe {
                         train,
@@ -333,6 +343,13 @@ fn transport_scenarios() {
                 minimum >= cap * 4 / 5,
                 "{name}: random loss collapsed budget: {minimum}"
             );
+        }
+        if name.starts_with("idle_drop") {
+            assert!(
+                stats.frames_lost <= 1 && stats.frames_skipped == 0,
+                "{name}: {stats:?}"
+            );
+            assert!(restart_peak < 30.0, "{name}: restart queue {restart_peak}");
         }
         if name == "idle_motion" {
             assert_eq!(idle_minimum, ceiling, "idle must retain the budget");
