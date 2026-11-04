@@ -97,7 +97,7 @@ struct MfPipeline {
 impl MfPipeline {
     fn info(&self) -> VideoInfo {
         VideoInfo {
-            color: Default::default(),
+            color: self.config.color,
             encoder: self.encoder.name().to_string(),
             hardware: self.encoder.hardware(),
             codec: self.config.codec,

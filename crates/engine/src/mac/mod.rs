@@ -170,7 +170,7 @@ impl Video {
 impl VideoPipeline for Video {
     fn info(&self) -> VideoInfo {
         VideoInfo {
-            color: Default::default(),
+            color: self.config.color,
             encoder: format!(
                 "VideoToolbox {}",
                 if self.config.codec == Codec::Hevc {

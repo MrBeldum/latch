@@ -114,6 +114,7 @@ pub struct CursorState {
 
 #[derive(Debug, Clone, Default)]
 pub struct Stats {
+    pub color: latch_proto::color::ColorDescription,
     pub fps: f32,
     /// Encoded video in the frames that came together, in Mbps: what the
     /// bitrate setting caps. FEC parity, headers and audio are not in it.
@@ -748,6 +749,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         stats.decoder = decoder.name();
         stats.encoder = accept.encoder.clone();
         stats.codec = accept.codec.name();
+        stats.color = accept.color;
         if accept.audio.is_none() && settings.audio {
             stats.audio = if accept.audio_problem.is_empty() {
                 "no sound from the host".into()
