@@ -776,6 +776,9 @@ fn test_6_control_messages_roundtrip_and_errors() {
             mic: None,
             mic_problem: String::new(),
             cursor: true,
+            gamepads: 4,
+            gamepad_kinds: vec![latch_proto::gamepad::PadKind::Xbox],
+            gamepad_problem: String::new(),
         }),
         Message::End(End {
             code: end::CAPTURE_FAILED,
@@ -1051,7 +1054,7 @@ fn startup_grace_bounds_silence_and_allows_a_healthy_idr_to_finish() {
 }
 
 #[test]
-fn microphone_packets_are_kind_9_and_older_fields_stay_off_the_wire() {
+fn microphone_packets_are_kind_13_and_older_fields_stay_off_the_wire() {
     use latch_proto::audio::{AudioOut, AudioPacketizer, AudioReceiver};
     use latch_proto::control::StreamRequest;
     use latch_proto::wire::{self, Datagram};
@@ -1062,7 +1065,7 @@ fn microphone_packets_are_kind_9_and_older_fields_stay_off_the_wire() {
         assert!(mic.packetize(seq * 5000, &[seq as u8; 30], |d| packets.push(d.to_vec())));
     }
     assert_eq!(packets.len(), 5, "four frames and their parity");
-    assert!(packets.iter().all(|p| p[0] == 9));
+    assert!(packets.iter().all(|p| p[0] == 13));
     let mut receiver = AudioReceiver::with_format(42, 240, 48_000);
     let now = std::time::Instant::now();
     // The second frame is lost; parity rebuilds it.
@@ -1106,4 +1109,35 @@ fn microphone_packets_are_kind_9_and_older_fields_stay_off_the_wire() {
     };
     let json = serde_json::to_string(&surround).unwrap();
     assert!(json.contains(r#""audio_channels":6"#) && json.contains(r#""mic":true"#));
+}
+
+#[test]
+fn av1_offer_is_additive_and_unknown_codecs_still_fall_through() {
+    use latch_proto::control::StreamRequest;
+    let mut request: serde_json::Value = serde_json::to_value(StreamRequest {
+        protocol: 1,
+        width: 1920,
+        height: 1080,
+        fps: 240,
+        bitrate_kbps: 100_000,
+        codecs: vec![Codec::Av1, Codec::Hevc, Codec::H264Baseline],
+        udp_port: 47880,
+        audio: false,
+        name: String::new(),
+        cursor: false,
+        gamepads: false,
+        audio_channels: 0,
+        mic: false,
+    })
+    .unwrap();
+    assert_eq!(request["codecs"][0], "av1");
+    request["codecs"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, serde_json::json!("future-codec"));
+    let decoded: StreamRequest = serde_json::from_value(request).unwrap();
+    assert_eq!(
+        decoded.codecs,
+        [Codec::Av1, Codec::Hevc, Codec::H264Baseline]
+    );
 }

@@ -32,7 +32,7 @@ impl AudioPacketizer {
         }
     }
 
-    /// The same for the viewer's microphone (datagram kind 9).
+    /// The same for the viewer's microphone (datagram kind 13).
     pub fn mic(session: u32) -> Self {
         Self {
             write: crate::wire::write_mic,

@@ -1,11 +1,147 @@
 # Changelog
 
+## Unreleased — transport workstream
+
+- Batch Linux video sends/receives and macOS receives without waiting to fill
+  batches; reuse packetizer storage and hand complete frames to decode inline.
+- Faster delay-gradient bitrate feedback and recovery, persistent FEC protection
+  after radio bursts, and RTT-gated recovery IDRs. Protocol 1 stays compatible.
+- Add codec-free transport/FEC measurements and deterministic capacity-step,
+  240 fps, random/burst loss, long-RTT and jitter scenarios.
+- Cut for policers: uncorrected loss or lost frames cut at any raw loss, then
+  the climb holds just under the policed rate; 5–15 ms Wi-Fi ping
+  jitter no longer trips the queue threshold; a capacity collapse cuts on its
+  first report (100→20 Mbps at 10 ms RTT: 160→60 ms).
+- Hold steady caps: keep the last sustainable rate and probe above it in
+  bounded, RTT-aware steps instead of doubling to the ceiling after every
+  drain. Budget spread on a fixed 20/50/100 Mbps cap is 0.7/1.2/2.5 Mbps
+  (5.1: 1.6/3.5/7.1); 150–250 ms RTT paths no longer fill the queue.
+- Recovery counts the real time between reports, so 5.1's 250 ms and older
+  one-second viewers recover as fast as 50 ms ones; reports after more than
+  2 s of silence grant no growth.
+- A permanent lossless RTT increase (route change) is rebased instead of
+  pinning the budget at its floor.
+- The wire floor is 1 Mbps rather than a tenth of the requested rate, so a
+  100 Mbps request adapts to a 2–5 Mbps link.
+- Older viewers without repaired-loss reporting no longer lose their bitrate
+  to FEC-repaired radio loss.
+- A host that ends a stream half-closes and keeps reading briefly, and the
+  viewer closes its connection as soon as it has read the end: with 50 ms
+  reports in flight, a takeover could otherwise reset the connection before
+  the old viewer learned why it ended.
+- Windows viewers rearm Mio readiness after a batched receive, so packets
+  after an idle gap wake the receive loop instead of waiting for its 20 ms timer.
+
+
 The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
 ## Unreleased
 
+- No Latch-imposed ceilings on a stream. The viewer allowed 30–240 fps and
+  2–150 Mbps and the host clamped every request to 240 fps, 500 Mbps and
+  8192 pixels; the software H.264 encoder refused anything over 240 fps.
+  Requests now run to 500 fps, 1 Gbps and 16384 pixels a side, and the host
+  meets them with what its encoder takes: each codec's top level, lowered
+  where the hardware has a smaller limit (VideoToolbox is tried at a ladder
+  of sizes: an M3 Pro takes H.264 to 4096 × 2160 and HEVC to 8192 × 4320).
+  Hosts report these limits in `/v1/status` (`streamer.codecs`), and a
+  viewer fits what it asks for to them, both counting a picture in coded
+  16-pixel blocks (3840 × 2400 on an M3 Pro's H.264 now fits to a size it
+  encodes in hardware, not to one it hands to software). A Linux host's
+  software frame rate is measured on its own CPU when the host starts,
+  instead of guessed from its core count (an M3 Pro: 67 fps at 1080p);
+  until then it reports and holds sessions to 30 fps at 1080p, and the
+  host itself holds every request to what it measured, so a viewer that
+  connects at once, or does not fit its request, cannot ask a slow CPU
+  for 4K at 120. Measured on the test pattern: 1280 × 720 asked
+  at 300 fps streams at 283 (was held at 240); 640 × 360 at 480 streams at
+  474 (was 240).
+- Quality profiles modelled on GeForce NOW's, which follow the display:
+  **Balanced** (the default: this screen's size at its own refresh rate,
+  so 120 fps on ProMotion and up to 500 on a fast monitor), **Competitive**
+  (1080p at the display's rate, up to 360), **Cinematic** (up to 4K and 120
+  fps at half again the bitrate) and **Custom** (30–500 fps, 2–1000 Mbps,
+  5K and 8K sizes). A profile's bitrate is a ceiling the host comes down
+  from: 40 Mbps at 1080p60, growing as pixels to the ¾ and frame rate to
+  the ½, never under 5.1's 50 (Cinematic 100). That is 50 Mbps at 1080p60,
+  87 at 1440p120, 113 at 4K60 and 160 at 4K120, one to two times
+  GeForce NOW's (25–35, 45–50, 75–100), for encoders tuned for latency
+  rather than size, H.264 where it would use AV1, and LAN or tailnet
+  paths.
+  AV1 is a codec choice (`"av1"` on the wire) for when both ends have it.
+  5.1's Smooth, Balanced and Sharp move to Competitive, Balanced and
+  Cinematic once.
+- A stats overlay, as in GeForce NOW: **Stats**, or the host key with S
+  (or F6), lays resolution, codec, frames received / decoded / drawn,
+  bitrate against its target, round trip, jitter, loss before and after
+  FEC, dropped frames, decode and present times and an estimated latency
+  breakdown over the picture's corner, without taking the mouse. The full
+  Stream performance panel moved to More.
+- Windows hardware HEVC is enabled by default. AMD HEVC can use the driver’s
+  AMF runtime directly, with Media Foundation fallback; hardware AV1 MFTs
+  are negotiated only after a keyframe probe. Windows honors requested
+  frame rates and bitrates beyond the former 240 fps/500 Mbps limits.
+- Virtual display setup adds missing high-refresh gaming modes and 8K
+  sizes, preserves existing XML, and checks monitor arrival after restart.
+  Hardware timing and driver mode-count limitations are documented in
+  `docs/measurements/2026-11-03/windows-host/`.
+- Mac host keyframe requests discard queued pictures until the requested
+  IDR, coalesce retries, and clear on output. A bitrate change applies from
+  the next picture on, without an IDR.
+  HEVC uses its quality path through the pixel rate of 1080p120, recovering
+  the quality lost to the speed hint; faster streams retain the fast path.
+
+- A Mac host keeps up with fast streams. VideoToolbox no longer uses its
+  low-latency rate control, which doubled each frame's encode time,
+  dropped frames and sent a fifth of the asked-for bitrate; and a frame
+  is handed to the encoder without waiting for the one before, so the
+  media engine overlaps them. Synthetic 1080p HEVC on an M3 Pro: 240 fps
+  where 110 was the ceiling, about 5 ms a frame instead of 9.4; the
+  14" MacBook Pro's own 3024×1964 at 120 fps where 31–43 came out.
+  ScreenCaptureKit takes every refresh of a display as fast as the
+  stream (ProMotion included) instead of a gap of exactly one frame that
+  timing jitter could halve, keeps more surfaces so two frames in the
+  encoder never starve it, and `LATCH_MAC_DISPLAY` picks a display other
+  than the main one. HEVC Main10 from P010 surfaces is in place for HDR.
+
+- Gamepads. Pads connected to the viewer (Xbox, DualSense, DualShock 4,
+  Switch Pro and others, on a Mac, Windows or Linux) reach the host's games
+  as virtual pads, and the game's rumble comes back to them. A Windows PC
+  makes Xbox 360 and DualShock 4 pads through the ViGEmBus driver, which
+  setup now installs (checksum-pinned, never restarting Windows) and
+  uninstall removes only if setup installed it; a Linux host makes Xbox 360
+  pads through `/dev/uinput` (see the Linux notes for the permission it
+  needs); a Mac host takes none. Each pad's whole state is sent when it
+  changes and again until the host has it, so a lost packet never leaves a
+  button held; on the PC a state reaches XInput well under a millisecond
+  after the viewer sends it. The stream toolbar shows the connected pads.
+  Hosts and viewers from before this negotiate no gamepads and work as
+  before.
+- Linux host: only what changed on screen is read, converted and encoded.
+  X Damage rectangles are kept apart instead of merged into one box, only
+  those are read from the X server and converted to YUV (split across
+  cores), and the encoder skips the rest without comparing it.
+  Measurements: `docs/measurements/2026-11-03-linux-host/`.
+- Linux host: NVENC and VA-API hardware encoding (H.264, HEVC, and AV1 on
+  NVENC), loaded at run time and probed when the host starts, with
+  `latch-codec` as the fallback; `LATCH_LINUX_ENCODER` chooses. Each
+  encoder's limits come from its driver and are reported in
+  `streamer.codecs`; VA-API uses, for each codec, the first render node
+  that encodes it. Only failures that last give a codec up for the
+  process (a session limit or a size it does not take fail one open);
+  HEVC is not offered at sizes VA-API cannot code (1366 × 768), and a
+  resize to one ends the session for the viewer to reconnect with H.264.
+  Not yet run on a GPU.
+- The software H.264 encoder writes its reconstruction in place, searches
+  for scrolls only when enough of a band changed, and runs its analysis on
+  the slice workers. Its output changes only where little of a band
+  changed: under 1/64 of its samples (was 1/256) the band is not searched
+  for a scroll, and under 1/16 not for a sideways one, which is most of
+  why a 1440p sweep went from 3.7 to 0.5 Mb/s. Colour conversion keeps
+  its threads instead of starting them each frame (a whole 1080p frame:
+  1.35 to 1.06 ms on four Neoverse N1 cores).
 - The viewer no longer holds a fixed 40 ms of sound. The host sends each
   5 ms of sound as soon as it is captured, and the viewer's buffer holds
   what the measured jitter of the path needs (11–15 ms on a quiet LAN in

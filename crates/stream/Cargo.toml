@@ -22,6 +22,9 @@ cpal = "0.18"
 [target.'cfg(windows)'.dependencies]
 # Media Foundation's H.264 decoder (DXVA when the GPU has it).
 windows = { version = "0.58", features = [
+    # Gamepads through Windows.Gaming.Input.
+    "Foundation_Collections",
+    "Gaming_Input",
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
@@ -32,5 +35,19 @@ windows = { version = "0.58", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Variant",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Gamepads through the GameController framework.
+objc2 = "0.6"
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2-game-controller = { version = "0.3", features = ["block2", "dispatch2"] }
+# Rumble through each pad's Core Haptics engines.
+objc2-core-haptics = { version = "0.3", default-features = false, features = ["std", "block2", "CHHapticEngine", "CHHapticEvent", "CHHapticParameter", "CHHapticPattern", "CHHapticPatternPlayer"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSError", "NSString"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Gamepads through evdev; pure Rust ioctls.
+evdev = "0.13"
 
 [dev-dependencies]

@@ -42,6 +42,17 @@ pub fn fec_percent_for(loss_pct: f32, rtt: Option<std::time::Duration>) -> u8 {
     fec_percent_for_loss(loss_pct).max(floor)
 }
 
+/// Fast attack, two-second decay for parity feedback. Brief radio bursts must
+/// not lose their protection on the very next clean feedback window.
+pub fn fec_loss_sample(previous: f32, loss: f32, elapsed: Duration) -> f32 {
+    let loss = if loss.is_finite() {
+        loss.clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    loss.max(previous * (-elapsed.as_secs_f32() / 2.0).exp())
+}
+
 /// One encoded frame for the packetizer.
 #[derive(Debug, Clone, Copy)]
 pub struct OutFrame<'a> {
@@ -58,6 +69,7 @@ pub struct Packetizer {
     next_frame: u32,
     fec_percent: u8,
     shard_len: usize,
+    buffers: Vec<Vec<u8>>,
 }
 
 impl Packetizer {
@@ -67,6 +79,9 @@ impl Packetizer {
             next_frame: 0,
             fec_percent: DEFAULT_FEC_PERCENT,
             shard_len: crate::MAX_SHARD_LEN,
+            buffers: (0..crate::transport::BATCH_SIZE)
+                .map(|_| Vec::with_capacity(crate::MAX_DATAGRAM))
+                .collect(),
         }
     }
 
@@ -86,7 +101,21 @@ impl Packetizer {
     /// out data is less likely to take out the parity sent after it.
     /// Returns the frame's number. An empty frame is sent as one
     /// zero-length data shard.
-    pub fn packetize(&mut self, frame: &OutFrame<'_>, emit: impl FnMut(&[u8])) -> u32 {
+    pub fn packetize(&mut self, frame: &OutFrame<'_>, mut emit: impl FnMut(&[u8])) -> u32 {
+        self.packetize_batches(frame, |batch| {
+            for datagram in batch {
+                emit(datagram);
+            }
+        })
+    }
+
+    /// Flush data before computing parity, and flush the final partial batch.
+    /// Storage is reused between frames; no datagram is allocated per packet.
+    pub fn packetize_batches(
+        &mut self,
+        frame: &OutFrame<'_>,
+        mut emit: impl FnMut(&[Vec<u8>]),
+    ) -> u32 {
         let number = self.next_frame;
         self.next_frame = self.next_frame.wrapping_add(1);
         let len = frame.data.len().clamp(1, self.shard_len);
@@ -95,8 +124,7 @@ impl Packetizer {
         if blocks > u8::MAX as usize || frame.data.len() > u32::MAX as usize {
             return number;
         }
-        let mut emit = emit;
-        let mut buf = Vec::with_capacity(32 + len);
+        let mut used = 0;
         // The last shard, zero-padded to the shard length.
         let tail = {
             let full = frame.data.len() / len * len;
@@ -146,11 +174,19 @@ impl Packetizer {
                     bytes: shard_bytes(first + index),
                     ..header(block, data, parity)
                 };
-                crate::wire::write_video(&mut buf, self.session, &shard);
-                emit(&buf);
+                crate::wire::write_video(&mut self.buffers[used], self.session, &shard);
+                used += 1;
+                if used == self.buffers.len() {
+                    emit(&self.buffers);
+                    used = 0;
+                }
             }
         }
 
+        if used > 0 {
+            emit(&self.buffers[..used]);
+            used = 0;
+        }
         let mut parity_flat = Vec::new();
         for (block, &(first, data, parity)) in layout.iter().enumerate() {
             let refs: Vec<&[u8]> = (first..first + data).map(shard_bytes).collect();
@@ -169,9 +205,16 @@ impl Packetizer {
                     bytes,
                     ..header(block, data, parity)
                 };
-                crate::wire::write_video(&mut buf, self.session, &shard);
-                emit(&buf);
+                crate::wire::write_video(&mut self.buffers[used], self.session, &shard);
+                used += 1;
+                if used == self.buffers.len() {
+                    emit(&self.buffers);
+                    used = 0;
+                }
             }
+        }
+        if used > 0 {
+            emit(&self.buffers[..used]);
         }
         number
     }
@@ -221,6 +264,8 @@ struct Block {
     shards: Vec<Option<Vec<u8>>>,
     data: usize,
     complete: bool,
+    received: usize,
+    received_data: usize,
 }
 struct Pending {
     len: usize,
@@ -304,6 +349,8 @@ impl Reassembler {
             shards: vec![None; count + shard.parity as usize],
             data: count,
             complete: false,
+            received: 0,
+            received_data: 0,
         });
         if block.shards.len() != count + shard.parity as usize {
             return;
@@ -318,8 +365,12 @@ impl Reassembler {
         bytes.extend_from_slice(shard.bytes);
         block.shards[idx] = Some(bytes);
         self.stats.shards_received += 1;
-        if block.shards.iter().filter(|s| s.is_some()).count() >= count {
-            let missing = block.shards[..count].iter().filter(|s| s.is_none()).count();
+        block.received += 1;
+        block.received_data += usize::from(idx < count);
+        if block.received_data == count {
+            block.complete = true;
+        } else if block.received >= count {
+            let missing = count - block.received_data;
             if let Ok(coder) = crate::fec::ReedSolomon::cached(count, shard.parity as usize) {
                 if coder.reconstruct(&mut block.shards).is_ok() {
                     block.complete = true;

@@ -4,7 +4,9 @@
 //!
 //!     serve [--bind 100.x.y.z] [--port 47860] [--telemetry]
 //!
-//! `LATCH_TEST_PATTERN=still|sweep|noise` streams the synthetic desktop.
+//! `LATCH_TEST_PATTERN=still|sweep|noise` streams the synthetic desktop;
+//! `LATCH_TEST_GAMEPADS=system` then still plugs viewers' gamepads into the
+//! platform (ViGEmBus, uinput) rather than test pads.
 //! A viewer's microphone plays into `LATCH_MIC_DEVICE` (or the first
 //! virtual cable) on Windows and macOS, as the host does.
 
@@ -37,7 +39,18 @@ fn main() -> anyhow::Result<()> {
     let server = Server::bind(
         port,
         Options {
-            prepare: None,
+            prepare: args.iter().any(|a| a == "--prepare-display").then(|| {
+                Box::new(|req: &StreamRequest| {
+                    let previous = latch_engine::display::prepare(req.width, req.height, req.fps)?;
+                    Ok(previous.map(|previous| {
+                        Box::new(move || {
+                            if let Err(e) = latch_engine::display::restore(&previous) {
+                                eprintln!("restore display: {e:#}");
+                            }
+                        }) as Box<dyn FnOnce() + Send>
+                    }))
+                }) as latch_engine::server::Prepare
+            }),
             log: Box::new(|line| eprintln!("{line}")),
             mic: mic_opener(),
         },

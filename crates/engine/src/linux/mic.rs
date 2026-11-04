@@ -199,7 +199,7 @@ pub(super) fn open(format: &AudioFormat) -> anyhow::Result<crate::mic::MicOut> {
             if !q.playing && q.samples.len() >= cushion {
                 q.playing = true;
             }
-            for pair in out.chunks_exact_mut(2) {
+            for pair in out.as_chunks_mut::<2>().0 {
                 let sample = if q.playing {
                     q.samples.pop_front().unwrap_or_else(|| {
                         q.playing = false;

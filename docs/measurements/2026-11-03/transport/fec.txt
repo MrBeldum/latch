@@ -1,0 +1,25 @@
+   Compiling latch-proto v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-cf8a2264/crates/proto)
+    Finished `release` profile [optimized] target(s) in 24.16s
+     Running unittests src/lib.rs (target/release/deps/latch_proto-b63c515e7f675670)
+
+running 1 test
+FEC 64+7 x 1172: encode 5004.0 MB/s (14.29525ms for 1000 iter), reconstruct 2782.6 MB/s (28.375µs for 1 iter, 25.707417ms for 1000 iter)
+FEC 64+20 x 1172: encode 1958.3 MB/s (36.528375ms for 1000 iter), reconstruct 193.8 MB/s (58.042µs for 1 iter, 369.11625ms for 1000 iter)
+FEC 128+14 x 1172: encode 556.7 MB/s (257.008208ms for 1000 iter), reconstruct 272.5 MB/s (10.557708ms for 1 iter, 525.049583ms for 1000 iter)
+FEC 200+55 x 1172: encode 119.8 MB/s (1.866429417s for 1000 iter), reconstruct 82.7 MB/s (546.708µs for 1 iter, 2.7036655s for 1000 iter)
+test fec::tests::benchmark_fec ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 5.81s
+
+     Running tests/protocol.rs (target/release/deps/protocol-94c0322769000211)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/regressions.rs (target/release/deps/regressions-3571cb953347433f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+

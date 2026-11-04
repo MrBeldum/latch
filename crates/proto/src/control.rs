@@ -11,11 +11,76 @@ pub const PATH: &str = "/v1/stream";
 /// Largest control message, type byte included.
 pub const MAX_MESSAGE: usize = 65_536;
 
+/// The widest range a [`StreamRequest`] is taken in. These are bounds on
+/// what is asked, not limits of Latch: a host still meets each request
+/// with what its capture and encoder can do (`latch_core::api::Caps`).
+/// Sides are bounded by the largest picture any codec level defines
+/// (AV1 level 6.x: 16384 × 8704).
+pub const MAX_SIDE: u32 = 16_384;
+/// Frames a second: the fastest gaming monitors run at 500 Hz.
+pub const MAX_FPS: u32 = 500;
+/// Kilobits a second: 1 Gbps, the highest any codec level allows.
+pub const MAX_BITRATE_KBPS: u32 = 1_000_000;
+
+/// `width` × `height` at `fps` within an encoder's limits (longest side,
+/// largest picture, pixels a second): scaled down in proportion until the
+/// picture fits, then the frame rate lowered until the pixel rate does.
+/// Sides stay even. A picture is counted as coded, in whole 16-pixel
+/// blocks ([`coded_pixels`]), as levels count it (H.264 in macroblocks)
+/// and as a media engine runs out of room: an M3 Pro takes 4096 × 2160
+/// and fails 3776 × 2352, which is fewer pixels but more blocks. A limit
+/// of 0 is none. The host and the viewer both fit with this, so a
+/// request a viewer fitted is one the host takes as it is.
+pub fn fit(
+    (max_side, max_pixels, max_pixel_rate): (u32, u64, u64),
+    width: u32,
+    height: u32,
+    fps: u32,
+) -> (u32, u32, u32) {
+    let (w0, h0) = (width.max(2), height.max(2));
+    let side = if max_side == 0 {
+        1.0
+    } else {
+        f64::from(max_side.max(2)) / f64::from(w0.max(h0))
+    };
+    let area = if max_pixels == 0 {
+        1.0
+    } else {
+        (max_pixels.max(4) as f64 / (f64::from(w0) * f64::from(h0))).sqrt()
+    };
+    let mut scale = side.min(area).min(1.0);
+    let even = |v: u32, scale: f64| ((f64::from(v) * scale) as u32 / 2 * 2).max(2);
+    let (mut w, mut h) = if scale < 1.0 {
+        (even(w0, scale), even(h0, scale))
+    } else {
+        (width, height)
+    };
+    // Rounding up to blocks can still leave it a few blocks over.
+    while max_pixels > 0 && coded_pixels(w, h) > max_pixels && w.max(h) > 16 {
+        scale *= 0.998;
+        (w, h) = (even(w0, scale), even(h0, scale));
+    }
+    let fps = if max_pixel_rate == 0 {
+        fps
+    } else {
+        let ceiling = max_pixel_rate / coded_pixels(w, h).max(1);
+        fps.min(u32::try_from(ceiling).unwrap_or(u32::MAX)).max(1)
+    };
+    (w, h, fps)
+}
+
+/// A picture's pixels as coded: each side rounded up to a 16-pixel block.
+pub fn coded_pixels(width: u32, height: u32) -> u64 {
+    u64::from(width.next_multiple_of(16)) * u64::from(height.next_multiple_of(16))
+}
+
 /// A video codec, as named on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Codec {
     #[serde(rename = "hevc")]
     Hevc,
+    #[serde(rename = "av1")]
+    Av1,
     #[serde(rename = "h264-high")]
     H264High,
     #[serde(rename = "h264-baseline")]
@@ -26,6 +91,7 @@ impl Codec {
     pub fn name(self) -> &'static str {
         match self {
             Codec::Hevc => "HEVC",
+            Codec::Av1 => "AV1",
             Codec::H264High | Codec::H264Baseline => "H.264",
         }
     }
@@ -47,11 +113,14 @@ pub struct StreamRequest {
     pub name: String,
     #[serde(default)]
     pub cursor: bool,
+    /// The viewer sends gamepads (`docs/PROTOCOL.md`, "Gamepads").
+    #[serde(default)]
+    pub gamepads: bool,
     /// Most audio channels the viewer plays (6 for 5.1, 8 for 7.1); absent
     /// or below 3 means stereo, all an older viewer decodes.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub audio_channels: u32,
-    /// The viewer offers its microphone (datagram kind 9) when the host
+    /// The viewer offers its microphone (datagram kind 13) when the host
     /// answers with an `Accept.mic` format.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mic: bool,
@@ -62,6 +131,13 @@ fn is_zero(n: &u32) -> bool {
 }
 
 fn known_codecs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Codec>, D::Error> {
+    known(d)
+}
+
+/// A list of names, skipping the ones this version does not know.
+fn known<'de, D: serde::Deserializer<'de>, T: serde::de::DeserializeOwned>(
+    d: D,
+) -> Result<Vec<T>, D::Error> {
     let names = Vec::<serde_json::Value>::deserialize(d)?;
     Ok(names
         .into_iter()
@@ -93,6 +169,16 @@ pub struct Accept {
     pub audio_problem: String,
     #[serde(default)]
     pub cursor: bool,
+    /// Gamepad slots the host emulates; 0 when it takes none.
+    #[serde(default)]
+    pub gamepads: u8,
+    /// The pad kinds the host emulates as themselves; others become Xbox
+    /// pads.
+    #[serde(default, deserialize_with = "known")]
+    pub gamepad_kinds: Vec<crate::gamepad::PadKind>,
+    /// Why the host takes no gamepads, when the viewer offered them.
+    #[serde(default)]
+    pub gamepad_problem: String,
     /// What the viewer's microphone is to be sent as, when it offered it
     /// and this host has somewhere to play it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -329,6 +415,35 @@ mod tests {
         }"#;
         let req_new: StreamRequest = serde_json::from_str(json_with_cursor).unwrap();
         assert!(req_new.cursor);
+        assert!(!req_new.gamepads);
+    }
+
+    #[test]
+    fn gamepads_are_negotiated_and_unknown_kinds_skipped() {
+        use crate::gamepad::PadKind;
+        let json = r#"{
+            "session": 42,
+            "token": "0123456789abcdef0123456789abcdef",
+            "codec": "hevc",
+            "width": 1920,
+            "height": 1080,
+            "fps": 60,
+            "bitrate_kbps": 8000,
+            "encoder": "nvenc",
+            "audio": null,
+            "gamepads": 4,
+            "gamepad_kinds": ["xbox", "switch", "playstation"]
+        }"#;
+        let acc: Accept = serde_json::from_str(json).unwrap();
+        assert_eq!(acc.gamepads, 4);
+        assert_eq!(acc.gamepad_kinds, [PadKind::Xbox, PadKind::PlayStation]);
+        // A 5.0 host's Accept: no gamepads.
+        let old = json.replace(r#""gamepads": 4,"#, "").replace(
+            r#""gamepad_kinds": ["xbox", "switch", "playstation"]"#,
+            r#""cursor": false"#,
+        );
+        let acc: Accept = serde_json::from_str(&old).unwrap();
+        assert_eq!((acc.gamepads, acc.gamepad_kinds.len()), (0, 0));
     }
 
     #[test]

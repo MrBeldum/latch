@@ -302,6 +302,7 @@ pub fn decodable() -> Vec<Codec> {
 /// A decoder for `codec`: the platform's where there is one, else
 /// `latch-codec`'s for Constrained Baseline.
 pub fn new_decoder(codec: Codec) -> Result<Box<dyn Decoder>> {
+    anyhow::ensure!(codec != Codec::Av1, "AV1 decoding is unavailable");
     #[cfg(target_os = "macos")]
     {
         match videotoolbox::VideoToolbox::new(codec == Codec::Hevc) {

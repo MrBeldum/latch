@@ -10,6 +10,13 @@
 //!          [--moves N]     (N relative moves of +10,+5, one every 16 ms)
 //!          [--dump PREFIX] (PREFIX-before.pgm and PREFIX-after.pgm: the
 //!                           picture's luma either side of the moves)
+//!          [--pads N]      (N gamepads for the whole run: south/A toggles
+//!                           every --pad-toggle-ms (500), the left stick
+//!                           sweeps, the right trigger ramps; each state
+//!                           change is logged with the wall clock to the
+//!                           microsecond, and so is every rumble the host
+//!                           sends back)
+//!          [--pad-kind xbox|playstation] [--pad-hz 250]
 //!          [--mute]        (play sound at zero volume)
 //!
 //! With `LATCH_AUDIO_PROBE=1` against a host run with
@@ -17,6 +24,7 @@
 //! after the host made each click it reached this machine's speaker (both
 //! wall clocks; on two machines, their offset is in it).
 
+use latch_proto::gamepad::{button, PadKind, PadState};
 use latch_stream::{Event, Frame, FrameSlot, Session, Settings};
 use std::net::IpAddr;
 use std::sync::{mpsc, Arc};
@@ -116,6 +124,14 @@ fn main() -> anyhow::Result<()> {
         "sample-ms must be 1..=1000"
     );
     let keys: usize = arg("--keys", "0").parse()?;
+    let pads: u8 = arg("--pads", "0").parse()?;
+    let pad_kind = match arg("--pad-kind", "xbox").as_str() {
+        "playstation" => PadKind::PlayStation,
+        "generic" => PadKind::Generic,
+        _ => PadKind::Xbox,
+    };
+    let pad_hz: u64 = arg("--pad-hz", "250").parse()?;
+    let pad_toggle_ms: u64 = arg("--pad-toggle-ms", "500").parse()?;
 
     let frames = Arc::new(FrameSlot::default());
     let (tx, rx) = mpsc::channel();
@@ -130,9 +146,11 @@ fn main() -> anyhow::Result<()> {
             fps,
             bitrate_kbps: kbps,
             hevc: flag("--hevc"),
+            av1: flag("--av1"),
             audio: flag("--audio"),
             name: "view example".into(),
             cursor: false,
+            gamepads: pads > 0,
             mic: flag("--mic"),
         },
         frames.clone(),
@@ -149,6 +167,75 @@ fn main() -> anyhow::Result<()> {
         }
     }
     eprintln!("connected in {:?}", asked.elapsed());
+    // Microseconds since the epoch, comparable with another program's
+    // log on the same machine.
+    fn wall_us() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros())
+    }
+    let pad_log = Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
+    let pads_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pad_thread = (pads > 0).then(|| {
+        let log = pad_log.clone();
+        session.on_pad_feedback(move |slot, f| {
+            eprintln!(
+                "pad {slot} feedback large {} small {} triggers {}/{} led {:?} player {} at {}",
+                f.large,
+                f.small,
+                f.left_trigger,
+                f.right_trigger,
+                f.led,
+                f.player,
+                wall_us()
+            );
+            log.lock().push(serde_json::json!({
+                "feedback": slot, "large": f.large, "small": f.small, "led": f.led,
+                "player": f.player, "wall_us": wall_us().to_string(),
+            }));
+        });
+        let input = session.input();
+        let done = pads_done.clone();
+        let log = pad_log.clone();
+        std::thread::spawn(move || {
+            let slots = pads.min(input.pad_slots());
+            if slots < pads {
+                eprintln!("the host takes {} gamepads", input.pad_slots());
+            }
+            let start = Instant::now();
+            let period = Duration::from_micros(1_000_000 / pad_hz.max(1));
+            let mut south = false;
+            let mut tick = 0u64;
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                let ms = start.elapsed().as_millis() as u64;
+                let toggled = (ms / pad_toggle_ms.max(1)) % 2 == 1;
+                let phase = (tick % 1000) as f32 / 1000.0 * std::f32::consts::TAU;
+                let state = PadState {
+                    buttons: if toggled { button::SOUTH } else { 0 },
+                    left_x: (phase.sin() * 30_000.0) as i16,
+                    left_y: (phase.cos() * 30_000.0) as i16,
+                    right_trigger: ((tick % 256) * 256) as u16,
+                    ..Default::default()
+                };
+                // Stamped before sending, so the log never trails the pad.
+                let sent_us = wall_us();
+                for slot in 0..slots {
+                    input.pad(slot, pad_kind, state);
+                }
+                if toggled != south {
+                    south = toggled;
+                    log.lock().push(serde_json::json!({
+                        "south": south, "wall_us": sent_us.to_string(),
+                    }));
+                }
+                tick += 1;
+                std::thread::sleep(period);
+            }
+            for slot in 0..slots {
+                input.pad_gone(slot);
+            }
+        })
+    });
     if flag("--mute") {
         session.set_volume(0.0);
     }
@@ -299,6 +386,12 @@ fn main() -> anyhow::Result<()> {
             }),
         }));
     }
+    pads_done.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(t) = pad_thread {
+        let _ = t.join();
+        // Let the unplug reach the host before the session ends it anyway.
+        std::thread::sleep(Duration::from_millis(200));
+    }
     let elapsed = t0.elapsed().as_secs_f64();
     let cpu = (cpu_seconds() - cpu0) / elapsed * 100.0;
     let stats = session.stats();
@@ -342,6 +435,8 @@ fn main() -> anyhow::Result<()> {
         "audio_click_ms": { "n": clicks.len(), "min": clicks.first(), "p50": click(0.5), "p95": click(0.95), "max": clicks.last() },
         "frame_interval_ms": { "n": gaps.len(), "fps": if span > 0.0 { gaps.len() as f64 / span } else { 0.0 }, "mean": mean_gap, "stdev": stdev_gap, "p50": gap(0.5), "p95": gap(0.95), "p99": gap(0.99), "max": gaps.last() },
         "seconds": lines,
+        "pads": { "asked": pads, "host_slots": session.input().pad_slots(),
+                  "problem": session.pad_problem(), "log": pad_log.lock().clone() },
     });
     println!("{}", serde_json::to_string_pretty(&summary)?);
     session.stop();

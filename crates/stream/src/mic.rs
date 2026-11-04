@@ -2,7 +2,7 @@
 //! on and the host has somewhere to play it (`Accept.mic`): the default
 //! input device, mixed to mono and resampled to the host's 48 kHz, coded
 //! lossless in 5 ms frames (`lpcm-rice`) with the same parity as the
-//! host's sound, as datagram kind 9. macOS asks the person once whether
+//! host's sound, as datagram kind 13. macOS asks the person once whether
 //! Latch may use the microphone; until they agree the device delivers
 //! silence.
 

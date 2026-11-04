@@ -16,14 +16,19 @@ pub const DEVICE: &str = "Virtual Display Driver";
 /// Where the driver reads its settings unless the registry points elsewhere.
 pub const DEFAULT_DIR: &str = r"C:\VirtualDisplayDriver";
 pub const SETTINGS: &str = "vdd_settings.xml";
-const REG_KEY: &str = r"HKLM:\SOFTWARE\MikeTheTech\VirtualDisplayDriver";
-/// Listed with every size: the default frame rate and ProMotion's.
-pub const REFRESH_RATES: [u32; 2] = [60, 120];
+pub(crate) const REG_KEY: &str = r"HKLM:\SOFTWARE\MikeTheTech\VirtualDisplayDriver";
+/// Where setup records the driver's `VDDPATH` from before it pointed it at
+/// Latch's protected copy, so uninstall can put it back.
+pub(crate) const RECORD_KEY: &str = r"HKLM:\SOFTWARE\Latch\Display";
+/// Common display timings; custom timings in the driver's file are preserved.
+pub const REFRESH_RATES: [u32; 7] = [60, 90, 120, 144, 165, 240, 360];
+const LARGE_MODES: &[(u32, u32)] = &[(7680, 4320), (7680, 2160)];
 
 /// Every size as a PowerShell array of `@(width,height)` pairs.
 pub fn modes_ps() -> String {
     stream_modes()
         .iter()
+        .chain(LARGE_MODES)
         .map(|(w, h)| format!("@({w},{h})"))
         .collect::<Vec<_>>()
         .join(", ")
@@ -36,7 +41,8 @@ pub fn modes_ps() -> String {
 fn locate_ps() -> String {
     format!(
         r#"$vddDevices = @(Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | Where-Object {{ $_.FriendlyName -eq '{device}' -and $_.Status -eq 'OK' }})
-$vddDir = (Get-ItemProperty '{reg}' -ErrorAction SilentlyContinue).VDDPATH
+$vddOldPath = (Get-ItemProperty '{reg}' -ErrorAction SilentlyContinue).VDDPATH
+$vddDir = $vddOldPath
 if (-not $vddDir) {{ $vddDir = '{dir}' }}
 $vddFile = Join-Path $vddDir '{settings}'
 $vddWanted = @({modes})
@@ -46,17 +52,31 @@ $vddParseFailed = $false
 if (Test-Path -LiteralPath $vddFile) {{
     try {{
         [xml]$vddXml = Get-Content -LiteralPath $vddFile -Raw
-        foreach ($r in $vddXml.SelectNodes('/vdd_settings/resolutions/resolution')) {{ $vddListed["$($r.width)x$($r.height)"] = $true }}
+        foreach ($r in $vddXml.SelectNodes('/vdd_settings/resolutions/resolution')) {{ $vddListed["$($r.width)x$($r.height)"] = $r }}
     }} catch {{ $vddXml = $null; $vddParseFailed = $true }}
 }}
+$vddRates = @({rates})
+function Vdd-Rates($w, $h) {{
+    if (($w -eq 1920 -and $h -eq 1080) -or ($w -eq 2560 -and $h -eq 1440)) {{ return $vddRates }}
+    return @(60, 120)
+}}
 $vddMissing = @()
-foreach ($m in $vddWanted) {{ if (-not $vddListed["$($m[0])x$($m[1])"]) {{ $vddMissing += ,$m }} }}
+foreach ($m in $vddWanted) {{
+    $r = $vddListed["$($m[0])x$($m[1])"]
+    if (-not $r -or @((Vdd-Rates $m[0] $m[1]) | Where-Object {{ $_ -notin @($r.refresh_rate) -and $_ -notin @($vddXml.vdd_settings.global.g_refresh_rate) }}).Count -gt 0) {{ $vddMissing += ,$m }}
+}}
+
 "#,
         device = DEVICE,
         reg = REG_KEY,
         dir = DEFAULT_DIR,
         settings = SETTINGS,
         modes = modes_ps(),
+        rates = REFRESH_RATES
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
     )
 }
 
@@ -65,18 +85,14 @@ foreach ($m in $vddWanted) {{ if (-not $vddListed["$($m[0])x$($m[1])"]) {{ $vddM
 /// the driver reads them; a file that will not parse is left alone and
 /// said so. Nothing happens on a PC without the driver.
 pub fn setup_ps() -> String {
-    let rates = REFRESH_RATES
-        .iter()
-        .map(|r| format!(", @('refresh_rate', {r})"))
-        .collect::<String>();
     format!(
-        r#"Step "Listing the sizes a Mac can ask for on the virtual display"
+        r#"Step "Listing virtual display resolutions and refresh rates"
 {locate}if ($vddDevices.Count -eq 0) {{
     Write-Output "  no {device} on this PC; skipped"
 }} elseif ($vddParseFailed) {{
     Write-Output "  $vddFile could not be read and is left alone"
 }} elseif ($vddMissing.Count -eq 0) {{
-    Write-Output "  every size is listed already"
+    Write-Output "  every resolution and refresh rate is listed already"
 }} else {{
     if (-not $vddXml) {{
         [xml]$vddXml = '<?xml version="1.0" encoding="utf-8"?><vdd_settings><monitors><count>1</count></monitors><gpu><friendlyname>default</friendlyname></gpu><resolutions></resolutions></vdd_settings>'
@@ -85,34 +101,115 @@ pub fn setup_ps() -> String {
     $vddList = $vddRoot.SelectSingleNode('resolutions')
     if (-not $vddList) {{ $vddList = $vddRoot.AppendChild($vddXml.CreateElement('resolutions')) }}
     foreach ($m in $vddMissing) {{
-        $r = $vddXml.CreateElement('resolution')
-        foreach ($pair in @(@('width', $m[0]), @('height', $m[1]){rates})) {{
-            $e = $vddXml.CreateElement($pair[0])
-            $e.InnerText = "$($pair[1])"
-            [void]$r.AppendChild($e)
+        $r = $vddListed["$($m[0])x$($m[1])"]
+        if (-not $r) {{
+            $r = $vddXml.CreateElement('resolution')
+            foreach ($pair in @(@('width', $m[0]), @('height', $m[1]))) {{
+                $e = $vddXml.CreateElement($pair[0])
+                $e.InnerText = "$($pair[1])"
+                [void]$r.AppendChild($e)
+            }}
+            [void]$vddList.AppendChild($r)
         }}
-        [void]$vddList.AppendChild($r)
+        foreach ($hz in (Vdd-Rates $m[0] $m[1])) {{
+            if ($hz -notin @($r.refresh_rate) -and $hz -notin @($vddXml.vdd_settings.global.g_refresh_rate)) {{
+                $e = $vddXml.CreateElement('refresh_rate')
+                $e.InnerText = "$hz"
+                [void]$r.AppendChild($e)
+            }}
+        }}
     }}
     # Never let an elevated XML write follow a user's junction or symlink.
     try {{
         Assert-ProtectedTree $vddDir
         if (Test-Path -LiteralPath $vddFile) {{ Assert-Protected $vddFile }}
     }} catch {{
-        Write-Output "  display settings are not protected: $_; left unchanged"
-        exit 1
+        # The driver's installer often leaves C:\VirtualDisplayDriver writable.
+        # Keep that file untouched; publish settings in a protected directory.
+        Write-Output "  using protected settings instead of $vddFile ($_)"
+        $vddDir = $env:ProgramFiles
+        foreach ($part in @('Latch', 'Display')) {{
+            Assert-ProtectedTree $vddDir
+            $vddDir = Join-Path $vddDir $part
+            if (-not (Test-Path -LiteralPath $vddDir)) {{ New-Item -ItemType Directory -Path $vddDir | Out-Null }}
+        }}
+        Assert-ProtectedTree $vddDir
+        $vddFile = Join-Path $vddDir '{settings}'
+        if (Test-Path -LiteralPath $vddFile) {{ Assert-Protected $vddFile }}
+        $vddRelocated = $true
     }}
+    $vddPreviousBytes = $null
+    if (Test-Path -LiteralPath $vddFile) {{ $vddPreviousBytes = [IO.File]::ReadAllBytes($vddFile) }}
+    $vddHadMonitor = @(Get-PnpDevice -Class Monitor -ErrorAction SilentlyContinue | Where-Object {{ $_.InstanceId -like 'DISPLAY\MTT1337\*' -and $_.Status -eq 'OK' }}).Count -gt 0
     $vddWriterSettings = New-Object System.Xml.XmlWriterSettings
     $vddWriterSettings.Indent = $true
     $vddWriterSettings.Encoding = New-Object System.Text.UTF8Encoding($false)
     $vddWriter = [System.Xml.XmlWriter]::Create($vddFile, $vddWriterSettings)
     try {{ $vddXml.Save($vddWriter) }} finally {{ $vddWriter.Close() }}
-    Write-Output "  added $($vddMissing.Count) sizes to $vddFile; restarting the virtual display"
+    if ($vddRelocated) {{
+        if (-not (Test-Path -LiteralPath '{reg}')) {{ New-Item -Path '{reg}' -Force | Out-Null }}
+        New-ItemProperty -Path '{reg}' -Name 'VDDPATH' -Value $vddDir -PropertyType String -Force | Out-Null
+        # The first relocation only: a later run would record Latch's own folder.
+        if (-not (Test-Path -LiteralPath '{record}')) {{
+            New-Item -Path '{record}' -Force | Out-Null
+            $vddPrevious = 'absent'
+            if ($vddOldPath) {{ $vddPrevious = $vddOldPath }}
+            New-ItemProperty -Path '{record}' -Name 'PreviousVddPath' -Value $vddPrevious -PropertyType String -Force | Out-Null
+        }}
+    }}
+    Write-Output "  updated $($vddMissing.Count) resolutions to $vddFile; restarting the virtual display"
     foreach ($d in $vddDevices) {{ pnputil /restart-device $d.InstanceId | Out-Null }}
+    if ($vddHadMonitor) {{
+        $vddAlive = $false
+        foreach ($attempt in 1..20) {{
+            Start-Sleep -Milliseconds 250
+            if (@(Get-PnpDevice -Class Monitor -ErrorAction SilentlyContinue | Where-Object {{ $_.InstanceId -like 'DISPLAY\MTT1337\*' -and $_.Status -eq 'OK' }}).Count -gt 0) {{ $vddAlive = $true; break }}
+        }}
+        if (-not $vddAlive) {{
+            if ($vddPreviousBytes) {{ [IO.File]::WriteAllBytes($vddFile, $vddPreviousBytes) }} else {{ Remove-Item -LiteralPath $vddFile -Force }}
+            if ($vddRelocated) {{
+                if ($vddOldPath) {{ Set-ItemProperty -Path '{reg}' -Name VDDPATH -Value $vddOldPath }} else {{ Remove-ItemProperty -Path '{reg}' -Name VDDPATH }}
+            }}
+            foreach ($d in $vddDevices) {{ pnputil /restart-device $d.InstanceId | Out-Null }}
+            throw 'Virtual display rejected the mode list; previous settings restored (the driver may limit the number of modes)'
+        }}
+    }}
 }}
 "#,
         locate = locate_ps(),
         device = DEVICE,
-        rates = rates,
+        settings = SETTINGS,
+        reg = REG_KEY,
+        record = RECORD_KEY,
+    )
+}
+
+/// Uninstall's part: if setup pointed the driver at Latch's protected copy,
+/// point it back where it was, restart it so it rereads its settings, and
+/// remove the copy. Expects `$latchDir`, `$setupFailed` and
+/// `Assert-ProtectedTree` from the uninstall script.
+#[cfg(any(windows, test))]
+pub(crate) fn uninstall_ps() -> String {
+    format!(
+        r#"Step "Pointing the virtual display back at its own settings"
+$vddOurs = Join-Path $latchDir 'Display'
+$vddNow = (Get-ItemProperty '{reg}' -ErrorAction SilentlyContinue).VDDPATH
+if ($vddNow -and ($vddNow.TrimEnd('') -ieq $vddOurs)) {{
+    $vddPrevious = (Get-ItemProperty '{record}' -ErrorAction SilentlyContinue).PreviousVddPath
+    if ($vddPrevious -and $vddPrevious -ne 'absent') {{ Set-ItemProperty -Path '{reg}' -Name VDDPATH -Value $vddPrevious }}
+    else {{ Remove-ItemProperty -Path '{reg}' -Name VDDPATH -ErrorAction SilentlyContinue }}
+    foreach ($d in @(Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | Where-Object {{ $_.FriendlyName -eq '{device}' -and $_.Status -eq 'OK' }})) {{
+        pnputil /restart-device $d.InstanceId | Out-Null
+    }}
+}}
+if (Test-Path -LiteralPath $vddOurs) {{
+    try {{ Assert-ProtectedTree $vddOurs; Remove-Item -LiteralPath $vddOurs -Recurse -Force -ErrorAction Stop }} catch {{ Write-Output "  display settings folder: $_"; $setupFailed = $true }}
+}}
+if (Test-Path -LiteralPath '{record}') {{ Remove-Item -LiteralPath '{record}' -Force }}
+"#,
+        reg = REG_KEY,
+        record = RECORD_KEY,
+        device = DEVICE,
     )
 }
 
@@ -154,6 +251,17 @@ mod tests {
     #[test]
     fn the_step_lists_every_mode_keeps_the_file_and_restarts_only_on_change() {
         let s = setup_ps();
+        if let Ok(path) = std::env::var("LATCH_DUMP_VDD_SCRIPT") {
+            std::fs::write(
+                path,
+                format!(
+                    "{}\nfunction Step($label) {{ Write-Output $label }}\n{}",
+                    include_str!("../../../scripts/setup-protection.ps1"),
+                    s
+                ),
+            )
+            .unwrap();
+        }
         for (w, h) in stream_modes() {
             assert!(s.contains(&format!("@({w},{h})")), "{w}x{h} is listed");
         }
@@ -161,7 +269,11 @@ mod tests {
             s.contains("@(3024,1964)"),
             "a MacBook Pro 14\" is listed:\n{s}"
         );
-        assert!(s.contains("@('refresh_rate', 60), @('refresh_rate', 120)"));
+        for hz in [90, 144, 165, 240, 360] {
+            assert!(REFRESH_RATES.contains(&hz));
+        }
+        assert!(s.contains("@(7680,4320)"));
+        assert!(s.contains("$hz -notin @($r.refresh_rate)"));
         assert!(s.contains(&format!("FriendlyName -eq '{DEVICE}'")));
         assert!(s.contains("VDDPATH"), "a relocated settings file is found");
         assert!(s.contains(DEFAULT_DIR));

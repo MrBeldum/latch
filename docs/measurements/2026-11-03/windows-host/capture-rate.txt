@@ -1,0 +1,3 @@
+DXGI capture only 1920x1080@240: 223.0 updates/s
+DXGI capture only 2560x1440@240: 191.0 updates/s
+DXGI capture only 3840x2160@120: 107.5 updates/s

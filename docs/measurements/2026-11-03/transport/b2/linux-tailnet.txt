@@ -1,0 +1,30 @@
+run=1 offload=0 linux-tx {"receive":false,"seconds":5.000,"media_mbps":49.999,"pps":6000,"cpu_percent":3.29,"cpu_us_per_Mbit":657.78,"frames":600,"packets":30000,"errors":0}
+run=1 offload=0 mac-rx {"receive":true,"seconds":5.008,"media_mbps":49.923,"pps":5991,"cpu_percent":7.86,"cpu_us_per_Mbit":1573.96,"frames":600,"packets":30000,"errors":0}
+run=1 offload=0 linux-rx {"receive":true,"seconds":5.011,"media_mbps":49.893,"pps":5987,"cpu_percent":3.28,"cpu_us_per_Mbit":658.27,"frames":600,"packets":30000,"errors":0}
+coalesced_datagrams=0
+run=1 offload=0 mac-tx {"receive":false,"seconds":5.003,"media_mbps":49.972,"pps":5997,"cpu_percent":16.44,"cpu_us_per_Mbit":3290.54,"frames":600,"packets":30000,"errors":0}
+run=1 offload=1 linux-tx {"receive":false,"seconds":5.000,"media_mbps":49.999,"pps":6000,"cpu_percent":1.31,"cpu_us_per_Mbit":262.37,"frames":600,"packets":30000,"errors":0}
+run=1 offload=1 mac-rx {"receive":true,"seconds":5.002,"media_mbps":49.815,"pps":5998,"cpu_percent":7.48,"cpu_us_per_Mbit":1501.92,"frames":598,"packets":30000,"errors":0}
+run=1 offload=1 linux-rx {"receive":true,"seconds":5.058,"media_mbps":49.427,"pps":5931,"cpu_percent":2.99,"cpu_us_per_Mbit":605.08,"frames":600,"packets":30000,"errors":0}
+coalesced_datagrams=26798
+run=1 offload=1 mac-tx {"receive":false,"seconds":5.002,"media_mbps":49.976,"pps":5997,"cpu_percent":20.47,"cpu_us_per_Mbit":4096.15,"frames":600,"packets":30000,"errors":0}
+run=2 offload=0 linux-tx {"receive":false,"seconds":5.000,"media_mbps":49.999,"pps":6000,"cpu_percent":3.06,"cpu_us_per_Mbit":611.22,"frames":600,"packets":30000,"errors":0}
+run=2 offload=0 mac-rx {"receive":true,"seconds":5.006,"media_mbps":49.109,"pps":5925,"cpu_percent":7.19,"cpu_us_per_Mbit":1464.97,"frames":590,"packets":29660,"errors":0}
+run=2 offload=0 linux-rx {"receive":true,"seconds":4.999,"media_mbps":50.005,"pps":6001,"cpu_percent":3.60,"cpu_us_per_Mbit":720.03,"frames":600,"packets":30000,"errors":0}
+coalesced_datagrams=0
+run=2 offload=0 mac-tx {"receive":false,"seconds":5.003,"media_mbps":49.974,"pps":5997,"cpu_percent":9.32,"cpu_us_per_Mbit":1864.02,"frames":600,"packets":30000,"errors":0}
+run=2 offload=1 linux-tx {"receive":false,"seconds":5.000,"media_mbps":49.999,"pps":6000,"cpu_percent":1.23,"cpu_us_per_Mbit":246.01,"frames":600,"packets":30000,"errors":0}
+run=2 offload=1 mac-rx {"receive":true,"seconds":4.999,"media_mbps":50.013,"pps":6002,"cpu_percent":11.91,"cpu_us_per_Mbit":2381.12,"frames":600,"packets":30000,"errors":0}
+run=2 offload=1 linux-rx {"receive":true,"seconds":5.000,"media_mbps":50.000,"pps":6000,"cpu_percent":3.27,"cpu_us_per_Mbit":654.70,"frames":600,"packets":30000,"errors":0}
+coalesced_datagrams=25755
+run=2 offload=1 mac-tx {"receive":false,"seconds":5.003,"media_mbps":49.975,"pps":5997,"cpu_percent":18.94,"cpu_us_per_Mbit":3790.03,"frames":600,"packets":30000,"errors":0}
+run=3 offload=0 linux-tx {"receive":false,"seconds":5.000,"media_mbps":49.999,"pps":6000,"cpu_percent":2.86,"cpu_us_per_Mbit":572.83,"frames":600,"packets":30000,"errors":0}
+run=3 offload=0 mac-rx {"receive":true,"seconds":5.005,"media_mbps":49.948,"pps":5994,"cpu_percent":10.81,"cpu_us_per_Mbit":2165.07,"frames":600,"packets":30000,"errors":0}
+run=3 offload=0 linux-rx {"receive":true,"seconds":5.000,"media_mbps":50.001,"pps":6000,"cpu_percent":3.60,"cpu_us_per_Mbit":719.20,"frames":600,"packets":30000,"errors":0}
+coalesced_datagrams=0
+run=3 offload=0 mac-tx {"receive":false,"seconds":5.002,"media_mbps":49.980,"pps":5998,"cpu_percent":22.67,"cpu_us_per_Mbit":4535.09,"frames":600,"packets":30000,"errors":0}
+run=3 offload=1 linux-tx {"receive":false,"seconds":5.000,"media_mbps":49.999,"pps":6000,"cpu_percent":1.40,"cpu_us_per_Mbit":279.17,"frames":600,"packets":30000,"errors":0}
+run=3 offload=1 mac-rx {"receive":true,"seconds":5.001,"media_mbps":49.991,"pps":5999,"cpu_percent":7.82,"cpu_us_per_Mbit":1564.01,"frames":600,"packets":30000,"errors":0}
+run=3 offload=1 linux-rx {"receive":true,"seconds":4.999,"media_mbps":50.009,"pps":6001,"cpu_percent":3.32,"cpu_us_per_Mbit":664.67,"frames":600,"packets":30000,"errors":0}
+coalesced_datagrams=26237
+run=3 offload=1 mac-tx {"receive":false,"seconds":5.002,"media_mbps":49.976,"pps":5997,"cpu_percent":26.57,"cpu_us_per_Mbit":5316.00,"frames":600,"packets":30000,"errors":0}

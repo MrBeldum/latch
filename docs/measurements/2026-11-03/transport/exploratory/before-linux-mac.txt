@@ -1,0 +1,12 @@
+buffers SocketBuffers { send: 8388608, receive: 8388608 }
+buffers SocketBuffers { send: 16777216, receive: 16777216 }
+{"receive":false,"seconds":5.000,"media_mbps":99.998,"pps":11880,"cpu_percent":6.67,"cpu_us_per_Mbit":667.17,"frames":600,"packets":59400,"errors":0}
+Error: Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" }
+buffers SocketBuffers { send: 8388608, receive: 8388608 }
+buffers SocketBuffers { send: 16777216, receive: 16777216 }
+{"receive":false,"seconds":5.000,"media_mbps":299.990,"pps":35639,"cpu_percent":18.52,"cpu_us_per_Mbit":617.52,"frames":600,"packets":178200,"errors":0}
+Error: Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" }
+buffers SocketBuffers { send: 8388608, receive: 8388608 }
+buffers SocketBuffers { send: 16777216, receive: 16777216 }
+{"receive":false,"seconds":5.001,"media_mbps":1986.580,"pps":236006,"cpu_percent":96.29,"cpu_us_per_Mbit":484.71,"frames":3974,"packets":1180278,"errors":0}
+Error: Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" }

@@ -1,5 +1,6 @@
 //! Windows capture and media objects live on MTA workers. The session may
 //! move its trait objects between threads without moving COM apartments.
+mod amf;
 mod audio;
 mod capture;
 mod display;
@@ -8,6 +9,7 @@ mod encode;
 mod input;
 mod mf;
 mod runtime;
+mod vigem;
 
 use crate::{
     audio::AudioCapture,
@@ -17,9 +19,10 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use capture::{Capture, Converter};
-use encode::Encoder;
+use encode::Encoder as MfEncoder;
 use runtime::Runtime;
 use std::{
+    collections::VecDeque,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -31,22 +34,71 @@ use windows::{core::Interface, Win32::Media::MediaFoundation::IMFSample};
 /// without looking at its deadlines.
 const MAX_WAIT: Duration = Duration::from_millis(100);
 
+enum VideoEncoder {
+    Mf(Box<MfEncoder>),
+    Amf(Box<amf::Encoder>),
+}
+impl VideoEncoder {
+    fn new(config: &VideoConfig, gpu: &capture::Gpu) -> Result<Self> {
+        let selected = std::env::var("LATCH_WINDOWS_ENCODER").unwrap_or_default();
+        // SAFETY: the device owns the adapter returned by DXGI.
+        let amd = unsafe {
+            gpu.device
+                .cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>()?
+                .GetAdapter()?
+                .GetDesc()?
+                .VendorId
+                == 0x1002
+        };
+        if config.codec == Codec::Hevc && amd && selected != "mf" {
+            match amf::Encoder::new(config, gpu) {
+                Ok(encoder) => return Ok(Self::Amf(Box::new(encoder))),
+                Err(e) => tracing::warn!("AMF unavailable; using Media Foundation: {e:#}"),
+            }
+        }
+        Ok(Self::Mf(Box::new(MfEncoder::new(config, gpu)?)))
+    }
+    fn hardware(&self) -> bool {
+        match self {
+            Self::Amf(_) => true,
+            Self::Mf(e) => e.hardware,
+        }
+    }
+    fn name(&self) -> &str {
+        match self {
+            Self::Amf(_) => "AMF HEVC (AMD)",
+            Self::Mf(e) => &e.name,
+        }
+    }
+    fn bitrate(&mut self, kbps: u32) -> Result<()> {
+        match self {
+            Self::Amf(e) => e.bitrate(kbps),
+            Self::Mf(e) => e.bitrate(kbps),
+        }
+    }
+}
+
 struct MfPipeline {
     capture: Capture,
     converter: Converter,
-    encoder: Encoder,
+    encoder: VideoEncoder,
     /// One MF sample per converter slot, made when the slot is first used.
     samples: Vec<Option<IMFSample>>,
     config: VideoConfig,
     pacer: Pacer,
     last_sent: Instant,
     last_capture: Instant,
+    /// AMF inputs whose output is still to come, oldest first: when each
+    /// was captured, and whether it was forced to be a keyframe.
+    ahead: VecDeque<(Instant, bool)>,
+    /// The display changed while a frame was ahead; reopen before the next.
+    moved: bool,
 }
 impl MfPipeline {
     fn info(&self) -> VideoInfo {
         VideoInfo {
-            encoder: self.encoder.name.clone(),
-            hardware: self.encoder.hardware,
+            encoder: self.encoder.name().to_string(),
+            hardware: self.encoder.hardware(),
             codec: self.config.codec,
             width: self.config.width,
             height: self.config.height,
@@ -55,10 +107,10 @@ impl MfPipeline {
     }
     /// The converted picture as an encoder input.
     fn sample(&mut self, picture: &capture::Converted) -> Result<IMFSample> {
-        if self.encoder.hardware {
+        if self.encoder.hardware() {
             let slot = &mut self.samples[picture.slot];
             if slot.is_none() {
-                *slot = Some(Encoder::texture_sample(&picture.texture)?);
+                *slot = Some(MfEncoder::texture_sample(&picture.texture)?);
             }
             return Ok(slot.clone().expect("sample was just made"));
         }
@@ -69,12 +121,40 @@ impl MfPipeline {
                 encode::nv12_sample(surface, stride, width, height)
             })?
     }
+    /// A new converter, encoder and samples for the display's new device or size.
+    fn reopen(&mut self) -> Result<()> {
+        self.converter = Converter::new(
+            &self.capture.gpu,
+            (self.capture.display.width, self.capture.display.height),
+            (self.config.width, self.config.height),
+            self.config.fps,
+        )?;
+        self.samples = vec![None; capture::RING];
+        self.ahead.clear();
+        self.encoder = VideoEncoder::new(&self.config, &self.capture.gpu)
+            .context("reopen encoder after display change")?;
+        Ok(())
+    }
     fn next(&mut self, keyframe: bool, idle: Duration) -> Result<EncodedVideo> {
+        if !self.ahead.is_empty() {
+            if !keyframe {
+                return self.collect(true);
+            }
+            // A requested IDR must not sit behind an endlessly replenished
+            // queue. Discard the old outputs, then restart the reference chain.
+            while !self.ahead.is_empty() {
+                self.collect(false)?;
+            }
+        }
         // Frames go out on the pacer's grid, so the time spent capturing,
         // converting and encoding one comes out of its interval.
         self.pacer.wait();
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut force = keyframe;
+        if std::mem::take(&mut self.moved) {
+            self.reopen()?;
+            force = true;
+        }
         let mut buffered = false;
         loop {
             let timeout = if self.capture.has_frame && (force || buffered) {
@@ -92,19 +172,11 @@ impl MfPipeline {
             if device != self.capture.gpu.device.as_raw()
                 || size != (self.capture.display.width, self.capture.display.height)
             {
-                self.converter = Converter::new(
-                    &self.capture.gpu,
-                    (self.capture.display.width, self.capture.display.height),
-                    (self.config.width, self.config.height),
-                    self.config.fps,
-                )?;
-                self.samples = vec![None; capture::RING];
-                self.encoder = Encoder::new(&self.config, &self.capture.gpu)
-                    .context("reopen encoder after display change")?;
+                self.reopen()?;
                 force = true;
             }
             if changed {
-                self.last_capture = Instant::now();
+                self.last_capture = self.capture.captured;
             }
             if self.capture.has_frame
                 && (changed || force || buffered || self.last_sent.elapsed() >= idle)
@@ -118,8 +190,16 @@ impl MfPipeline {
                     self.pacer.taken(Instant::now());
                 }
                 let picture = self.converter.convert(&self.capture.frame)?;
+                if let VideoEncoder::Amf(encoder) = &mut self.encoder {
+                    encoder.submit(&picture.texture, force)?;
+                    self.ahead.push_back((self.last_capture, force));
+                    return self.collect(true);
+                }
                 let sample = self.sample(&picture)?;
-                if let Some((data, idr)) = self.encoder.encode(&sample, force)? {
+                let VideoEncoder::Mf(encoder) = &mut self.encoder else {
+                    unreachable!("AMF returned above")
+                };
+                if let Some((data, idr)) = encoder.encode(&sample, force)? {
                     if force && !idr {
                         bail!("Media Foundation encoder did not honour force-IDR");
                     }
@@ -144,6 +224,65 @@ impl MfPipeline {
         }
     }
 }
+impl MfPipeline {
+    /// The oldest AMF frame's access unit. While the encoder works on it,
+    /// the next picture is captured and handed over as soon as the grid
+    /// says it is due, so a stream faster than one-at-a-time encoding keeps
+    /// the encoder busy and runs at what the GPU can do. A stream the
+    /// encoder keeps up with never has a picture due before its output,
+    /// so nothing waits behind anything.
+    fn collect(&mut self, allow_ahead: bool) -> Result<EncodedVideo> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let VideoEncoder::Amf(encoder) = &mut self.encoder else {
+                bail!("frames ahead without an AMF encoder");
+            };
+            // Waits up to the encoder's 1 ms query timeout.
+            if let Some((data, idr)) = encoder.receive(Duration::ZERO)? {
+                let (captured, forced) =
+                    self.ahead.pop_front().context("AMF output without input")?;
+                if forced && !idr {
+                    bail!("AMF encoder did not honour force-IDR");
+                }
+                self.last_sent = Instant::now();
+                return Ok(EncodedVideo {
+                    data,
+                    keyframe: idr,
+                    captured,
+                });
+            }
+            if allow_ahead
+                && self.ahead.len() < AHEAD
+                && !self.moved
+                && self.pacer.due().is_some_and(|due| due <= Instant::now())
+            {
+                let device = self.capture.gpu.device.as_raw();
+                let size = (self.capture.display.width, self.capture.display.height);
+                // Only a new picture goes ahead; repeats wait their turn.
+                if self.capture.grab(Duration::ZERO)? {
+                    if device != self.capture.gpu.device.as_raw()
+                        || size != (self.capture.display.width, self.capture.display.height)
+                    {
+                        self.moved = true;
+                    } else {
+                        self.pacer.taken(Instant::now());
+                        self.last_capture = self.capture.captured;
+                        let picture = self.converter.convert(&self.capture.frame)?;
+                        encoder.submit(&picture.texture, false)?;
+                        self.ahead.push_back((self.last_capture, false));
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                bail!("AMF output timed out");
+            }
+        }
+    }
+}
+/// AMF inputs in flight at most: the encoder's input queue, and fewer than
+/// the converter's ring so no slot is rewritten while it is read.
+const AHEAD: usize = 2;
+const _: () = assert!(AHEAD < capture::RING);
 enum Pipeline {
     Mf(Box<MfPipeline>),
     Software(Box<SoftwarePipeline<Capture>>),
@@ -160,7 +299,7 @@ impl Pipeline {
                     (config.width, config.height),
                     config.fps,
                 )?;
-                let encoder = Encoder::new(config, &capture.gpu)?;
+                let encoder = VideoEncoder::new(config, &capture.gpu)?;
                 Ok::<_, anyhow::Error>((converter, encoder))
             })();
             match attempt {
@@ -174,21 +313,23 @@ impl Pipeline {
                         pacer: Pacer::new(config.fps),
                         last_sent: Instant::now() - Duration::from_secs(1),
                         last_capture: Instant::now(),
+                        ahead: VecDeque::new(),
+                        moved: false,
                     })))
                 }
-                Err(e) if config.codec == Codec::Hevc => {
+                Err(e) if matches!(config.codec, Codec::Hevc | Codec::Av1) => {
                     // Latch's own encoder makes H.264 only, and the viewer
                     // has been told HEVC: fail this session, and offer H.264
                     // to the next one.
-                    encode::hevc_failed(&e);
-                    return Err(e.context("open HEVC encoder"));
+                    encode::codec_failed(config.codec, &e);
+                    return Err(e.context("open hardware codec"));
                 }
                 Err(e) => {
                     tracing::warn!("Media Foundation unavailable, using Latch software: {e:#}")
                 }
             }
-        } else if config.codec == Codec::Hevc {
-            bail!("HEVC needs Media Foundation");
+        } else if matches!(config.codec, Codec::Hevc | Codec::Av1) {
+            bail!("codec needs Media Foundation");
         }
         Ok(Self::Software(Box::new(SoftwarePipeline::new(
             capture, config,
@@ -206,23 +347,33 @@ impl Pipeline {
             Self::Software(p) => return p.next(keyframe, idle),
             Self::Failed(_) => bail!("Windows video pipeline failed to reopen"),
             Self::Mf(p) => {
-                match p.next(keyframe, idle) {
+                let result = p.next(keyframe, idle).or_else(|error| {
+                    if !matches!(p.encoder, VideoEncoder::Amf(_)) {
+                        return Err(error);
+                    }
+                    tracing::warn!("AMF pipeline failed; reopening Media Foundation: {error:#}");
+                    p.ahead.clear();
+                    p.encoder =
+                        VideoEncoder::Mf(Box::new(MfEncoder::new(&p.config, &p.capture.gpu)?));
+                    p.next(true, idle)
+                });
+                match result {
                     Ok(frame) => return Ok(frame),
-                    Err(e) if p.config.codec == Codec::Hevc => {
+                    Err(e) if matches!(p.config.codec, Codec::Hevc | Codec::Av1) => {
                         // Neither Microsoft's encoder nor Latch's software one
                         // makes HEVC, and the viewer decodes nothing else on
                         // this stream: end it, so the next offers H.264.
-                        encode::hevc_failed(&e);
+                        encode::codec_failed(p.config.codec, &e);
                         let info = self.info();
                         *self = Self::Failed(info);
-                        return Err(e.context("HEVC pipeline failed"));
+                        return Err(e.context("hardware codec pipeline failed"));
                     }
                     Err(e) => tracing::warn!("Media Foundation pipeline failed: {e:#}"),
                 }
-                if p.encoder.hardware {
-                    match Encoder::software(&p.config) {
+                if p.encoder.hardware() {
+                    match MfEncoder::software(&p.config) {
                         Ok(encoder) => {
-                            p.encoder = encoder;
+                            p.encoder = VideoEncoder::Mf(Box::new(encoder));
                             match p.next(true, idle) {
                                 Ok(frame) => return Ok(frame),
                                 Err(e) => tracing::warn!("Microsoft encoder failed: {e:#}"),
@@ -309,15 +460,16 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
         || config.width > 16384
         || config.height > 16384
         || config.fps == 0
-        || config.fps > 1000
+        || config.bitrate_kbps > u32::MAX / 1000
         || config.bitrate_kbps == 0
     {
         bail!("invalid Windows video size, fps, or bitrate");
     }
     if !matches!(config.codec, Codec::H264Baseline | Codec::H264High)
-        && !(config.codec == Codec::Hevc && encode::hevc_allowed())
+        && !(matches!(config.codec, Codec::Hevc | Codec::Av1)
+            && encode::codec_allowed(config.codec))
     {
-        bail!("Windows supports H.264 only");
+        bail!("Windows codec is unavailable");
     }
     let config = config.clone();
     let (requests, receive) = mpsc::channel();
@@ -385,6 +537,9 @@ pub fn open_audio(layout: crate::audio::Layout) -> Result<Box<dyn AudioCapture>>
 pub fn open_input() -> Result<Box<dyn InputSink>> {
     Ok(Box::new(input::Injector::new()))
 }
+pub fn open_pads(feedback: crate::gamepad::FeedbackFn) -> Result<crate::gamepad::Opened> {
+    Ok(crate::gamepad::Pads::opened(vigem::open()?, feedback))
+}
 pub use elevated::{
     helper_exe as input_helper_exe, run_helper as run_input_helper, TASK as INPUT_TASK,
 };
@@ -396,10 +551,10 @@ pub fn encodable() -> Vec<Codec> {
                 return vec![Codec::H264Baseline];
             };
             let mut codecs = Vec::new();
-            // Off unless LATCH_WINDOWS_HEVC=1, and only once a GPU encoder has
-            // made a keyframe here.
-            if encode::hevc_available() {
-                codecs.push(Codec::Hevc);
+            for codec in [Codec::Av1, Codec::Hevc] {
+                if encode::codec_available(codec) {
+                    codecs.push(codec);
+                }
             }
             if encode::available() {
                 codecs.extend([Codec::H264High, Codec::H264Baseline]);
@@ -466,6 +621,27 @@ fn unavailable(error: &anyhow::Error, facility: &str) -> bool {
 mod test_decoder;
 #[cfg(test)]
 mod tests {
+    /// Run with a changing desktop to exercise the bounded AMF input queue.
+    #[test]
+    #[ignore]
+    fn hardware_pipeline_keyframes() -> anyhow::Result<()> {
+        use super::*;
+        let _runtime = Runtime::new(true)?;
+        let config = VideoConfig {
+            width: 1920,
+            height: 1080,
+            fps: 1000,
+            bitrate_kbps: 50_000,
+            codec: Codec::Hevc,
+        };
+        let mut pipeline = Pipeline::new(&config, true)?;
+        for i in 0..96 {
+            let force = i % 7 == 0;
+            let frame = pipeline.next(force, Duration::ZERO)?;
+            anyhow::ensure!(!force || frame.keyframe, "IDR request lost at frame {i}");
+        }
+        Ok(())
+    }
     use super::*;
     #[test]
     fn proxy_drop_waits_for_worker_resources() {
@@ -508,7 +684,7 @@ mod tests {
             bitrate_kbps: 4000,
             codec: Codec::H264Baseline,
         };
-        let mut encoder = match Encoder::software(&config) {
+        let mut encoder = match MfEncoder::software(&config) {
             Ok(e) => e,
             Err(e) => {
                 if unavailable(&e, "software H.264 encoder") {

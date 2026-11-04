@@ -96,10 +96,19 @@ toolbar goes away and the mouse is captured back. The keys are shown when
 a stream starts, and on the toolbar itself. Before the first picture
 arrives, a **Cancel** button under the progress ends the attempt without
 the host key. A menu or a question keeps the toolbar there until it is
-answered. The status line, with the session clock, the frame rate and
-bitrate against what was asked for, and the round trip, is drawn over the
-picture's bottom-left corner while **Stats** is open, or in the bar below
-the picture when a manual size leaves one.
+answered.
+
+**Stats** (or the host key with **S**, or **F6** as in GeForce NOW:
+Control-Option-S) lays a stats overlay over the picture's top-right
+corner without taking the mouse or showing the toolbar: resolution, codec
+and decoder; frames a second received, decoded and drawn against what was
+asked for; bitrate now against the host's current target and the ceiling;
+round trip; frame jitter; packet loss as it happened and after FEC; frames
+lost, skipped before decoding and decoded but never drawn; decode time;
+how long a decoded picture waits to be drawn; and an estimated latency
+with its breakdown (host capture to send, half the round trip plus frame
+assembly, decoder queue plus decode, waiting to be drawn plus half a
+refresh of this display). Values worth a look turn amber.
 
 The mouse is captured by default: the Mac cursor is hidden and held in
 place and raw movement is sent, which is what games read for the camera
@@ -114,11 +123,12 @@ the Mac cursor's position is sent 1:1 instead and nothing is captured.
 | **Direct · 38 ms / Relayed via Tokyo · 210 ms / Via your relay · 60 ms** | The path Tailscale found and its round trip. Amber means every packet goes through one of Tailscale's shared relays, which adds delay; **Connection details** under the machine list say why and what would give a direct path. What Latch asks for is the same on every path |
 | **Mouse** | **Captured, for games** (the default): a click on the picture hides the cursor and sends raw movement, which games read; the host key frees it. **Free, for desktops**: the Mac cursor's position is sent 1:1 and nothing is captured. The choice is remembered, and is also in Settings |
 | **Keys** | Ctrl+Alt+Delete, Windows key, Alt+Tab, Escape, Print Screen; and **Command acts as Ctrl** |
-| **Stats** | The Stream performance panel: frame rate and bitrate against what was asked for, round trip, packet loss, encode, assembly, queue and decode times, and the decoder. **Copy diagnostics** puts it all on the clipboard |
+| **Stats** | The stats overlay (above). **More → Stream performance** opens the full panel: frame rate and bitrate against what was asked for, round trip, packet loss, encode, assembly, queue and decode times, and the decoder. **Copy diagnostics** puts it all on the clipboard |
 | **Full screen** | Toggle; the setting decides how a session starts |
 | **PC** (or **Mac**, **Machine**) | Sleep…, Restart…, Shut down…, each asking first, when the machine's owner allows them; Sleep only on a Windows PC, the one kind a wake packet can bring back. **Update Latch Host…** for a PC whose host is older than 3.1 |
 | **Stream settings** | The same controls as Settings: quality profile, resolution, frame rate, bitrate and codec. **Apply and reconnect** restarts the session with them in a second or two; Escape or the close button leaves them as they were |
 | **Disconnect** | End the session |
+| **2 gamepads** | Shown while gamepads are connected to this Mac; hover for which, and whether the host takes them (green), or why not (amber) |
 
 On a narrow window everything but **Stream settings** and **Disconnect**
 folds into one **More** menu.
@@ -131,6 +141,16 @@ Command. While the stream has the keys, ⌘Q, ⌘H and ⌘+/⌘−/⌘0 go to th
 too (⌘Q closes the PC's window, not Latch): quit or hide Latch from the menu
 bar or the Dock, after **Disconnect**, or while the toolbar or a panel has
 the focus. ⌘Tab and ⌘Space stay on the Mac.
+
+### Gamepads
+
+Gamepads connected to the Mac (Xbox Wireless, DualSense, DualShock 4,
+Switch Pro and other MFi pads, over USB or Bluetooth) go to the host as
+they are: a Windows PC gets an Xbox 360 pad for an Xbox pad and a
+DualShock 4 for a PlayStation one, a Linux host an Xbox 360 pad for each.
+The game's rumble comes back to the pad, on each handle and, on pads that
+have them, the triggers. macOS gives gamepads to the frontmost app only,
+so keep the stream's window in front. A Mac host takes no gamepads.
 
 ### Clipboard
 
@@ -153,11 +173,12 @@ Shift+Insert. To copy in a terminal, select the text and press ⌘C.
 
 A Linux VPS draws a desktop of one fixed size and encodes on the CPU, so
 Latch never asks it for more than that size: a larger resolution setting
-gets the desktop's own size, a smaller one (720p, say) is scaled down. On
-a machine with fewer than four cores, Latch asks for at most 30 fps at
-1080p, and more for a smaller picture in proportion to the pixels it
-saves: up to 67 fps at 720p, 43 at 900p, 120 at 540p. To get 60 fps from
-such a machine, pick 720p (or 540p) and 60 fps.
+gets the desktop's own size, a smaller one (720p, say) is scaled down.
+Latch Host there times its software encoder on its own CPU at that size
+and reports the frame rate it keeps up with; Latch asks for no more than
+that, and more for a smaller picture in proportion to the pixels it saves
+(a host measured at 30 fps at 1080p is asked for up to 67 at 720p, 120 at
+540p). To get 60 fps from a slow machine, pick 720p (or 540p) and 60 fps.
 
 ## Only connecting from this Mac
 
@@ -174,10 +195,10 @@ both routers. When it cannot, every packet goes through a relay: your own
 peer relay if you run one (**Relay** in Settings), otherwise one of
 Tailscale's (DERP). A relay adds a detour, and the round trip it adds is a
 floor under how quickly the PC answers a click; it changes nothing about
-what Latch asks for. Recommended quality is this screen's size at 50
-Mbps on every path, so a relayed stream is laggier, not blurrier. The
-encoder holds that rate (CBR); a still desktop no longer drops to a
-trickle.
+what Latch asks for. Balanced quality is this screen's size at its own
+refresh rate on every path, so a relayed stream is laggier, not blurrier;
+the host's rate control lowers the bitrate only when the network does not
+carry it.
 Tailscale's own relays are shared, so a stream through one can also
 stutter at busy times; a peer relay you run is yours alone.
 
@@ -206,11 +227,11 @@ it from this network (see below).
 
 | Setting | What it changes |
 |---------|-----------------|
-| Quality | **Recommended** (the default) asks for this screen's own size at 50 Mbps, on every path. **Smooth** is 1080p · 60 fps · 20 Mbps, **Balanced** match screen · 60 · 50, **Sharp** match screen · 60 · 100. **Custom** uses the rows below; changing one of them switches to it |
-| Resolution | **Match screen** is this display's own pixel size (3024×1964 on a 14" MacBook Pro), so the picture fills it exactly. **540p**, **720p**, **900p**, **1080p**, **1440p** and **4K** are the standard 16:9 sizes, 960×540, 1280×720, 1600×900, 1920×1080, 2560×1440 and 3840×2160; on a display of another shape they leave a bar above and below. The sizes below 1080p are for a PC that encodes in software or a slow network: fewer pixels leave more bitrate for each and a higher frame rate. The list shows the pixel size of each. The PC switches its display to the size asked for; a PC with no monitor needs a virtual display that lists that size, which setup on the PC arranges for the Virtual Display Driver |
-| Frame rate | 30 to 240; the PC's display is switched to match when it can |
-| Bitrate | 2 to 150 Mbps; arrow keys step by 1, Shift-arrow by 10. The encoder holds this rate. Large swings mean the path is dropping packets |
-| Codec | Auto (HEVC when both ends can), HEVC, H.264 |
+| Quality | Profiles that follow this display, as GeForce NOW's do. **Balanced** (the default) asks for this screen's own size at its own refresh rate (120 Hz on a ProMotion MacBook Pro, 144–360 on a fast monitor). **Competitive** is 1080p at the display's refresh rate, up to 360 fps. **Cinematic** is this screen's size up to 4K, up to 120 fps, at half again the bitrate. Each profile's bitrate is a ceiling: 40 Mbps at 1080p60, growing as pixels to the ¾ and frame rate to the ½ (50 Mbps at 1080p60, 87 at 1440p120, 113 at 4K60, 160 at 4K120), half again for Cinematic, never under 5.1's 50 Mbps (Cinematic 100); the host comes down from it whenever the network carries less. **Custom** uses the rows below; changing one of them switches to it, starting from what the profile asked for. The PC's encoder sets the only other limits: a larger picture than it takes is scaled down in proportion. Settings saved by 5.1 move Smooth, Balanced and Sharp to Competitive, Balanced and Cinematic once |
+| Resolution | **Match screen** is this display's own pixel size (3024×1964 on a 14" MacBook Pro), so the picture fills it exactly. **540p**, **720p**, **900p**, **1080p**, **1440p**, **4K**, **5K** and **8K** are the standard 16:9 sizes, 960×540, 1280×720, 1600×900, 1920×1080, 2560×1440, 3840×2160, 5120×2880 and 7680×4320; on a display of another shape they leave a bar above and below. The sizes below 1080p are for a PC that encodes in software or a slow network: fewer pixels leave more bitrate for each and a higher frame rate. The list shows the pixel size of each. The PC switches its display to the size asked for; a PC with no monitor needs a virtual display that lists that size, which setup on the PC arranges for the Virtual Display Driver |
+| Frame rate | 30 to 500, and this display's own rate (marked); the PC's display is switched to match when it can |
+| Bitrate | 2 to 1000 Mbps in steps (fine at the low end); arrow keys step once, Shift-arrow ten times. The most the encoder spends; the host's rate control comes down from it when the path drops packets |
+| Codec | Auto (the best both ends have: AV1, then HEVC, then H.264), AV1, HEVC, H.264. A codec either end lacks falls back to H.264 |
 | Send my microphone | Off by default. On, this Mac's microphone plays on the PC as a microphone: by itself on Linux; on Windows and macOS through a virtual cable installed there (VB-CABLE, BlackHole). macOS asks for the microphone the first time |
 | Open streams full screen | How a session starts |
 | Capture the mouse | The toolbar's Mouse choice, remembered |
@@ -242,6 +263,111 @@ and only if the PC's router forwards UDP 9 to the PC. A [Tailscale subnet
 router](https://tailscale.com/kb/1019/subnets) on the PC's network (a NAS,
 a Raspberry Pi, or a router that runs Tailscale) is the alternative. Use
 **Test wake** while the PC is on to find out which situation you are in.
+
+## Sharing this Mac: the video pipeline
+
+ScreenCaptureKit renders the display straight into an IOSurface at the
+stream's size (it scales, with bars where the shapes differ), and
+VideoToolbox encodes that surface; only compressed bytes reach Latch.
+
+- **Which display.** The main one, or the one whose CGDirectDisplayID is
+  in `LATCH_MAC_DISPLAY` in the host's environment. The stream request
+  does not name a display yet.
+- **How often.** Every refresh of a display no faster than the stream
+  (a ProMotion panel reports no fixed rate and gets every refresh too);
+  for a slower stream, every k-th refresh with half a refresh of slack,
+  since a gap of exactly 1/fps lets timing jitter skip every other one.
+  The frame grid then takes the stream's rate from what arrives.
+- **Surfaces.** Five, so the two frames in the encoder and the newest
+  picture never leave the window server without one to draw into.
+- **Encoder settings.** Hardware required (software only if it fails),
+  real time, no frame reordering, `MaxFrameDelayCount` 0, the stream's
+  rate as `ExpectedFrameRate` and (macOS 15+)
+  `MaximumRealTimeFrameRate`, no periodic keyframes, BT.709 tags.
+  Bitrate is whatever the server asks for; VideoToolbox took 1 Gbps.
+  For 8-bit hardware HEVC through 248,832,000 pixels/second (1080p120),
+  `PrioritizeEncodingSpeedOverQuality` is false; above that budget, and
+  for H.264, Main10 and software, it is true. This M3 Pro crossover
+  restores HEVC quality while retaining the fast path at 240 fps and
+  3024×1964@120. Other chips may have a different crossover.
+- **No low-latency rate control.** `EnableLowLatencyRateControl` sounds
+  right but is built for calls: on an M3 Pro it made a 1080p frame take
+  9.4 ms instead of 4.7, dropped frames (45 of 60 fps at 1080p60), and
+  sent a fifth of the bitrate asked for.
+- **Two frames in flight.** A frame goes to the encoder without waiting
+  for the one before, and leaves the moment it is done, so the media
+  engine overlaps them. A stream whose interval is shorter than one
+  frame's encode time (240 fps at 1080p, 120 at 3024×1964) keeps its
+  rate; a slower one sees no difference.
+- **10-bit.** HEVC Main10 from P010 (`x420`) surfaces works and is tested
+  with synthetic surfaces; nothing asks for it until HDR does.
+
+A requested keyframe is the next picture returned to the server. Queued
+pre-request frames are discarded until the fresh IDR, so they cannot delay
+loss recovery or make the server request another IDR. Retries share that
+request until the IDR leaves. A bitrate change first completes the
+pictures already in the encoder, so every later picture is encoded at the
+new rate (on an M3 Pro the first one after a 20 → 1 Mbps cut came out at
+half the size). The completed old-rate pictures still leave, in order:
+later P-frames reference them, and dropping them would cost an IDR at
+every step of a ramp.
+
+### Measured limits (M3 Pro)
+
+`cargo test --release -p latch-engine --lib realtime_benchmark -- --ignored --nocapture`
+submits a moving synthetic picture from prefilled IOSurfaces on the
+stream's grid, as capture does, and times each frame from submission to
+the encoder's output. `LATCH_VT_BENCH=hevc:1920x1080@240:80000,...`
+picks the cases, `LATCH_VT_IN_FLIGHT=1` measures one frame at a time.
+Two runs on 2026-11-03, the Mac busy with other builds:
+
+| Case | 5.1 p50 / p95 ms | 5.1 fps | Now p50 / p95 ms | Now fps |
+| --- | --- | --- | --- | --- |
+| HEVC 1080p60, 50 Mbps | 9.8–10.5 / 13–44 | 51–61 | 4.9–5.3 / 8.1–8.3 | 60.7 |
+| HEVC 1080p120, 50 Mbps | 9.3–9.7 / 12–14 | 99–105 | 4.7–4.8 / 8.0–8.3 | 121 |
+| HEVC 1080p240, 80 Mbps | 8.7–9.8 / 9–20 | 86–114 | 4.2–4.6 / 6.2–6.6 | 241–242 |
+| HEVC 3024×1964@120, 100 Mbps | 22.9–23.6 / 24–90 | 31–43 | 11.2–11.8 / 17 | 120 |
+| H.264 High 1080p240, 80 Mbps | 8.4–9.6 / 10–92 | 40–116 | 10.0 / 11.2 | 192 |
+| H.264 High 3024×1964@120 | 27–33 / 60–65 | 28–32 | 27–28 / 29–32 | 70–72 |
+| Baseline 1080p240, 80 Mbps | 8.3–9.3 / 10–43 | 73–115 | 9.7 / 10.6–10.7 | 191–197 |
+
+H.264 runs out of encoder at about 195 fps at 1080p and 72 at
+3024×1964; asked for more, its frames queue behind each other (hence
+~10 ms and ~27 ms). HEVC is the codec for fast or large streams. 4K60
+HEVC takes 14 ms a frame.
+The table predates HEVC's quality path: up to 1080p120 an HEVC frame
+now takes about 7 ms (p95 8–9 ms), still inside a 120 Hz frame.
+
+Picture quality, from the paced synthetic matrix in
+[measurements/2026-11-03/mac-host](measurements/2026-11-03/mac-host/README.md)
+(medians of three, FFmpeg PSNR against the exact source pictures, a
+forced IDR every second; 5.1 → the speed hint alone → now):
+
+| Case | PSNR dB | IDR max kB |
+| --- | --- | --- |
+| HEVC 1080p60, 20 Mbps, moving | 40.61 → 34.72 → 42.41 | 925 → 830 → 1329 |
+| HEVC 1080p60, 20 Mbps, still | 42.32 → 38.69 → 43.32 | 925 → 1018 → 1279 |
+| HEVC 1080p120, 50 Mbps, moving | 44.27 → 40.72 → 47.70 | 1021 → 1215 → 1970 |
+| HEVC 1080p240, 80 Mbps, moving | 44.17 → 39.36 → 39.36 | 925 → 1066 → 1066 |
+| HEVC 3024×1964@120, 100 Mbps, moving | 43.70 → 36.18 → 36.18 | 2524 → 2794 → 2794 |
+| H.264 High 1080p60, 20 Mbps, still | 43.18 → 39.33 → 39.33 | 925 → 844 → 844 |
+| H.264 High 1080p120, 50 Mbps, still | 45.18 → 42.92 → 42.92 | 1031 → 1254 → 1254 |
+
+5.1's figures at 240 fps and 3024×1964 come from the 26–45 fps it
+managed there. H.264 ignores `PrioritizeEncodingSpeedOverQuality` (its
+output is bit-identical either way). It trails 5.1 by up to 4.5 dB
+on some cases and gains a little on others; the low-latency rate control
+gets 1 dB back at 1080p60/20 but doubles the encode time, so H.264 stays
+as it is. HEVC's quality path buys its PSNR with larger IDRs.
+
+Keyframes stay large. VideoToolbox holds P-frames to `DataRateLimits`
+but not keyframes: an IDR is 20–40× a P-frame at 1080p (0.8–2 MB).
+Nothing found bounds the IDR alone. `ConstantBitRate` and the macOS 26
+VBV keys pad P-frames and leave the IDR as it was, `MinAllowedFrameQP`
+takes effect only at a keyframe and then holds for the whole GOP (every
+P-frame capped too), and `BaseFrameQP` works only under the low-latency
+rate control above. So a lost frame is best answered without an IDR
+(reference invalidation), and the IDR that remains is paced on the wire.
 
 ## Permissions
 
@@ -351,3 +477,11 @@ it says what happened last. A copy that is not running from an app bundle
   MAC. While Tailscale on this Mac is off they stay
   listed with when they were last seen, and **Wake** still works over the
   LAN or the public address.
+
+### Transport measurement (2026-11-03)
+
+The viewer drains UDP in reusable 32-datagram `recvmsg_x` batches and hands
+completed video to decode within the batch. Unsupported batch receive falls
+back on the nonblocking socket. Host sends retain the shared unconnected UDP
+socket and scalar sends. See [transport measurements](measurements/2026-11-03/transport/README.md)
+for measured headroom and outstanding MTU/offload work.

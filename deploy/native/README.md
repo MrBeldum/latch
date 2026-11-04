@@ -87,6 +87,30 @@ and executed per session with `LATCH_CLIENT_WIDTH`, `LATCH_CLIENT_HEIGHT`, and
 `LATCH_CLIENT_FPS` in the environment. Any existing Sunshine `global_prep_cmd`
 is imported automatically during setup.
 
+## Gamepads
+
+A viewer's gamepads become Xbox 360 pads made through `/dev/uinput`, which
+games, SDL and Steam read like a pad the `xpad` driver made; the game's
+rumble goes back to the viewer. Creating them needs write access to
+`/dev/uinput`, which Ubuntu gives only to root and the `input` group.
+Without it the stream works and the viewer's toolbar says the host takes no
+gamepads, with the reason. Rather than adding the user to `input` (which
+also lets it read every keyboard), give one group the device:
+
+```sh
+sudo groupadd -f latch-pads
+sudo usermod -aG latch-pads "$USER"
+echo 'KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="latch-pads", MODE="0660", OPTIONS+="static_node=uinput"' |
+  sudo tee /etc/udev/rules.d/60-latch-uinput.rules
+sudo modprobe uinput
+sudo udevadm control --reload && sudo udevadm trigger --name-match=uinput
+systemctl --user restart latch.service   # after signing in again, for the group
+```
+
+On a desktop with a seat, `TAG+="uaccess"` instead of the group gives the
+signed-in user the device (Steam's rule does that). The pads Latch makes
+are readable by the desktop's user as any pad is.
+
 ## Upgrading from versions before 4.1.0
 
 Nodes set up before 4.1.0 use earlier names for their services, host binary,

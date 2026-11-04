@@ -399,6 +399,56 @@ pub(super) fn restore(previous: &Previous) -> Result<()> {
 mod tests {
     use super::selection_rank;
     #[test]
+    #[ignore]
+    fn hardware_display_modes() -> anyhow::Result<()> {
+        use super::*;
+        let _runtime = super::super::Runtime::new(false)?;
+        let output = select()?;
+        let mut mode = current(&output)?;
+        if let Ok(requested) = std::env::var("LATCH_TEST_DISPLAY_MODE") {
+            let parts: Vec<u32> = requested
+                .split(',')
+                .map(str::parse)
+                .collect::<std::result::Result<_, _>>()?;
+            anyhow::ensure!(parts.len() == 3, "expected width,height,refresh");
+            mode.dmPelsWidth = parts[0];
+            mode.dmPelsHeight = parts[1];
+            mode.dmDisplayFrequency = parts[2];
+            mode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+            change(&output.desc.DeviceName, &mode)?;
+        }
+        eprintln!(
+            "current {} {}x{}@{}",
+            text(&output.desc.DeviceName),
+            mode.dmPelsWidth,
+            mode.dmPelsHeight,
+            mode.dmDisplayFrequency
+        );
+        for i in 0.. {
+            let mut mode = DEVMODEW {
+                dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+                ..Default::default()
+            };
+            // SAFETY: the output's terminated name and sized descriptor are live.
+            if !unsafe {
+                EnumDisplaySettingsW(
+                    PCWSTR(output.desc.DeviceName.as_ptr()),
+                    ENUM_DISPLAY_SETTINGS_MODE(i),
+                    &mut mode,
+                )
+            }
+            .as_bool()
+            {
+                break;
+            }
+            eprintln!(
+                "mode {}x{}@{}",
+                mode.dmPelsWidth, mode.dmPelsHeight, mode.dmDisplayFrequency
+            );
+        }
+        Ok(())
+    }
+    #[test]
     fn virtual_output_wins_over_primary() {
         let candidates = [(false, true), (true, false)];
         assert_eq!(
@@ -411,9 +461,17 @@ mod tests {
     }
     #[test]
     fn refresh_falls_back_without_refusing_high_fps() {
-        for (requested, expected) in [(30, 60), (60, 60), (90, 120), (144, 120), (240, 120)] {
+        for (requested, expected) in [
+            (30, 60),
+            (60, 60),
+            (90, 120),
+            (144, 144),
+            (240, 240),
+            (360, 360),
+            (500, 360),
+        ] {
             assert_eq!(
-                [60, 120]
+                [60, 120, 144, 240, 360]
                     .into_iter()
                     .min_by_key(|hz| super::refresh_rank(*hz, requested)),
                 Some(expected)

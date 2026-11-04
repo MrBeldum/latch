@@ -139,13 +139,14 @@ impl Service {
         } else {
             status.encoder
         };
-        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let (max_fps, codecs) = streamer::capacity(&encoder, status.viewer.is_some());
         Streamer {
             kind: latch_core::STREAMER_KIND.into(),
             installed: true,
             running: server.is_some(),
             api_ok: true,
-            max_fps: streamer::max_fps(&encoder, cores),
+            max_fps,
+            codecs,
             encoder,
             audio_problem: status.audio_problem,
             requested_bitrate_kbps: status.requested_bitrate_kbps,
@@ -228,6 +229,9 @@ impl Service {
             "Latch Host {} listening on TCP and UDP {CONTROL_PORT}",
             env!("CARGO_PKG_VERSION")
         ));
+        // Measure the encoders now, not when the first viewer asks, and
+        // hold software encoding to a provisional ceiling until that ends.
+        let _ = self.streaming_status();
         if let Ok(exe) = std::env::current_exe() {
             if replacing {
                 self.log("updated: the previous version has been replaced");

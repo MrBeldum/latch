@@ -13,6 +13,7 @@ use crate::audio::Player;
 use crate::video::{self, Decoder, FrameSlot};
 use latch_proto::audio::{AudioOut, AudioReceiver};
 use latch_proto::control::{self, Accept, Codec, Message, Report, StreamRequest};
+use latch_proto::gamepad::{Feedback, LatestReceiver, PadKind, PadSender, PadState};
 use latch_proto::input::{Event as InputEvent, InputSender};
 use latch_proto::rtt::RttEstimator;
 use latch_proto::video::{InFrame, KeyframeRequests, Reassembled, Reassembler, ReassemblyStats};
@@ -41,7 +42,8 @@ const PING_EVERY: Duration = Duration::from_millis(500);
 /// rather than the picture falling further and further behind.
 const DECODE_QUEUE: usize = 8;
 const DECODE_MAX_AGE: Duration = Duration::from_millis(50);
-const REPORT_EVERY: Duration = Duration::from_millis(250);
+const REPORT_EVERY: Duration = Duration::from_millis(50);
+const STATS_EVERY: Duration = Duration::from_millis(250);
 /// How long a stopping session waits for a decode in progress. A platform
 /// decoder can block inside the OS (VideoToolbox after a sleep or a GPU
 /// reset); the window must still be able to leave the stream.
@@ -89,14 +91,21 @@ pub struct Settings {
     pub bitrate_kbps: u32,
     /// Ask for HEVC when both sides can; otherwise H.264.
     pub hevc: bool,
+    /// Ask for AV1 when both sides can.
+    pub av1: bool,
     pub audio: bool,
     /// This machine's name, for the host's log.
     pub name: String,
     /// Ask the host to stream cursor shapes and omit the pointer from video.
     pub cursor: bool,
+    /// Offer gamepads.
+    pub gamepads: bool,
     /// Send this machine's microphone, where the host can play it.
     pub mic: bool,
 }
+
+/// Where a session sends the host's rumble and lights: slot and feedback.
+pub type FeedbackFn = Box<dyn Fn(u8, Feedback) + Send + Sync>;
 
 #[derive(Debug, Clone, Default)]
 pub struct CursorState {
@@ -155,6 +164,20 @@ pub struct Stats {
     pub host_socket_receive_bytes: usize,
     pub frames_lost: u64,
     pub window_ms: u32,
+    /// Whole frames put together a second, before the decoder: what the
+    /// network brought, where [`Stats::fps`] is what was decoded.
+    pub received_fps: f32,
+    /// Share of video packets in the last second the network lost,
+    /// whether FEC rebuilt them or not; [`Stats::loss_pct`] is what was
+    /// left after FEC.
+    pub raw_loss_pct: f32,
+    /// Frames that arrived whole in the last second but were never
+    /// decoded: thrown away while the decoder caught up or while the
+    /// stream waited for a keyframe.
+    pub frames_dropped: u64,
+    /// How unevenly whole frames arrive: the mean distance of each gap
+    /// between two from the mean gap, in ms.
+    pub frame_jitter_ms: f32,
 }
 
 #[derive(Default)]
@@ -213,6 +236,7 @@ struct Link {
     udp: UdpSocket,
     host: SocketAddr,
     sender: InputSender,
+    pads: PadSender,
     buf: Vec<u8>,
 }
 
@@ -221,6 +245,17 @@ impl Link {
         if self.sender.poll(now, &mut self.buf) {
             let _ = self.udp.send_to(&self.buf, self.host);
         }
+        if self.pads.poll(now, &mut self.buf) {
+            let _ = self.udp.send_to(&self.buf, self.host);
+        }
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.sender
+            .next_deadline()
+            .into_iter()
+            .chain(self.pads.next_deadline())
+            .min()
     }
 }
 
@@ -247,7 +282,11 @@ struct Inner {
     heard_us: AtomicU64,
     /// Video packets the network lost in the last second, rebuilt or not,
     /// in thousandths of a percent: what the host sizes its FEC by.
-    raw_loss_milli: AtomicU64,
+    feedback: Mutex<Report>,
+    /// When the decoder last published a picture, µs since `epoch`.
+    published_us: AtomicU64,
+    /// Frames thrown away before decoding since the last stats window.
+    dropped: AtomicU64,
     connected: AtomicBool,
     stop: AtomicBool,
     finished: AtomicBool,
@@ -257,6 +296,13 @@ struct Inner {
     cursor_supported: AtomicBool,
     cursor_state: Mutex<Option<CursorState>>,
     control_writer: Mutex<Option<TcpStream>>,
+    /// Gamepad slots the host takes; 0 until it accepts, or if it takes none.
+    pad_slots: AtomicU32,
+    pad_problem: Mutex<String>,
+    pad_feedback: Mutex<Option<FeedbackFn>>,
+    /// Pads' newest states from before the host accepted, sent once it has.
+    /// Locked after `link`, never before.
+    pending_pads: Mutex<[Option<(PadKind, PadState)>; latch_proto::gamepad::MAX_PADS]>,
 }
 
 #[derive(Default)]
@@ -370,6 +416,42 @@ impl Input {
     pub fn release_all(&self) {
         self.send(InputEvent::ReleaseAll);
     }
+
+    /// Gamepad slots the host takes (0 while connecting, or when it takes
+    /// none).
+    pub fn pad_slots(&self) -> u8 {
+        self.inner.pad_slots.load(Ordering::Acquire) as u8
+    }
+
+    /// The pad in `slot` looks like this now. Sent at once, then again until
+    /// the host has it; before the host has accepted, kept until it has. A
+    /// slot the host does not take is ignored.
+    pub fn pad(&self, slot: u8, kind: PadKind, state: PadState) {
+        self.set_pad(slot, Some((kind, state)));
+    }
+
+    /// The pad in `slot` went away.
+    pub fn pad_gone(&self, slot: u8) {
+        self.set_pad(slot, None);
+    }
+
+    fn set_pad(&self, slot: u8, pad: Option<(PadKind, PadState)>) {
+        let mut link = self.inner.link.lock();
+        let Some(link) = link.as_mut() else {
+            if let Some(p) = self.inner.pending_pads.lock().get_mut(slot as usize) {
+                *p = pad;
+            }
+            return;
+        };
+        if slot >= self.pad_slots() {
+            return;
+        }
+        match pad {
+            Some((kind, state)) => link.pads.update(slot, kind, state),
+            None => link.pads.remove(slot),
+        }
+        link.flush(Instant::now());
+    }
 }
 
 impl Session {
@@ -395,7 +477,9 @@ impl Session {
             tcp: Mutex::new(None),
             epoch: Instant::now(),
             heard_us: AtomicU64::new(0),
-            raw_loss_milli: AtomicU64::new(0),
+            feedback: Mutex::new(Report::default()),
+            published_us: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
             connected: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -405,6 +489,10 @@ impl Session {
             cursor_supported: AtomicBool::new(false),
             cursor_state: Mutex::new(None),
             control_writer: Mutex::new(None),
+            pad_slots: AtomicU32::new(0),
+            pad_problem: Mutex::new(String::new()),
+            pad_feedback: Mutex::new(None),
+            pending_pads: Mutex::new([None; latch_proto::gamepad::MAX_PADS]),
         });
         let worker = inner.clone();
         let spawned = std::thread::Builder::new()
@@ -472,6 +560,15 @@ impl Session {
         stats
     }
 
+    /// When the newest picture was published to the [`FrameSlot`]: the
+    /// renderer takes how long it waited from this.
+    pub fn published_at(&self) -> Option<Instant> {
+        match self.inner.published_us.load(Ordering::Relaxed) {
+            0 => None,
+            us => Some(self.inner.epoch + Duration::from_micros(us)),
+        }
+    }
+
     pub fn set_volume(&self, gain: f32) {
         self.inner
             .audio_gain
@@ -487,6 +584,16 @@ impl Session {
             inner: self.inner.clone(),
         }
     }
+
+    /// Why the host takes no gamepads, once it has said so.
+    pub fn pad_problem(&self) -> String {
+        self.inner.pad_problem.lock().clone()
+    }
+
+    /// Where the host's rumble and lights go, from the receive thread.
+    pub fn on_pad_feedback(&self, f: impl Fn(u8, Feedback) + Send + Sync + 'static) {
+        *self.inner.pad_feedback.lock() = Some(Box::new(f));
+    }
 }
 
 impl Drop for Session {
@@ -499,7 +606,7 @@ impl Drop for Session {
 fn offer(settings: &Settings) -> Vec<Codec> {
     video::decodable()
         .into_iter()
-        .filter(|&c| settings.hevc || c != Codec::Hevc)
+        .filter(|&c| (settings.hevc || c != Codec::Hevc) && (settings.av1 || c != Codec::Av1))
         .collect()
 }
 
@@ -556,6 +663,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         audio: settings.audio,
         name: settings.name.clone(),
         cursor: settings.cursor,
+        gamepads: settings.gamepads,
         mic: settings.mic,
         // 5.1 or 7.1 when this machine's speakers have them; stereo is the
         // field's absence, which every host understands.
@@ -618,6 +726,18 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     inner
         .cursor_supported
         .store(accept.cursor, Ordering::Release);
+    let pad_slots = accept.gamepads.min(latch_proto::gamepad::MAX_PADS as u8);
+    inner.pad_slots.store(
+        pad_slots as u32 * settings.gamepads as u32,
+        Ordering::Release,
+    );
+    if settings.gamepads && pad_slots == 0 {
+        *inner.pad_problem.lock() = if accept.gamepad_problem.is_empty() {
+            "the host takes no gamepads".into()
+        } else {
+            accept.gamepad_problem.clone()
+        };
+    }
     let Some(token) = control::token_from_hex(&accept.token) else {
         return fail("starting", "the host sent a malformed session token".into());
     };
@@ -665,12 +785,28 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         Ok(u) => u,
         Err(e) => return fail("connecting", format!("{e}")),
     };
-    *inner.link.lock() = Some(Link {
-        udp: send_udp,
-        host: media,
-        sender: InputSender::new(accept.session),
-        buf: Vec::with_capacity(latch_proto::MAX_DATAGRAM),
-    });
+    {
+        let mut link = Link {
+            udp: send_udp,
+            host: media,
+            sender: InputSender::new(accept.session),
+            pads: PadSender::new(accept.session),
+            buf: Vec::with_capacity(latch_proto::MAX_DATAGRAM),
+        };
+        let taken = inner.pad_slots.load(Ordering::Acquire);
+        let mut guard = inner.link.lock();
+        let pending = std::mem::replace(
+            &mut *inner.pending_pads.lock(),
+            [None; latch_proto::gamepad::MAX_PADS],
+        );
+        for (slot, pad) in pending.into_iter().enumerate() {
+            if let Some((kind, state)) = pad.filter(|_| (slot as u32) < taken) {
+                link.pads.update(slot as u8, kind, state);
+            }
+        }
+        link.flush(Instant::now());
+        *guard = Some(link);
+    }
     if settings.mic {
         let started = match (&accept.mic, udp.try_clone()) {
             (Some(format), Ok(udp)) => crate::mic::Mic::start(format, accept.session, udp, media)
@@ -704,6 +840,11 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     inner.connected.store(false, Ordering::Release);
     inner.queue_cv.notify_all();
     let _ = tcp.shutdown(Shutdown::Both);
+    // After the host's FIN macOS refuses that shutdown: only closing every
+    // handle sends ours, which lets the host finish without waiting.
+    *inner.control_writer.lock() = None;
+    inner.tcp.lock().take();
+    drop(tcp);
     if let Ok(r) = receiver {
         let _ = r.join();
     }
@@ -874,19 +1015,7 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
         }
         if now - last_report >= REPORT_EVERY {
             last_report = now;
-            let stats = inner.stats.lock().clone();
-            let report = Report {
-                fps: stats.fps,
-                loss_pct: inner.raw_loss_milli.load(Ordering::Relaxed) as f32 / 1000.0,
-                decode_ms: stats.decode_ms,
-                rtt_ms: stats.rtt_ms as f32,
-                received_kbps: (stats.received_mbps * 1000.0) as u32,
-                frames_lost: stats.frames_lost,
-                unrecovered_loss_pct: Some(stats.loss_pct),
-                queue_ms: stats.queue_ms,
-                window_ms: stats.window_ms,
-                ..Default::default()
-            };
+            let report = inner.feedback.lock().clone();
             if !send_control(inner, &Message::Report(report)) && !inner.stopping() {
                 return Outcome::Ended(-1, "The connection to the host broke.".into());
             }
@@ -946,7 +1075,10 @@ fn receive(
     }
     let mut events = mio::Events::with_capacity(4);
     let accepted = Instant::now();
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     let mut buf = vec![0u8; latch_proto::MAX_DATAGRAM + 1];
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    let mut batch = latch_proto::transport::ReceiveBatch::default();
     let mut out = Vec::with_capacity(64);
     let mut reassembler = Reassembler::new(session);
     let mut audio_rx = accept.audio.as_ref().map_or_else(
@@ -954,13 +1086,17 @@ fn receive(
         |format| AudioReceiver::with_format(session, format.frame_samples, format.rate),
     );
     let mut keyframes = KeyframeRequests::new();
+    let mut feedback = LatestReceiver::new();
     let mut rtt = RttEstimator::new();
     let mut media_seen = false;
     let mut last_hello: Option<Instant> = None;
     let mut last_ping = Instant::now();
     let mut window_start = Instant::now();
     let mut throughput = Throughput::default();
+    let mut arrivals = Arrivals::default();
     let mut window_base = reassembler.stats();
+    let mut report_start = Instant::now();
+    let mut report_base = window_base;
     let mut poor = false;
     let mut good_windows = 0u32;
     // The socket ran dry on the last pass, after which everything that had
@@ -973,6 +1109,7 @@ fn receive(
                 .next_deadline()
                 .into_iter()
                 .chain(audio_rx.next_deadline())
+                .chain(inner.link.lock().as_ref().and_then(Link::next_deadline))
                 .min()
                 .unwrap_or(now + Duration::from_millis(20));
             let wait = deadline
@@ -996,6 +1133,41 @@ fn receive(
         if let Some(link) = inner.link.lock().as_mut() {
             link.flush(now);
         }
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        match receive_ready(&ready_socket, &mut batch, &udp, |bytes, from| {
+            if from.ip() == host.ip() {
+                if let Ok(datagram) = wire::parse(bytes) {
+                    if datagram.session() == session {
+                        inner.heard();
+                        handle(
+                            inner,
+                            &datagram,
+                            &udp,
+                            from,
+                            &mut out,
+                            &mut reassembler,
+                            &mut audio_rx,
+                            &mut feedback,
+                            &mut rtt,
+                            &mut media_seen,
+                            &mut throughput,
+                            bytes.len(),
+                        );
+                        hand_off_video(
+                            inner,
+                            &mut reassembler,
+                            &mut throughput,
+                            &mut arrivals,
+                            Instant::now(),
+                        );
+                    }
+                }
+            }
+        }) {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => drained = true,
+            _ => {}
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         // Drain a bounded batch before timers and feedback bookkeeping.
         for _ in 0..64 {
             match ready_socket.recv_from(&mut buf) {
@@ -1011,6 +1183,7 @@ fn receive(
                                 &mut out,
                                 &mut reassembler,
                                 &mut audio_rx,
+                                &mut feedback,
                                 &mut rtt,
                                 &mut media_seen,
                                 &mut throughput,
@@ -1040,29 +1213,7 @@ fn receive(
                 }
             }
         }
-        while let Some(event) = reassembler.poll(now) {
-            match event {
-                Reassembled::Frame(frame) => {
-                    throughput.frame(&frame);
-                    let mut q = inner.queue.lock();
-                    if q.frames.len() >= DECODE_QUEUE
-                        || q.frames.front().is_some_and(|(_, at)| {
-                            now.saturating_duration_since(*at) >= DECODE_MAX_AGE
-                        })
-                    {
-                        tracing::warn!("the decoder fell behind; restarting at a keyframe");
-                        q.frames.clear();
-                        q.want_keyframe = true;
-                    }
-                    q.frames.push_back((frame, now));
-                    drop(q);
-                    inner.queue_cv.notify_one();
-                }
-                Reassembled::Lost { frame } => {
-                    tracing::debug!("video frame {frame} lost");
-                }
-            }
-        }
+        hand_off_video(inner, &mut reassembler, &mut throughput, &mut arrivals, now);
         let waiting = reassembler.needs_keyframe(accepted, now) || inner.queue.lock().want_keyframe;
         if keyframes.due(waiting, now, rtt.srtt()) {
             wire::write_keyframe_request(
@@ -1072,15 +1223,35 @@ fn receive(
             );
             let _ = udp.send_to(&out, host);
         }
-        if now - window_start >= REPORT_EVERY {
+        if now - report_start >= REPORT_EVERY {
+            let stats = reassembler.stats();
+            let (loss, _, raw_loss) = loss_in_window(&report_base, &stats);
+            let secs = (now - report_start).as_secs_f32();
+            *inner.feedback.lock() = Report {
+                fps: (stats.frames_delivered - report_base.frames_delivered) as f32 / secs,
+                loss_pct: raw_loss,
+                decode_ms: inner.stats.lock().decode_ms,
+                rtt_ms: rtt.srtt().map_or(0.0, |d| d.as_secs_f32() * 1000.0),
+                received_kbps: (std::mem::take(&mut throughput.feedback_received) as f32 * 8.0
+                    / secs
+                    / 1000.0) as u32,
+                frames_lost: stats.frames_lost - report_base.frames_lost,
+                unrecovered_loss_pct: Some(loss),
+                window_ms: (secs * 1000.0) as u32,
+                ..Default::default()
+            };
+            report_start = now;
+            report_base = stats;
+        }
+        if now - window_start >= STATS_EVERY {
             let stats = reassembler.stats();
             let (loss, recovered, raw_loss) = loss_in_window(&window_base, &stats);
             let lost_count = stats.frames_lost.saturating_sub(window_base.frames_lost);
+            let skipped = stats
+                .frames_skipped
+                .saturating_sub(window_base.frames_skipped);
             let lost_frames = lost_count > 0;
             window_base = stats;
-            inner
-                .raw_loss_milli
-                .store((raw_loss * 1000.0) as u64, Ordering::Relaxed);
             let secs = (now - window_start).as_secs_f32();
             window_start = now;
             let decode = std::mem::take(&mut *inner.decode.lock());
@@ -1090,6 +1261,9 @@ fn receive(
                 s.window_ms = (secs * 1000.0) as u32;
                 s.frames_lost = lost_count;
                 s.fps = decode.frames as f32 / secs;
+                (s.received_fps, s.frame_jitter_ms) = arrivals.take(secs);
+                s.raw_loss_pct = raw_loss;
+                s.frames_dropped = skipped + inner.dropped.swap(0, Ordering::Relaxed);
                 (s.mbps, s.received_mbps) = throughput.take(secs);
                 s.decode_ms = decode.decode_us as f32 / frames / 1000.0;
                 s.queue_ms = decode.queue_us as f32 / frames / 1000.0;
@@ -1134,11 +1308,88 @@ fn receive(
     }
 }
 
+fn hand_off_video(
+    inner: &Arc<Inner>,
+    reassembler: &mut Reassembler,
+    throughput: &mut Throughput,
+    arrivals: &mut Arrivals,
+    now: Instant,
+) {
+    while let Some(event) = reassembler.poll(now) {
+        match event {
+            Reassembled::Frame(frame) => {
+                throughput.frame(&frame);
+                arrivals.frame(now);
+                let mut q = inner.queue.lock();
+                if q.frames.len() >= DECODE_QUEUE
+                    || q.frames
+                        .front()
+                        .is_some_and(|(_, at)| now.saturating_duration_since(*at) >= DECODE_MAX_AGE)
+                {
+                    tracing::warn!("the decoder fell behind; restarting at a keyframe");
+                    inner
+                        .dropped
+                        .fetch_add(q.frames.len() as u64, Ordering::Relaxed);
+                    q.frames.clear();
+                    q.want_keyframe = true;
+                }
+                q.frames.push_back((frame, now));
+                drop(q);
+                inner.queue_cv.notify_one();
+            }
+            Reassembled::Lost { frame } => {
+                tracing::debug!("video frame {frame} lost");
+            }
+        }
+    }
+}
+
+/// When whole frames arrived in the current statistics window.
+#[derive(Default)]
+struct Arrivals {
+    last: Option<Instant>,
+    frames: u32,
+    /// Gaps between consecutive frames, in µs.
+    gaps: Vec<u64>,
+}
+
+impl Arrivals {
+    fn frame(&mut self, now: Instant) {
+        if let Some(last) = self.last.replace(now) {
+            self.gaps
+                .push(now.saturating_duration_since(last).as_micros() as u64);
+        }
+        self.frames += 1;
+    }
+
+    /// Frames a second over `secs`, and the mean absolute deviation of the
+    /// gaps between them in ms; the window starts again.
+    fn take(&mut self, secs: f32) -> (f32, f32) {
+        let fps = self.frames as f32 / secs.max(f32::EPSILON);
+        let jitter = if self.gaps.len() < 2 {
+            0.0
+        } else {
+            let mean = self.gaps.iter().sum::<u64>() as f64 / self.gaps.len() as f64;
+            let spread = self
+                .gaps
+                .iter()
+                .map(|&g| (g as f64 - mean).abs())
+                .sum::<f64>()
+                / self.gaps.len() as f64;
+            (spread / 1000.0) as f32
+        };
+        self.frames = 0;
+        self.gaps.clear();
+        (fps, jitter)
+    }
+}
+
 /// Media bytes in the current statistics window.
 #[derive(Default)]
 struct Throughput {
     /// Video and audio datagrams as received.
     received: u64,
+    feedback_received: u64,
     /// Encoded video in the frames put back together.
     video: u64,
 }
@@ -1147,6 +1398,7 @@ impl Throughput {
     fn datagram(&mut self, datagram: &Datagram<'_>, len: usize) {
         if matches!(datagram, Datagram::Video { .. } | Datagram::Audio { .. }) {
             self.received += len as u64;
+            self.feedback_received += len as u64;
         }
     }
 
@@ -1190,6 +1442,7 @@ fn handle(
     out: &mut Vec<u8>,
     reassembler: &mut Reassembler,
     audio_rx: &mut AudioReceiver,
+    feedback: &mut LatestReceiver,
     rtt: &mut RttEstimator,
     media_seen: &mut bool,
     throughput: &mut Throughput,
@@ -1215,6 +1468,30 @@ fn handle(
         Datagram::InputAck { next, .. } => {
             if let Some(link) = inner.link.lock().as_mut() {
                 link.sender.ack(*next);
+            }
+        }
+        Datagram::PadAck { acks, .. } => {
+            if let Some(link) = inner.link.lock().as_mut() {
+                for ack in acks.iter() {
+                    link.pads.ack(ack);
+                }
+            }
+        }
+        Datagram::PadFeedback { updates, .. } => {
+            let mut acks = Vec::with_capacity(updates.count());
+            let deliver = inner.pad_feedback.lock();
+            for u in updates.iter() {
+                if feedback.accept(u.slot, u.seq) {
+                    if let Some(f) = deliver.as_ref() {
+                        f(u.slot, u.feedback);
+                    }
+                }
+                acks.extend(feedback.ack(u.slot));
+            }
+            drop(deliver);
+            if !acks.is_empty() {
+                wire::write_pad_feedback_ack(out, session, &acks);
+                let _ = udp.send_to(out, from);
             }
         }
         Datagram::Ping { time, .. } => {
@@ -1246,11 +1523,15 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
                     .front()
                     .is_some_and(|(_, at)| at.elapsed() >= DECODE_MAX_AGE)
                 {
+                    inner
+                        .dropped
+                        .fetch_add(q.frames.len() as u64, Ordering::Relaxed);
                     q.frames.clear();
                     q.want_keyframe = true;
                 }
                 if let Some(next) = q.frames.pop_front() {
                     if q.want_keyframe && !next.0.keyframe {
+                        inner.dropped.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
                     if next.0.keyframe {
@@ -1282,6 +1563,9 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
                 }
                 let black = picture.is_black();
                 inner.frames.publish(picture);
+                inner
+                    .published_us
+                    .store(inner.now_us().max(1), Ordering::Relaxed);
                 (inner.wake)();
                 inner.video_health.lock().frame(decoded, black);
                 let mut w = inner.decode.lock();
@@ -1301,9 +1585,93 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn receive_ready(
+    ready: &mio::net::UdpSocket,
+    batch: &mut latch_proto::transport::ReceiveBatch,
+    udp: &UdpSocket,
+    handle: impl FnMut(&[u8], SocketAddr),
+) -> std::io::Result<usize> {
+    // Mio must see WouldBlock even when I/O uses the standard-socket clone:
+    // on Windows this rearms the interests disabled by the readable event.
+    ready.try_io(|| batch.receive(udp, handle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn batch_receive_rearms_after_a_drained_burst() {
+        for offload in [false, true] {
+            let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+            udp.set_nonblocking(true).unwrap();
+            let mut ready = mio::net::UdpSocket::from_std(udp.try_clone().unwrap());
+            let mut poll = mio::Poll::new().unwrap();
+            poll.registry()
+                .register(&mut ready, mio::Token(0), mio::Interest::READABLE)
+                .unwrap();
+            let mut events = mio::Events::with_capacity(4);
+            let mut batch = latch_proto::transport::ReceiveBatch::with_offload(offload);
+            let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let addr = udp.local_addr().unwrap();
+            for burst in 0..4 {
+                let sender = tx.try_clone().unwrap();
+                let child = std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(10));
+                    for _ in 0..8 {
+                        sender.send_to(&[burst], addr).unwrap();
+                    }
+                });
+                let start = Instant::now();
+                poll.poll(&mut events, Some(Duration::from_secs(1)))
+                    .unwrap();
+                assert!(
+                    events.iter().any(|event| event.is_readable()),
+                    "missed burst {burst}, offload={offload}"
+                );
+                assert!(
+                    start.elapsed() < Duration::from_millis(200),
+                    "timer-driven receive"
+                );
+                child.join().unwrap();
+                let mut count = 0;
+                loop {
+                    match receive_ready(&ready, &mut batch, &udp, |bytes, _| {
+                        assert_eq!(bytes, &[burst]);
+                        count += 1;
+                    }) {
+                        Ok(_) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(e) => panic!("{e}"),
+                    }
+                }
+                assert_eq!(count, 8);
+            }
+        }
+    }
+
+    #[test]
+    fn arrivals_count_frames_and_how_unevenly_they_come() {
+        let mut a = Arrivals::default();
+        let t = Instant::now();
+        for ms in [0, 10, 20, 30, 40] {
+            a.frame(t + Duration::from_millis(ms));
+        }
+        let (fps, jitter) = a.take(0.05);
+        assert_eq!(fps, 100.0);
+        assert!(jitter < 0.01, "even gaps: {jitter}");
+        for ms in [50, 52, 70, 72, 90] {
+            a.frame(t + Duration::from_millis(ms));
+        }
+        let (_, jitter) = a.take(0.05);
+        assert!(
+            (jitter - 6.4).abs() < 0.01,
+            "gaps 10, 2, 18, 2, 18 ms: {jitter}"
+        );
+        assert_eq!(a.take(1.0), (0.0, 0.0), "a new window");
+    }
 
     #[test]
     fn video_health_distinguishes_missing_black_frozen_and_recovered_video() {
@@ -1417,12 +1785,14 @@ mod tests {
     fn hevc_is_offered_only_when_the_settings_allow_it() {
         let mut s = Settings {
             cursor: false,
+            gamepads: false,
             mic: false,
             width: 1920,
             height: 1080,
             fps: 60,
             bitrate_kbps: 20_000,
             hevc: false,
+            av1: false,
             audio: true,
             name: "test".into(),
         };
@@ -1446,12 +1816,14 @@ mod tests {
             },
             Settings {
                 cursor: false,
+                gamepads: false,
                 mic: false,
                 width: 1920,
                 height: 1080,
                 fps: 60,
                 bitrate_kbps: 10_000,
                 hevc: false,
+                av1: false,
                 audio: false,
                 name: "test".into(),
             },
@@ -1507,7 +1879,9 @@ mod tests {
             tcp: Mutex::new(None),
             epoch: Instant::now(),
             heard_us: AtomicU64::new(0),
-            raw_loss_milli: AtomicU64::new(0),
+            feedback: Mutex::new(Report::default()),
+            published_us: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
             connected: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -1515,6 +1889,10 @@ mod tests {
             cursor_supported: AtomicBool::new(false),
             cursor_state: Mutex::new(None),
             control_writer: Mutex::new(None),
+            pad_slots: AtomicU32::new(0),
+            pad_problem: Mutex::new(String::new()),
+            pad_feedback: Mutex::new(None),
+            pending_pads: Mutex::new([None; latch_proto::gamepad::MAX_PADS]),
             done: Mutex::new(false),
             done_cv: Condvar::new(),
         });

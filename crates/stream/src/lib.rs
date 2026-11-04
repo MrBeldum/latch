@@ -1,9 +1,10 @@
 //! The viewer side of a Latch stream (`docs/PROTOCOL.md`): the session
-//! with a host ([`session`]), video decoding ([`video`]) and audio playback
-//! ([`audio`]). Decoding uses VideoToolbox on a Mac, Media Foundation on
+//! with a host ([`session`]), video decoding ([`video`]), audio playback
+//! ([`audio`]) and this machine's gamepads ([`gamepad`]). Decoding uses VideoToolbox on a Mac, Media Foundation on
 //! Windows, and `latch-codec` wherever neither is there.
 
 pub mod audio;
+pub mod gamepad;
 pub mod input;
 pub mod mic;
 #[path = "../../engine/src/priority.rs"]
