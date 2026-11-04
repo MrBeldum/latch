@@ -1,6 +1,6 @@
-Code: gfn/transport-fec after the second review round (main ee3176a merged in).
+Code: gfn/transport-fec after the second review round (main 5f8f45f, PR 60, merged in).
 PASS cargo fmt --all -- --check
-PASS cargo test --locked --workspace --all-targets --no-fail-fast (Mac; 751 passed, 0 failed, 34 ignored)
+PASS cargo test --locked --workspace --all-targets --no-fail-fast (Mac; 758 passed, 0 failed, 37 ignored)
 PASS cargo clippy --locked --workspace --all-targets -- -D warnings (Mac)
 PASS cargo clippy --locked --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 PASS cargo check --locked --release --workspace --target x86_64-pc-windows-msvc
