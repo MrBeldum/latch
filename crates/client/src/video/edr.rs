@@ -24,10 +24,16 @@ vertex V vs(uint i [[vertex_id]]) {
     float2 p = float2(int(i&1)*4-1,int(i>>1)*4-1);
     return {float4(p,0,1),float2((p.x+1)*0.5,1-(p.y+1)*0.5)};
 }
-fragment float4 fs(V in [[stage_in]], texture2d<float> y [[texture(0)]], texture2d<float> uv [[texture(1)]], constant float &headroom [[buffer(0)]]) {
+fragment float4 fs(V in [[stage_in]], texture2d<float> y [[texture(0)]], texture2d<float> uv [[texture(1)]], constant float2 &params [[buffer(0)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float yy = (y.sample(s,in.uv).r*65535.0/64.0-64.0)/876.0;
     float2 c = (uv.sample(s,in.uv).rg*65535.0/64.0-512.0)/896.0;
+    float headroom = params.x;
+    if(params.y == 0) {
+        float3 c709 = saturate(float3(yy+1.5748*c.y,yy-0.1873*c.x-0.4681*c.y,yy+1.8556*c.x));
+        float3 lin = select(pow((c709+0.055)/1.055,float3(2.4)),c709/12.92,c709 <= 0.04045);
+        return float4(dot(lin,float3(0.822593,0.177534,0)),dot(lin,float3(0.0332,0.966784,0)),dot(lin,float3(0.017085,0.072396,0.910302)),1);
+    }
     float3 pq = max(float3(yy+1.4746*c.y,yy-0.164553*c.x-0.571353*c.y,yy+1.8814*c.x),0.0);
     float3 p = pow(pq,float3(32.0/2523.0));
     float3 wide = 10000.0*pow(max(p-3424.0/4096.0,0.0)/(2413.0/128.0-(2392.0/128.0)*p),float3(16384.0/2610.0));
@@ -231,7 +237,8 @@ impl Edr {
         enc.set_render_pipeline_state(&self.pipeline);
         enc.set_fragment_texture(0, Some(&y));
         enc.set_fragment_texture(1, Some(&uv));
-        enc.set_fragment_bytes(0, 4, (&headroom as *const f32).cast());
+        let params = [headroom, if frame.color.is_hdr() { 1.0 } else { 0.0 }];
+        enc.set_fragment_bytes(0, 8, params.as_ptr().cast());
         enc.draw_primitives(MTLPrimitiveType::Triangle, 0, 3);
         enc.end_encoding();
         cmd.present_drawable(drawable);

@@ -372,7 +372,7 @@ pub fn new_decoder_color(
     #[cfg(windows)]
     {
         if matches!(codec, Codec::Hevc | Codec::H264Baseline) {
-            match mediafoundation::MfDecoder::with_codec(codec == Codec::Hevc) {
+            match mediafoundation::MfDecoder::with_color(codec == Codec::Hevc, color.bit_depth) {
                 Ok(d) if codec == Codec::H264Baseline => {
                     return Ok(Box::new(Fallback::new(Box::new(MediaFoundation(d)))))
                 }

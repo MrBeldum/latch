@@ -34,6 +34,9 @@ impl MfDecoder {
         Self::with_codec(false)
     }
     pub fn with_codec(hevc: bool) -> Result<Self> {
+        Self::with_color(hevc, 8)
+    }
+    pub fn with_color(hevc: bool, depth: u8) -> Result<Self> {
         let (requests, receive) = mpsc::channel::<Request>();
         let (ready, startup) = mpsc::sync_channel(1);
         thread::Builder::new()
@@ -41,8 +44,8 @@ impl MfDecoder {
             .spawn(move || {
                 let initialized = (|| {
                     let runtime = Runtime::new()?;
-                    let decoder =
-                        State::new_codec(true, hevc).or_else(|_| State::new_codec(false, hevc))?;
+                    let decoder = State::new_codec(true, hevc, depth)
+                        .or_else(|_| State::new_codec(false, hevc, depth))?;
                     Ok::<_, anyhow::Error>((runtime, decoder))
                 })();
                 let (_runtime, mut decoder) = match initialized {
@@ -357,6 +360,7 @@ impl Layout {
     }
 }
 struct State {
+    depth: u8,
     transform: IMFTransform,
     gpu: Option<Gpu>,
     output_type: Option<IMFMediaType>,
@@ -374,9 +378,9 @@ impl State {
     }
     #[cfg(test)]
     fn new(dxva: bool) -> Result<Self> {
-        Self::new_codec(dxva, false)
+        Self::new_codec(dxva, false, 8)
     }
-    fn new_codec(dxva: bool, hevc: bool) -> Result<Self> {
+    fn new_codec(dxva: bool, hevc: bool, depth: u8) -> Result<Self> {
         // SAFETY: This runs only in the initialized decoder MTA.
         unsafe {
             let transform: IMFTransform = CoCreateInstance(
@@ -415,6 +419,7 @@ impl State {
                 .SetInputType(0, &input, 0)
                 .context("decoder H.264 input type")?;
             let mut state = Self {
+                depth,
                 transform,
                 gpu,
                 output_type: None,
@@ -443,8 +448,12 @@ impl State {
                     Err(e) if e.code() == MF_E_NO_MORE_TYPES => break,
                     Err(e) => return Err(e).context("enumerate decoder output types"),
                 };
-                if ty.GetGUID(&MF_MT_SUBTYPE)? == MFVideoFormat_NV12
-                    || ty.GetGUID(&MF_MT_SUBTYPE)? == MFVideoFormat_P010
+                if ty.GetGUID(&MF_MT_SUBTYPE)?
+                    == if self.depth == 10 {
+                        MFVideoFormat_P010
+                    } else {
+                        MFVideoFormat_NV12
+                    }
                 {
                     match self.transform.SetOutputType(0, &ty, 0) {
                         Err(e) if e.code() == MF_E_UNSUPPORTED_D3D_TYPE && self.gpu.is_some() => {

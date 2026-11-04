@@ -353,9 +353,9 @@ impl CursorRenderer {
         target: &ID3D11Texture2D,
         cursor: &DXGI_OUTDUPL_POINTER_POSITION,
         shape: &DXGI_OUTDUPL_POINTER_SHAPE_INFO,
-        color: (DXGI_MODE_ROTATION, f32),
+        color: (DXGI_MODE_ROTATION, f32, bool),
     ) -> Result<()> {
-        let (rotation, white) = color;
+        let (rotation, white, output_pq) = color;
         let (mut raw, mut dst) = (
             D3D11_TEXTURE2D_DESC::default(),
             D3D11_TEXTURE2D_DESC::default(),
@@ -407,7 +407,7 @@ impl CursorRenderer {
                 raw.Height,
                 u32::from(raw.Format == DXGI_FORMAT_R16G16B16A16_FLOAT),
                 white.to_bits(),
-                u32::from(dst.Format == DXGI_FORMAT_R10G10B10A2_UNORM),
+                u32::from(output_pq),
                 0,
             ];
             gpu.context.UpdateSubresource(
@@ -443,6 +443,7 @@ impl CursorRenderer {
 }
 pub(super) struct Capture {
     pub hdr_output: bool,
+    ten_bit: bool,
     pub gpu: Gpu,
     duplication: Option<IDXGIOutputDuplication>,
     source: ID3D11Texture2D,
@@ -530,13 +531,15 @@ fn duplicate(output: &display::Output, gpu: &Gpu) -> Result<IDXGIOutputDuplicati
 // apartment-bound MF interfaces or COM initialization guard travel with it.
 unsafe impl Send for Capture {}
 impl Capture {
+    #[cfg(test)]
     pub fn new() -> Result<Self> {
-        Self::new_color(false)
+        Self::new_color(Default::default())
     }
-    pub fn new_color(want_hdr: bool) -> Result<Self> {
+    pub fn new_color(color: latch_proto::color::ColorDescription) -> Result<Self> {
         let _dpi = display::DpiAwareness::physical();
         let output = display::select()?;
-        let hdr_output = want_hdr
+        let ten_bit = color.bit_depth == 10;
+        let hdr_output = color.is_hdr()
             && unsafe {
                 output
                     .output
@@ -559,7 +562,7 @@ impl Capture {
         let frame = gpu.texture(
             display.width,
             display.height,
-            if hdr_output {
+            if ten_bit {
                 DXGI_FORMAT_R10G10B10A2_UNORM
             } else {
                 DXGI_FORMAT_B8G8R8A8_UNORM
@@ -570,6 +573,7 @@ impl Capture {
         let renderer = CursorRenderer::new(&gpu)?;
         Ok(Self {
             hdr_output,
+            ten_bit,
             gpu,
             duplication: Some(duplication),
             source,
@@ -613,7 +617,16 @@ impl Capture {
             )
         };
         if old.HighPart != new.HighPart || old.LowPart != new.LowPart {
-            *self = Self::new_color(self.hdr_output)?;
+            let mut color = latch_proto::color::ColorDescription {
+                bit_depth: if self.ten_bit { 10 } else { 8 },
+                ..Default::default()
+            };
+            if self.hdr_output {
+                color.transfer = 16;
+            }
+            let hdr_output = self.hdr_output;
+            *self = Self::new_color(color)?;
+            self.hdr_output = hdr_output;
             return Ok(());
         }
         let duplication = duplicate(&output, &self.gpu)?;
@@ -630,7 +643,7 @@ impl Capture {
         let frame = self.gpu.texture(
             display.width,
             display.height,
-            if self.hdr_output {
+            if self.ten_bit {
                 DXGI_FORMAT_R10G10B10A2_UNORM
             } else {
                 DXGI_FORMAT_B8G8R8A8_UNORM
@@ -729,7 +742,7 @@ impl Capture {
                 self.frame = self.gpu.texture(
                     width,
                     height,
-                    if self.hdr_output {
+                    if self.ten_bit {
                         DXGI_FORMAT_R10G10B10A2_UNORM
                     } else {
                         DXGI_FORMAT_B8G8R8A8_UNORM
@@ -761,7 +774,7 @@ impl Capture {
                 .context("read DXGI pointer shape")?;
                 shape_bytes = Some(bytes);
             }
-            composite = self.hdr_output
+            composite = self.ten_bit
                 || self.pointer.Visible.as_bool()
                 || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM
                 || !matches!(
@@ -801,7 +814,7 @@ impl Capture {
                 &self.frame,
                 &self.pointer,
                 &self.shape,
-                (self.rotation, self.white),
+                (self.rotation, self.white, self.hdr_output),
             )?;
         }
         self.has_frame = true;
@@ -879,6 +892,7 @@ pub(super) struct Converter {
     input: Option<(ID3D11Texture2D, ID3D11VideoProcessorInputView)>,
 }
 impl Converter {
+    #[cfg(test)]
     pub fn new(gpu: &Gpu, input: (u32, u32), output: (u32, u32), fps: u32) -> Result<Self> {
         Self::with_color(gpu, input, output, fps, Default::default())
     }
@@ -1208,7 +1222,7 @@ mod tests {
             &target,
             &Default::default(),
             &Default::default(),
-            (DXGI_MODE_ROTATION_IDENTITY, 2.0),
+            (DXGI_MODE_ROTATION_IDENTITY, 2.0, false),
         )?;
         let pixels = gpu.read(&mut None, &target, 1, |bytes, _| bytes.to_vec())?;
         assert_eq!(&pixels[..4], &[255, 255, 255, 255]);
@@ -1430,7 +1444,7 @@ mod hdr_probe {
             &target,
             &Default::default(),
             &Default::default(),
-            (DXGI_MODE_ROTATION_IDENTITY, 1.0),
+            (DXGI_MODE_ROTATION_IDENTITY, 1.0, true),
         )?;
         let mut converter = Converter::with_color(&gpu, (960, 540), (960, 540), 60, color)?;
         let picture = converter.convert(&target)?;

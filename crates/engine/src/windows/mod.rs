@@ -292,7 +292,7 @@ enum Pipeline {
 }
 impl Pipeline {
     fn new(config: &VideoConfig, mf: bool) -> Result<Self> {
-        let capture = Capture::new_color(config.color.is_hdr())?;
+        let capture = Capture::new_color(config.color)?;
         let mut config = config.clone();
         if config.color.is_hdr() && !capture.hdr_output {
             config.color = latch_proto::color::ColorDescription {

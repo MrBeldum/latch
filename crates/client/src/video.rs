@@ -532,7 +532,7 @@ impl Resources {
         let _ = (rect, pixels_per_point);
         #[cfg(target_os = "macos")]
         if let Some(edr) = &mut self.edr {
-            if frame.color.is_hdr() && frame.native.is_some() {
+            if frame.color.bit_depth == 10 && frame.native.is_some() {
                 match edr.draw(&frame, rect, pixels_per_point) {
                     Ok(()) => {
                         self.edr_active = true;
@@ -562,6 +562,7 @@ impl Resources {
     }
 
     #[cfg(target_os = "macos")]
+    #[allow(clippy::result_large_err)] // Returns ownership for the rare CPU fallback.
     fn upload_native(
         &mut self,
         device: &wgpu::Device,
@@ -893,6 +894,42 @@ pub fn install(render_state: &egui_wgpu::RenderState) {
     render_state.renderer.write().callback_resources.insert(res);
 }
 
+/// HDR is offered only after the native layer can be created. Headless tools
+/// must opt in explicitly; they cannot infer a display from a decoder.
+pub fn color_capabilities() -> latch_proto::color::ColorCapabilities {
+    #[cfg(target_os = "macos")]
+    let peak = edr::peak_nits();
+    #[cfg(windows)]
+    let peak = hdr10::peak_nits();
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let peak = 0;
+    latch_proto::color::ColorCapabilities {
+        ten_bit: cfg!(any(target_os = "macos", windows)),
+        hdr: peak > 0,
+        peak_nits: peak,
+    }
+}
+
+/// Hide the video sublayer before egui decides whether this frame has a video
+/// callback. The callback makes it visible again, including idle repeats.
+pub fn begin_frame(frame: &eframe::Frame) {
+    #[cfg(any(target_os = "macos", windows))]
+    if let Some(state) = frame.wgpu_render_state() {
+        if let Some(r) = state.renderer.read().callback_resources.get::<Resources>() {
+            #[cfg(target_os = "macos")]
+            if let Some(edr) = &r.edr {
+                edr.hide();
+            }
+            #[cfg(windows)]
+            if let Some(hdr) = &r.hdr10 {
+                hdr.hide();
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let _ = frame;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1165,40 +1202,4 @@ mod tests {
             "3024x1964 upload and render: 50 frames in {elapsed:?} ({per_frame:.2} ms/frame)"
         );
     }
-}
-
-/// HDR is offered only after the native layer can be created. Headless tools
-/// must opt in explicitly; they cannot infer a display from a decoder.
-pub fn color_capabilities() -> latch_proto::color::ColorCapabilities {
-    #[cfg(target_os = "macos")]
-    let peak = edr::peak_nits();
-    #[cfg(windows)]
-    let peak = hdr10::peak_nits();
-    #[cfg(not(any(target_os = "macos", windows)))]
-    let peak = 0;
-    latch_proto::color::ColorCapabilities {
-        ten_bit: cfg!(any(target_os = "macos", windows)),
-        hdr: peak > 0,
-        peak_nits: peak,
-    }
-}
-
-/// Hide the video sublayer before egui decides whether this frame has a video
-/// callback. The callback makes it visible again, including idle repeats.
-pub fn begin_frame(frame: &eframe::Frame) {
-    #[cfg(any(target_os = "macos", windows))]
-    if let Some(state) = frame.wgpu_render_state() {
-        if let Some(r) = state.renderer.read().callback_resources.get::<Resources>() {
-            #[cfg(target_os = "macos")]
-            if let Some(edr) = &r.edr {
-                edr.hide();
-            }
-            #[cfg(windows)]
-            if let Some(hdr) = &r.hdr10 {
-                hdr.hide();
-            }
-        }
-    }
-    #[cfg(not(any(target_os = "macos", windows)))]
-    let _ = frame;
 }
