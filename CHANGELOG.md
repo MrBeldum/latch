@@ -58,8 +58,13 @@
   lower it before motion resumes into a path that got slower. Report the
   budget and application-limited state.
 - An underfilled stream cut by someone else's standing queue regains what it
-  delivered once the queue has been gone for a second; waiting in the pacer is
-  not sender pressure while pacing. A pending keyframe never takes the
+  delivered once the queue has been gone for a second, and an idle or
+  floor-bound sparse stream regrows by time after any cut, up to what probe
+  trains measured; waiting in the pacer is not sender pressure while pacing.
+- The queue-free loss rate test needs 4 Mbps of traffic, compares mean loss
+  before and during the test, and confirms only if the reduced budget (not
+  the content) lowered the load: sparse desktop streams under bursty loss no
+  longer confirm phantom policers at the floor. A pending keyframe never takes the
   encoder target under half the ordinary one.
 - One parity policy and one parity layout for the server, the wire
   reservation (now including the keyframe/recovery floor) and the transport

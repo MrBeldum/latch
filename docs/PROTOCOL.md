@@ -512,9 +512,11 @@ above max(6 ms, base RTT / 10, 3× ping jitter) is pressure (idle senders retain
 a 3 ms jitter allowance). Severe residual loss on a loaded sender, or damage without usable rate
 feedback remains pressure; so does >10% loss with a delivery deficit sustained
 for 500 ms on an underfilled one. Moderate queue-free damage first raises FEC, then
-lowers the rate actually sent by 20% after 500 ms; loss falling by half (or
-by over max(35%, 2 points) above a random-loss floor) with actual load
-falling at least 10% confirms a policer after a horizon plus one second.
+lowers the rate actually sent by 20% after 500 ms (only at 4 Mbps or more sent);
+mean loss falling by half against its mean before the test (or by over
+max(35%, 2 points) above a random-loss floor) with the mean actual load
+falling at least 10% while filling the reduced budget confirms a policer
+after a horizon plus one second.
 Inconclusive tests restore the budget and wait three seconds.
 Delay/collapse cuts stay immediate under the existing two/one-window gates;
 one damaged legacy window of 500 ms or more cuts at once.
@@ -539,8 +541,9 @@ viewer that times them; two recent trains both under 3/4 of the budget lower
 it to 90% of the faster one (with pacing) before motion resumes, and later
 faster trains restore it. An underfilled stream cut by a standing delay that
 still delivered everything gets back what it delivered once the delay has
-been gone for a second. While pacing, the pacer's own local queue is not
-sender pressure. Data shards precede parity computation and transmission; a
+been gone for a second; an idle one (or an underfilled one at the floor)
+regrows by time a second after a cut, never past the last trains. While
+pacing, the pacer's own local queue is not sender pressure. Data shards precede parity computation and transmission; a
 completed frame is handed to decode immediately, including mid-receive-batch.
 Protocol 1 datagrams remain at most 1200 bytes. No MTU or socket-offload
 capability is advertised by this change.

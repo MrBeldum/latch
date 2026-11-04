@@ -425,8 +425,12 @@ Trains a viewer cannot time (one receive batch) read as fast, which changes
 nothing; an older viewer gets none, and idle then works as on main. An
 underfilled stream that a standing delay cut while it still delivered
 everything (someone else's queue) gets back what it delivered once the delay
-has been gone for a second: it can never fill a probe to prove it. Viewer
-reports carry the budget as `wire_budget_kbps`.
+has been gone for a second: it can never fill a probe to prove it. Likewise an
+idle stream (or an underfilled one at the floor), a second after any cut's
+signal clears, regrows by time but never past the last pair of trains (only
+fresh trains act at all); the regrown rate stands in for capacity, so motion
+probes up from it in bounded steps. Viewer reports carry the budget as
+`wire_budget_kbps`.
 Each cut removes 20%, or 40% for queue delay above 20 ms or loss above 10%.
 Loss in a window that delivered more than is now sent predates the last cut
 and is ignored, as is a queue still falling within three horizons of a cut
@@ -434,8 +438,12 @@ and is ignored, as is a queue still falling within three horizons of a cut
 20 ms is pressure only for a loaded sender. Moderate queue-free damage with
 usable send/receive feedback gets 500 ms for FEC adaptation before a reversible
 20% reduction of the rate actually sent (a lower unused budget would change no
-load). After a feedback horizon plus one second, actual sending must have
-fallen by 10% and loss by half, or by more than max(35% of it, 2 points) (a
+load), if at least 4 Mbps is sent: a sparse stream's few datagrams a window
+cannot tell a policer from chance, so parity and the severe-loss escape cover
+it. After a feedback horizon plus one second, the mean sent rate over the test
+must have fallen by 10% while filling at least 85% of the reduced budget (so
+the budget, not the content, lowered it), and mean raw loss (against its mean
+over the 500 ms before, not the window that started the test) by half, or by more than max(35% of it, 2 points) (a
 policer over a random-loss floor), to confirm a policer at the rate implied by
 the loss that remained; otherwise the budget returns and no further test runs
 for three seconds. A confirmed test also records that remaining loss as the
