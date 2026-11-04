@@ -172,14 +172,23 @@ pub struct Stats {
     /// How unevenly whole frames arrive: the mean distance of each gap
     /// between two from the mean gap, in ms.
     pub frame_jitter_ms: f32,
-    /// Keyframes and recovery frames delivered in the last window, and
-    /// their bytes.
+}
+
+/// Every loss of the session and how it ended, for tools that measure
+/// recovery ([`Session::recovery_log`]).
+#[derive(Debug, Clone, Default)]
+pub struct RecoveryLog {
+    /// Keyframes and recovery frames delivered, and their bytes.
     pub keyframes: u64,
     pub keyframe_bytes: u64,
     pub recovery_frames: u64,
     pub recovery_bytes: u64,
-    /// Losses that ended in the last window, oldest first.
+    /// Oldest first; at most [`RecoveryLog::KEPT`].
     pub losses: Vec<LossEvent>,
+}
+
+impl RecoveryLog {
+    pub const KEPT: usize = 100_000;
 }
 
 /// One loss, from the frame given up on to the frame that ended it.
@@ -196,15 +205,12 @@ pub struct LossEvent {
     pub bytes: usize,
 }
 
-/// Loss bookkeeping for [`Stats::losses`].
+/// Loss bookkeeping for [`RecoveryLog`].
 #[derive(Default)]
 struct Losses {
     /// When the current loss was declared, and the delivery before it.
     open: Option<(Instant, Option<Instant>)>,
     last_delivery: Option<Instant>,
-    ended: Vec<LossEvent>,
-    keyframes: (u64, u64),
-    recoveries: (u64, u64),
 }
 
 impl Losses {
@@ -214,25 +220,30 @@ impl Losses {
         }
     }
 
-    fn delivered(&mut self, frame: &InFrame, now: Instant) {
+    fn delivered(&mut self, log: &Mutex<RecoveryLog>, frame: &InFrame, now: Instant) {
+        let ended = self.open.take();
+        self.last_delivery = Some(now);
+        if !frame.keyframe && !frame.recovery && ended.is_none() {
+            return;
+        }
+        let mut log = log.lock();
         if frame.keyframe {
-            self.keyframes.0 += 1;
-            self.keyframes.1 += frame.data.len() as u64;
+            log.keyframes += 1;
+            log.keyframe_bytes += frame.data.len() as u64;
         }
         if frame.recovery {
-            self.recoveries.0 += 1;
-            self.recoveries.1 += frame.data.len() as u64;
+            log.recovery_frames += 1;
+            log.recovery_bytes += frame.data.len() as u64;
         }
-        if let Some((at, before)) = self.open.take() {
+        if let Some((at, before)) = ended.filter(|_| log.losses.len() < RecoveryLog::KEPT) {
             let ms = |t: Instant| now.saturating_duration_since(t).as_secs_f32() * 1000.0;
-            self.ended.push(LossEvent {
+            log.losses.push(LossEvent {
                 resume_ms: ms(at),
                 freeze_ms: before.map_or(0.0, ms),
                 keyframe: frame.keyframe,
                 bytes: frame.data.len(),
             });
         }
-        self.last_delivery = Some(now);
     }
 }
 
@@ -369,6 +380,7 @@ struct Inner {
     wake: Box<dyn Fn() + Send + Sync>,
     frames: Arc<FrameSlot>,
     stats: Mutex<Stats>,
+    recovery: Mutex<RecoveryLog>,
     /// Persists across the receive thread's periodic player description.
     host_audio_problem: Mutex<String>,
     video_health: Mutex<VideoHealth>,
@@ -570,6 +582,7 @@ impl Session {
             wake: Box::new(wake),
             frames,
             stats: Mutex::new(Stats::default()),
+            recovery: Mutex::default(),
             host_audio_problem: Mutex::new(String::new()),
             video_health: Mutex::new(VideoHealth::default()),
             decode: Mutex::new(DecodeWindow::default()),
@@ -660,6 +673,11 @@ impl Session {
         let mut stats = self.inner.stats.lock().clone();
         stats.video_problem = self.inner.video_health.lock().problem(Instant::now());
         stats
+    }
+
+    /// Every loss so far and how it ended.
+    pub fn recovery_log(&self) -> RecoveryLog {
+        self.inner.recovery.lock().clone()
     }
 
     /// When the newest picture was published to the [`FrameSlot`]: the
@@ -1399,9 +1417,6 @@ fn receive(
                 s.fec_recovered = recovered;
                 s.rtt_ms = rtt.srtt().map_or(0, |d| d.as_millis() as u32);
                 s.rtt_var_ms = rtt.rttvar().as_millis() as u32;
-                (s.keyframes, s.keyframe_bytes) = std::mem::take(&mut losses.keyframes);
-                (s.recovery_frames, s.recovery_bytes) = std::mem::take(&mut losses.recoveries);
-                s.losses = std::mem::take(&mut losses.ended);
                 if let Some(p) = &player {
                     let problem = inner.host_audio_problem.lock();
                     s.audio = if problem.is_empty() {
@@ -1438,7 +1453,7 @@ fn hand_off_video(
     while let Some(event) = reassembler.poll(now) {
         match event {
             Reassembled::Frame(frame) => {
-                losses.delivered(&frame, now);
+                losses.delivered(&inner.recovery, &frame, now);
                 throughput.frame(&frame);
                 arrivals.frame(now);
                 let mut q = inner.queue.lock();
@@ -1989,6 +2004,7 @@ mod tests {
                 height: 64,
                 ..Default::default()
             }),
+            recovery: Mutex::default(),
             host_audio_problem: Mutex::new(String::new()),
             video_health: Mutex::new(VideoHealth::default()),
             decode: Mutex::new(DecodeWindow::default()),
