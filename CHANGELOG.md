@@ -46,6 +46,19 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- No wait at a session's end can hang it: the host leaves a media thread
+  stuck in a capture or encoder call behind after 5 s (the session still
+  ends and lets go of the screen), and a second viewer gives up after 30 s,
+  rather than waiting for ever, on one that is still starting a stream. The
+  viewer's control writes time out after 2 s and its receive thread is
+  waited for at most 2 s.
+- CI: the loopback tests' sessions take turns (test mode sends input to the
+  newest test pattern, so the gamepad test's session took the key presses
+  of the picture test, which then waited for ever on a square that never
+  flipped: hours-long hangs on the macOS runner). A test still running after
+  60 s prints every thread's stack and fails the run, and every CI job has
+  a time limit.
+
 - No Latch-imposed ceilings on a stream. The viewer allowed 30–240 fps and
   2–150 Mbps and the host clamped every request to 240 fps, 500 Mbps and
   8192 pixels; the software H.264 encoder refused anything over 240 fps.
