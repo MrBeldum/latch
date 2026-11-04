@@ -4,17 +4,18 @@
 //! checks convergence at 10 Mbps; an encoder budget is not measured traffic.
 
 // Exercise the production controller without widening its public API.
+#[allow(dead_code)]
 #[path = "../src/congestion.rs"]
 mod congestion;
+#[path = "support/relay.rs"]
+mod relay;
 
 use latch_core::http::{self, Response};
 use latch_engine::server::{Options, Server};
 use latch_proto::control::{self, StreamRequest};
 use latch_proto::sim::{Impairment, Link};
 use latch_stream::{Event, FrameSlot, Session, Settings};
-use parking_lot::Mutex;
-use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, TcpListener, UdpSocket};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
@@ -59,111 +60,12 @@ fn host() -> u16 {
     panic!("no free port");
 }
 
-/// A relay on 127.0.0.1: TCP passed through as is, UDP through two
-/// impaired links. Returns its port (the same number for TCP and UDP).
-fn relay(
-    host_port: u16,
-    impairment: Impairment,
-    queue_delay_ms: Arc<std::sync::atomic::AtomicU32>,
-) -> u16 {
-    let (listener, udp) = loop {
-        // UDP picks the port, as in `host`.
-        let u = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = u.local_addr().unwrap().port();
-        if let Ok(l) = TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
-            break (l, u);
-        }
-    };
-    let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        for client in listener.incoming().flatten() {
-            let server = TcpStream::connect((Ipv4Addr::LOCALHOST, host_port)).unwrap();
-            let pipe = |mut from: TcpStream, mut to: TcpStream| {
-                std::thread::spawn(move || {
-                    let mut buf = [0u8; 16384];
-                    while let Ok(n) = from.read(&mut buf) {
-                        if n == 0 || to.write_all(&buf[..n]).is_err() {
-                            break;
-                        }
-                    }
-                    let _ = to.shutdown(std::net::Shutdown::Both);
-                });
-            };
-            pipe(client.try_clone().unwrap(), server.try_clone().unwrap());
-            pipe(server, client);
-        }
-    });
-    // Viewer → relay socket → host from a second socket, so the host sees
-    // the relay as the viewer. Per direction, one thread blocks on its socket
-    // and puts what arrives into the link; another sleeps until the link's
-    // next datagram is due and sends it then. Releasing only when something
-    // else arrives (or when a socket timeout fires, about 15 ms on Windows)
-    // held pings behind a thin stream and looked like a queue that never
-    // drained.
-    let to_host = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), host_port);
-    let viewer: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
-    let up = Arc::new(Mutex::new(Link::new(impairment, 7)));
-    let down = Arc::new(Mutex::new(Link::new(impairment, 11)));
-    {
-        let (from_viewer, link, viewer) = (udp.try_clone().unwrap(), up.clone(), viewer.clone());
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 2048];
-            while let Ok((n, from)) = from_viewer.recv_from(&mut buf) {
-                *viewer.lock() = Some(from);
-                link.lock().send(Instant::now(), &buf[..n]);
-            }
-        });
-    }
-    {
-        let (from_host, link) = (to_host.try_clone().unwrap(), down.clone());
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 2048];
-            while let Ok((n, _)) = from_host.recv_from(&mut buf) {
-                // Model standing cross-traffic queueing independently of the
-                // encoder's offered rate. All downstream traffic, including
-                // ping/pong, waits in the same queue; TCP reports stay untouched.
-                let delay = Duration::from_millis(u64::from(
-                    queue_delay_ms.load(std::sync::atomic::Ordering::Relaxed),
-                ));
-                link.lock().send(Instant::now() + delay, &buf[..n]);
-            }
-        });
-    }
-    let deliver = move |link: Arc<Mutex<Link>>,
-                        out: UdpSocket,
-                        to: Box<dyn Fn() -> Option<SocketAddr> + Send>| {
-        move || loop {
-            let now = Instant::now();
-            let (due, next) = {
-                let mut link = link.lock();
-                (link.receive(now), link.next_arrival())
-            };
-            if let Some(to) = to() {
-                for d in due {
-                    let _ = out.send_to(&d, to);
-                }
-            }
-            // std's sleep is high resolution on every platform this runs on.
-            let wait = next.map_or(Duration::from_millis(1), |t| {
-                t.saturating_duration_since(now)
-            });
-            std::thread::sleep(wait.clamp(Duration::from_micros(100), Duration::from_millis(1)));
-        }
-    };
-    let up = deliver(up, to_host, Box::new(move || Some(host_addr)));
-    let down = deliver(down, udp, Box::new(move || *viewer.lock()));
-    std::thread::spawn(up);
-    std::thread::spawn(down);
-    port
-}
-
 #[test]
 fn noise_stream_adapts_to_sustained_queue_delay_and_recovers() {
     use std::sync::atomic::{AtomicU32, Ordering};
     std::env::set_var("LATCH_TEST_PATTERN", "noise");
     let queue_delay_ms = Arc::new(AtomicU32::new(5));
-    let port = relay(host(), Impairment::NONE, queue_delay_ms.clone());
+    let port = relay::relay(host(), Impairment::NONE, queue_delay_ms.clone());
     let frames = Arc::new(FrameSlot::default());
     let (tx, rx) = mpsc::channel();
     let session = Session::start(
@@ -207,12 +109,18 @@ fn noise_stream_adapts_to_sustained_queue_delay_and_recovers() {
     let baseline = loop {
         std::thread::sleep(Duration::from_millis(300));
         let s = session.stats();
-        if frames.seq() >= 10 && s.rtt_ms > 0 && s.applied_bitrate_kbps > 0 {
+        if frames.seq() >= 10 && s.rtt_ms > 0 && s.applied_bitrate_kbps > 0 && s.application_limited
+        {
             break s;
         }
         assert!(Instant::now() < deadline, "no baseline: {s:?}");
     };
     eprintln!("baseline: {baseline:?}");
+    assert!(baseline.wire_budget_kbps >= 40_000, "idle budget collapsed");
+    assert!(
+        baseline.application_limited,
+        "must exercise an underfilled encoder"
+    );
     queue_delay_ms.store(45, Ordering::Relaxed);
     let mut clean = 0;
     let mut constrained = 0;
@@ -231,9 +139,6 @@ fn noise_stream_adapts_to_sustained_queue_delay_and_recovers() {
         // whole settled run, not in every poll. 12 fps over a ~250 ms stats
         // window is 1–3 frames: one frame reads as 3.8 fps.
         if s.applied_bitrate_kbps > 0
-            // The budget follows what is actually sent, so this underfilled
-            // stream may already sit near the 1 Mbps wire floor (797 kbps of
-            // video) before the queue builds: at the floor counts as cut.
             && s.applied_bitrate_kbps < (baseline.applied_bitrate_kbps / 4).max(1_000)
             && s.rtt_ms >= baseline.rtt_ms + 20
             && s.fps >= 3.0
@@ -325,7 +230,7 @@ fn saturated_ten_megabit_fifo_converges_and_recovers_with_fake_clock() {
     }
     let mean = settled.iter().sum::<u32>() / settled.len() as u32;
     assert!((8_000..=10_500).contains(&mean), "did not converge: {mean}");
-    assert!(congestion::video_budget(10_000, 10, false) < 10_000);
+    assert!(congestion::video_budget(10_000, 10, 0, 120, false, false) < 10_000);
     assert!(pressured >= 4, "must exercise sustained overload");
     assert!(
         clean >= 8,

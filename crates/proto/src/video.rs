@@ -42,6 +42,27 @@ pub fn fec_percent_for(loss_pct: f32, rtt: Option<std::time::Duration>) -> u8 {
     fec_percent_for_loss(loss_pct).max(floor)
 }
 
+/// Production path percentage; burst and protected-frame floors apply separately.
+pub fn transport_fec_percent(loss_pct: f32, rtt: Option<Duration>) -> u8 {
+    fec_percent_for(loss_pct, rtt).min(30)
+}
+
+/// Parity shards for one block of `data` shards: the path percentage, the
+/// learned burst floor (bounded to half a block) and, for keyframes and
+/// recovery frames, 30% and at least four. The host's wire reservation uses
+/// the same layout, so the two cannot drift apart.
+pub fn fec_parity_shards(data: usize, percent: u8, burst: u8, protected: bool) -> usize {
+    let percent = percent
+        .clamp(MIN_FEC_PERCENT, MAX_FEC_PERCENT)
+        .max(if protected { 30 } else { 0 });
+    let burst = usize::from(burst.min(32));
+    (data * usize::from(percent))
+        .div_ceil(100)
+        .max(if protected { 4 } else { 1 })
+        .max(if burst > 0 { (burst + 2).min(data) } else { 0 })
+        .min(255 - data)
+}
+
 /// Fast attack, two-second decay for parity feedback. Brief radio bursts must
 /// not lose their protection on the very next clean feedback window.
 pub fn fec_loss_sample(previous: f32, loss: f32, elapsed: Duration) -> f32 {
@@ -70,6 +91,7 @@ pub struct Packetizer {
     /// The next frame is a recovery frame predicting from this one.
     recovery_base: Option<u32>,
     fec_percent: u8,
+    fec_burst: u8,
     shard_len: usize,
     buffers: Vec<Vec<u8>>,
 }
@@ -81,6 +103,7 @@ impl Packetizer {
             next_frame: 0,
             recovery_base: None,
             fec_percent: DEFAULT_FEC_PERCENT,
+            fec_burst: 0,
             shard_len: crate::MAX_SHARD_LEN,
             buffers: (0..crate::transport::BATCH_SIZE)
                 .map(|_| Vec::with_capacity(crate::MAX_DATAGRAM))
@@ -93,8 +116,17 @@ impl Packetizer {
         self.fec_percent = percent.clamp(MIN_FEC_PERCENT, MAX_FEC_PERCENT);
     }
 
+    /// Longest observed run of missing data shards, bounded to half a block.
+    pub fn set_fec_burst(&mut self, packets: u8) {
+        self.fec_burst = packets.min(32);
+    }
+
     pub fn fec_percent(&self) -> u8 {
         self.fec_percent
+    }
+
+    pub fn fec_burst(&self) -> u8 {
+        self.fec_burst
     }
 
     /// The number the next frame will get.
@@ -166,9 +198,8 @@ impl Packetizer {
         let layout: Vec<(usize, usize, usize)> = (0..blocks)
             .scan(0, |first, block| {
                 let data = total / blocks + usize::from(block < total % blocks);
-                let parity = (data * self.fec_percent as usize)
-                    .div_ceil(100)
-                    .clamp(1, 255 - data);
+                let protected = frame.keyframe || recovery != 0;
+                let parity = fec_parity_shards(data, self.fec_percent, self.fec_burst, protected);
                 let start = *first;
                 *first += data;
                 Some((start, data, parity))
@@ -313,6 +344,7 @@ pub struct Reassembler {
     last: Option<u32>,
     stats: ReassemblyStats,
     shard_pool: Vec<Vec<u8>>,
+    loss_burst: u8,
 }
 
 impl Reassembler {
@@ -325,6 +357,7 @@ impl Reassembler {
             last: None,
             stats: Default::default(),
             shard_pool: Vec::new(),
+            loss_burst: 0,
         }
     }
 
@@ -402,6 +435,7 @@ impl Reassembler {
             block.complete = true;
         } else if block.received >= count {
             let missing = count - block.received_data;
+            self.loss_burst = self.loss_burst.max(missing_run(&block.shards[..count]));
             if let Ok(coder) = crate::fec::ReedSolomon::cached(count, shard.parity as usize) {
                 if coder.reconstruct(&mut block.shards).is_ok() {
                     block.complete = true;
@@ -499,6 +533,7 @@ impl Reassembler {
                 for (i, block) in frame.blocks.into_iter().enumerate() {
                     self.stats.shards_missing += match block {
                         Some(b) => {
+                            self.loss_burst = self.loss_burst.max(missing_run(&b.shards[..b.data]));
                             let missing = b.shards[..b.data].iter().filter(|s| s.is_none()).count();
                             for shard in b.shards.into_iter().flatten() {
                                 if self.shard_pool.len() < 4096 {
@@ -507,7 +542,11 @@ impl Reassembler {
                             }
                             missing
                         }
-                        None => total / count + usize::from(i < total % count),
+                        None => {
+                            let missing = total / count + usize::from(i < total % count);
+                            self.loss_burst = self.loss_burst.max(missing.min(32) as u8);
+                            missing
+                        }
                     } as u64;
                 }
             }
@@ -581,9 +620,29 @@ impl Reassembler {
         self.last
     }
 
+    /// Longest data-shard erasure run since the last feedback window.
+    /// Reordered data still absent when parity completes can overestimate it.
+    pub fn take_loss_burst(&mut self) -> u8 {
+        std::mem::take(&mut self.loss_burst)
+    }
+
     pub fn stats(&self) -> ReassemblyStats {
         self.stats
     }
+}
+
+fn missing_run(shards: &[Option<Vec<u8>>]) -> u8 {
+    let mut run = 0u8;
+    let mut longest = 0;
+    for shard in shards {
+        run = if shard.is_none() {
+            run.saturating_add(1)
+        } else {
+            0
+        };
+        longest = longest.max(run);
+    }
+    longest.min(32)
 }
 
 /// Repeats of an unanswered `KeyframeRequest` at most this often (or the
@@ -891,6 +950,51 @@ pub fn before(a: u32, b: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyframes_and_recovery_survive_four_packet_bursts_even_when_tiny() {
+        for size in [1, 7 * crate::MAX_SHARD_LEN, 150 * crate::MAX_SHARD_LEN] {
+            for recovery in [false, true] {
+                let now = Instant::now();
+                let mut tx = Packetizer::new(1);
+                let mut rx = Reassembler::new(1);
+                run(&mut tx, &mut rx, &[(0, true, None)], &[], now);
+                if recovery {
+                    tx.mark_recovery(0);
+                }
+                let data = vec![0x5a; size];
+                let mut erased = 0;
+                tx.packetize(
+                    &OutFrame {
+                        data: &data,
+                        keyframe: !recovery,
+                        host_delay: 0,
+                    },
+                    |dg| {
+                        assert!(dg.len() <= crate::MAX_DATAGRAM);
+                        let crate::wire::Datagram::Video { shard, .. } =
+                            crate::wire::parse(dg).unwrap()
+                        else {
+                            panic!()
+                        };
+                        assert!(shard.parity >= 4);
+                        assert!(usize::from(shard.data + shard.parity) <= 255);
+                        if erased < 4 {
+                            erased += 1;
+                        } else {
+                            rx.push(&shard, now);
+                        }
+                    },
+                );
+                let Some(Reassembled::Frame(frame)) = rx.poll(now) else {
+                    panic!("lost protected frame size={size}")
+                };
+                assert_eq!(frame.data, data);
+                assert!(rx.take_loss_burst() > 0);
+                assert_eq!(rx.take_loss_burst(), 0);
+            }
+        }
+    }
 
     /// Sends `count` small frames through a packetizer into `reassembler`,
     /// skipping the frames `lost` names, and returns what came out.

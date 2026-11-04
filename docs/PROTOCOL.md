@@ -52,6 +52,7 @@ Content-Length: <n>
 | `reference_invalidation` | bool | optional, default false; after a loss the viewer asks for a recovery frame (see [RecoveryRequest](#recoveryrequest-14-and-recoveryack-15)) |
 | `audio_channels` | u32 | optional; most channels the viewer plays (6 for 5.1, 8 for 7.1). Absent, or below 3, means stereo |
 | `mic` | bool | optional, default false; the viewer offers its microphone (datagram kind 13) |
+| `probe_trains` | bool | optional, default false; the viewer times probe trains (datagram kind 16) and reports their rate |
 
 A request is taken within 64 to 16384 pixels a side, 1 to 500 fps and
 500 kbps to 1 Gbps (`latch_proto::control::MAX_*`). The host then meets
@@ -152,6 +153,7 @@ not match its kind is dropped without an answer.
 | 13 | `Mic` | viewer → host |
 | 14 | `RecoveryRequest` | viewer → host |
 | 15 | `RecoveryAck` | host → viewer |
+| 16 | `Probe` | host → viewer |
 
 ### Hello (1)
 
@@ -195,7 +197,10 @@ the last one padded with zeros, and splits them into
 `blocks = ceil(D / 64)` consecutive blocks of nearly equal size (the first
 `D mod blocks` blocks get one shard more). Each block gets
 `parity = ceil(data * fec_percent / 100)` parity shards, at least one, at
-most `255 - data`. The block's data and parity shards together form a
+most `255 - data`. Hosts may raise this within the existing field: keyframes
+and negotiated recovery frames now get at least 30% and four parity shards;
+normal frames cover an observed burst plus two shards, at most their data count.
+No datagram size changes. The block's data and parity shards together form a
 systematic Reed–Solomon code over GF(2⁸) (polynomial 0x11D) with a
 Cauchy generator matrix, as specified in `crates/proto/src/fec.rs`: any
 `data` of the block's shards rebuild it. `shard_len` is at most 1 172.
@@ -405,6 +410,36 @@ The viewer's microphone, laid out exactly as `Audio` (3) with its own
 format (5 ms of 48 kHz mono). The host takes it only from the address the
 session's `Hello` came from. A host that does not know kind 13 drops it.
 
+### Probe (16)
+
+Only to a viewer whose `StreamRequest` has `probe_trains`; an older viewer
+never sees it (and would drop it as unknown). `aux` is the train number;
+`u8 index` at offset 8 and `u8 count` at offset 9 place the datagram in
+its train, and zero padding follows (the host sends 1 200-byte datagrams,
+at least 10 bytes parse). The host sends a train back to back while video
+is idle: after 500 ms of it, two trains 200 ms apart, then one a second,
+each 6 to 16 datagrams, skipped below an 8 Mbps retained budget. The
+viewer deduplicates indexes and accepts only ordered, contiguous prefixes
+of at least four packets (a lost tail is allowed). It uses the median
+eight-position packet pair, rather than total span. Pair dispersion must
+be at least twice the measured pair timing variation; a dominant stall
+is rejected. Equal timestamps allow up to 1 ms of receive batching noise;
+an entirely batched train supplies only a high timing bound.
+The fastest usable rate goes in `probe_kbps`; zero means unknown.
+
+These datagrams bypass the video pacer and **are outside the wire budget**
+and ordinary throughput counters (`received_kbps` counts no probes).
+Including the 80-byte per-datagram tunnel allowance, each train bursts
+7,680–20,480 B, up to ~330 kbps extra in the first idle second (two trains),
+then ≤164 kbps. A 16-packet burst takes 32.8 ms at 5 Mbps in a 40 ms FIFO;
+skipping low retained budgets reduces this risk, but cannot prevent a
+burst overflowing a path that fell below the retained rate or a small
+policer bucket. After every train an ordinary 16-byte Ping (96 modeled
+wire bytes) independently times its queue. Its echo is kept separate from
+the ordinary minimum RTT; it must show delay above the measured ping
+jitter before a train alone can lower the target. Padding and these extra
+pings add no new wire fields; old viewers receive neither train nor echo.
+
 ## Versioning
 
 `protocol` in `StreamRequest` and the upgrade token's `/1` name the
@@ -451,18 +486,25 @@ the frame rate comes down first, to 30, then the picture in proportion.
 
 Report retains its four original required fields. New JSON fields all have
 serde defaults, so older endpoints ignore them and new hosts accept the
-original four-field report. No datagram layout or protocol number changes.
+original four-field report. No datagram layout or protocol number changes;
+the one new datagram kind, `Probe` (16), goes only to a viewer that asked
+for it.
 
 Viewer reports add `received_kbps` (received media rate), `frames_lost`
 (unrecovered frames in the last measurement window), `unrecovered_loss_pct`
 (optional; absence means legacy raw loss), `queue_ms` (decode queue age),
+`loss_burst_packets` (longest data-shard erasure run, bounded to 32),
+`probe_kbps` (fastest probe train, see [Probe](#probe-16); absent when none)
 and `window_ms` (measurement duration). New measurements and reports use 50 ms
 windows (older peers retain their 250 ms or one-second windows). Raw `loss_pct` includes FEC-recovered shards; recovery alone is
 not congestion. RTT is milliseconds on the reporter's clock.
 
 Hosts may reply using the existing Report type, adding
 `requested_bitrate_kbps`, `applied_bitrate_kbps`, `pacing_queue_ms`,
-`send_errors`, `send_retries`, `socket_send_bytes`, `socket_receive_bytes`.
+`send_errors`, `send_retries`, `socket_send_bytes`, `socket_receive_bytes`,
+`wire_budget_kbps` and `application_limited`. All have serde defaults.
+`wire_budget_kbps` is the controller's wire budget, kept through idle;
+the encoder's share of it shows in `applied_bitrate_kbps`.
 Applied bitrate is the encoder target after wire overhead reservation;
 requested bitrate is the session ceiling. Error/retry counts are cumulative.
 Legacy viewers ignore host Reports as an unhandled existing message type.
@@ -482,20 +524,46 @@ ignored. Added report fields default on read; old JSON readers ignore them.
 `engine::congestion` is the only bitrate controller. New report windows are
 50 ms; old 250 ms / one-second reports remain valid. Host pings at 50 Hz supply
 each window's lowest RTT. A smoothed increasing delay gradient or standing rise
-above max(6 ms, base RTT / 10, 3× ping jitter) is pressure, as are uncorrected
-loss and lost frames at any raw loss. Two windows trigger a budget cut; one
-does when `received_kbps` is under half the host's send rate while loss is
-above 10% or delay above 20 ms (reports without `received_kbps` never do).
+above max(6 ms, base RTT / 10, 3× ping jitter) is pressure (idle senders retain
+a 3 ms jitter allowance). Severe residual loss on a loaded sender, or damage without usable rate
+feedback remains pressure; so does >10% loss with a delivery deficit sustained
+for 500 ms on an underfilled one. Moderate queue-free damage first raises FEC, then
+lowers the rate actually sent by 20% after 500 ms (only at 4 Mbps or more sent);
+mean loss falling by half against its mean before the test (or by over
+max(35%, 2 points) above a random-loss floor) with the mean actual load
+falling at least 10% while filling the reduced budget confirms a policer
+after a horizon plus one second.
+Inconclusive tests restore the budget and wait three seconds.
+Delay/collapse cuts stay immediate under the existing two/one-window gates;
+one damaged legacy window of 500 ms or more cuts at once.
 Clean recovery doubles the budget per 400 ms of actual time between reports
 (up to 2 s apart) back to just under the last sustainable rate, then probes
 above it in bounded, RTT-aware steps; it is capped below a policer's rate for
-three seconds after loss without queueing. The wire floor is 1 Mbps. Legacy
+three seconds after severe/legacy loss without queueing, ten after a confirmed
+rate-correlation test. The wire floor is 1 Mbps. Legacy
 reports without `unrecovered_loss_pct` count raw loss above 10% (or any lost
 frame) as damage.
 The session starts at its ceiling, and clean paths bypass pacing. Recovered
 random loss alone enables neither cuts nor pacing. Parity uses fast-attack,
 two-second-decay raw loss with a base-RTT floor (15% at 40 ms, 20% at 100 ms),
-capped at 30%. Data shards precede parity computation and transmission; a
+capped at 30% before the per-frame packet floors above. The sender reserves
+rounded parity, padding and headers inside its wire budget, including the
+protected-frame floor while a keyframe or recovery frame is owed (never more
+than half the ordinary target). Four reports
+below 80% of the encoder's allowance mark it application-limited; under half
+of it is idle. Idle keeps the budget and the encoder's target: motion resumes
+at once, unpaced on a clean path. While idle the host sends probe trains to a
+viewer that times them. Two recent confident trains below 3/4 of the
+budget also need independent queue delay (including their trailing ping)
+or lossy delivery deficit before lowering it to 90% of the faster train.
+Without corroboration they only constrain pacing; unknown trains keep the
+target and initially pace at 1/20 of it. Delivery filling that pace without
+loss or delay validates 25% pace increases once per feedback horizon;
+a fresh fast train removes the limit. Later fast trains restore a confirmed cut. An underfilled stream cut by a standing delay that
+still delivered everything gets back its earlier budget once the delay has
+been gone for a second; an idle one (or an underfilled one at the floor)
+regrows by time a second after a cut, never past the last trains. While
+pacing, the pacer's own local queue is not sender pressure. Data shards precede parity computation and transmission; a
 completed frame is handed to decode immediately, including mid-receive-batch.
 Protocol 1 datagrams remain at most 1200 bytes. No MTU or socket-offload
 capability is advertised by this change.

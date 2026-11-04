@@ -1,6 +1,10 @@
-//! 35 s codec-free frame/FEC/FIFO runs behind a fixed cap: budget spread,
-//! standing queue and frame damage over the last 30 s, with the production
-//! pacer. Run --nocapture for the table in docs/measurements/2026-11-03/transport.
+//! 35 s codec-free frame/FEC/FIFO runs behind a cap: budget spread, standing
+//! queue and frame damage over the last 30 s, with the production pacer and
+//! parity policy. Most caps are fixed; `fifo2x*`, `step_loss`, `loss3mixed*`
+//! and `idle_drop*` (from the PR #58 review) change capacity, shorten the
+//! FIFO or mix random loss under a FIFO. Run --nocapture for the tables in
+//! docs/measurements/2026-11-04/transport-fec.
+#[allow(dead_code)]
 #[path = "../src/congestion.rs"]
 mod congestion;
 #[path = "../src/pacing.rs"]
@@ -19,6 +23,16 @@ use std::{
 #[test]
 fn transport_scenarios() {
     for (name, cap, ceiling, base, interval, back, legacy) in [
+        ("loss1cap20", 20000, 20000, 10, 50, 10, false),
+        ("loss3cap20", 20000, 20000, 10, 50, 10, false),
+        ("loss5cap20", 20000, 20000, 10, 50, 10, false),
+        ("loss1cap50", 50000, 50000, 10, 50, 10, false),
+        ("loss3cap50", 50000, 50000, 10, 50, 10, false),
+        ("loss5cap50", 50000, 50000, 10, 50, 10, false),
+        ("loss1cap100", 100000, 100000, 10, 50, 10, false),
+        ("loss3cap100", 100000, 100000, 10, 50, 10, false),
+        ("loss5cap100", 100000, 100000, 10, 50, 10, false),
+        ("idle_motion", 50000, 50000, 10, 50, 10, false),
         ("steady20", 20000, 100000, 10, 50, 10, false),
         ("steady50", 50000, 100000, 10, 50, 10, false),
         ("steady100", 100000, 200000, 10, 50, 10, false),
@@ -35,15 +49,42 @@ fn transport_scenarios() {
         ("cap5", 5000, 100000, 10, 50, 10, false),
         ("route", 100000, 100000, 10, 50, 10, false),
         ("lan1g", 1000000, 1000000, 1, 50, 1, false),
+        // An encoder allowed twice a full 40 ms (or 4 ms) FIFO's rate.
+        ("fifo2x", 20000, 40000, 10, 50, 10, false),
+        ("fifo2x_short", 20000, 40000, 10, 50, 10, false),
+        // 100 -> 20 Mbps at 5 s; FIFO overflow is the only loss.
+        ("step_loss", 20000, 100000, 10, 50, 10, false),
+        // Wi-Fi-like random loss in front of a 20 Mbps FIFO.
+        ("loss3mixed", 20000, 100000, 10, 50, 10, false),
+        ("loss3mixed150", 20000, 100000, 150, 50, 150, false),
+        ("loss3mixed250", 20000, 100000, 250, 50, 250, false),
+        // Idle 5 s while capacity falls 100 -> 5 Mbps at 2.5 s; motion (and,
+        // for _idr, a 4x keyframe) at 5 s.
+        ("idle_drop", 5000, 100000, 250, 50, 250, false),
+        ("idle_drop_idr", 5000, 100000, 250, 50, 250, false),
     ] {
+        let idle = name == "idle_motion" || name.starts_with("idle_drop");
         let fps = 120;
+        let random = name.starts_with("loss");
         let impairment = Impairment {
-            loss: if name == "legacy_radio" { 0.05 } else { 0.0 },
+            loss: if random {
+                f64::from(name.as_bytes()[4] - b'0') / 100.0
+            } else if name == "legacy_radio" {
+                0.05
+            } else {
+                0.0
+            },
+            burst_enter: if random { 0.002 } else { 0.0 },
+            burst_exit: 0.3,
+            duplicate: if random { 0.01 } else { 0.0 },
+            reorder: if random { 0.01 } else { 0.0 },
+            reorder_delay: Duration::from_millis(4),
+            jitter: Duration::from_millis(if random { 4 } else { 0 }),
             delay: Duration::from_millis(base / 2),
-            ..Impairment::NONE
         };
         let start = Instant::now();
-        let mut pending = VecDeque::<Vec<u8>>::new();
+        let mut pending = VecDeque::<(Vec<u8>, bool)>::new();
+        let mut pending_frames = 0;
         let mut pacer = pacing::Pacer::new(start);
         let mut controller = congestion::Controller::new(ceiling, start);
         let mut link = Link::new(impairment, 17);
@@ -59,27 +100,60 @@ fn transport_scenarios() {
         let mut queue_samples = Vec::new();
         let mut ping_low = f32::MAX;
         let mut minimum = ceiling;
-        let mut fec_loss = 0.0;
+        let mut fec = congestion::FecPolicy::default();
+        let mut wire_bytes = 0u64;
+        let mut parity_bytes = 0u64;
+        let mut idrs = 0;
+        let mut full_rate_at = None;
+        let mut idle_minimum = ceiling;
         let mut budgets = Vec::new();
         let mut route_recovered = false;
+        let mut restart_peak = 0.0f32;
+        // The server's probe trains while idle, and the viewer's meter.
+        let mut meter = latch_proto::probe::TrainMeter::default();
+        let mut train = 0u16;
+        let mut probe = Vec::new();
+        let mut first_frame_at = None;
+        let mut train_echoes = VecDeque::new();
         for ms in 0..35_000u64 {
             let now = start + Duration::from_millis(ms);
-            let capacity = cap;
-            link.set_bandwidth(capacity, Duration::from_millis(40));
-            if ms * fps >= next_frame * 1000 {
+            let capacity = if (name == "step_loss" && ms < 5000)
+                || (name.starts_with("idle_drop") && ms < 2500)
+            {
+                ceiling
+            } else {
+                cap
+            };
+            link.set_bandwidth(
+                capacity,
+                Duration::from_millis(if name == "fifo2x_short" { 4 } else { 40 }),
+            );
+            // Two queued encoded frames plus the train currently being sent.
+            if ms * fps >= next_frame * 1000 && pending_frames < 3 {
+                let keyframe = idr_due.is_some_and(|at| at <= now)
+                    && now - last_idr >= Duration::from_millis(base);
                 let size = (u64::from(congestion::video_budget(
                     controller.budget(),
                     tx.fec_percent(),
+                    tx.fec_burst(),
+                    fps as u32,
                     false,
+                    keyframe,
                 )) * 1000
                     / 8
                     / fps) as usize;
+                let size = if idle && ms < 5000 { size / 100 } else { size };
+                // Resume with an encoder-sized keyframe four slots long.
+                let large_idr = name == "idle_drop_idr"
+                    && ms >= 5000
+                    && now - last_idr > Duration::from_secs(4);
+                let keyframe = keyframe || large_idr;
+                let size = if large_idr { size * 4 } else { size };
                 let data = vec![0x5a; size];
-                let keyframe = idr_due.is_some_and(|at| at <= now)
-                    && now - last_idr >= Duration::from_millis(base);
                 if keyframe {
                     idr_due = None;
                     last_idr = now;
+                    idrs += 1;
                 }
                 tx.packetize(
                     &OutFrame {
@@ -88,25 +162,51 @@ fn transport_scenarios() {
                         host_delay: 0,
                     },
                     |dg| {
-                        pending.push_back(dg.to_vec());
+                        wire_bytes += (dg.len() + 80) as u64;
+                        if let Ok(Datagram::Video { shard, .. }) = latch_proto::wire::parse(dg) {
+                            if shard.shard >= shard.data {
+                                parity_bytes += (dg.len() + 80) as u64;
+                            }
+                        }
+                        pending.push_back((dg.to_vec(), false));
                     },
                 );
-                next_frame += 1;
+                pending.back_mut().unwrap().1 = true;
+                pending_frames += 1;
+                next_frame = ms * fps / 1000 + 1;
             }
-            while let Some(dg) = pending.front() {
-                let pace = if controller.pacing() {
-                    controller.budget()
-                } else {
-                    0
-                };
-                if !pacer.delay(now, dg.len(), pace).is_zero() {
+            if let Some(count) = controller.probe_train(now) {
+                train = train.wrapping_add(1);
+                for index in 0..count {
+                    latch_proto::wire::write_probe(
+                        &mut probe,
+                        1,
+                        train,
+                        index,
+                        count,
+                        latch_proto::MAX_DATAGRAM,
+                    );
+                    link.send(now, &probe);
+                }
+                latch_proto::wire::write_ping(&mut probe, 1, ms * 1000);
+                link.send(now, &probe);
+            }
+            // The server's pacer: off on a clean proven path.
+            while let Some((dg, _)) = pending.front() {
+                if !pacer.delay(now, dg.len(), controller.pace_kbps()).is_zero() {
                     break;
                 }
-                let dg = pending.pop_front().unwrap();
+                let (dg, last) = pending.pop_front().unwrap();
+                if last {
+                    pending_frames -= 1;
+                }
                 sent += dg.len() + 80;
                 link.send(now, &dg);
             }
             let queue = link.queue_delay(now).as_secs_f32() * 1000.0;
+            if (5000..5500).contains(&ms) {
+                restart_peak = restart_peak.max(queue);
+            }
             if ms >= 5000 {
                 queue_samples.push(queue);
                 budgets.push(controller.budget() as f64);
@@ -120,12 +220,37 @@ fn transport_scenarios() {
                     }) + queue,
                 );
             }
+            while train_echoes.front().is_some_and(|(at, _)| *at <= now) {
+                let (_, time) = train_echoes.pop_front().unwrap();
+                controller.observe_train_rtt((ms * 1000 - time) as f32 / 1000.0, now);
+            }
             for dg in link.receive(now) {
-                wire_received += dg.len() + 80;
-                if let Ok(Datagram::Video { shard, .. }) = latch_proto::wire::parse(&dg) {
-                    rx.push(&shard, now);
+                match latch_proto::wire::parse(&dg) {
+                    Ok(Datagram::Video { shard, .. }) => {
+                        wire_received += dg.len() + 80;
+                        rx.push(&shard, now);
+                    }
+                    Ok(Datagram::Ping { time, .. }) => {
+                        train_echoes.push_back((now + Duration::from_millis(base / 2), time));
+                    }
+                    Ok(Datagram::Probe {
+                        train,
+                        index,
+                        count,
+                        len,
+                        ..
+                    }) => meter.push(train, index, count, len, now),
+                    _ => {}
                 }
                 while let Some(event) = rx.poll(now) {
+                    if let Reassembled::Frame(ref frame) = event {
+                        if name == "idle_motion" && ms >= 5000 && frame.data.len() > 30000 {
+                            full_rate_at.get_or_insert(ms - 5000);
+                        }
+                        if idle && ms >= 5000 && frame.data.len() > 2000 {
+                            first_frame_at.get_or_insert(ms - 5000);
+                        }
+                    }
                     if matches!(event, Reassembled::Lost { .. }) && idr_due.is_none() {
                         idr_due = Some(now + Duration::from_millis(base));
                     }
@@ -155,6 +280,8 @@ fn transport_scenarios() {
                     } else {
                         Some(missing as f32 * 100.0 / denom)
                     },
+                    loss_burst_packets: rx.take_loss_burst(),
+                    probe_kbps: meter.take_kbps(now),
                     window_ms: interval as u32,
                     ..Default::default()
                 };
@@ -172,17 +299,18 @@ fn transport_scenarios() {
             while feedback.front().is_some_and(|(at, ..)| *at <= now) {
                 let (_, report, rtt, sent) = feedback.pop_front().unwrap();
                 controller.observe_sent(sent);
+                // An idle unpaced server's local queue is about zero.
                 controller.update(now, &report, rtt, 0.0);
-                fec_loss = latch_proto::video::fec_loss_sample(
-                    fec_loss,
-                    report.loss_pct,
-                    Duration::from_millis(interval),
-                );
-                tx.set_fec_percent(
-                    latch_proto::video::fec_percent_for(fec_loss, controller.base_rtt()).min(30),
-                );
+                // The server's exact parity policy (shared helper).
+                let (percent, burst) =
+                    fec.update(&report, &controller, Duration::from_millis(interval));
+                tx.set_fec_percent(percent);
+                tx.set_fec_burst(burst);
             }
             minimum = minimum.min(controller.budget());
+            if ms < 5000 {
+                idle_minimum = idle_minimum.min(controller.budget());
+            }
             if name == "route" && ms >= 15000 && controller.budget() == ceiling {
                 route_recovered = true;
             }
@@ -199,9 +327,54 @@ fn transport_scenarios() {
             stats.frames_skipped,
             controller.budget()
         );
+        println!("OVERHEAD {name} parity_pct={:.2} parity_mbps={:.3} wire_mbps={:.3} lost_per_min={:.1} idrs_per_min={:.1} motion_ms={}",
+            parity_bytes as f64 * 100.0 / wire_bytes as f64,
+            parity_bytes as f64 * 8.0 / 35_000_000.0,
+            wire_bytes as f64 * 8.0 / 35_000_000.0,
+            stats.frames_lost as f64 * 60.0 / 35.0, idrs as f64 * 60.0 / 35.0,
+            full_rate_at.map_or(-1, |ms| ms as i64));
+        let peak = queue_samples.last().copied().unwrap_or(0.0);
+        println!(
+            "RESTART {name} first_500ms_queue_peak={restart_peak:.3} queue_peak={peak:.3} first_frame_ms={}",
+            first_frame_at.map_or(-1, |ms| ms as i64)
+        );
+        if random && cap == ceiling {
+            assert!(
+                minimum >= cap * 4 / 5,
+                "{name}: random loss collapsed budget: {minimum}"
+            );
+        }
+        if name.starts_with("idle_drop") {
+            assert!(
+                stats.frames_lost <= 1 && stats.frames_skipped == 0,
+                "{name}: {stats:?}"
+            );
+            assert!(restart_peak < 30.0, "{name}: restart queue {restart_peak}");
+        }
+        if name == "idle_motion" {
+            assert_eq!(idle_minimum, ceiling, "idle must retain the budget");
+            assert_eq!(controller.budget(), ceiling);
+            // A clean path resumes at once: the first motion frame is full
+            // size and lands one frame slot plus half the RTT later.
+            assert!(
+                full_rate_at.is_some_and(|ms| ms <= 20),
+                "resumed frames must be full rate at once: {full_rate_at:?}"
+            );
+        }
         // Main's controller spreads 1.7/3.5/7.1 Mbps at these caps (10 ms,
         // 50 ms reports); stay at or under it at every RTT and at 5.1's cadence.
-        if interval <= 250 && !legacy && name != "route" && name != "lan1g" && cap >= 20000 {
+        let review = ["fifo2x", "step_loss", "loss3mixed", "idle_drop"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix));
+        if interval <= 250
+            && !legacy
+            && name != "route"
+            && name != "lan1g"
+            && cap >= 20000
+            && !random
+            && name != "idle_motion"
+            && !review
+        {
             let sd_bound = match cap {
                 20000 => 1700.0,
                 50000 => 3500.0,

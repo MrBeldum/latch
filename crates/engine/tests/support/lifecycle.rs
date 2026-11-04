@@ -57,7 +57,10 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         feedback: Default::default(),
         rtt: Mutex::new(RttEstimator::new()),
         rtt_low: Mutex::new(None),
+        train_ping: AtomicU64::new(0),
+        train_rtt: Mutex::new(None),
         pace_kbps: AtomicU32::new(0),
+        fec_burst: AtomicU8::new(0),
         fec: AtomicU8::new(DEFAULT_FEC_PERCENT),
         heard_us: AtomicU64::new(0),
         frames: AtomicU64::new(0),
@@ -69,6 +72,7 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         surround_kbps: 0,
         mic: Mutex::new(None),
         cursor_supported: false,
+        probe_trains: false,
         draw_cursor: AtomicBool::new(true),
         control_writer: Mutex::new(None),
     })

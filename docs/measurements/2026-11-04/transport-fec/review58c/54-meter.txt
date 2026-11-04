@@ -1,0 +1,45 @@
+cap=1000 n=6 quant_ms=0 alternate_loss=false estimate=1000
+cap=1000 n=6 quant_ms=0 alternate_loss=true estimate=600
+cap=1000 n=6 quant_ms=1 alternate_loss=false estimate=984
+cap=1000 n=6 quant_ms=1 alternate_loss=true estimate=590
+cap=1000 n=16 quant_ms=0 alternate_loss=false estimate=1000
+cap=1000 n=16 quant_ms=0 alternate_loss=true estimate=533
+cap=1000 n=16 quant_ms=1 alternate_loss=false estimate=997
+cap=1000 n=16 quant_ms=1 alternate_loss=true estimate=531
+cap=5000 n=6 quant_ms=0 alternate_loss=false estimate=5000
+cap=5000 n=6 quant_ms=0 alternate_loss=true estimate=2999
+cap=5000 n=6 quant_ms=1 alternate_loss=false estimate=4654
+cap=5000 n=6 quant_ms=1 alternate_loss=true estimate=2792
+cap=5000 n=16 quant_ms=0 alternate_loss=false estimate=5000
+cap=5000 n=16 quant_ms=0 alternate_loss=true estimate=2666
+cap=5000 n=16 quant_ms=1 alternate_loss=false estimate=4954
+cap=5000 n=16 quant_ms=1 alternate_loss=true estimate=2642
+cap=20000 n=6 quant_ms=0 alternate_loss=false estimate=20000
+cap=20000 n=6 quant_ms=0 alternate_loss=true estimate=11999
+cap=20000 n=6 quant_ms=1 alternate_loss=false estimate=17066
+cap=20000 n=6 quant_ms=1 alternate_loss=true estimate=0
+cap=20000 n=16 quant_ms=0 alternate_loss=false estimate=20000
+cap=20000 n=16 quant_ms=0 alternate_loss=true estimate=10666
+cap=20000 n=16 quant_ms=1 alternate_loss=false estimate=19200
+cap=20000 n=16 quant_ms=1 alternate_loss=true estimate=10240
+cap=100000 n=6 quant_ms=0 alternate_loss=false estimate=100000
+cap=100000 n=6 quant_ms=0 alternate_loss=true estimate=60000
+cap=100000 n=6 quant_ms=1 alternate_loss=false estimate=0
+cap=100000 n=6 quant_ms=1 alternate_loss=true estimate=0
+cap=100000 n=16 quant_ms=0 alternate_loss=false estimate=100000
+cap=100000 n=16 quant_ms=0 alternate_loss=true estimate=53333
+cap=100000 n=16 quant_ms=1 alternate_loss=false estimate=76800
+cap=100000 n=16 quant_ms=1 alternate_loss=true estimate=40960
+cap=500000 n=6 quant_ms=0 alternate_loss=false estimate=500000
+cap=500000 n=6 quant_ms=0 alternate_loss=true estimate=300000
+cap=500000 n=6 quant_ms=1 alternate_loss=false estimate=0
+cap=500000 n=6 quant_ms=1 alternate_loss=true estimate=0
+cap=500000 n=16 quant_ms=0 alternate_loss=false estimate=500000
+cap=500000 n=16 quant_ms=0 alternate_loss=true estimate=266666
+cap=500000 n=16 quant_ms=1 alternate_loss=false estimate=0
+cap=500000 n=16 quant_ms=1 alternate_loss=true estimate=0
+100Mbps batched/wifi gap_us=100 estimate=102400
+100Mbps batched/wifi gap_us=500 estimate=20480
+100Mbps batched/wifi gap_us=1000 estimate=10240
+100Mbps batched/wifi gap_us=2000 estimate=5120
+100Mbps batched/wifi gap_us=4000 estimate=2560

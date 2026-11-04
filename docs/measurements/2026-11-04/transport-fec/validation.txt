@@ -1,0 +1,18 @@
+Code: gfn/transport-fec after the second review round (main 5f8f45f, PR 60, merged in).
+PASS cargo fmt --all -- --check
+PASS cargo test --locked --workspace --all-targets --no-fail-fast (Mac; 758 passed, 0 failed, 37 ignored)
+PASS cargo clippy --locked --workspace --all-targets -- -D warnings (Mac)
+PASS cargo clippy --locked --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+PASS cargo check --locked --release --workspace --target x86_64-pc-windows-msvc
+PASS cargo clippy --locked --workspace --all-targets --target aarch64-unknown-linux-gnu -- -D warnings (ALSA sysroot)
+PASS bash scripts/audit-native.sh
+PASS cargo test -p latch-engine --test transport_scenarios --test steady_transport --test bottleneck --test impaired -- --nocapture
+PASS cargo test -p latch-proto --test keyframe_recovery -- --nocapture (3/3)
+PASS bottleneck noise_stream_adapts_to_sustained_queue_delay_and_recovers: 8/8 alone, 4/4 under 11 busy-loop processes
+     (the e2fad22 CI failure: macOS job 126538931447)
+PASS review-58b harness: main and e2fad22 reproduce the reviewer's numbers exactly with review58b/main.rs and e2fad22.rs
+PASS Linux ARM64 serve (own port 47966) -> Mac viewer: 56 runs (16 main, 16 e2fad22, 24 this), all exit 0
+PASS Mac loopback serve/view through the review relay, port 47966: 24 + 8 runs, all exit 0
+PASS impaired a_bad_network_slows_the_picture_but_loses_no_key: 8/8 under 11 busy-loop processes (debug build; 2/6 failed before the restore fix, as on CI)
+CLEANUP Linux: test serve stopped by PID after each host; ~/gfn-transport-fec removed at the end.
+NOT RUN Windows on-device build/tests: the PC was offline (not contacted).

@@ -1,0 +1,3 @@
+interior4 100Mbps estimate=0
+duplicate 100Mbps estimate=100000
+reordered_tail 100Mbps estimate=0

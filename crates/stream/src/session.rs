@@ -173,6 +173,8 @@ pub struct Stats {
     /// Persistent video diagnosis, even while the transport is connected.
     pub video_problem: Option<String>,
     pub applied_bitrate_kbps: u32,
+    pub wire_budget_kbps: u32,
+    pub application_limited: bool,
     pub requested_bitrate_kbps: u32,
     pub pacing_queue_ms: f32,
     pub send_errors: u64,
@@ -868,6 +870,7 @@ fn attempt(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         gamepads: settings.gamepads,
         reference_invalidation: recovery_wanted(),
         mic: settings.mic,
+        probe_trains: true,
         // 5.1 or 7.1 when this machine's speakers have them; stereo is the
         // field's absence, which every host understands.
         audio_channels: match settings.audio.then(crate::audio::output_channels) {
@@ -1184,6 +1187,8 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
                 inner.heard();
                 let mut stats = inner.stats.lock();
                 stats.applied_bitrate_kbps = report.applied_bitrate_kbps;
+                stats.wire_budget_kbps = report.wire_budget_kbps;
+                stats.application_limited = report.application_limited;
                 stats.requested_bitrate_kbps = report.requested_bitrate_kbps;
                 stats.pacing_queue_ms = report.pacing_queue_ms;
                 stats.send_errors = report.send_errors;
@@ -1510,6 +1515,8 @@ fn receive(
                     / 1000.0) as u32,
                 frames_lost: stats.frames_lost - report_base.frames_lost,
                 unrecovered_loss_pct: Some(loss),
+                loss_burst_packets: reassembler.take_loss_burst(),
+                probe_kbps: throughput.probes.take_kbps(now),
                 window_ms: (secs * 1000.0) as u32,
                 ..Default::default()
             };
@@ -1671,6 +1678,8 @@ struct Throughput {
     feedback_received: u64,
     /// Encoded video in the frames put back together.
     video: u64,
+    /// Host probe trains: their rate, for the next report.
+    probes: latch_proto::probe::TrainMeter,
 }
 
 impl Throughput {
@@ -1687,7 +1696,14 @@ impl Throughput {
 
     /// Video and received Mbps over `secs`; starts the next window.
     fn take(&mut self, secs: f32) -> (f32, f32) {
-        let window = std::mem::take(self);
+        let probes = std::mem::take(&mut self.probes);
+        let window = std::mem::replace(
+            self,
+            Self {
+                probes,
+                ..Default::default()
+            },
+        );
         let mbps = |bytes: u64| bytes as f32 * 8.0 / secs / 1e6;
         (mbps(window.video), mbps(window.received))
     }
@@ -1783,6 +1799,13 @@ fn handle(
             let sample = inner.now_us().saturating_sub(*time);
             rtt.sample(Duration::from_micros(sample));
         }
+        Datagram::Probe {
+            train,
+            index,
+            count,
+            len,
+            ..
+        } => throughput.probes.push(*train, *index, *count, *len, now),
         _ => {}
     }
 }

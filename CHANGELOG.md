@@ -2,6 +2,7 @@
 
 ## Unreleased — native reference recovery
 
+- Idle probe estimates reject jitter, missing positions and reordering, deduplicate packets, and require independent delay/delivery evidence before lowering the encoder target. Unknown capacity only limits resume pacing; low retained budgets skip trains.
 - Add VideoToolbox LTR recovery behind runtime support (`LATCH_MAC_LTR=1`
   opts into the supporting low-latency mode), with exact VT/FFmpeg loss tests.
 - Media Foundation H.264 LTR recovery on Windows hosts, opt-in with
@@ -66,6 +67,40 @@
   existing 84-mode list to 102 and prevented monitor creation. A rejected
   update now restores settings, removes an unused relocation, warns that
   virtual display modes are unchanged, and completes the remaining steps.
+
+## Unreleased — FEC-first transport
+
+- Protect keyframes and reference-recovery frames with at least 30% parity
+  and four parity packets per block; adapt other frames to raw loss and
+  observed erasure runs, reserving their rounded wire cost before encoding.
+- Test moderate queue-free loss against a reversible 20% reduction of the rate
+  actually sent before treating it as a policer, and remember the random-loss
+  floor a confirmed test measured. Keep queue-gradient and severe-collapse cuts,
+  also for an encoder that underfills its budget (sustained >10% loss with a
+  delivery deficit), and cut on one damaged legacy one-second window.
+- Keep the budget and the encoder's target through idle, so motion resumes
+  at full rate at once. While idle, send short probe trains (new datagram
+  kind 16, only to viewers that set `probe_trains`); the viewer times their
+  packet pairs and reports `probe_kbps`. Two confident slow trains need
+  independent queue or delivery evidence to lower the target; unknown
+  capacity only limits resume pacing. Probe padding is outside the wire
+  budget and is skipped below an 8 Mbps retained budget. Report the
+  budget and application-limited state.
+- An underfilled stream cut by someone else's standing queue (or starved
+  pings) regains its earlier budget once the delay has been gone for a second, and an idle or
+  floor-bound sparse stream regrows by time after any cut, up to what probe
+  trains measured; waiting in the pacer is not sender pressure while pacing.
+- The queue-free loss rate test needs 4 Mbps of traffic, compares mean loss
+  before and during the test, and confirms only if the reduced budget (not
+  the content) lowered the load: sparse desktop streams under bursty loss no
+  longer confirm phantom policers at the floor. A pending keyframe never takes the
+  encoder target under half the ordinary one.
+- One parity policy and one parity layout for the server, the wire
+  reservation (now including the keyframe/recovery floor) and the transport
+  simulations. The pacer's burst is two datagrams or 1 ms of rate.
+- Add 1/3/5% random-loss/burst matrices at 20/50/100 Mbps, mixed-loss,
+  short-FIFO and capacity-drop-during-idle scenarios, parity overhead,
+  IDRs/min and idle-to-motion timing.
 
 ## Unreleased — transport workstream
 

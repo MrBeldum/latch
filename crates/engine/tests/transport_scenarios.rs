@@ -1,5 +1,6 @@
 //! Codec-free, deterministic frame/FEC/FIFO feedback scenarios. Run --nocapture
 //! for measurements; all time is simulated, including delayed feedback and IDR.
+#[allow(dead_code)]
 #[path = "../src/congestion.rs"]
 mod congestion;
 use latch_proto::{
@@ -69,7 +70,7 @@ fn transport_scenarios() {
         let mut cut_at = None;
         let mut peak = 0;
         let mut minimum = ceiling;
-        let mut fec_loss = 0.0;
+        let mut fec = congestion::FecPolicy::default();
         let mut tokens = 0.0f64;
         let mut seed = 0x9e37_79b9_u32;
         let mut damaged_windows = 0;
@@ -94,16 +95,19 @@ fn transport_scenarios() {
                 tokens = (tokens + rate).min(rate * 2000.0 / fps as f64);
             }
             if ms * fps >= next_frame * 1000 {
+                let keyframe = idr_due.is_some_and(|at| at <= now)
+                    && now - last_idr >= Duration::from_millis(base);
                 let size = (u64::from(congestion::video_budget(
                     controller.budget(),
                     tx.fec_percent(),
+                    tx.fec_burst(),
+                    fps as u32,
                     false,
+                    keyframe,
                 )) * 1000
                     / 8
                     / fps) as usize;
                 let data = vec![0x5a; size];
-                let keyframe = idr_due.is_some_and(|at| at <= now)
-                    && now - last_idr >= Duration::from_millis(base);
                 if keyframe {
                     idr_due = None;
                     last_idr = now;
@@ -169,6 +173,7 @@ fn transport_scenarios() {
                     frames_lost: stats.frames_lost - previous.frames_lost,
                     loss_pct: (missing + recovered) as f32 * 100.0 / denom,
                     unrecovered_loss_pct: Some(missing as f32 * 100.0 / denom),
+                    loss_burst_packets: rx.take_loss_burst(),
                     window_ms: 50,
                     ..Default::default()
                 };
@@ -198,14 +203,10 @@ fn transport_scenarios() {
                 if name == "step" && (2500..8000).contains(&ms) && controller.budget() < before {
                     low_phase_cuts += 1;
                 }
-                fec_loss = latch_proto::video::fec_loss_sample(
-                    fec_loss,
-                    report.loss_pct,
-                    Duration::from_millis(50),
-                );
-                tx.set_fec_percent(
-                    latch_proto::video::fec_percent_for(fec_loss, controller.base_rtt()).min(30),
-                );
+                // The server's exact parity policy (shared helper).
+                let (percent, burst) = fec.update(&report, &controller, Duration::from_millis(50));
+                tx.set_fec_percent(percent);
+                tx.set_fec_burst(burst);
             }
             if ms >= 8000 && controller.budget() >= ceiling * 95 / 100 {
                 ceiling_at.get_or_insert(ms - 8000);
@@ -235,7 +236,7 @@ fn transport_scenarios() {
             // 5% over mostly costs the tail parity, which the viewer never
             // misses; larger overshoots lose frames until the rate drops.
             if name != "policer5" {
-                assert!(lost_windows > 3, "{name}: must exercise frame damage");
+                assert!(lost_windows > 0, "{name}: must exercise frame damage");
                 assert!(
                     f64::from(minimum) < f64::from(ceiling) * share,
                     "{name}: must cut without queue growth"

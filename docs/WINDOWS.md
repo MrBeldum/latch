@@ -587,3 +587,16 @@ stream to wgpu (logged once) rather than being retried each frame, which
 would alternate the two surfaces.
 
 [HDR measurements and remaining validation](measurements/2026-11-03/hdr/README.md).
+
+### FEC-first transport (2026-11-04)
+
+Radio loss raises parity before reducing the wire budget. Keyframes and
+reference-recovery frames carry at least 30% and four parity shards per block;
+normal frames adapt to erasure runs too. Idle encoders keep their target and
+resume at once on a known clean path. Idle probe trains reject jitter,
+interior loss and reordering; a lower encoder target also requires independent
+queue or delivery evidence. Unknown capacity only constrains resume pacing.
+Probe padding is outside the wire budget and skipped below an 8 Mbps retained
+budget. Queue growth still cuts rate; moderate loss without queue
+growth requires a rate-correlation test.
+See [measurements and parity costs](measurements/2026-11-04/transport-fec/README.md).

@@ -1,0 +1,10 @@
+cap=1000 count=6 received=0 peak_us=0 estimate=0
+cap=1000 count=16 received=0 peak_us=0 estimate=0
+cap=5000 count=6 received=1 peak_us=2048 estimate=0
+cap=5000 count=16 received=1 peak_us=2048 estimate=0
+cap=20000 count=6 received=6 peak_us=3072 estimate=20000
+cap=20000 count=16 received=7 peak_us=3584 estimate=20013
+cap=100000 count=6 received=6 peak_us=614 estimate=100392
+cap=100000 count=16 received=16 peak_us=1638 estimate=100392
+cap=500000 count=6 received=6 peak_us=122 estimate=512000
+cap=500000 count=16 received=16 peak_us=327 estimate=512000

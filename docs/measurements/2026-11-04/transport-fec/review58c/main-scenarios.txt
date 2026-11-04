@@ -1,0 +1,70 @@
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.47s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.62s
+R58B clean_resume_rtt10 lost=0 skipped=0 queue_peak=3.3 queue_p95=2.3 mean_enc=20000 motion_enc_mean=20000 full_rate_at=Some(8) final=20000 idr=[]
+R58B clean_resume_rtt50 lost=0 skipped=0 queue_peak=3.4 queue_p95=2.4 mean_enc=20000 motion_enc_mean=20000 full_rate_at=Some(28) final=20000 idr=[]
+R58B clean_resume_rtt150 lost=0 skipped=0 queue_peak=3.4 queue_p95=2.4 mean_enc=20000 motion_enc_mean=20000 full_rate_at=Some(78) final=20000 idr=[]
+R58B clean_resume_rtt250 lost=0 skipped=0 queue_peak=3.4 queue_p95=2.4 mean_enc=20000 motion_enc_mean=20000 full_rate_at=Some(128) final=20000 idr=[]
+R58B desktop_2s_idle_1s_motion_rtt10 lost=0 skipped=0 queue_peak=3.3 queue_p95=1.3 mean_enc=20000 motion_enc_mean=20000 full_rate_at=None final=20000 idr=[]
+R58B desktop_2s_idle_1s_motion_rtt50 lost=0 skipped=0 queue_peak=3.4 queue_p95=1.4 mean_enc=20000 motion_enc_mean=20000 full_rate_at=None final=20000 idr=[]
+R58B sparse_idr_rtt20 lost=0 skipped=0 queue_peak=11.8 queue_p95=0.2 mean_enc=20000 motion_enc_mean=0 full_rate_at=None final=20000 idr=[(8000, 120000, 21), (15000, 120000, 21)]
+R58B sparse_spike_rtt20 lost=0 skipped=0 queue_peak=11.8 queue_p95=0.1 mean_enc=16911 motion_enc_mean=0 full_rate_at=None final=20000 idr=[(8000, 120000, 21)]
+R58B resume_spike_rtt20 lost=0 skipped=0 queue_peak=3.3 queue_p95=2.3 mean_enc=19798 motion_enc_mean=19798 full_rate_at=Some(13) final=20000 idr=[]
+R58B overshoot_rtt100_fifo40_to8000 lost=13 skipped=18 queue_peak=40.0 queue_p95=26.2 mean_enc=6936 motion_enc_mean=6936 full_rate_at=Some(7866) final=7733 idr=[]
+R58B overshoot_rtt100_fifo40_to20000 lost=12 skipped=22 queue_peak=39.9 queue_p95=10.0 mean_enc=16513 motion_enc_mean=16513 full_rate_at=Some(84) final=19394 idr=[]
+R58B overshoot_rtt100_fifo40_to40000 lost=11 skipped=22 queue_peak=40.0 queue_p95=7.4 mean_enc=29929 motion_enc_mean=29929 full_rate_at=Some(67) final=37439 idr=[]
+R58B overshoot_rtt100_fifo40_to70000 lost=9 skipped=23 queue_peak=40.0 queue_p95=7.9 mean_enc=67633 motion_enc_mean=67633 full_rate_at=Some(60) final=67740 idr=[]
+R58B overshoot_rtt250_fifo40_to8000 lost=22 skipped=36 queue_peak=40.0 queue_p95=34.5 mean_enc=7685 motion_enc_mean=7685 full_rate_at=Some(8167) final=7717 idr=[]
+R58B overshoot_rtt250_fifo40_to20000 lost=21 skipped=40 queue_peak=40.0 queue_p95=13.0 mean_enc=17060 motion_enc_mean=17060 full_rate_at=Some(159) final=19422 idr=[]
+R58B overshoot_rtt250_fifo40_to40000 lost=20 skipped=40 queue_peak=40.0 queue_p95=7.6 mean_enc=30419 motion_enc_mean=30419 full_rate_at=Some(142) final=37880 idr=[]
+R58B overshoot_rtt250_fifo40_to70000 lost=18 skipped=43 queue_peak=40.0 queue_p95=5.8 mean_enc=23373 motion_enc_mean=23373 full_rate_at=Some(135) final=66792 idr=[]
+R58B overshoot_rtt250_fifo200_to8000 lost=20 skipped=60 queue_peak=199.9 queue_p95=120.9 mean_enc=7418 motion_enc_mean=7418 full_rate_at=Some(210) final=4680 idr=[]
+R58B overshoot_rtt250_fifo200_to20000 lost=16 skipped=65 queue_peak=199.9 queue_p95=13.1 mean_enc=17205 motion_enc_mean=17205 full_rate_at=Some(159) final=19419 idr=[]
+R58B overshoot_rtt250_fifo200_to40000 lost=6 skipped=69 queue_peak=200.0 queue_p95=7.7 mean_enc=30987 motion_enc_mean=30987 full_rate_at=Some(142) final=39359 idr=[]
+R58B overshoot_rtt250_fifo200_to70000 lost=0 skipped=0 queue_peak=102.7 queue_p95=7.8 mean_enc=53375 motion_enc_mean=53375 full_rate_at=Some(135) final=67186 idr=[]
+R58B legacy1000_wifi3 lost=24 skipped=72 queue_peak=9.4 queue_p95=8.2 mean_enc=37505 motion_enc_mean=37505 full_rate_at=None final=1000 idr=[]
+R58B legacy1000_wifi1 lost=18 skipped=61 queue_peak=9.8 queue_p95=7.6 mean_enc=17978 motion_enc_mean=17978 full_rate_at=None final=1000 idr=[]
+R58B legacy1000_clean_jitter lost=0 skipped=0 queue_peak=31.8 queue_p95=20.5 mean_enc=47588 motion_enc_mean=47588 full_rate_at=None final=45982 idr=[]
+R58B v51_250_wifi3 lost=16 skipped=64 queue_peak=9.4 queue_p95=8.4 mean_enc=49750 motion_enc_mean=49750 full_rate_at=None final=48500 idr=[]
+R58B v50_wifi3 lost=29 skipped=76 queue_peak=9.4 queue_p95=8.2 mean_enc=37143 motion_enc_mean=37143 full_rate_at=None final=1000 idr=[]
+R58B v50_wifi8 lost=88 skipped=157 queue_peak=8.4 queue_p95=2.5 mean_enc=1146 motion_enc_mean=1146 full_rate_at=None final=1000 idr=[]
+R58B v50_clean lost=0 skipped=0 queue_peak=31.8 queue_p95=26.0 mean_enc=47199 motion_enc_mean=47199 full_rate_at=None final=40000 idr=[]
+R58B desktop_cap20_ceiling100_rtt250_fifo200 lost=16 skipped=65 queue_peak=199.9 queue_p95=40.1 mean_enc=19404 motion_enc_mean=18685 full_rate_at=None final=20889 idr=[]
+R58B desktop_cap20_ceiling100_rtt100_fifo40 lost=62 skipped=137 queue_peak=39.9 queue_p95=7.7 mean_enc=15615 motion_enc_mean=11625 full_rate_at=None final=14590 idr=[]
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.63s
+MIXED ms=4950 sent=1000 raw=10 budget=1000
+MIXED ms=9950 sent=1000 raw=10 budget=1000
+MIXED ms=14950 sent=1000 raw=10 budget=1000
+MIXED ms=19950 sent=1000 raw=10 budget=1000
+MIXED ms=24950 sent=1000 raw=10 budget=1000
+MIXED ms=29950 sent=1000 raw=10 budget=1000
+MIXED ms=34950 sent=1000 raw=10 budget=1000
+MIXED ms=39950 sent=1000 raw=10 budget=1000
+MIXED ms=44950 sent=1000 raw=10 budget=1000
+MIXED ms=49950 sent=1000 raw=10 budget=1000
+MIXED ms=54950 sent=1000 raw=10 budget=1000
+MIXED ms=59950 sent=1000 raw=10 budget=1000
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+STEADY steady20 mean=19288.6 sd=733.6 queue_p95=8.992 lost=19 skipped=1 min=12884 final=19327
+STEADY steady50 mean=49211.7 sd=1211.2 queue_p95=7.987 lost=16 skipped=2 min=42950 final=48670
+STEADY steady100 mean=101636.3 sd=2500.7 queue_p95=8.802 lost=16 skipped=2 min=85725 final=107228
+STEADY cap20rtt150 mean=19534.6 sd=581.4 queue_p95=14.664 lost=48 skipped=13 min=12753 final=20224
+STEADY cap20rtt250 mean=19491.0 sd=225.4 queue_p95=10.520 lost=66 skipped=25 min=12753 final=19423
+STEADY cap100rtt150 mean=102166.6 sd=1126.4 queue_p95=9.002 lost=33 skipped=10 min=85549 final=101470
+STEADY cap100rtt250 mean=98684.3 sd=1949.3 queue_p95=7.885 lost=76 skipped=15 min=64294 final=97142
+STEADY rtt150 mean=50494.4 sd=538.9 queue_p95=8.576 lost=33 skipped=10 min=42774 final=50470
+STEADY rtt250 mean=49234.0 sd=971.1 queue_p95=7.987 lost=69 skipped=22 min=32080 final=48471
+STEADY slow250 mean=50710.1 sd=656.0 queue_p95=11.411 lost=42 skipped=0 min=31450 final=50339
+STEADY legacy1000 mean=50229.8 sd=772.6 queue_p95=22.691 lost=238 skipped=0 min=32100 final=51006
+STEADY legacy_radio mean=100000.0 sd=0.0 queue_p95=7.782 lost=10 skipped=31 min=100000 final=100000
+STEADY cap2 mean=1082.7 sd=108.0 queue_p95=14.608 lost=20 skipped=1 min=1000 final=1000
+STEADY cap5 mean=3062.1 sd=832.8 queue_p95=28.264 lost=20 skipped=1 min=2045 final=2943
+STEADY route mean=86303.9 sd=32455.8 queue_p95=8.384 lost=0 skipped=0 min=1000 final=100000
+STEADY lan1g mean=1000000.0 sd=0.0 queue_p95=7.997 lost=0 skipped=0 min=1000000 final=1000000
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.39s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.18s
+POLICER ms=4950 sent=4871 recv=4871 loss=0 budget=4871
+POLICER ms=9950 sent=4892 recv=4892 loss=0 budget=4892
+POLICER ms=14950 sent=4936 recv=4936 loss=0 budget=4936
+POLICER ms=19950 sent=4108 recv=4108 loss=0 budget=4108
+POLICER ms=24950 sent=4851 recv=4851 loss=0 budget=4851
+POLICER ms=29950 sent=4800 recv=4800 loss=0 budget=4850

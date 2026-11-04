@@ -20,6 +20,7 @@ mod kind {
     pub const MIC: u8 = 13;
     pub const RECOVERY_REQUEST: u8 = 14;
     pub const RECOVERY_ACK: u8 = 15;
+    pub const PROBE: u8 = 16;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +236,15 @@ pub enum Datagram<'a> {
         session: u32,
         packet: AudioPacket<'a>,
     },
+    /// Datagram `index` of `count` in probe train `train`: padding sent
+    /// back to back, whose spread at the viewer measures the path's rate.
+    Probe {
+        session: u32,
+        train: u16,
+        index: u8,
+        count: u8,
+        len: usize,
+    },
 }
 
 impl Datagram<'_> {
@@ -254,7 +264,8 @@ impl Datagram<'_> {
             | Datagram::PadAck { session, .. }
             | Datagram::PadFeedback { session, .. }
             | Datagram::PadFeedbackAck { session, .. }
-            | Datagram::Mic { session, .. } => *session,
+            | Datagram::Mic { session, .. }
+            | Datagram::Probe { session, .. } => *session,
         }
     }
 }
@@ -505,6 +516,22 @@ pub fn parse(buf: &[u8]) -> Result<Datagram<'_>, WireError> {
             }
             Ok(Datagram::PadFeedback { session, updates })
         }
+        kind::PROBE => {
+            if buf.len() < 10 {
+                return Err(WireError::Length);
+            }
+            let (index, count) = (buf[8], buf[9]);
+            if index >= count {
+                return Err(WireError::Field("index"));
+            }
+            Ok(Datagram::Probe {
+                session,
+                train: aux,
+                index,
+                count,
+                len: buf.len(),
+            })
+        }
         k => Err(WireError::UnknownKind(k)),
     }
 }
@@ -619,6 +646,16 @@ pub fn write_recovery_ack(out: &mut Vec<u8>, session: u32, a: &RecoveryAck) {
     out.extend(a.frame.to_le_bytes());
 }
 
+/// One `len`-byte datagram (at least 10, at most [`crate::MAX_DATAGRAM`])
+/// of a probe train; the rest is zero padding.
+pub fn write_probe(out: &mut Vec<u8>, session: u32, train: u16, index: u8, count: u8, len: usize) {
+    debug_assert!(index < count);
+    header(out, kind::PROBE, 0, train, session);
+    out.push(index);
+    out.push(count);
+    out.resize(len.clamp(10, crate::MAX_DATAGRAM), 0);
+}
+
 pub fn write_ping(out: &mut Vec<u8>, session: u32, time: u64) {
     header(out, kind::PING, 0, 0, session);
     out.extend(time.to_le_bytes());
@@ -689,6 +726,7 @@ mod tests {
             (kind::MIC, "Mic"),
             (kind::RECOVERY_REQUEST, "RecoveryRequest"),
             (kind::RECOVERY_ACK, "RecoveryAck"),
+            (kind::PROBE, "Probe"),
         ];
         let mut used = std::collections::HashSet::new();
         let protocol = include_str!("../../../docs/PROTOCOL.md");
@@ -699,6 +737,6 @@ mod tests {
                 "undocumented kind {name}"
             );
         }
-        assert_eq!(used.len(), 15);
+        assert_eq!(used.len(), 16);
     }
 }

@@ -1,0 +1,3 @@
+interior4 100Mbps estimate=73333
+duplicate 100Mbps estimate=200000
+reordered_tail 100Mbps estimate=100000

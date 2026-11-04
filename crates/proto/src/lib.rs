@@ -16,6 +16,7 @@ pub mod control;
 pub mod fec;
 pub mod gamepad;
 pub mod input;
+pub mod probe;
 pub mod rtt;
 pub mod sim;
 pub mod transport;

@@ -335,12 +335,12 @@ through `libc`.
   plus a report window. A smoothed positive delay gradient detects filling
   queues; sustained delay above max(6 ms, 10% of base RTT, 3× measured ping
   jitter) also counts, so 5–15 ms of Wi-Fi jitter is not a queue. Recovered
-  random loss alone does not cut bitrate; uncorrected loss or lost frames do,
-  at any raw loss (a policer). Parity has a base-RTT floor of 15% at 40 ms and 20%
+  random loss alone does not cut bitrate. Moderate queue-free residual damage
+  first raises FEC, then tests whether loss improves with reduced offered load. Parity has a base-RTT floor of 15% at 40 ms and 20%
   at 100 ms (30% cap), with fast attack and a two-second decay after bursts.
 * **Send immediately on clean paths.** The bounded two-frame sender remains,
   with no token-bucket delay on a clean path. Queue or severe sustained loss
-  enables the 2.5×-budget, sixteen-datagram bucket. Radio loss repaired by FEC
+  enables the 2.5×-budget bucket. Radio loss repaired by FEC
   does not enable pacing. Clean feedback releases pacing after at least
   200 ms (two report intervals for slower peers).
 * **Data before parity.** A frame's data shards go out before any parity
@@ -409,20 +409,78 @@ backpressure preserves encoded references. Cancellation may discard queued
 media. Audio, input acknowledgements and pings bypass the video queue.
 
 Under pressure video uses a wire-byte token bucket at 2.5 times the wire budget,
-with a sixteen-datagram burst. The encoder allowance reserves audio separately,
+with a burst of two datagrams or 1 ms at that rate, whichever is larger. While
+pacing, waiting in that bucket is not sender pressure (it would only slow the
+bucket further); a clean path still sends every frame, keyframes included,
+at once. The encoder allowance reserves audio separately,
 then compounds header overhead with rounded FEC rather than adding the two.
-Cuts use the lower of current budget and actual successful send rate, bounded
-by received throughput +7% (a standing FIFO delivers its bottleneck rate; a
-viewer without `received_kbps` is credited the offered rate less its loss).
+For a loaded sender, cuts use the lower of budget and successful send rate,
+bounded by received throughput +7%. A sender is application-limited after
+four reports below 80% of what the encoder may spend (including zero-byte
+windows); a delay cut while idle starts from that allowance, without
+mistaking sparse throughput or a CPU sender stall for network capacity.
+
+Idle keeps the budget and the encoder's target. A pause proves nothing about
+the path, and a content-limited encoder must not spiral its own target down;
+motion after it resumes at once, unpaced on a clean path, as on any frame.
+Instead the idle sender (below half its budget, application-limited) measures
+the path: after 500 ms, two probe trains 200 ms apart and then one a second,
+each 6 to 16 full datagrams, skipped below an 8 Mbps retained budget,
+to viewers that time them (`docs/PROTOCOL.md`, "Probe"). Sequence positions
+are deduplicated; only ordered contiguous prefixes count. The median
+eight-position packet pair estimates capacity, gated by measured pair
+variation (dispersion ≥2× variation) and the dominant-stall rejection.
+Two fresh confident trains below 3/4 of the budget need corroborating
+queue delay or lossy delivery deficit to lower the target to 90% of the
+faster train. An ordinary ping immediately behind each burst independently
+measures its FIFO delay, relative to baseline RTT and learned ping jitter.
+It does not pollute the minimum-RTT samples. Without corroboration only
+resume pacing changes: 105% of a measured rate, or 1/20 of the budget when
+unknown. Lossless delivery filling that pace validates 25% increases once
+per feedback horizon. A fresh fast train removes this limit; later fast
+trains restore confirmed cuts. An older viewer gets no probes or limit.
+
+Probe datagrams bypass the pacer and **are outside the wire budget** and
+ordinary throughput statistics: up to ~330 kbps extra in the first idle
+second, then ≤164 kbps, in bursts of 7,680–20,480 B (including tunnel
+allowance); each trailing ping adds 96 modeled wire bytes. At 5 Mbps the
+largest burst occupies 32.8 ms of a 40 ms FIFO. Skipping low retained
+budgets reduces the burst cost but does not guarantee safety after a
+capacity drop or through a small token bucket. See the protocol for limits.
+An
+underfilled stream that a standing delay cut while it still delivered
+everything (someone else's queue, or pings starved on a loaded machine) gets
+back the budget it had once the delay has been gone for a second: it can
+never fill a probe to prove it, and trains still guard its idle resume. Likewise an
+idle stream (or an underfilled one at the floor), a second after any cut's
+signal clears, regrows by time but never past the last pair of trains (only
+fresh trains act at all); the regrown rate stands in for capacity, so motion
+probes up from it in bounded steps. Viewer reports carry the budget as
+`wire_budget_kbps`.
 Each cut removes 20%, or 40% for queue delay above 20 ms or loss above 10%.
 Loss in a window that delivered more than is now sent predates the last cut
 and is ignored, as is a queue still falling within three horizons of a cut
 (horizon: 2× base RTT plus one report window, two for windows ≥200 ms). Sender age above
-20 ms is also pressure. Uncorrected loss above 3% (raw loss for legacy
-reports) or lost frames in two windows running count at any raw loss. Loss
-without queue delay is treated as a policer: a smoothed received rate (+7%
-headers) caps the climb at 97% of it for three seconds, during which one
-damaged window near it cuts again. A 50 ms window holds only a few frames, so
+20 ms is pressure only for a loaded sender. Moderate queue-free damage with
+usable send/receive feedback gets 500 ms for FEC adaptation before a reversible
+20% reduction of the rate actually sent (a lower unused budget would change no
+load), if at least 4 Mbps is sent: a sparse stream's few datagrams a window
+cannot tell a policer from chance, so parity and the severe-loss escape cover
+it. After a feedback horizon plus one second, the mean sent rate over the test
+must have fallen by 10% while filling at least 85% of the reduced budget (so
+the budget, not the content, lowered it), and mean raw loss (against its mean
+over the 500 ms before, not the window that started the test) by half, or by more than max(35% of it, 2 points) (a
+policer over a random-loss floor), to confirm a policer at the rate implied by
+the loss that remained; otherwise the budget returns and no further test runs
+for three seconds. A confirmed test also records that remaining loss as the
+path's random floor: loss within 2 points of it is not a new overshoot while
+the ten-second policer memory lasts (legacy/severe-loss cuts retain the
+three-second memory). Uncorrected loss above 10% on a loaded sender, unusable
+rate feedback and delay pressure retain conservative cuts. An underfilled
+encoder is no exemption: >10% loss with under 90% of the sent rate arriving,
+sustained for 500 ms or a feedback horizon, is pressure and may collapse-cut
+(a short sparse-window spike is not). One coarse (≥500 ms, legacy) window
+that is damaged with a queue or >10% loss cuts at once. A 50 ms window holds only a few frames, so
 received/sent ratios are too coarse to be a signal on their own; they gate only
 the one-window collapse cut, together with loss above 10% or delay above 20 ms. The
 ping-jitter estimate starts at 3 ms and learns only from falling delay outside
@@ -445,6 +503,20 @@ is a route change: the RTT minima are rebased and the estimate dropped; loss or
 a falling RTT (a draining FIFO) cancels the evidence. Raw legacy loss under 10%
 without lost frames is treated as repaired radio loss. Rate setters run between
 frames at a 5% target change.
+Parity percentages retain the 30% path cap, but every keyframe/recovery block
+has at least 30% and four parity shards. Other frames add up to the measured
+burst plus two shards (at most their data count); burst evidence is bounded to
+32 and decays over two seconds, rounding to zero. Queue overflow is excluded
+from burst learning. The packetizer and the encoder allowance share one layout
+(`latch_proto::video::fec_parity_shards`), and the server and the transport
+simulations share one parity policy (`congestion::FecPolicy`). The allowance
+uses 108 bytes per packet for Latch/IP/tunnel overhead, with 4% headroom, and
+reserves the protected floor while a keyframe or recovery frame is owed (below
+five minimum datagrams per frame slot, that irreducible layout is the
+permitted burst), but never more than half the ordinary encoder target: at
+1 Mbps and 240 fps the full floor would leave 3 kbps, so a protected frame
+there may be one frame's burst over its slot. Normal frames do not pay it. CPU time computing parity is excluded from
+unpaced sender queue age. See [FEC measurements](measurements/2026-11-04/transport-fec/README.md).
 This remains a heuristic controller; it is not a full GCC implementation.
 
 Linux sends up to 32 datagrams with `sendmmsg` and receives with `recvmmsg`.

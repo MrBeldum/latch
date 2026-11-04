@@ -41,6 +41,7 @@ fn a_cold_software_host_does_not_take_4k_at_the_display_refresh_rate() {
         reference_invalidation: false,
         audio_channels: 0,
         mic: false,
+        probe_trains: false,
     };
     software::set_ceiling(Some(Ceiling::PROVISIONAL));
     drop(server.prepare(request.clone(), peer).unwrap());

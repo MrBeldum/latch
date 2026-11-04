@@ -1,0 +1,14 @@
+serving on 100.70.121.94:47968 (TCP and UDP)
+host UDP buffers: send=16777216 receive=16777216 bytes (requested 8388608/8388608; Linux may cap at net.core.wmem_max/rmem_max)
+view example is watching: 640×360 at 60 fps, 20000 kb/s, Latch software H.264 (test pattern)
+2026-11-04T15:00:47.835013Z  INFO latch_engine::server: recovery refused (a keyframe is owed); sending a keyframe frame=351
+2026-11-04T15:00:48.575600Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=12000 applied_kbps=15752 host_rtt=183.22300720214844 queue_ms=112.0479965209961 loss=0.0
+2026-11-04T15:00:48.832815Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=13471 applied_kbps=9001 host_rtt=12.860000610351563 queue_ms=0.39800000190734863 loss=0.0
+2026-11-04T15:00:48.899003Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=15108 applied_kbps=10689 host_rtt=13.22599983215332 queue_ms=0.6230000257492065 loss=0.0
+2026-11-04T15:00:48.966336Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=16977 applied_kbps=11251 host_rtt=13.312999725341797 queue_ms=0.06400000303983688 loss=0.0
+2026-11-04T15:00:49.049650Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=19613 applied_kbps=12939 host_rtt=12.486000061035156 queue_ms=1.1360000371932983 loss=0.0
+2026-11-04T15:00:49.125460Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=20000 applied_kbps=15189 host_rtt=13.380999565124512 queue_ms=0.7070000171661377 loss=0.0
+2026-11-04T15:00:51.697435Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=16000 applied_kbps=15189 host_rtt=0.0 queue_ms=0.0 loss=0.0
+2026-11-04T15:00:51.913411Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=18024 applied_kbps=12376 host_rtt=12.343999862670898 queue_ms=0.3179999887943268 loss=0.0
+2026-11-04T15:00:51.995837Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=20000 applied_kbps=14064 host_rtt=12.0 queue_ms=0.07500000298023224 loss=0.0
+view example stopped watching after 12 s: the viewer disconnected
