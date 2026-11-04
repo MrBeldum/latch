@@ -1,5 +1,5 @@
 use super::runtime::Runtime;
-use crate::audio::{f32_to_i16, AudioCapture, Resampler, CHANNELS, FRAME};
+use crate::audio::{f32_to_i16, AudioCapture, Layout, Resampler, CHANNELS, FRAME};
 use anyhow::{bail, Context, Result};
 use std::{
     collections::VecDeque,
@@ -10,7 +10,7 @@ use std::{
 use windows::Win32::{
     Foundation::*,
     Media::{Audio::*, KernelStreaming::*, Multimedia::*},
-    System::{Com::*, Threading::*},
+    System::{Com::*, Performance::*, Threading::*},
 };
 
 struct EventHandle(HANDLE);
@@ -46,9 +46,60 @@ struct Loopback {
     float: bool,
     resampler: Resampler,
     pending: VecDeque<f32>,
+    trace: Option<Trace>,
 }
+
+/// `LATCH_AUDIO_TRACE` set: how big loopback packets are and how old
+/// their first frame is when read, logged every five seconds. (Negative:
+/// a packet's QPC stamp is when the endpoint will play it, and loopback
+/// hands the mix over before the device buffer does.)
+struct Trace {
+    since: Instant,
+    frames: Vec<u32>,
+    age_us: Vec<i64>,
+}
+impl Trace {
+    fn note(&mut self, frames: u32, age_us: i64, rate: u32) {
+        self.frames.push(frames);
+        self.age_us.push(age_us);
+        if self.since.elapsed() < Duration::from_secs(5) {
+            return;
+        }
+        self.frames.sort_unstable();
+        self.age_us.sort_unstable();
+        let pick = |v: &[i64], p: f64| v[((v.len() - 1) as f64 * p) as usize];
+        let f = self.frames[self.frames.len() / 2];
+        tracing::info!(
+            "WASAPI loopback: {} packets, median {f} frames ({:.2} ms), first-frame age p50 {:.2} ms p95 {:.2} ms max {:.2} ms",
+            self.frames.len(),
+            f64::from(f) * 1000.0 / f64::from(rate),
+            pick(&self.age_us, 0.5) as f64 / 1000.0,
+            pick(&self.age_us, 0.95) as f64 / 1000.0,
+            pick(&self.age_us, 1.0) as f64 / 1000.0,
+        );
+        self.since = Instant::now();
+        self.frames.clear();
+        self.age_us.clear();
+    }
+}
+
+/// QueryPerformanceCounter in the 100 ns units WASAPI stamps packets with.
+fn qpc_100ns() -> i64 {
+    let (mut count, mut freq) = (0i64, 0i64);
+    // SAFETY: Both calls only write the given integers.
+    unsafe {
+        let _ = QueryPerformanceCounter(&mut count);
+        let _ = QueryPerformanceFrequency(&mut freq);
+    }
+    (count as i128 * 10_000_000 / i128::from(freq.max(1))) as i64
+}
+
 impl Loopback {
-    fn open(event_driven: bool) -> Result<Self> {
+    /// Loopback runs at the endpoint's engine period (10 ms on most
+    /// drivers) and cannot ask for a smaller one: IAudioClient3's
+    /// low-latency streams refuse the loopback flag
+    /// (AUDCLNT_E_INVALID_STREAM_FLAG).
+    fn open(event_driven: bool, layout: Layout) -> Result<Self> {
         // SAFETY: Called in the audio worker's MTA; COM objects stay on it.
         unsafe {
             let enumerator: IMMDeviceEnumerator =
@@ -139,8 +190,13 @@ impl Loopback {
                 valid_bits,
                 block,
                 float,
-                resampler: Resampler::with_channel_mask(rate, channels, mask),
+                resampler: Resampler::with_layout(rate, channels, mask, layout.pick(channels)),
                 pending: VecDeque::new(),
+                trace: std::env::var_os("LATCH_AUDIO_TRACE").map(|_| Trace {
+                    since: Instant::now(),
+                    frames: Vec::new(),
+                    age_us: Vec::new(),
+                }),
             })
         }
     }
@@ -156,10 +212,13 @@ impl Loopback {
             {
                 return Ok(false);
             }
-            let (mut data, mut frames, mut flags) = (std::ptr::null_mut(), 0, 0);
+            let (mut data, mut frames, mut flags, mut stamp) = (std::ptr::null_mut(), 0, 0, 0u64);
             self.capture
-                .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
+                .GetBuffer(&mut data, &mut frames, &mut flags, None, Some(&mut stamp))
                 .context("WASAPI capture buffer")?;
+            if let Some(trace) = &mut self.trace {
+                trace.note(frames, (qpc_100ns() - stamp as i64) / 10, self.rate);
+            }
             if frames == 0 {
                 self.capture
                     .ReleaseBuffer(0)
@@ -200,14 +259,18 @@ impl Loopback {
                 .capture
                 .ReleaseBuffer(frames)
                 .context("release WASAPI packet");
-            let mut stereo = Vec::new();
-            self.resampler.push(&samples, &mut stereo);
-            self.pending.extend(stereo);
+            let mut mixed = Vec::new();
+            self.resampler.push(&samples, &mut mixed);
+            self.pending.extend(mixed);
             released?;
             Ok(true)
         }
     }
-    fn read(&mut self, timeout: Duration) -> Result<Option<[i16; FRAME * CHANNELS]>> {
+    fn out_channels(&self) -> usize {
+        self.resampler.out_channels()
+    }
+    fn read(&mut self, timeout: Duration) -> Result<Option<Vec<i16>>> {
+        let size = FRAME * self.out_channels();
         let deadline = Instant::now() + timeout;
         loop {
             if Instant::now() >= self.check_at {
@@ -221,10 +284,10 @@ impl Loopback {
                     );
                 }
             }
-            while self.pending.len() < FRAME * CHANNELS && self.packet()? {}
-            if self.pending.len() >= FRAME * CHANNELS {
-                let samples: Vec<f32> = self.pending.drain(..FRAME * CHANNELS).collect();
-                let mut out = [0; FRAME * CHANNELS];
+            while self.pending.len() < size && self.packet()? {}
+            if self.pending.len() >= size {
+                let samples: Vec<f32> = self.pending.drain(..size).collect();
+                let mut out = vec![0; size];
                 f32_to_i16(&samples, &mut out);
                 return Ok(Some(out));
             }
@@ -257,14 +320,30 @@ impl Drop for Loopback {
 }
 struct Request {
     timeout: Duration,
-    reply: mpsc::SyncSender<Result<Option<[i16; FRAME * CHANNELS]>>>,
+    reply: mpsc::SyncSender<Result<Option<Vec<i16>>>>,
 }
 struct Proxy {
     requests: mpsc::Sender<Request>,
     description: String,
+    channels: usize,
 }
 impl AudioCapture for Proxy {
     fn read(&mut self, out: &mut [i16; FRAME * CHANNELS], timeout: Duration) -> Result<bool> {
+        let mut frame = Vec::new();
+        let got = self.read_frame(&mut frame, timeout)?;
+        if got {
+            anyhow::ensure!(frame.len() == out.len(), "this capture is not stereo");
+            out.copy_from_slice(&frame);
+        }
+        Ok(got)
+    }
+    fn describe(&self) -> String {
+        self.description.clone()
+    }
+    fn channels(&self) -> usize {
+        self.channels
+    }
+    fn read_frame(&mut self, out: &mut Vec<i16>, timeout: Duration) -> Result<bool> {
         let (reply, response) = mpsc::sync_channel(1);
         self.requests
             .send(Request { timeout, reply })
@@ -277,17 +356,14 @@ impl AudioCapture for Proxy {
             None => Ok(false),
         }
     }
-    fn describe(&self) -> String {
-        self.description.clone()
-    }
 }
-fn open_loopback() -> Result<Loopback> {
-    Loopback::open(true).or_else(|e| {
+fn open_loopback(layout: Layout) -> Result<Loopback> {
+    Loopback::open(true, layout).or_else(|e| {
         tracing::debug!("WASAPI events unavailable: {e:#}; polling");
-        Loopback::open(false)
+        Loopback::open(false, layout)
     })
 }
-pub(super) fn open() -> Result<Box<dyn AudioCapture>> {
+pub(super) fn open(layout: Layout) -> Result<Box<dyn AudioCapture>> {
     let (requests, receive) = mpsc::channel::<Request>();
     let (ready, startup) = mpsc::sync_channel(1);
     thread::Builder::new()
@@ -295,7 +371,7 @@ pub(super) fn open() -> Result<Box<dyn AudioCapture>> {
         .spawn(move || {
             let initialized = (|| {
                 let runtime = Runtime::new(false)?;
-                let capture = open_loopback()?;
+                let capture = open_loopback(layout)?;
                 Ok::<_, anyhow::Error>((runtime, capture))
             })();
             let (_runtime, mut capture) = match initialized {
@@ -305,11 +381,12 @@ pub(super) fn open() -> Result<Box<dyn AudioCapture>> {
                     return;
                 }
             };
+            let channels = capture.out_channels();
             let description = format!(
                 "WASAPI default render loopback ({} Hz, {} channels)",
                 capture.rate, capture.channels
             );
-            if ready.send(Ok(description)).is_err() {
+            if ready.send(Ok((description, channels))).is_err() {
                 return;
             }
             for request in receive {
@@ -323,7 +400,7 @@ pub(super) fn open() -> Result<Box<dyn AudioCapture>> {
                             || e.code() == AUDCLNT_E_RESOURCES_INVALIDATED
                     });
                 let result = if invalidated {
-                    match open_loopback() {
+                    match open_loopback(Layout::Exactly(channels)) {
                         Ok(new) => {
                             capture = new;
                             Ok(None)
@@ -337,19 +414,20 @@ pub(super) fn open() -> Result<Box<dyn AudioCapture>> {
             }
         })
         .context("spawn audio worker")?;
-    let description = startup
+    let (description, channels) = startup
         .recv()
         .context("audio worker stopped during startup")??;
     Ok(Box::new(Proxy {
         requests,
         description,
+        channels,
     }))
 }
 #[cfg(test)]
 mod tests {
     #[test]
     fn loopback_opens_when_audio_endpoint_exists() -> anyhow::Result<()> {
-        match super::open() {
+        match super::open(super::Layout::UpTo(8)) {
             Ok(capture) => eprintln!("{}", capture.describe()),
             Err(e) => {
                 if !super::super::unavailable(&e, "WASAPI loopback") {

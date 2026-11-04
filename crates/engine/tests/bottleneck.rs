@@ -177,6 +177,7 @@ fn noise_stream_adapts_to_sustained_queue_delay_and_recovers() {
         Settings {
             cursor: false,
             gamepads: false,
+            mic: false,
             width: 640,
             height: 360,
             fps: 12,

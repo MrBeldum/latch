@@ -531,8 +531,8 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
         worker: Some(worker),
     }))
 }
-pub fn open_audio() -> Result<Box<dyn AudioCapture>> {
-    audio::open()
+pub fn open_audio(layout: crate::audio::Layout) -> Result<Box<dyn AudioCapture>> {
+    audio::open(layout)
 }
 pub fn open_input() -> Result<Box<dyn InputSink>> {
     Ok(Box::new(input::Injector::new()))

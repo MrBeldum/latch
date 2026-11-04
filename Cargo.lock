@@ -2105,6 +2105,7 @@ dependencies = [
  "latch-core",
  "latch-engine",
  "latch-proto",
+ "latch-stream",
  "latch-ui",
  "parking_lot",
  "rand",
@@ -2134,6 +2135,7 @@ dependencies = [
 name = "latch-stream"
 version = "5.1.0"
 dependencies = [
+ "alsa",
  "anyhow",
  "block2 0.6.2",
  "cpal",
@@ -2151,6 +2153,7 @@ dependencies = [
  "rand",
  "serde_json",
  "tracing",
+ "tracing-subscriber",
  "windows 0.58.0",
 ]
 

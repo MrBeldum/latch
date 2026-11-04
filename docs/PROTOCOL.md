@@ -49,6 +49,8 @@ Content-Length: <n>
 | `name` | string | the viewer's machine name, for the host's log |
 | `cursor` | bool | optional, default false; viewer can draw pointer locally and handle shape updates |
 | `gamepads` | bool | optional, default false; the viewer sends gamepads (see [Gamepads](#gamepads-912)) |
+| `audio_channels` | u32 | optional; most channels the viewer plays (6 for 5.1, 8 for 7.1). Absent, or below 3, means stereo |
+| `mic` | bool | optional, default false; the viewer offers its microphone (datagram kind 13) |
 
 A request is taken within 64 to 16384 pixels a side, 1 to 500 fps and
 500 kbps to 1 Gbps (`latch_proto::control::MAX_*`). The host then meets
@@ -100,6 +102,8 @@ type byte and the payload and is at most 65 536. Payloads are JSON objects.
 | `gamepads` | u8 | optional, default 0; gamepad slots the host emulates (0: none, so the viewer sends none) |
 | `gamepad_kinds` | [string] | optional; the pad kinds the host emulates as themselves, of `"xbox"`, `"playstation"`, `"generic"`; unknown names are skipped |
 | `gamepad_problem` | string | optional; why the host takes no gamepads although the viewer offered them |
+| `mic` | object | optional; the format the viewer's microphone is to be sent in (`{"rate": 48000, "channels": 1, "frame_samples": 240, "codec": "lpcm-rice"}`), present only when the viewer offered it and the host has somewhere to play it |
+| `mic_problem` | string | optional; why an offered microphone is not wanted, when `mic` is absent |
 
 Either side sends `Keepalive` when it has sent nothing for one second. A
 connection that has been silent for ten seconds is dead. The session ends
@@ -143,6 +147,7 @@ not match its kind is dropped without an answer.
 | 10 | `PadAck` | host → viewer |
 | 11 | `PadFeedback` | host → viewer |
 | 12 | `PadFeedbackAck` | viewer → host |
+| 13 | `Mic` | viewer → host |
 
 ### Hello (1)
 
@@ -210,8 +215,13 @@ one lost packet of the four.
 
 Each coded audio frame is at most `MAX_DATAGRAM - 18` (1 182) bytes,
 leaving room for the 16-byte audio header and the parity packet's two-byte
-length. The host picks `frame_samples` and announces it in `Accept`;
-the default is 240 samples (5 ms at 48 kHz).
+length. The host picks `frame_samples` and announces it in `Accept`: 240
+samples (5 ms at 48 kHz) for stereo, 80 for 5.1 and 60 for 7.1, the most
+whose worst case fits. Stereo frames are `lpcm-rice` version 1, exactly as
+5.1.0 sent them; more channels are version 2 (see the codec's module
+documentation), which only a viewer that asked with `audio_channels`
+receives. Channels are in WAVE order (5.1: FL FR FC LFE BL BR; 7.1 adds
+SL SR).
 
 ### Input (4)
 
@@ -323,6 +333,13 @@ receiver applies a snapshot only if its `seq` is newer than the last it
 applied for that slot (serial-number order), so a late or repeated
 datagram never moves a stick back or restarts a rumble that stopped. The
 viewer answers every `PadFeedback` with a `PadFeedbackAck`.
+
+### Mic (13)
+
+The viewer's microphone, laid out exactly as `Audio` (3) with its own
+`seq` and parity groups, sent only after an `Accept` with `mic`, in that
+format (5 ms of 48 kHz mono). The host takes it only from the address the
+session's `Hello` came from. A host that does not know kind 13 drops it.
 
 ## Versioning
 

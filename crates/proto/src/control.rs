@@ -116,6 +116,18 @@ pub struct StreamRequest {
     /// The viewer sends gamepads (`docs/PROTOCOL.md`, "Gamepads").
     #[serde(default)]
     pub gamepads: bool,
+    /// Most audio channels the viewer plays (6 for 5.1, 8 for 7.1); absent
+    /// or below 3 means stereo, all an older viewer decodes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub audio_channels: u32,
+    /// The viewer offers its microphone (datagram kind 13) when the host
+    /// answers with an `Accept.mic` format.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mic: bool,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn known_codecs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Codec>, D::Error> {
@@ -167,6 +179,13 @@ pub struct Accept {
     /// Why the host takes no gamepads, when the viewer offered them.
     #[serde(default)]
     pub gamepad_problem: String,
+    /// What the viewer's microphone is to be sent as, when it offered it
+    /// and this host has somewhere to play it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic: Option<AudioFormat>,
+    /// Why the offered microphone is not wanted, when `mic` is null.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mic_problem: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

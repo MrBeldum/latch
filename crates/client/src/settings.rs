@@ -154,6 +154,13 @@ pub fn stream_controls(
         },
     );
     ui::row_separator(ui);
+    ui::toggle_row(
+        ui,
+        &mut s.mic,
+        "Send my microphone",
+        Some("The PC hears it as a microphone: on Linux by itself, on Windows and macOS through a virtual cable (VB-CABLE, BlackHole) installed there."),
+    );
+    ui::row_separator(ui);
     let p = crate::session::plan(s, native, hz, &crate::session::HostLimits::default());
     ui.add_space(space::MD);
     ui.horizontal_wrapped(|ui| {

@@ -232,6 +232,7 @@ it from this network (see below).
 | Frame rate | 30 to 500, and this display's own rate (marked); the PC's display is switched to match when it can |
 | Bitrate | 2 to 1000 Mbps in steps (fine at the low end); arrow keys step once, Shift-arrow ten times. The most the encoder spends; the host's rate control comes down from it when the path drops packets |
 | Codec | Auto (the best both ends have: AV1, then HEVC, then H.264), AV1, HEVC, H.264. A codec either end lacks falls back to H.264 |
+| Send my microphone | Off by default. On, this Mac's microphone plays on the PC as a microphone: by itself on Linux; on Windows and macOS through a virtual cable installed there (VB-CABLE, BlackHole). macOS asks for the microphone the first time |
 | Open streams full screen | How a session starts |
 | Capture the mouse | The toolbar's Mouse choice, remembered |
 | Command acts as Ctrl | Off makes ⌘ the Windows key on Windows and Linux machines; a Mac always gets ⌘ as Command |
@@ -376,6 +377,14 @@ rate control above. So a lost frame is best answered without an IDR
   the first time the Mac serves a Latch Host install through the stream.
 - Only connecting, nothing else: Latch captures no screen and reads the
   keyboard and mouse only in its own window.
+- **Microphone**: asked for only when **Send my microphone** is on, the
+  first time a stream starts with it. Until it is allowed (System
+  Settings > Privacy & Security > Microphone), macOS hands Latch silence,
+  so the PC hears nothing.
+- Sharing this Mac with a viewer that sends its microphone needs a virtual
+  cable such as [BlackHole](https://existential.audio/blackhole/): Latch
+  plays the viewer's microphone into its output, and apps on this Mac pick
+  BlackHole as their microphone. `LATCH_MIC_DEVICE` names another output.
 - Sharing this Mac also needs **Screen Recording** (the picture and the
   sound, through ScreenCaptureKit) and **Accessibility** (the viewer's
   keyboard and mouse). macOS asks once, when you set up sharing; after

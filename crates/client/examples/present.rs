@@ -260,6 +260,7 @@ fn main() -> anyhow::Result<()> {
                             name: "present measurement".into(),
                             cursor: false,
                             gamepads: false,
+                            mic: false,
                         },
                         frames.clone(),
                         tx,

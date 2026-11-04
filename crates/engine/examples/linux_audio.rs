@@ -4,7 +4,7 @@ fn main() -> anyhow::Result<()> {
     use latch_engine::audio::{CHANNELS, FRAME};
     use std::time::{Duration, Instant};
     let seconds: u64 = std::env::args().nth(1).map_or(Ok(3), |s| s.parse())?;
-    let mut capture = latch_engine::linux::open_audio()?;
+    let mut capture = latch_engine::linux::open_audio(latch_engine::audio::Layout::UpTo(CHANNELS))?;
     println!("{}", capture.describe());
     let start = Instant::now();
     let mut frame = [0; FRAME * CHANNELS];

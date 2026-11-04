@@ -115,6 +115,8 @@ pub struct Settings {
     pub cursor: bool,
     /// Offer gamepads.
     pub gamepads: bool,
+    /// Send this machine's microphone, where the host can play it.
+    pub mic: bool,
 }
 
 /// Where a session sends the host's rumble and lights: slot and feedback.
@@ -158,6 +160,12 @@ pub struct Stats {
     /// Where sound goes ("audio → MacBook Pro Speakers"), or why it does
     /// not; empty until the first second of video.
     pub audio: String,
+    /// Where the delay between an audio packet arriving and its sound
+    /// leaving the speaker goes.
+    pub audio_latency: crate::audio::Latency,
+    /// Where this machine's microphone goes, or why it does not; empty
+    /// when it was not asked for.
+    pub mic: String,
     /// Persistent video diagnosis, even while the transport is connected.
     pub video_problem: Option<String>,
     pub applied_bitrate_kbps: u32,
@@ -267,6 +275,8 @@ impl Link {
 }
 
 struct Inner {
+    /// This machine's microphone, while it is being sent.
+    mic: Mutex<Option<crate::mic::Mic>>,
     events: Sender<Event>,
     wake: Box<dyn Fn() + Send + Sync>,
     frames: Arc<FrameSlot>,
@@ -341,6 +351,7 @@ impl Inner {
             frames,
             stats: Mutex::new(Stats::default()),
             host_audio_problem: Mutex::new(String::new()),
+            mic: Mutex::new(None),
             video_health: Mutex::new(VideoHealth::default()),
             decode: Mutex::new(DecodeWindow::default()),
             link: Mutex::new(None),
@@ -721,6 +732,13 @@ fn attempt(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         name: settings.name.clone(),
         cursor: settings.cursor,
         gamepads: settings.gamepads,
+        mic: settings.mic,
+        // 5.1 or 7.1 when this machine's speakers have them; stereo is the
+        // field's absence, which every host understands.
+        audio_channels: match settings.audio.then(crate::audio::output_channels) {
+            Some(n) if n > 2 => n,
+            _ => 0,
+        },
     };
     let body = serde_json::to_vec(&request).unwrap_or_default();
     let host = SocketAddr::new(server.address, server.port);
@@ -863,6 +881,21 @@ fn attempt(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         link.flush(Instant::now());
         *guard = Some(link);
     }
+    if settings.mic {
+        let started = match (&accept.mic, udp.try_clone()) {
+            (Some(format), Ok(udp)) => crate::mic::Mic::start(format, accept.session, udp, media)
+                .map_err(|e| format!("{e:#}")),
+            (Some(_), Err(e)) => Err(e.to_string()),
+            (None, _) if accept.mic_problem.is_empty() => {
+                Err("the host does not take a microphone".into())
+            }
+            (None, _) => Err(format!("the host cannot play it: {}", accept.mic_problem)),
+        };
+        match started {
+            Ok(mic) => *inner.mic.lock() = Some(mic),
+            Err(why) => inner.stats.lock().mic = format!("microphone not sent: {why}"),
+        }
+    }
     inner.heard();
     let receiver = {
         let inner = inner.clone();
@@ -877,6 +910,7 @@ fn attempt(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         Worker::spawn("stream-decode", move || decode(&inner, decoder, codec))
     };
     let outcome = control_loop(inner, &mut tcp, &accept);
+    inner.mic.lock().take();
     inner.attempt_over.store(true, Ordering::Release);
     inner.connected.store(false, Ordering::Release);
     inner.queue_cv.notify_all();
@@ -1326,7 +1360,17 @@ fn receive(
                 s.fec_recovered = recovered;
                 s.rtt_ms = rtt.srtt().map_or(0, |d| d.as_millis() as u32);
                 s.rtt_var_ms = rtt.rttvar().as_millis() as u32;
+                if let Some(mic) = inner.mic.lock().as_ref() {
+                    s.mic = match mic.state() {
+                        crate::mic::MicState::Opening => "microphone: opening".into(),
+                        crate::mic::MicState::Sending { device } => {
+                            format!("microphone {device} → host")
+                        }
+                        crate::mic::MicState::Failed(why) => format!("microphone not sent: {why}"),
+                    };
+                }
                 if let Some(p) = &player {
+                    s.audio_latency = p.latency();
                     let problem = inner.host_audio_problem.lock();
                     s.audio = if problem.is_empty() {
                         p.describe()
@@ -1862,6 +1906,7 @@ mod tests {
         let mut s = Settings {
             cursor: false,
             gamepads: false,
+            mic: false,
             width: 1920,
             height: 1080,
             fps: 60,
@@ -1892,6 +1937,7 @@ mod tests {
             Settings {
                 cursor: false,
                 gamepads: false,
+                mic: false,
                 width: 1920,
                 height: 1080,
                 fps: 60,

@@ -102,6 +102,7 @@ fn connect_with(
             name: "loopback test".into(),
             cursor,
             gamepads,
+            mic: false,
         },
         frames.clone(),
         tx,
