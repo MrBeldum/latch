@@ -85,10 +85,30 @@ foreach ($m in $vddWanted) {{
 pub fn setup_ps() -> String {
     format!(
         r#"Step "Listing virtual display resolutions and refresh rates"
+$vddModesUnchanged = $false
+$vddRelocated = $false
+$vddWriteStarted = $false
+$vddPreviousBytes = $null
+$vddErrorPreference = $ErrorActionPreference
+function Restart-Vdd {{
+    foreach ($d in $vddDevices) {{
+        pnputil /restart-device $d.InstanceId | Out-Null
+        if ($LASTEXITCODE -ne 0) {{ throw "Virtual display restart exited with $LASTEXITCODE" }}
+    }}
+}}
+function Wait-VddMonitor {{
+    foreach ($attempt in 1..60) {{
+        Start-Sleep -Milliseconds 250
+        if (@(Get-PnpDevice -Class Monitor -ErrorAction SilentlyContinue | Where-Object {{ $_.InstanceId -like 'DISPLAY\MTT1337\*' -and $_.Status -eq 'OK' }}).Count -gt 0) {{ return $true }}
+    }}
+    return $false
+}}
+try {{
+$ErrorActionPreference = 'Stop'
 {locate}if ($vddDevices.Count -eq 0) {{
     Write-Output "  no {device} on this PC; skipped"
 }} elseif ($vddParseFailed) {{
-    Write-Output "  $vddFile could not be read and is left alone"
+    throw "$vddFile could not be read and is left alone"
 }} elseif ($vddMissing.Count -eq 0) {{
     Write-Output "  every resolution and refresh rate is listed already"
 }} else {{
@@ -142,37 +162,51 @@ pub fn setup_ps() -> String {
     $vddWriterSettings = New-Object System.Xml.XmlWriterSettings
     $vddWriterSettings.Indent = $true
     $vddWriterSettings.Encoding = New-Object System.Text.UTF8Encoding($false)
+    $vddWriteStarted = $true
     $vddWriter = [System.Xml.XmlWriter]::Create($vddFile, $vddWriterSettings)
     try {{ $vddXml.Save($vddWriter) }} finally {{ $vddWriter.Close() }}
     if ($vddRelocated) {{
         if (-not (Test-Path -LiteralPath '{reg}')) {{ New-Item -Path '{reg}' -Force | Out-Null }}
         New-ItemProperty -Path '{reg}' -Name 'VDDPATH' -Value $vddDir -PropertyType String -Force | Out-Null
-        # The first relocation only: a later run would record Latch's own folder.
-        if (-not (Test-Path -LiteralPath '{record}')) {{
-            New-Item -Path '{record}' -Force | Out-Null
-            $vddPrevious = 'absent'
-            if ($vddOldPath) {{ $vddPrevious = $vddOldPath }}
-            New-ItemProperty -Path '{record}' -Name 'PreviousVddPath' -Value $vddPrevious -PropertyType String -Force | Out-Null
-        }}
     }}
     Write-Output "  updated $($vddMissing.Count) resolutions to $vddFile; restarting the virtual display"
-    foreach ($d in $vddDevices) {{ pnputil /restart-device $d.InstanceId | Out-Null }}
-    if ($vddHadMonitor) {{
-        $vddAlive = $false
-        foreach ($attempt in 1..20) {{
-            Start-Sleep -Milliseconds 250
-            if (@(Get-PnpDevice -Class Monitor -ErrorAction SilentlyContinue | Where-Object {{ $_.InstanceId -like 'DISPLAY\MTT1337\*' -and $_.Status -eq 'OK' }}).Count -gt 0) {{ $vddAlive = $true; break }}
-        }}
-        if (-not $vddAlive) {{
-            if ($vddPreviousBytes) {{ [IO.File]::WriteAllBytes($vddFile, $vddPreviousBytes) }} else {{ Remove-Item -LiteralPath $vddFile -Force }}
-            if ($vddRelocated) {{
-                if ($vddOldPath) {{ Set-ItemProperty -Path '{reg}' -Name VDDPATH -Value $vddOldPath }} else {{ Remove-ItemProperty -Path '{reg}' -Name VDDPATH }}
-            }}
-            foreach ($d in $vddDevices) {{ pnputil /restart-device $d.InstanceId | Out-Null }}
-            throw 'Virtual display rejected the mode list; previous settings restored (the driver may limit the number of modes)'
-        }}
+    Restart-Vdd
+    if (-not (Wait-VddMonitor)) {{
+        throw 'Virtual display monitor did not return after the settings change'
+    }}
+    # Record only a successful relocation. A failed attempt must leave no
+    # uninstall record pointing at a copy which has already been removed.
+    if ($vddRelocated -and -not (Test-Path -LiteralPath '{record}')) {{
+        New-Item -Path '{record}' -Force | Out-Null
+        $vddPrevious = 'absent'
+        if ($vddOldPath) {{ $vddPrevious = $vddOldPath }}
+        New-ItemProperty -Path '{record}' -Name 'PreviousVddPath' -Value $vddPrevious -PropertyType String -Force | Out-Null
     }}
 }}
+}} catch {{
+    $vddModesUnchanged = $true
+    Write-Output "  WARNING: virtual display modes unchanged: $_"
+    if ($vddWriteStarted) {{
+        try {{
+            if ($null -ne $vddPreviousBytes) {{ [IO.File]::WriteAllBytes($vddFile, $vddPreviousBytes) }}
+            else {{ Remove-Item -LiteralPath $vddFile -Force -ErrorAction SilentlyContinue }}
+            if ($vddRelocated) {{
+                if ($vddOldPath) {{ Set-ItemProperty -Path '{reg}' -Name VDDPATH -Value $vddOldPath }}
+                else {{ Remove-ItemProperty -Path '{reg}' -Name VDDPATH -ErrorAction SilentlyContinue }}
+            }}
+            Restart-Vdd
+            if ($vddHadMonitor -and -not (Wait-VddMonitor)) {{ throw 'The previous virtual display monitor did not return' }}
+            Write-Output '  previous virtual display settings restored'
+        }} catch {{ Write-Output "  WARNING: virtual display restore: $_"; $setupFailed = $true }}
+    }}
+    if ($vddRelocated -and (Get-ItemProperty '{reg}' -ErrorAction SilentlyContinue).VDDPATH -ne $vddDir) {{
+        try {{
+            if ($null -eq $vddPreviousBytes) {{ Assert-ProtectedTree $vddDir; Remove-Item -LiteralPath $vddDir -Recurse -Force }}
+            if (Test-Path -LiteralPath '{record}') {{ Remove-Item -LiteralPath '{record}' -Force }}
+        }} catch {{ Write-Output "  WARNING: virtual display cleanup: $_" }}
+    }}
+}} finally {{ $ErrorActionPreference = $vddErrorPreference }}
+
 "#,
         locate = locate_ps(),
         device = DEVICE,
@@ -283,7 +317,7 @@ mod tests {
             s.contains("$vddMissing += ,$m"),
             "pairs stay pairs when collected:\n{s}"
         );
-        let restart = s.find("pnputil /restart-device").expect("restart");
+        let restart = s.find("    Restart-Vdd\n").expect("restart");
         let save = s.find("$vddXml.Save(").expect("save");
         assert!(
             save < restart,

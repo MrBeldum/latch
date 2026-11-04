@@ -57,6 +57,13 @@ jobs:
             if ($errors.Count -gt 0) { $errors | Format-List | Out-String | Write-Host; throw "$f does not parse" }
             Write-Host "parses: $f"
           }
+      - name: virtual display setup restores rejected settings and continues
+        shell: powershell
+        run: |
+          $env:LATCH_DUMP_VDD_SCRIPT = Join-Path $env:RUNNER_TEMP 'vdd.ps1'
+          cargo test -q --locked -p latch-host --lib the_step_lists_every_mode_keeps_the_file_and_restarts_only_on_change
+          if ($LASTEXITCODE -ne 0) { throw "dumping the display step failed" }
+          scripts/test-vdd-setup.ps1 -Script $env:LATCH_DUMP_VDD_SCRIPT
       - name: setup rejects writable paths and reparse points
         shell: powershell
         run: scripts/test-setup-protection.ps1

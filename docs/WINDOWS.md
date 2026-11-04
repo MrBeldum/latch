@@ -266,8 +266,14 @@ seeds high refresh at the two gaming sizes instead of every combination.
 More modes can be supplied in the driver's XML; Latch enumerates them
 without a refresh whitelist. Advertising every possible size/rate at once,
 and adding arbitrary requested modes on demand, remain unresolved with this
-driver. Setup rolls back a rejected mode list when the active MTT monitor
-disappears after restart.
+driver. Setup allows at least 15 seconds for the active MTT monitor to return
+after restart. If the driver rejects the list or the settings update fails,
+setup warns, restores the previous XML and `VDDPATH`, restarts the driver,
+and continues with the power, gamepad and wake steps. A successful setup
+with that warning exits zero and ends with "virtual display modes unchanged";
+a failed restore is reported as a setup failure, after the remaining steps.
+An unused relocated settings folder and its uninstall record are removed
+on rollback.
 
 If the driver's settings folder is writable by ordinary users, setup leaves
 it untouched and writes the preserved XML under `%ProgramFiles%\Latch\Display`,
