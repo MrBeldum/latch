@@ -586,28 +586,48 @@ impl Reassembler {
     }
 }
 
+/// Repeats of an unanswered `KeyframeRequest` at most this often (or the
+/// round trip, if longer). A request lost on the way costs this much of
+/// frozen picture; the host tells repeats from duplicates
+/// ([`KeyframeAnswers`]), so a repeat costs it nothing.
+pub const KEYFRAME_RETRY: Duration = Duration::from_millis(50);
+
 /// When to send `KeyframeRequest`: at once after a loss, then every
-/// `max(100 ms, rtt)` until a keyframe newer than the request arrives.
+/// `max(KEYFRAME_RETRY, rtt)` until a keyframe newer than the request
+/// arrives. Any frame lost meanwhile may be the keyframe that answered: ask
+/// again at once rather than at the next interval. The host tells such a
+/// repeat from a duplicate ([`KeyframeAnswers`]).
 pub struct KeyframeRequests {
     last_sent: Option<Instant>,
+    lost: bool,
 }
 
 impl KeyframeRequests {
     pub fn new() -> Self {
-        Self { last_sent: None }
+        Self {
+            last_sent: None,
+            lost: false,
+        }
+    }
+
+    /// A frame was declared lost (the reassembler's `Lost`).
+    pub fn lost(&mut self) {
+        self.lost = true;
     }
 
     /// `waiting`: the reassembler waits for a keyframe. Returns whether to
     /// send a request now.
     pub fn due(&mut self, waiting: bool, now: Instant, rtt: Option<Duration>) -> bool {
+        let lost = std::mem::take(&mut self.lost);
         if !waiting {
             self.last_sent = None;
             return false;
         }
-        let interval = rtt.unwrap_or_default().max(Duration::from_millis(100));
-        if self
-            .last_sent
-            .is_none_or(|t| now.saturating_duration_since(t) >= interval)
+        let interval = rtt.unwrap_or_default().max(KEYFRAME_RETRY);
+        if lost
+            || self
+                .last_sent
+                .is_none_or(|t| now.saturating_duration_since(t) >= interval)
         {
             self.last_sent = Some(now);
             true
@@ -811,6 +831,55 @@ impl Recovery {
 impl Default for Recovery {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Repeats of a request naming the same last-delivered frame are taken for
+/// duplicates of one loss this long, unless [`KeyframeAnswers`] can tell
+/// that the keyframe answering it was lost.
+pub const DUPLICATE_REQUEST_HOLD: Duration = Duration::from_millis(250);
+
+/// The host's side of `KeyframeRequest`: which requests ask for a keyframe
+/// not already on its way. A request naming a newer last-delivered frame
+/// reports a new loss. One naming the same frame again is a duplicate while
+/// the keyframe answering it may still be in flight; once that keyframe has
+/// been out for a round trip, the viewer asking again means it was lost too,
+/// and the picture stays frozen until another one arrives.
+#[derive(Debug, Default)]
+pub struct KeyframeAnswers {
+    accepted: Option<(u32, Instant)>,
+    sent: Option<Instant>,
+}
+
+impl KeyframeAnswers {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A keyframe went out at `now`, asked for or not.
+    pub fn sent(&mut self, now: Instant) {
+        self.sent = Some(now);
+    }
+
+    /// A request naming `last` arrived at `now`; `rtt` is a low estimate
+    /// of the round trip (the smoothed RTT less its variation: a repeat
+    /// sent as soon as the keyframe was found lost takes about one round
+    /// trip after it went out, give or take jitter). Returns whether to
+    /// make the next frame a keyframe.
+    pub fn request(&mut self, last: u32, now: Instant, rtt: Option<Duration>) -> bool {
+        let wanted = self.accepted.is_none_or(|(n, at)| {
+            before(n, last)
+                || (n == last
+                    && (now.saturating_duration_since(at) >= DUPLICATE_REQUEST_HOLD
+                        || self.sent.is_some_and(|sent| {
+                            sent >= at
+                                && now.saturating_duration_since(sent) >= rtt.unwrap_or_default()
+                        })))
+        });
+        if wanted {
+            self.accepted = Some((last, now));
+        }
+        wanted
     }
 }
 

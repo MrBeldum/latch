@@ -1267,6 +1267,7 @@ fn receive(
                         hand_off_video(
                             inner,
                             &mut reassembler,
+                            &mut keyframes,
                             &mut throughput,
                             &mut arrivals,
                             &mut losses,
@@ -1333,6 +1334,7 @@ fn receive(
         hand_off_video(
             inner,
             &mut reassembler,
+            &mut keyframes,
             &mut throughput,
             &mut arrivals,
             &mut losses,
@@ -1445,6 +1447,7 @@ fn receive(
 fn hand_off_video(
     inner: &Arc<Inner>,
     reassembler: &mut Reassembler,
+    keyframes: &mut KeyframeRequests,
     throughput: &mut Throughput,
     arrivals: &mut Arrivals,
     losses: &mut Losses,
@@ -1476,6 +1479,8 @@ fn hand_off_video(
             Reassembled::Lost { frame } => {
                 losses.lost(now);
                 tracing::debug!("video frame {frame} lost");
+                // Perhaps the keyframe asked for: ask again.
+                keyframes.lost();
             }
         }
     }

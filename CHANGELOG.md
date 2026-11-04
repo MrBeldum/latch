@@ -31,6 +31,13 @@
   the old viewer learned why it ended.
 - Windows viewers rearm Mio readiness after a batched receive, so packets
   after an idle gap wake the receive loop instead of waiting for its 20 ms timer.
+- A recovery keyframe lost in a burst no longer freezes the picture for
+  400–550 ms: the host held every repeat of a keyframe request for 250 ms,
+  so the viewer's retries were ignored. It now answers a repeat once its
+  keyframe has been out for a round trip, the viewer asks again as soon as
+  another frame is lost, and retries every 50 ms (or the RTT) instead of
+  100 ms. Through 3 % loss with bursts the longest freeze is
+  about 230 ms (simulated, 24 minutes of stream; 5.1 rules: 400 ms).
 
 
 The release workflow publishes the section that matches the tag as the

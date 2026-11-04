@@ -16,7 +16,9 @@ use latch_proto::audio::AudioPacketizer;
 use latch_proto::control::{self, end, Accept, AudioFormat, End, Message, Notice, StreamRequest};
 use latch_proto::input::InputReceiver;
 use latch_proto::rtt::RttEstimator;
-use latch_proto::video::{fec_percent_for, OutFrame, Packetizer, DEFAULT_FEC_PERCENT};
+use latch_proto::video::{
+    fec_percent_for, KeyframeAnswers, OutFrame, Packetizer, DEFAULT_FEC_PERCENT,
+};
 use latch_proto::wire::{self, Datagram};
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
@@ -394,7 +396,7 @@ impl Server {
             frames: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             transport: TransportState::new(config.bitrate_kbps),
-            keyframe_request: Mutex::new(None),
+            keyframe_requests: Mutex::default(),
             recovery: RecoveryState::new(recovery),
             audio_enabled: prepared.audio.is_some(),
             cursor_supported,
@@ -844,7 +846,8 @@ struct Session {
     frames: AtomicU64,
     bytes: AtomicU64,
     transport: TransportState,
-    keyframe_request: Mutex<Option<(u32, Instant)>>,
+    /// Which keyframe requests ask for a keyframe not already sent.
+    keyframe_requests: Mutex<KeyframeAnswers>,
     recovery: RecoveryState,
     audio_enabled: bool,
     cursor_supported: bool,
@@ -1149,13 +1152,15 @@ fn receive(server: Weak<Server>) {
                 }
             }
             Datagram::KeyframeRequest { last, .. } => {
-                let now = Instant::now();
-                let mut previous = session.keyframe_request.lock();
-                if previous.is_none_or(|(n, at)| {
-                    latch_proto::video::before(n, last)
-                        || (n == last && now - at >= Duration::from_millis(250))
-                }) {
-                    *previous = Some((last, now));
+                let rtt = {
+                    let rtt = session.rtt.lock();
+                    rtt.srtt().map(|srtt| srtt.saturating_sub(rtt.rttvar()))
+                };
+                let wanted = session
+                    .keyframe_requests
+                    .lock()
+                    .request(last, Instant::now(), rtt);
+                if wanted {
                     session.keyframe.store(true, Ordering::Release);
                 }
             }
@@ -1439,6 +1444,9 @@ fn paced_video(
                 send(&server.udp, session, datagram, addr);
             }
         });
+        if frame.keyframe {
+            session.keyframe_requests.lock().sent(Instant::now());
+        }
         session.frames.fetch_add(1, Ordering::Relaxed);
     }
 }

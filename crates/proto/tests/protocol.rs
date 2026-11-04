@@ -952,7 +952,7 @@ fn lost_startup_idr_requests_recovery_and_accepts_next_idr() {
             assert!(result.is_none());
             assert!(rx.waiting_for_keyframe());
             assert!(requests.due(true, now, None));
-            assert!(!requests.due(true, now + Duration::from_millis(50), None));
+            assert!(!requests.due(true, now + Duration::from_millis(40), None));
         }
         if index == 3 {
             assert!(matches!(result, Some(Reassembled::Frame(_))));
