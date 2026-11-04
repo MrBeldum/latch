@@ -3,7 +3,7 @@ use super::macos_zero_copy::{CVMetalTextureWrapper, MetalTextureCache};
 use latch_stream::{video::NativeFrame, Frame};
 use metal::{foreign_types::ForeignType, *};
 use objc2::{msg_send, runtime::AnyObject};
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
 use std::{
     collections::VecDeque,
     ffi::c_void,
@@ -90,8 +90,10 @@ pub(super) struct Edr {
     /// these resources must be `Send`; only the main thread uses it.
     view: usize,
     /// The last screen the view's window was on, kept while it is on none
-    /// (a space changing), so that is not a change of display.
-    screen: usize,
+    /// (a space changing), so that is not a change of display: the NSScreen
+    /// object and its display ID. AppKit hands out a new NSScreen for the
+    /// same display whenever the app is activated, so the ID is what counts.
+    screen: (usize, u32),
     /// Tests render into a texture at a given headroom instead of a window.
     #[cfg(test)]
     offscreen: Option<(Texture, f32)>,
@@ -145,7 +147,7 @@ impl Edr {
             cache,
             pending: VecDeque::new(),
             view: 0,
-            screen: 0,
+            screen: (0, 0),
             #[cfg(test)]
             offscreen: None,
         })
@@ -208,10 +210,18 @@ impl Edr {
                 return None;
             }
             let screen: *mut AnyObject = msg_send![window, screen];
-            if !screen.is_null() {
-                self.screen = screen as usize;
+            if !screen.is_null() && screen as usize != self.screen.0 {
+                let description: *mut AnyObject = msg_send![screen, deviceDescription];
+                let key = NSString::from_str("NSScreenNumber");
+                let number: *mut AnyObject = msg_send![description, objectForKey: &*key];
+                let id: u32 = if number.is_null() {
+                    0
+                } else {
+                    msg_send![number, unsignedIntValue]
+                };
+                self.screen = (screen as usize, id);
             }
-            Some((window as u64) ^ (self.screen as u64).rotate_left(32))
+            Some((window as u64) ^ u64::from(self.screen.1) << 32)
         }
     }
     fn set_visible(&self, visible: bool) {
