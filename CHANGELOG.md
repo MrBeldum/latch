@@ -6,6 +6,18 @@
   opts into the supporting low-latency mode), with exact VT/FFmpeg loss tests.
 - Gate Media Foundation H.264 LTR recovery on an encoder-open decode self-test;
   reopen failed probes with IDR recovery.
+- Mac viewer: bound every VideoToolbox decode call (1 s); a stalled session is
+  replaced and a keyframe requested instead of freezing the picture for good.
+- VideoToolbox recovery acknowledges only pictures the viewer decoded, and an
+  H.264 loss of pictures with long-term marks takes an IDR (the refresh made
+  the viewer's references overflow, which froze Apple's decoder).
+- Opted-in VideoToolbox sessions reopen in the ordinary mode when they stall
+  for 500 ms or miss their frame rate; LTR stays off for Main10, Baseline and
+  HDR.
+- Media Foundation LTR: periodic-content self-test with three losses, slots
+  covering ⅔ s, IDR when a slot's first picture is lost, a buffering MFT is
+  demoted instead of ending the pipeline, and the first picture after the
+  probe is an IDR (unverified on Windows hardware).
 
 ## Unreleased — HDR and ten-bit colour
 

@@ -239,15 +239,32 @@ on hardware encoders. Four cached NV12 textures and their views are reused.
   pictures match byte for byte in FFmpeg
   ([commands](measurements/2026-11-03/rfi/review-fixes/README.md)).
   Media Foundation H.264 enables LTR only after a probe at each encoder open:
-  32 moving synthetic pictures at the requested configuration, two forced
-  LTR recoveries with intervening frames dropped, and bit-exact comparison
-  with uninterrupted Media Foundation decoding. No property readback is
-  required; accepting setters is insufficient. A buffering encoder, decoder
-  error, unexpected IDR, or pixel mismatch reopens the MFT without LTR and
-  keeps IDR recovery. Four application-controlled slots use trust-until
-  (`LTRBufferControl=0x10004`, `UseLTRFrame=0x10000 | slot_bitmap`).
-  The RX 6600 AMD H.264 MFT passed the pixel probe at 640×360/60/8 Mbps,
-  despite lacking readback ([validation and limits](measurements/2026-11-04/rfi-vt-mf/README.md)).
+  40 synthetic pictures at the requested configuration, two pictures in
+  turn, each drifting, so a picture is best predicted by the one two before
+  it, and after a loss by a lost one, which trust-until forbids the recovery
+  frame and everything after it. Three losses are dropped and recovered,
+  the last spanning both fast slots so its refresh comes from an older one;
+  every delivered picture must match uninterrupted Media Foundation decoding
+  bit for bit. No property readback is required; accepting setters is
+  insufficient. A buffering encoder, decoder error, unexpected IDR, or pixel
+  mismatch reopens the MFT without LTR and keeps IDR recovery. The first
+  picture after the probe is always an IDR. Four application-controlled
+  slots use trust-until (`LTRBufferControl=0x10004`,
+  `UseLTRFrame=0x10000 | slot_bitmap`) on two cadences: slots 0–1 take a
+  picture every ~33 ms, slots 2–3 every ~667 ms, so a base up to ⅔ s old
+  (three round trips of the ~155 ms peer-relayed path to the Mac) still has
+  a slot; no round trip reaches the pipeline, so the window is fixed. A loss
+  that took the picture first filling a slot (after an IDR or a refresh)
+  takes an IDR: as with VideoToolbox, the viewer's references would later
+  exceed `max_num_ref_frames` (see [MACOS.md](MACOS.md)). An MFT that
+  buffers a picture after passing the probe is demoted to IDR recovery and
+  keeps streaming; it no longer ends the pipeline. HEVC, AV1, Main10 and
+  HDR never advertise MF LTR. The RX 6600 AMD H.264 MFT passed the earlier
+  32-picture probe at 640×360/60/8 Mbps
+  ([validation and limits](measurements/2026-11-04/rfi-vt-mf/README.md));
+  **the periodic-content probe, the slot cadence, the buffering demotion and
+  the negative control have not run on Windows hardware** (the PC was
+  offline): they are compile-checked only.
   The production path uses only AMF HEVC; AMF H.264 is not instantiated.
 - **Fallback.** H.264 High/Baseline keep the GPU MFT → Microsoft MFT →
   Latch software path. An AMF runtime failure reopens MF HEVC and starts

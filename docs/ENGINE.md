@@ -197,9 +197,13 @@ which an unattended host cannot. Under a Wayland session only Xwayland
 windows are seen.
 
 VideoToolbox LTR recovery is runtime-gated (the low-latency mode is opt-in
-with `LATCH_MAC_LTR=1`). Windows H.264 MFTs must pass a loss/decode self-test
-at open before advertising recovery; the engine reuses `latch-stream`'s
-Media Foundation decoder for this check. See the platform documents.
+with `LATCH_MAC_LTR=1`, and a session that stalls or misses its pace reopens
+without it). Windows H.264 MFTs must pass a loss/decode self-test at open
+before advertising recovery; the engine reuses `latch-stream`'s Media
+Foundation decoder for this check. An H.264 refresh is withheld when the
+viewer's references would exceed `max_num_ref_frames`, which freezes Apple's
+decoder; the Mac viewer also bounds every VideoToolbox decode call. See the
+platform documents.
 
 ### Audio
 
