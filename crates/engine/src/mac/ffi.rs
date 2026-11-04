@@ -269,13 +269,9 @@ extern "C" {
         attributes: Ref,
         out: *mut Ref,
     ) -> i32;
-    #[cfg(test)]
     pub fn CVPixelBufferLockBaseAddress(buffer: Ref, flags: u64) -> i32;
-    #[cfg(test)]
     pub fn CVPixelBufferUnlockBaseAddress(buffer: Ref, flags: u64) -> i32;
-    #[cfg(test)]
     pub fn CVPixelBufferGetBaseAddressOfPlane(buffer: Ref, plane: usize) -> *mut u8;
-    #[cfg(test)]
     pub fn CVPixelBufferGetBytesPerRowOfPlane(buffer: Ref, plane: usize) -> usize;
     #[cfg(test)]
     pub fn CVBufferSetAttachment(buffer: Ref, key: Ref, value: Ref, mode: u32);

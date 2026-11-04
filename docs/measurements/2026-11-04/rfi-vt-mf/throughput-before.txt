@@ -1,0 +1,128 @@
+   Compiling bitflags v2.13.1
+   Compiling cfg-if v1.0.4
+   Compiling objc2-encode v4.1.0
+   Compiling once_cell v1.21.4
+   Compiling libc v0.2.189
+   Compiling simd-adler32 v0.3.10
+   Compiling serde_core v1.0.229
+   Compiling typenum v1.20.1
+   Compiling zeroize v1.9.0
+   Compiling adler2 v2.0.1
+   Compiling equivalent v1.0.2
+   Compiling untrusted v0.9.0
+   Compiling crc32fast v1.5.1
+   Compiling miniz_oxide v0.9.1
+   Compiling hashbrown v0.17.1
+   Compiling miniz_oxide v0.8.9
+   Compiling rustls-pki-types v1.15.1
+   Compiling tracing-core v0.1.36
+   Compiling fdeflate v0.3.7
+   Compiling objc2 v0.6.4
+   Compiling num-traits v0.2.19
+   Compiling zmij v1.0.23
+   Compiling getrandom v0.2.17
+   Compiling generic-array v0.14.7
+   Compiling flate2 v1.1.10
+   Compiling getrandom v0.4.3
+   Compiling rustls-webpki v0.103.16
+   Compiling indexmap v2.14.1
+   Compiling zerocopy v0.8.56
+   Compiling itoa v1.0.18
+   Compiling winnow v0.7.15
+   Compiling subtle v2.6.1
+   Compiling pxfm v0.1.30
+   Compiling option-ext v0.2.0
+   Compiling memchr v2.8.3
+   Compiling smallvec v1.16.0
+   Compiling pin-project-lite v0.2.17
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling block2 v0.6.2
+   Compiling objc2-core-audio-types v0.3.2
+   Compiling toml_write v0.1.2
+   Compiling log v0.4.34
+   Compiling dispatch2 v0.3.1
+   Compiling digest v0.10.7
+   Compiling rustls v0.23.46
+   Compiling tracing v0.1.44
+   Compiling dirs-sys v0.4.1
+   Compiling png v0.18.1
+   Compiling graviola v0.4.2
+   Compiling rand_core v0.6.4
+   Compiling cpufeatures v0.2.17
+   Compiling errno v0.3.14
+   Compiling socket2 v0.6.5
+   Compiling byteorder-lite v0.1.0
+   Compiling scopeguard v1.2.0
+   Compiling objc2-core-foundation v0.3.2
+   Compiling bytemuck v1.25.2
+   Compiling regex-syntax v0.8.11
+   Compiling lock_api v0.4.14
+   Compiling rustix v1.1.4
+   Compiling sha2 v0.10.9
+   Compiling serde v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling directories v5.0.1
+   Compiling parking_lot_core v0.9.12
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling anyhow v1.0.104
+   Compiling if-addrs v0.15.0
+   Compiling toml_edit v0.22.27
+   Compiling regex-automata v0.4.18
+   Compiling webpki-roots v1.0.11
+   Compiling semver v1.0.28
+   Compiling dasp_sample v0.11.0
+   Compiling moxcms v0.8.1
+   Compiling lazy_static v1.5.0
+   Compiling mach2 v0.6.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling objc2-foundation v0.3.2
+   Compiling rand_chacha v0.3.1
+   Compiling objc2-core-video v0.3.2
+   Compiling objc2-core-graphics v0.3.2
+   Compiling objc2-core-media v0.3.2
+   Compiling rand v0.8.8
+   Compiling gethostname v1.1.0
+   Compiling sharded-slab v0.1.7
+   Compiling latch-proto v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-14028ebb/crates/proto)
+   Compiling matchers v0.2.0
+   Compiling parking_lot v0.12.5
+   Compiling toml v0.8.23
+   Compiling rustls-graviola v0.4.0
+   Compiling tracing-log v0.2.0
+   Compiling mio v1.2.4
+   Compiling thread_local v1.1.10
+   Compiling x11rb-protocol v0.13.2
+   Compiling latch-codec v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-14028ebb/crates/codec)
+   Compiling nu-ansi-term v0.50.3
+   Compiling tracing-subscriber v0.3.23
+   Compiling objc2-core-audio v0.3.2
+   Compiling objc2-app-kit v0.3.2
+   Compiling objc2-audio-toolbox v0.3.2
+   Compiling objc2-game-controller v0.3.2
+   Compiling objc2-core-haptics v0.3.2
+   Compiling coreaudio-rs v0.14.2
+   Compiling objc2-screen-capture-kit v0.3.2
+   Compiling image v0.25.10
+   Compiling cpal v0.18.2
+   Compiling x11rb v0.13.2
+   Compiling latch-core v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-14028ebb/crates/core)
+   Compiling latch-stream v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-14028ebb/crates/stream)
+   Compiling latch-engine v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-14028ebb/crates/engine)
+    Finished `release` profile [optimized] target(s) in 26.04s
+     Running unittests src/lib.rs (target/release/deps/latch_engine-ba871161630e97b6)
+
+running 1 test
+
+codec                size  fps  Mbps |    p50    p95    max |    got |    IDR B      P B  IDR/P  kbps
+create Hevc Eight hardware=true: 0
+Hevc            1920x1080  120    50 |   7.79   8.51  10.58 |  121.1 |   796751    26221   30.4 31628
+create Hevc Eight hardware=true: 0
+Hevc            1920x1080  240    80 |   4.88   5.72   7.46 |  242.2 |   620110    38814   16.0 79903
+create Hevc Eight hardware=true: 0
+Hevc            3024x1964  120   100 |  11.42  12.74  17.31 |  120.8 |  1642436    92893   17.7 102292
+test mac::encoder::tests::realtime_benchmark ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 95 filtered out; finished in 6.31s
+

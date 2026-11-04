@@ -4,6 +4,7 @@ mod capture;
 mod encoder;
 mod ffi;
 mod input;
+pub(crate) mod synthetic;
 
 use crate::audio::{AudioCapture, CHANNELS, FRAME};
 use crate::input::InputSink;
@@ -172,6 +173,13 @@ impl Video {
     /// A hardware session that failed is replaced in software; a software
     /// failure ends the stream.
     fn recover(&mut self, error: anyhow::Error) -> Result<()> {
+        if self.encoder.low_latency() {
+            tracing::warn!(%error, "VideoToolbox low-latency encode failed; continuing in the ordinary mode");
+            self.encoder.reopen_ordinary()?;
+            self.wake();
+            self.encoder.request_keyframe();
+            return Ok(());
+        }
         if !self.encoder.hardware {
             return Err(error);
         }
@@ -239,6 +247,32 @@ impl VideoPipeline for Video {
                 self.restart_capture()?;
                 continue;
             }
+            if self.encoder.stalled() {
+                drop(state);
+                tracing::warn!(
+                    low_latency = self.encoder.low_latency(),
+                    "VideoToolbox gave no frame back in {:?}; reopening the encoder",
+                    encoder::STALL
+                );
+                // Even a software session that stopped tries the media
+                // engine again first; software is the last resort.
+                if let Err(error) = self.encoder.reopen_ordinary() {
+                    tracing::warn!(%error, "ordinary VideoToolbox session failed; continuing in software");
+                    self.encoder.software()?;
+                }
+                self.wake();
+                continue;
+            }
+            if self.encoder.misses_pace() {
+                drop(state);
+                tracing::warn!(
+                    "VideoToolbox low-latency mode missed the frame rate; \
+                     continuing in the ordinary mode, recovering with IDRs"
+                );
+                self.encoder.reopen_ordinary()?;
+                self.wake();
+                continue;
+            }
             let now = Instant::now();
             let changed = state.generation != self.generation;
             // A new picture or a keyframe goes at the pacer's next slot; an
@@ -279,8 +313,20 @@ impl VideoPipeline for Video {
             } else {
                 ready_at - now
             };
+            // Frames in the encoder: look at it again soon in case it stopped.
+            let wait = if self.encoder.in_flight() > 0 {
+                wait.min(Duration::from_millis(100))
+            } else {
+                wait
+            };
             self.capture.shared.ready.wait_for(&mut state, wait);
         }
+    }
+    fn recovers(&self) -> bool {
+        self.encoder.recovers()
+    }
+    fn recover_from(&mut self, picture: u64) -> bool {
+        self.encoder.recover_from(picture)
     }
     fn set_bitrate(&mut self, kbps: u32) {
         if kbps > 0 && kbps != self.config.bitrate_kbps && self.pending.take().is_some() {

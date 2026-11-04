@@ -1,0 +1,11 @@
+UNSAFE seed 1: Stats { emitted: 324, accepted: 273, refreshes: 6, refused: 3, recovery_frames: 3, idrs: 30, lost_token_acks: 1, mismatches: 0, decode_errors: 0, first_problem: None, ffmpeg: Some("loss: [h264 @ 0xafac3ce00] number of reference frames (7+4) exceeds max (10; probably corrupt input), di
+UNSAFE seed 2: Stats { emitted: 360, accepted: 290, refreshes: 13, refused: 1, recovery_frames: 10, idrs: 11, lost_token_acks: 1, mismatches: 0, decode_errors: 0, first_problem: None, ffmpeg: None }
+UNSAFE seed 3: Stats { emitted: 350, accepted: 259, refreshes: 14, refused: 1, recovery_frames: 14, idrs: 10, lost_token_acks: 0, mismatches: 0, decode_errors: 0, first_problem: None, ffmpeg: None }
+UNSAFE seed 4: Stats { emitted: 249, accepted: 211, refreshes: 6, refused: 2, recovery_frames: 5, idrs: 43, lost_token_acks: 0, mismatches: 0, decode_errors: 0, first_problem: None, ffmpeg: Some("loss: [h264 @ 0x7c1050e00] number of reference frames (9+2) exceeds max (10; probably corrupt input), di
+UNSAFE seed 5: Stats { emitted: 375, accepted: 354, refreshes: 4, refused: 0, recovery_frames: 4, idrs: 9, lost_token_acks: 0, mismatches: 0, decode_errors: 0, first_problem: None, ffmpeg: None }
+picture 182 (IDR false, recovery None): VideoToolbox decode stalled; decoder session replaced
+UNSAFE seed 6: Stats { emitted: 345, accepted: 304, refreshes: 11, refused: 0, recovery_frames: 11, idrs: 14, lost_token_acks: 0, mismatches: 0, decode_errors: 46, first_problem: Some("picture 182 (IDR false, recovery None): VideoToolbox decode stalled; decoder session replaced"), ffmpeg: Some("loss
+picture 295 (IDR false, recovery Some(288)): VideoToolbox decode stalled; decoder session replaced
+UNSAFE seed 7: Stats { emitted: 349, accepted: 286, refreshes: 15, refused: 0, recovery_frames: 15, idrs: 9, lost_token_acks: 0, mismatches: 0, decode_errors: 40, first_problem: Some("picture 295 (IDR false, recovery Some(288)): VideoToolbox decode stalled; decoder session replaced"), ffmpeg: Some("
+UNSAFE seed 8: Stats { emitted: 290, accepted: 250, refreshes: 9, refused: 0, recovery_frames: 9, idrs: 33, lost_token_acks: 0, mismatches: 0, decode_errors: 0, first_problem: None, ffmpeg: None }
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 97 filtered out; finished in 231.06s

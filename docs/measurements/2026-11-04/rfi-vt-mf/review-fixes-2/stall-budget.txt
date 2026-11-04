@@ -1,0 +1,10 @@
+# scratch_vt_leak (review 60b) replaying vt-ltr-overflow.h264 6 times in one process, after the per-codec stall budget
+# cargo run --release -p latch-stream --example scratch_vt_leak -- crates/stream/tests/fixtures/vt-ltr-overflow.h264 hevc-noise-1920x1080-60.hevc 6
+start rss 52512 KB threads 1
+cycle 1: err at 21 after 1.083979542s: VideoToolbox decode stalled; decoder session replaced; keyframe after: Ok(true); fresh HEVC decoder: Ok(true); rss 64896 KB threads 6
+cycle 2: err at 21 after 1.021387542s: VideoToolbox decode stalled; decoder session replaced; keyframe after: Ok(true); fresh HEVC decoder: Ok(true); rss 65088 KB threads 7
+cycle 3: err at 21 after 1.023904584s: VideoToolbox H.264 stalled 3 times in 10 minutes; not decoding it for now; keyframe after: Err("VideoToolbox H.264 stalled too often in the last 10 minutes"); fresh HEVC decoder: Ok(true); rss 65040 KB threads 8
+cycle 4: err at 0 after 1.625µs: VideoToolbox H.264 stalled too often in the last 10 minutes; keyframe after: Err("VideoToolbox H.264 stalled too often in the last 10 minutes"); fresh HEVC decoder: Ok(true); rss 66624 KB threads 8
+cycle 5: err at 0 after 1.083µs: VideoToolbox H.264 stalled too often in the last 10 minutes; keyframe after: Err("VideoToolbox H.264 stalled too often in the last 10 minutes"); fresh HEVC decoder: Ok(true); rss 68240 KB threads 8
+cycle 6: err at 0 after 1.417µs: VideoToolbox H.264 stalled too often in the last 10 minutes; keyframe after: Err("VideoToolbox H.264 stalled too often in the last 10 minutes"); fresh HEVC decoder: Ok(true); rss 69808 KB threads 8
+end (3 s later) rss 69776 KB threads 7

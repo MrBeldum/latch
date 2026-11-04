@@ -274,6 +274,13 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
         Ok(this)
     }
 
+    /// Continue a pipeline's picture identities when replacing another backend.
+    #[cfg(windows)]
+    pub(crate) fn continue_pictures_after(&mut self, picture: u64) {
+        self.picture_base = picture;
+        self.last_picture = picture;
+    }
+
     pub fn timings(&self) -> SoftwareTimings {
         self.timings
     }

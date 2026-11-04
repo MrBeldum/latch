@@ -1,0 +1,18 @@
+# Before (PR head behaviour, still present in realtime_benchmark, which keeps no watchdog):
+$ LATCH_VT_BENCH=high:3024x1964@120:100000 LATCH_VT_BENCH_LTR=1 LATCH_VT_SECONDS=3 \
+    timeout 60 cargo test --locked -p latch-engine --lib realtime_benchmark -- --ignored --nocapture
+codec                size  fps  Mbps |    p50    p95    max |    got |    IDR B      P B  IDR/P  kbps
+exit 124 (killed after 60 s; sample: test thread in Encoder::collect, frames in flight, no callbacks)
+
+# Cause, from the same pipeline with the watchdog and the old fallback:
+create H264High Eight hardware=true: 0     <- low-latency hardware session
+create H264High Eight hardware=false: 0    <- its first encode failed; old fallback = software
+stall 1 at 5.000850375s (low latency false) <- software at this size gave nothing back; watchdog fired
+create H264High Eight hardware=true: 0     <- watchdog reopened an ordinary hardware session
+224 submitted, 1 stalls, 220 frames after the first
+
+# After (failed low-latency session reopens ordinary hardware at once):
+$ cargo test --locked -p latch-engine --lib h264_3024x1964_low_latency -- --ignored --nocapture
+create H264High Eight hardware=true: 0
+create H264High Eight hardware=true: 0
+573 submitted, 571 out, 0 stalls; hardware true low latency false   (8 s, ~72 fps; ordinary mode measured 73.6 fps in the review)
