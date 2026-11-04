@@ -234,6 +234,10 @@ on hardware encoders. Four cached NV12 textures and their views are reused.
   all. With none left the host sends an IDR. Measured RX 6600 → Mac
   (VideoToolbox HEVC): recovery frames of 0.8–6 kB where the IDR was
   16–18 kB, no decode errors ([measurements](measurements/2026-11-03/rfi/README.md)).
+  A moving 640×360 hardware test also compares uninterrupted decoding
+  with four loss/recovery episodes across LTR slot reuse: all 112 delivered
+  pictures match byte for byte in FFmpeg
+  ([commands](measurements/2026-11-03/rfi/review-fixes/README.md)).
   Media Foundation encoders refuse and send an IDR: the AMD H.264 MFT
   accepts the LTR setters but reads none of them back, so nothing shows it
   honours `CODECAPI_AVEncVideoUseLTRFrame`, and a frame that silently

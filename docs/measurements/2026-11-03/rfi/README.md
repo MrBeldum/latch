@@ -95,3 +95,5 @@ figures above.
   software encoder, not AMF, and the desktop was left as it was.
 * Media Foundation, VideoToolbox, VA-API and NVENC hosts: they refuse
   recovery and send an IDR, as before.
+
+Review follow-up: [capture generations, registry, legacy peers and exact AMF slot-reuse decode](review-fixes/README.md).

@@ -9,7 +9,7 @@ use latch_codec::h264::{Decoder, Encoder, EncoderConfig};
 use latch_codec::Yuv420;
 use latch_proto::sim::{Impairment, Link};
 use latch_proto::video::{
-    KeyframeRequests, OutFrame, Packetizer, Reassembled, Reassembler, Recovery,
+    KeyframeAnswers, KeyframeRequests, OutFrame, Packetizer, Reassembled, Reassembler, Recovery,
 };
 use latch_proto::wire::{self, Datagram, RecoveryAck, RecoveryRequest, RecoveryStatus};
 use std::collections::{HashMap, VecDeque};
@@ -129,6 +129,7 @@ fn simulate(impairment: Impairment, recover: bool, seed: u64) -> Outcome {
     let mut request: Option<RecoveryRequest> = None;
     let mut answer: Option<RecoveryAck> = None;
     let mut asked: Option<(u64, u32)> = None;
+    let mut keyframe_answers = KeyframeAnswers::new();
     let mut keyframe_owed = true;
     let mut last_keyframe: Option<Instant> = None;
     // Viewer.
@@ -165,7 +166,11 @@ fn simulate(impairment: Impairment, recover: bool, seed: u64) -> Outcome {
                     wire::write_recovery_ack(&mut out, SESSION, &ack);
                     forward.send(now, &out);
                 }
-                Ok(Datagram::KeyframeRequest { .. }) => keyframe_owed = true,
+                Ok(Datagram::KeyframeRequest { last, .. })
+                    if keyframe_answers.request(last, now, rtt) =>
+                {
+                    keyframe_owed = true;
+                }
                 _ => {}
             }
         }
@@ -240,6 +245,9 @@ fn simulate(impairment: Impairment, recover: bool, seed: u64) -> Outcome {
                 },
                 |datagram| forward.send(now, datagram),
             );
+            if info.keyframe {
+                keyframe_answers.sent(now);
+            }
             frame += 1;
         }
         // Viewer.
@@ -272,6 +280,7 @@ fn simulate(impairment: Impairment, recover: bool, seed: u64) -> Outcome {
                     last_delivery = Some(now);
                 }
                 Reassembled::Lost { .. } => {
+                    keyframes.lost();
                     lost_at.get_or_insert((now, last_delivery));
                 }
             }
