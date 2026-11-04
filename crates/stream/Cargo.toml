@@ -59,3 +59,4 @@ evdev = "0.13"
 alsa = "0.11"
 
 [dev-dependencies]
+tracing-subscriber.workspace = true
