@@ -167,6 +167,19 @@ float3 pq(float3 lin) {
 float3 wide(float3 rgb) {
     return mul(float3x3(0.627404,0.329283,0.043313,0.069097,0.919540,0.011362,0.016391,0.088013,0.895595),rgb);
 }
+// latch_proto::color::hdr_to_sdr: BT.709 gamut toward the colour's own
+// luminance, then a highlight shoulder on max(R,G,B) up to `peak`.
+float3 hdr_to_sdr(float3 c, float peak) {
+    float y = dot(c, float3(0.2126,0.7152,0.0722));
+    if(y <= 0) return 0;
+    float lo = min(min(c.r,c.g),c.b);
+    if(lo < 0) c = y + (c - y)*(y/(y - lo));
+    float m = max(max(c.r,c.g),c.b);
+    if(m <= 0.75) return c;
+    float x = (m - 0.75)/0.25, top = max((peak - 0.75)/0.25, 1.0);
+    float g = min(x*(1 + x/(top*top))/(1 + x), 1.0);
+    return saturate(c*((0.75 + 0.25*g)/m));
+}
 float3 linearize(float3 c) { return float3(c.r <= 0.04045 ? c.r/12.92 : pow((c.r+0.055)/1.055,2.4),c.g <= 0.04045 ? c.g/12.92 : pow((c.g+0.055)/1.055,2.4),c.b <= 0.04045 ? c.b/12.92 : pow((c.b+0.055)/1.055,2.4)); }
 float4 ps(float4 p : SV_Position) : SV_Target {
     int2 pos = int2(p.xy); int2 src = pos;
@@ -177,9 +190,11 @@ float4 ps(float4 p : SV_Position) : SV_Target {
     if(output_pq != 0) {
         bg.rgb = pq(wide(hdr != 0 ? bg.rgb*80.0 : linearize(bg.rgb)*white*80.0));
     } else if(hdr != 0) {
-        // scRGB is linear, with SDR white given by the display's white level.
-        // Clip highlights to SDR and apply the sRGB transfer before cursor blending.
-        float3 lin = saturate(bg.rgb / white);
+        // scRGB is linear BT.709, with SDR white given by the display's white
+        // level. Keep highlights up to the 1000-nit HDR ceiling apart and in
+        // hue rather than clipping each channel, then apply the sRGB transfer
+        // before cursor blending.
+        float3 lin = hdr_to_sdr(bg.rgb / white, 1000.0/80.0/white);
         bg.rgb = float3(lin.r <= 0.0031308 ? 12.92*lin.r : 1.055*pow(lin.r,1.0/2.4)-0.055,
                         lin.g <= 0.0031308 ? 12.92*lin.g : 1.055*pow(lin.g,1.0/2.4)-0.055,
                         lin.b <= 0.0031308 ? 12.92*lin.b : 1.055*pow(lin.b,1.0/2.4)-0.055);
@@ -1169,9 +1184,25 @@ mod tests {
         super::compile_shader(windows::core::s!("ps"), windows::core::s!("ps_4_0"))?;
         Ok(())
     }
+    /// IEEE half from f32 for the normal, finite values a test uses.
+    fn half(v: f32) -> u16 {
+        if v == 0.0 {
+            return 0;
+        }
+        let bits = v.to_bits();
+        let sign = ((bits >> 16) & 0x8000) as u16;
+        let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+        let mantissa = ((bits & 0x7f_ffff) + 0x1000) >> 13;
+        sign | (((exponent as u16) << 10) + mantissa as u16)
+    }
+    /// An HDR (Advanced Color) desktop captured for an SDR stream: neutral
+    /// 203/400/600/1000-nit patches stay apart, saturated and wide-gamut
+    /// colours keep their hue, SDR content below the knee is unchanged and
+    /// nothing goes black. Matches latch_proto's reference within a code.
     #[test]
-    fn fp16_sc_rgb_white_becomes_sdr_white() -> anyhow::Result<()> {
+    fn fp16_sc_rgb_hdr_desktop_keeps_highlights_in_sdr() -> anyhow::Result<()> {
         use super::*;
+        use latch_proto::color::{bt2020_to_bt709, hdr_to_sdr, srgb_oetf};
         // This tests shader output, not capture or video acceleration. WARP
         // runs the shader even on CI adapters without D3D11 video support.
         let (mut device, mut context) = (None, None);
@@ -1193,38 +1224,102 @@ mod tests {
             device: device.context("WARP returned no device")?,
             context: context.context("WARP returned no context")?,
         };
+        let white_nits = 203.0f64;
+        let nits = |n: f64| n / 80.0;
+        let mut patches: Vec<[f64; 3]> = [203.0, 400.0, 600.0, 1000.0, 100.0, 0.0]
+            .iter()
+            .map(|&n| [nits(n); 3])
+            .collect();
+        patches.extend([
+            [nits(1000.0), 0.0, 0.0],
+            [nits(1000.0), nits(500.0), 0.0],
+            [nits(40.0), nits(80.0), nits(600.0)],
+            bt2020_to_bt709([0.0, nits(1000.0), 0.0]),
+        ]);
+        let width = patches.len() as u32;
         let source = gpu.texture(
-            2,
+            width,
             1,
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             D3D11_BIND_SHADER_RESOURCE.0 as u32,
             false,
         )?;
         let target = gpu.texture(
-            2,
+            width,
             1,
             DXGI_FORMAT_B8G8R8A8_UNORM,
             D3D11_BIND_RENDER_TARGET.0 as u32,
             false,
         )?;
-        // Half-float scRGB pixels: SDR white at 160 nits, then black.
-        let pixels: [u16; 8] = [0x4000, 0x4000, 0x4000, 0x3c00, 0, 0, 0, 0x3c00];
-        // SAFETY: Upload covers the complete two-pixel texture.
+        let pixels: Vec<u16> = patches
+            .iter()
+            .flat_map(|p| {
+                [
+                    half(p[0] as f32),
+                    half(p[1] as f32),
+                    half(p[2] as f32),
+                    0x3c00,
+                ]
+            })
+            .collect();
+        // Half floats round: compare against what the shader actually reads.
+        let read: Vec<[f64; 3]> = pixels
+            .chunks(4)
+            .map(|p| {
+                [0, 1, 2].map(|i| {
+                    let h = p[i];
+                    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+                    let e = i32::from((h >> 10) & 31);
+                    let m = f64::from(h & 1023) / 1024.0;
+                    if e == 0 {
+                        sign * m * 2f64.powi(-14)
+                    } else {
+                        sign * (1.0 + m) * 2f64.powi(e - 15)
+                    }
+                })
+            })
+            .collect();
+        // SAFETY: Upload covers the complete one-row texture.
         unsafe {
             gpu.context
-                .UpdateSubresource(&source, 0, None, pixels.as_ptr().cast(), 16, 0);
+                .UpdateSubresource(&source, 0, None, pixels.as_ptr().cast(), width * 8, 0);
         }
+        let white = (white_nits / 80.0) as f32;
         CursorRenderer::new(&gpu)?.draw(
             &gpu,
             &source,
             &target,
             &Default::default(),
             &Default::default(),
-            (DXGI_MODE_ROTATION_IDENTITY, 2.0, false),
+            (DXGI_MODE_ROTATION_IDENTITY, white, false),
         )?;
-        let pixels = gpu.read(&mut None, &target, 1, |bytes, _| bytes.to_vec())?;
-        assert_eq!(&pixels[..4], &[255, 255, 255, 255]);
-        assert_eq!(&pixels[4..8], &[0, 0, 0, 255]);
+        let out = gpu.read(&mut None, &target, 1, |bytes, _| bytes.to_vec())?;
+        let bgr: Vec<[i32; 3]> = out[..width as usize * 4]
+            .chunks(4)
+            .map(|p| [i32::from(p[2]), i32::from(p[1]), i32::from(p[0])])
+            .collect();
+        for (i, rgb) in read.iter().enumerate() {
+            let expected = hdr_to_sdr(rgb.map(|v| v / f64::from(white)), 1000.0 / white_nits)
+                .map(|v| (255.0 * srgb_oetf(v)).round() as i32);
+            assert!(
+                (0..3).all(|c| (bgr[i][c] - expected[c]).abs() <= 1),
+                "patch {i} {rgb:?}: shader {:?}, reference {expected:?}",
+                bgr[i]
+            );
+        }
+        eprintln!("HDR desktop → SDR codes: {bgr:?}");
+        let neutral: Vec<i32> = bgr[..4].iter().map(|p| p[0]).collect();
+        assert!(neutral.windows(2).all(|w| w[0] < w[1]), "{neutral:?}");
+        assert_eq!(bgr[5], [0, 0, 0], "black stays black");
+        assert!(
+            bgr[4][0] > 150,
+            "100-nit grey is not darkened: {:?}",
+            bgr[4]
+        );
+        assert!(
+            bgr[6..].iter().all(|p| p.iter().any(|&c| c > 128)),
+            "{bgr:?}"
+        );
         Ok(())
     }
     #[test]

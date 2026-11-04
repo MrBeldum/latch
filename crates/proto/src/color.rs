@@ -21,6 +21,32 @@ pub struct ColorDescription {
     pub full_range: bool,
     pub bit_depth: u8,
     pub hdr: Option<HdrMetadata>,
+    /// Where the 4:2:0 chroma samples sit. Hosts before this field all
+    /// produced left-sited chroma, which is also H.273's unsignalled default.
+    #[serde(default)]
+    pub chroma: ChromaSiting,
+}
+
+/// H.273 ChromaSampleLocType for 4:2:0: `Left` (type 0) is co-sited with the
+/// even luma columns and midway between rows; `Center` (type 1) is midway in
+/// both directions. Windows' video processor (`*_LEFT_*` colour spaces) and
+/// VideoToolbox's Main10 VUI both use `Left`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChromaSiting {
+    #[default]
+    Left,
+    Center,
+}
+impl ChromaSiting {
+    /// Horizontal offset, in chroma texels, from the centred sampling
+    /// position a bilinear sampler uses at `luma_uv` to this siting.
+    pub fn texel_offset(self) -> f32 {
+        match self {
+            Self::Left => 0.25,
+            Self::Center => 0.0,
+        }
+    }
 }
 impl Default for ColorDescription {
     fn default() -> Self {
@@ -31,6 +57,7 @@ impl Default for ColorDescription {
             full_range: false,
             bit_depth: 8,
             hdr: None,
+            chroma: ChromaSiting::Left,
         }
     }
 }
@@ -59,18 +86,22 @@ impl ColorDescription {
         self.transfer == 16
     }
     pub fn supported(self) -> bool {
-        self == Self::default()
-            || self
-                == Self {
-                    bit_depth: 10,
-                    ..Self::default()
-                }
-            || (self.primaries == 9
-                && self.transfer == 16
-                && self.matrix == 9
-                && !self.full_range
-                && self.bit_depth == 10
-                && self.hdr.is_some())
+        // Either siting is presentable; the rest must be a known format.
+        let s = Self {
+            chroma: ChromaSiting::Left,
+            ..self
+        };
+        s == Self::default()
+            || s == Self {
+                bit_depth: 10,
+                ..Self::default()
+            }
+            || (s.primaries == 9
+                && s.transfer == 16
+                && s.matrix == 9
+                && !s.full_range
+                && s.bit_depth == 10
+                && s.hdr.is_some())
     }
 }
 
@@ -132,6 +163,49 @@ pub fn bt2020_to_bt709(v: [f64; 3]) -> [f64; 3] {
 }
 fn mul(m: [[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
     m.map(|r| r[0] * v[0] + r[1] * v[1] + r[2] * v[2])
+}
+
+/// Where an HDR picture's highlights go in SDR: everything up to this
+/// fraction of SDR white is untouched, and the rest up to the HDR ceiling is
+/// rolled off into the top of the range.
+pub const SDR_KNEE: f64 = 0.75;
+
+/// HDR → SDR for linear BT.709 relative to SDR white (1.0), with `peak` the
+/// brightest value to keep apart from the ones below it (the 1000-nit HDR
+/// ceiling over the display's SDR white). Out-of-gamut colours (negative
+/// channels from a wider gamut) are desaturated toward their own luminance,
+/// then highlights compress on max(R,G,B): both scale the colour about
+/// neutral, so hue is kept and brighter stays brighter instead of every
+/// channel clipping at SDR white on its own. Mirrors the Windows capture
+/// shader; returns linear light in 0..=1.
+pub fn hdr_to_sdr(rgb: [f64; 3], peak: f64) -> [f64; 3] {
+    let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    if y <= 0.0 {
+        return [0.0; 3];
+    }
+    let lo = rgb[0].min(rgb[1]).min(rgb[2]);
+    let c = if lo < 0.0 {
+        let t = y / (y - lo);
+        rgb.map(|v| y + (v - y) * t)
+    } else {
+        rgb
+    };
+    let m = c[0].max(c[1]).max(c[2]);
+    if m <= SDR_KNEE {
+        return c;
+    }
+    let range = 1.0 - SDR_KNEE;
+    let x = (m - SDR_KNEE) / range;
+    let top = ((peak - SDR_KNEE) / range).max(1.0);
+    let g = (x * (1.0 + x / (top * top)) / (1.0 + x)).min(1.0);
+    c.map(|v| (v * (SDR_KNEE + range * g) / m).clamp(0.0, 1.0))
+}
+pub fn srgb_oetf(v: f64) -> f64 {
+    if v <= 0.0031308 {
+        12.92 * v
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    }
 }
 
 /// A prefix SEI access unit, with emulation prevention, before each HDR IDR.
@@ -218,6 +292,63 @@ mod tests {
         // P010 limited range endpoints in R16Unorm, not 8-bit normalisation.
         assert_eq!(64u16 << 6, 4096);
         assert_eq!(940u16 << 6, 60160);
+    }
+    #[test]
+    fn chroma_siting_is_optional_on_the_wire() {
+        let hdr = ColorDescription::negotiate(
+            ColorCapabilities {
+                hdr: true,
+                ten_bit: true,
+                peak_nits: 1000,
+            },
+            true,
+            true,
+        );
+        assert_eq!(hdr.chroma, ChromaSiting::Left);
+        let mut json = serde_json::to_value(hdr).unwrap();
+        assert_eq!(json["chroma"], "left");
+        json.as_object_mut().unwrap().remove("chroma");
+        let old: ColorDescription = serde_json::from_value(json).unwrap();
+        assert_eq!(old, hdr);
+        for chroma in [ChromaSiting::Left, ChromaSiting::Center] {
+            assert!(ColorDescription { chroma, ..hdr }.supported());
+            assert!(ColorDescription {
+                chroma,
+                ..Default::default()
+            }
+            .supported());
+        }
+    }
+    #[test]
+    fn hdr_highlights_stay_apart_in_sdr_and_keep_their_hue() {
+        let white = 203.0;
+        let code =
+            |rgb: [f64; 3]| hdr_to_sdr(rgb, 1000.0 / white).map(|v| (255.0 * srgb_oetf(v)).round());
+        let neutral: Vec<f64> = [203.0, 400.0, 600.0, 1000.0]
+            .iter()
+            .map(|n| code([n / white; 3])[0])
+            .collect();
+        assert!(neutral.windows(2).all(|w| w[0] < w[1]), "{neutral:?}");
+        assert!(neutral[0] >= 235.0 && neutral[3] == 255.0, "{neutral:?}");
+        // SDR content well below white is untouched.
+        assert_eq!(hdr_to_sdr([0.5, 0.25, 0.1], 4.9), [0.5, 0.25, 0.1]);
+        let hue = |c: [f64; 3]| (3f64.sqrt() * (c[1] - c[2])).atan2(2.0 * c[0] - c[1] - c[2]);
+        let bt2020_green = bt2020_to_bt709([0.0, 1000.0 / white, 0.0]);
+        for rgb in [
+            [1000.0 / white, 0.0, 0.0],
+            [1000.0 / white, 500.0 / white, 0.0],
+            [0.2, 0.4, 600.0 / white],
+            bt2020_green,
+        ] {
+            let out = hdr_to_sdr(rgb, 1000.0 / white);
+            assert!(out.iter().all(|v| (0.0..=1.0).contains(v)), "{out:?}");
+            assert!(out.iter().any(|&v| v > 0.5), "{rgb:?} went dark: {out:?}");
+            assert!((hue(out) - hue(rgb)).abs() < 1e-9, "{rgb:?} → {out:?}");
+        }
+        // Brighter saturated colours stay brighter, not equal.
+        let red = |n: f64| hdr_to_sdr([n / white, 0.0, 0.0], 1000.0 / white)[0];
+        assert!(red(203.0) < red(400.0) && red(400.0) < red(1000.0));
+        assert_eq!(hdr_to_sdr([-0.1, -0.2, -0.3], 4.9), [0.0; 3]);
     }
     #[test]
     fn sei_is_escaped_and_has_both_payloads() {
