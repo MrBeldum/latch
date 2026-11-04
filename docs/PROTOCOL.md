@@ -420,10 +420,11 @@ at least 10 bytes parse). The host sends a train back to back while video
 is idle: after 500 ms of it, two trains 200 ms apart, then one a second,
 each 6 to 16 datagrams, skipped below an 8 Mbps retained budget. The
 viewer deduplicates indexes and accepts only ordered, contiguous prefixes
-of at least four packets (a lost tail is allowed). It uses the fastest
-four-position packet pair, rather than total span. Pair dispersion must
+of at least four packets (a lost tail is allowed). It uses the median
+eight-position packet pair, rather than total span. Pair dispersion must
 be at least twice the measured pair timing variation; a dominant stall
-is rejected. Entirely batched arrivals supply only a high timing bound.
+is rejected. Equal timestamps allow up to 1 ms of receive batching noise; an entirely
+batched train supplies only a high timing bound.
 The fastest usable rate goes in `probe_kbps`; zero means unknown.
 
 These datagrams bypass the video pacer and **are outside the wire budget**

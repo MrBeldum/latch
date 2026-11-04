@@ -427,8 +427,8 @@ Instead the idle sender (below half its budget, application-limited) measures
 the path: after 500 ms, two probe trains 200 ms apart and then one a second,
 each 6 to 16 full datagrams, skipped below an 8 Mbps retained budget,
 to viewers that time them (`docs/PROTOCOL.md`, "Probe"). Sequence positions
-are deduplicated; only ordered contiguous prefixes count. The fastest
-four-position packet pair estimates capacity, gated by measured pair
+are deduplicated; only ordered contiguous prefixes count. The median
+eight-position packet pair estimates capacity, gated by measured pair
 variation (dispersion ≥2× variation) and the dominant-stall rejection.
 Two fresh confident trains below 3/4 of the budget need corroborating
 queue delay or lossy delivery deficit to lower the target to 90% of the

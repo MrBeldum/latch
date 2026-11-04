@@ -74,7 +74,7 @@ impl TrainMeter {
         if !t.ordered || received < MIN_TRAIN {
             return;
         }
-        // Use the fastest four-position packet pair, rather than total
+        // Use the median eight-position packet pair, rather than total
         // span: a late arrival must not lower the estimate. Wider pairs
         // tolerate receive batching / coarse clocks. Their observed spread
         // measures timing noise; serialization must clearly exceed it.
@@ -88,7 +88,7 @@ impl TrainMeter {
         if largest * 2 > span {
             return;
         }
-        let width = 4.min(received - 1);
+        let width = 8.min(received - 2);
         let mut gaps: Vec<_> = t
             .arrivals
             .windows(width + 1)
@@ -97,11 +97,15 @@ impl TrainMeter {
         gaps.sort_unstable();
         let fastest = gaps[0];
         let jitter = gaps[gaps.len() - 1] - fastest;
-        if fastest < jitter * 2 && !(fastest.is_zero() && jitter <= Duration::from_millis(1)) {
+        // Equal timestamps expose batching / coarse receive clocks. Allow
+        // one millisecond of quantization noise across these wider pairs;
+        // it still needs independent queue evidence before any target cut.
+        let batched = t.arrivals.windows(2).any(|w| w[0] == w[1]);
+        if fastest < jitter * 2 && !(batched && jitter <= Duration::from_millis(1)) {
             return;
         }
         // An entirely batched train only supplies a high lower bound.
-        let secs = fastest.as_secs_f64().max(1e-4);
+        let secs = gaps[gaps.len() / 2].as_secs_f64().max(1e-4);
         let kbps = ((t.len + OVERHEAD) as f64 * width as f64 * 8.0 / secs / 1000.0)
             .min(f64::from(u32::MAX)) as u32;
         self.best = self.best.max(kbps.max(1));
@@ -124,6 +128,21 @@ impl TrainMeter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batched_millisecond_timestamps_keep_clean_rates_usable() {
+        let start = Instant::now();
+        for cap in [5000u64, 20_000, 30_000, 50_000, 100_000] {
+            let mut meter = TrainMeter::default();
+            for i in 0..16u8 {
+                let nanos = u64::from(i) * 10_240_000_000 / cap;
+                let millis = nanos.div_ceil(1_000_000);
+                meter.push(1, i, 16, 1200, start + Duration::from_millis(millis));
+            }
+            let rate = meter.take_kbps(start + Duration::from_secs(1));
+            assert!(u64::from(rate) >= cap * 3 / 4, "{cap}: {rate}");
+        }
+    }
 
     #[test]
     fn damaged_positions_do_not_fabricate_capacity() {
