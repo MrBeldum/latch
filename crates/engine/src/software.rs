@@ -531,7 +531,7 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
             .as_ref()
             .map_or((0, None), |e| e.last_picture());
         let base = self.picture_base;
-        let picture = (picture > 0).then(|| base + picture).unwrap_or(0);
+        let picture = if picture > 0 { base + picture } else { 0 };
         self.last_picture = self.last_picture.max(picture);
         Ok(EncodedVideo {
             data,
