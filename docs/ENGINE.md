@@ -353,8 +353,13 @@ shard storage is reused with a 4096-buffer pool cap. Decode queues are
 bounded by eight frames and 50 ms of age; exceeding either restarts at an
 IDR rather than decoding an increasing backlog. A missing initial IDR
 triggers recovery on the first complete P-frame, or after 500 ms without
-a delivered keyframe. Requests retry at max(100 ms, RTT); host duplicate
-requests with the same last-delivered frame are throttled for 250 ms. Requested
+a delivered keyframe. Requests retry at max(50 ms, RTT), and at once when
+another frame is lost meanwhile: that may be the recovery keyframe itself.
+The host (`KeyframeAnswers`) ignores a repeat naming the same last-delivered
+frame until a keyframe sent since the request it repeats has been out for a
+round trip (smoothed RTT less its variation), or 250 ms have passed, so
+duplicates cost nothing and a lost recovery keyframe is replaced about a
+round trip later instead of after a 250 ms hold. Requested
 IDRs are gated at max(50 ms, smoothed RTT), including requests that advance
 the last-delivered frame. See [transport measurements](measurements/2026-11-03/transport/README.md)
 for codec-free throughput, CPU, FEC and impairment results and remaining targets.

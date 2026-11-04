@@ -1133,6 +1133,7 @@ fn receive(
                         hand_off_video(
                             inner,
                             &mut reassembler,
+                            &mut keyframes,
                             &mut throughput,
                             &mut arrivals,
                             Instant::now(),
@@ -1190,7 +1191,14 @@ fn receive(
                 }
             }
         }
-        hand_off_video(inner, &mut reassembler, &mut throughput, &mut arrivals, now);
+        hand_off_video(
+            inner,
+            &mut reassembler,
+            &mut keyframes,
+            &mut throughput,
+            &mut arrivals,
+            now,
+        );
         let waiting = reassembler.needs_keyframe(accepted, now) || inner.queue.lock().want_keyframe;
         if keyframes.due(waiting, now, rtt.srtt()) {
             wire::write_keyframe_request(
@@ -1278,6 +1286,7 @@ fn receive(
 fn hand_off_video(
     inner: &Arc<Inner>,
     reassembler: &mut Reassembler,
+    keyframes: &mut KeyframeRequests,
     throughput: &mut Throughput,
     arrivals: &mut Arrivals,
     now: Instant,
@@ -1306,6 +1315,8 @@ fn hand_off_video(
             }
             Reassembled::Lost { frame } => {
                 tracing::debug!("video frame {frame} lost");
+                // Perhaps the keyframe asked for: ask again.
+                keyframes.lost();
             }
         }
     }

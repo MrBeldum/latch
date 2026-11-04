@@ -61,7 +61,7 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         frames: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
         transport: TransportState::new(1000),
-        keyframe_request: Mutex::new(None),
+        keyframe_requests: Mutex::default(),
         audio_enabled: false,
         cursor_supported: false,
         draw_cursor: AtomicBool::new(true),
