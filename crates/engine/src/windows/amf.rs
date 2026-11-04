@@ -282,15 +282,20 @@ impl Encoder {
                 Variant::int(i64::from(config.color.bit_depth)),
             )?;
             for prefix in ["HevcIn", "HevcOut"] {
+                // Older AMF drivers lack MatrixCoeff; ColorProfile sets the
+                // matrix and range together on those versions.
+                component.set(
+                    &format!("{prefix}ColorProfile"),
+                    Variant::int(if config.color.is_hdr() { 2 } else { 1 }),
+                )?;
                 for (suffix, value) in [
                     ("ColorPrimaries", config.color.primaries),
                     ("ColorTransferChar", config.color.transfer),
-                    ("MatrixCoeff", config.color.matrix),
                 ] {
                     component.set(&format!("{prefix}{suffix}"), Variant::int(i64::from(value)))?;
                 }
             }
-            component.set("HevcNominalRange", Variant::int(0))?; // Main
+            component.set("HevcNominalRange", Variant::int(0))?;
             component.set(
                 "HevcFrameSize",
                 Variant::pair(5, config.width, config.height),
