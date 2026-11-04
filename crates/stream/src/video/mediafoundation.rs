@@ -893,6 +893,12 @@ impl State {
     fn output_type(&mut self) -> Result<()> {
         // SAFETY: Type negotiation is serialized with ProcessInput/Output.
         unsafe {
+            // Eight bits take the first NV12 or P010 type. A ten-bit stream
+            // needs P010, which a decoder offers only once it has parsed the
+            // sequence header; until then NV12 stands in, and the stream
+            // change that follows the header picks P010.
+            let mut stand_in = None;
+            let mut chosen = None;
             for index in 0..256 {
                 let ty = match self.transform.GetOutputAvailableType(0, index) {
                     Ok(ty) => ty,
@@ -900,29 +906,35 @@ impl State {
                     Err(e) => return Err(e).context("enumerate decoder output types"),
                 };
                 let subtype = ty.GetGUID(&MF_MT_SUBTYPE)?;
-                // A ten-bit stream needs P010; eight bits take either.
                 if subtype == MFVideoFormat_P010
                     || (subtype == MFVideoFormat_NV12 && self.depth != 10)
                 {
-                    match self.transform.SetOutputType(0, &ty, 0) {
-                        Err(e) if e.code() == MF_E_UNSUPPORTED_D3D_TYPE && self.gpu.is_some() => {
-                            self.transform
-                                .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, 0)
-                                .context("disable unsupported decoder DXVA mode")?;
-                            self.gpu = None;
-                            self.dxva_used = false;
-                            self.transform
-                                .SetOutputType(0, &ty, 0)
-                                .context("set software decoder NV12 type")?;
-                        }
-                        result => result.context("set decoder NV12 output type")?,
-                    }
-                    self.output_type = Some(ty);
-                    return Ok(());
+                    chosen = Some(ty);
+                    break;
+                }
+                if subtype == MFVideoFormat_NV12 && stand_in.is_none() {
+                    stand_in = Some(ty);
                 }
             }
+            let ty = chosen
+                .or(stand_in)
+                .context("decoder offers no NV12 output")?;
+            match self.transform.SetOutputType(0, &ty, 0) {
+                Err(e) if e.code() == MF_E_UNSUPPORTED_D3D_TYPE && self.gpu.is_some() => {
+                    self.transform
+                        .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, 0)
+                        .context("disable unsupported decoder DXVA mode")?;
+                    self.gpu = None;
+                    self.dxva_used = false;
+                    self.transform
+                        .SetOutputType(0, &ty, 0)
+                        .context("set software decoder NV12 type")?;
+                }
+                result => result.context("set decoder NV12 output type")?,
+            }
+            self.output_type = Some(ty);
+            Ok(())
         }
-        bail!("decoder offers no NV12 output")
     }
     fn decode(&mut self, annexb: &[u8]) -> Result<Option<DecodedNv12>> {
         if self.output_type.is_some() {
