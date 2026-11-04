@@ -466,6 +466,8 @@ Hosts may reply using the existing Report type, adding
 `requested_bitrate_kbps`, `applied_bitrate_kbps`, `pacing_queue_ms`,
 `send_errors`, `send_retries`, `socket_send_bytes`, `socket_receive_bytes`,
 `wire_budget_kbps` and `application_limited`. All have serde defaults.
+`wire_budget_kbps` is the controller's target, kept through idle and restarts;
+the encoder's actual share shows in `applied_bitrate_kbps`.
 Applied bitrate is the encoder target after wire overhead reservation;
 requested bitrate is the session ceiling. Error/retry counts are cumulative.
 Legacy viewers ignore host Reports as an unhandled existing message type.
@@ -487,11 +489,14 @@ ignored. Added report fields default on read; old JSON readers ignore them.
 each window's lowest RTT. A smoothed increasing delay gradient or standing rise
 above max(6 ms, base RTT / 10, 3× ping jitter) is pressure (idle senders retain
 a 3 ms jitter allowance). Severe residual loss on a loaded sender, or damage without usable rate
-feedback remains pressure. Moderate queue-free damage first raises FEC, then
-uses a reversible 20% rate reduction after 500 ms; only loss falling by half
-with actual load falling at least 10% confirms a policer after a horizon plus
-one second. Inconclusive tests restore the budget and wait three seconds.
-Delay/collapse cuts stay immediate under the existing two/one-window gates.
+feedback remains pressure; so does >10% loss with a delivery deficit sustained
+for 500 ms on an underfilled one. Moderate queue-free damage first raises FEC, then
+lowers the rate actually sent by 20% after 500 ms; loss falling by half (or
+by over max(35%, 2 points) above a random-loss floor) with actual load
+falling at least 10% confirms a policer after a horizon plus one second.
+Inconclusive tests restore the budget and wait three seconds.
+Delay/collapse cuts stay immediate under the existing two/one-window gates;
+one damaged legacy window of 500 ms or more cuts at once.
 Clean recovery doubles the budget per 400 ms of actual time between reports
 (up to 2 s apart) back to just under the last sustainable rate, then probes
 above it in bounded, RTT-aware steps; it is capped below a policer's rate for
@@ -503,9 +508,12 @@ The session starts at its ceiling, and clean paths bypass pacing. Recovered
 random loss alone enables neither cuts nor pacing. Parity uses fast-attack,
 two-second-decay raw loss with a base-RTT floor (15% at 40 ms, 20% at 100 ms),
 capped at 30% before the per-frame packet floors above. The sender reserves
-rounded parity, padding and headers inside its wire budget. Four reports below
-80% of budget mark the encoder application-limited; idle sends do not lower a
-sustainable estimate or validate a higher capacity probe. Data shards precede parity computation and transmission; a
+rounded parity, padding and headers inside its wire budget, including the
+protected-frame floor while a keyframe or recovery frame is owed. Four reports
+below 80% of the encoder's allowance mark it application-limited. Idle keeps
+the target, but after a 1 s grace the rate trusted for resumed frames halves
+every 500 ms (down to 1/32 of the target); motion restarts from that trust and
+doubles the carried rate per validated feedback horizon back to the target. Data shards precede parity computation and transmission; a
 completed frame is handed to decode immediately, including mid-receive-batch.
 Protocol 1 datagrams remain at most 1200 bytes. No MTU or socket-offload
 capability is advertised by this change.

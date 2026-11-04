@@ -551,7 +551,9 @@ samples chroma at its signalled siting (left, as the video processor's
 
 Radio loss raises parity before reducing the wire budget. Keyframes and
 reference-recovery frames carry at least 30% and four parity shards per block;
-normal frames adapt to erasure runs too. Idle encoders retain their budget for
-motion, with application-limited telemetry. Queue growth still cuts rate;
-moderate loss without queue growth requires a rate-correlation test.
+normal frames adapt to erasure runs too. Idle encoders keep their target, but
+after a second of idle the first resumed frames use an aged, validated rate
+that doubles back to the target per feedback round trip (about half a second
+on a 10 ms path). Queue growth still cuts rate; moderate loss without queue
+growth requires a rate-correlation test.
 See [measurements and parity costs](measurements/2026-11-04/transport-fec/README.md).

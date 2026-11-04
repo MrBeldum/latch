@@ -34,11 +34,22 @@
 - Protect keyframes and reference-recovery frames with at least 30% parity
   and four parity packets per block; adapt other frames to raw loss and
   observed erasure runs, reserving their rounded wire cost before encoding.
-- Test moderate queue-free loss against a reversible 20% rate reduction
-  before treating it as a policer. Keep queue-gradient and severe-collapse cuts.
-- Keep idle encoders application-limited without lowering the sustainable
-  estimate; report the wire budget and application-limited state.
-- Add 1/3/5% random-loss/burst matrices at 20/50/100 Mbps, parity overhead,
+- Test moderate queue-free loss against a reversible 20% reduction of the rate
+  actually sent before treating it as a policer, and remember the random-loss
+  floor a confirmed test measured. Keep queue-gradient and severe-collapse cuts,
+  also for an encoder that underfills its budget (sustained >10% loss with a
+  delivery deficit), and cut on one damaged legacy one-second window.
+- Keep the budget through idle but age its proof: after 1 s the rate trusted
+  for resumed frames halves every 500 ms (to 1/32 of the target), and motion
+  restarts by doubling the carried rate per validated feedback horizon, so a
+  capacity drop during idle no longer meets a full-rate burst. Report the
+  target and application-limited state.
+- One parity policy and one parity layout for the server, the wire
+  reservation (now including the keyframe/recovery floor) and the transport
+  simulations. Keyframes and recovery frames are paced at 1.5x the encoder's
+  share once the path has shown a bottleneck.
+- Add 1/3/5% random-loss/burst matrices at 20/50/100 Mbps, mixed-loss,
+  short-FIFO and capacity-drop-during-idle scenarios, parity overhead,
   IDRs/min and idle-to-motion timing.
 
 ## Unreleased — transport workstream
