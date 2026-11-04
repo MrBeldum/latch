@@ -826,13 +826,21 @@ mod tests {
                 .map(|i| (at.0 + 60 + 120 * i, at.1 + 90))
                 .chain([(at.0 + 420, at.1 + 30)])
                 .collect();
-            let row: Vec<(i32, i32)> = (0..W / 20)
-                .map(|i| (at.0 + 20 * i + 10, at.1 + 90))
-                .collect();
-            eprintln!(
-                "row {:?}",
-                grab_scrgb(&row)?.iter().map(|p| p[1]).collect::<Vec<_>>()
-            );
+            if let Ok(dir) = std::env::var("LATCH_HDR_PATCH_DIR") {
+                // What the compositor shows, 1000 nits = white, for a look.
+                let all: Vec<(i32, i32)> = (-20..H + 20)
+                    .flat_map(|y| (-20..W + 20).map(move |x| (at.0 + x, at.1 + y)))
+                    .collect();
+                let pixels = grab_scrgb(&all)?;
+                let image = image::RgbImage::from_fn(W as u32 + 40, H as u32 + 40, |x, y| {
+                    let p = pixels[(y * (W as u32 + 40) + x) as usize];
+                    image::Rgb(
+                        [0, 1, 2]
+                            .map(|c| (255.0 * (p[c] / 12.5).clamp(0.0, 1.0).powf(1.0 / 2.2)) as u8),
+                    )
+                });
+                image.save(std::path::Path::new(&dir).join("window.png"))?;
+            }
             let hole = [egui::Rect::from_min_max(
                 egui::pos2(360.0, 0.0),
                 egui::pos2(480.0, 60.0),
