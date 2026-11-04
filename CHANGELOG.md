@@ -1,194 +1,62 @@
 # Changelog
 
-## Unreleased — native reference recovery
-
-- Idle probe estimates reject jitter, missing positions and reordering, deduplicate packets, and require independent delay/delivery evidence before lowering the encoder target. Unknown capacity only limits resume pacing; low retained budgets skip trains.
-- Add VideoToolbox LTR recovery behind runtime support (`LATCH_MAC_LTR=1`
-  opts into the supporting low-latency mode), with exact VT/FFmpeg loss tests.
-- Media Foundation H.264 LTR recovery on Windows hosts, opt-in with
-  `LATCH_MF_LTR=1` until it has run on hardware, and only after an
-  encoder-open decode self-test passes; failed probes reopen with IDR
-  recovery. AMF HEVC LTR is unchanged.
-- Mac viewer: bound every VideoToolbox decode call (1 s); a stalled session is
-  replaced and a keyframe requested instead of freezing the picture for good.
-  A codec may abandon three sessions per 10 minutes; past that only that
-  codec stops decoding until the window passes, and the stream renegotiates
-  without it.
-- Mac host: every session (not only opted-in ones) is replaced by an
-  ordinary hardware session when it holds frames for 500 ms.
-- VideoToolbox recovery acknowledges only pictures the viewer decoded, and an
-  H.264 loss of pictures with long-term marks takes an IDR (the refresh made
-  the viewer's references overflow, which froze Apple's decoder).
-- Opted-in VideoToolbox sessions reopen in the ordinary mode when they miss
-  their frame rate or their low-latency encode fails; LTR stays off for Main10, Baseline and
-  HDR.
-- Media Foundation LTR: periodic-content self-test with three losses, slots
-  covering ⅔ s, IDR when a slot's first picture is lost, a buffering MFT is
-  demoted instead of ending the pipeline, and the first picture after the
-  probe is an IDR (unverified on Windows hardware).
-
-## Unreleased — HDR and ten-bit colour
-
-- Mac viewer: no flicker on ten-bit streams. The EDR layer found its window
-  through `NSApplication.mainWindow`, nil whenever focus or a space changed,
-  so frames alternated between the EDR layer and egui's surface. It now
-  uses the NSView of egui's own surface, is used only for HDR (PQ) streams
-  (ten-bit SDR draws through the wgpu P010 shader), and the presenter is
-  chosen per stream and display, never per frame, on Windows' HDR10 window
-  too. A display that cannot be read for a moment (a space changing, an
-  occluded window) is no change, and a new one switches the presenter only
-  after 300 ms and at most once a second. Debug builds no longer panic when
-  the EDR layer is created (an untyped colour space in `setColorspace:`).
-  `LATCH_TEST_SERVE=ip:port` points the window at a test `serve`.
-
-- Negotiate default-off ten-bit SDR and HDR10 colour, display peak luminance,
-  and mastering/content-light metadata within protocol 1. Legacy peers stay SDR8.
-- Preserve scRGB on Advanced Color Windows desktops; GPU conversion to
-  RGB10/P010 feeds AMF or MF Main10 with explicit colour tags and HDR SEI.
-- Preserve P010 in viewers. Mac uses a float EDR Metal layer; Windows uses
-  a ten-bit SDR/HDR10 swapchain, with SDR tone mapping when HDR is unavailable.
-- Controls, stats, settings, toasts and the hint no longer switch HDR video to
-  an SDR tone map: the Mac EDR layer sits under egui's (which turns
-  translucent over the picture), and Windows cuts its HDR10 window around
-  them. Both native renderers sample chroma at its signalled siting (left,
-  carried in the colour description) instead of centred.
-- An HDR desktop streamed to an SDR viewer keeps 203–1000-nit highlights
-  apart and in hue (gamut map plus a highlight shoulder) instead of clipping
-  each channel at SDR white. The Windows HDR10 presenter now draws (its
-  triangle was culled).
-- Configure canonical HDR capture and PQ-tagged Main10 on Mac hosts, and add
-  colour-math, hardware roundtrip, native EDR and banding measurements.
-- Decoders get the negotiated colour: a ten-bit stream decodes to P010 on
-  VideoToolbox and Media Foundation (a hardware MFT starts on NV12 until the
-  sequence header), and a decoder giving another depth renegotiates the codec.
-## Unreleased — Windows setup
-
-- Windows setup: avoid duplicate 8K virtual-display entries that pushed an
-  existing 84-mode list to 102 and prevented monitor creation. A rejected
-  update now restores settings, removes an unused relocation, warns that
-  virtual display modes are unchanged, and completes the remaining steps.
-
-## Unreleased — FEC-first transport
-
-- Protect keyframes and reference-recovery frames with at least 30% parity
-  and four parity packets per block; adapt other frames to raw loss and
-  observed erasure runs, reserving their rounded wire cost before encoding.
-- Test moderate queue-free loss against a reversible 20% reduction of the rate
-  actually sent before treating it as a policer, and remember the random-loss
-  floor a confirmed test measured. Keep queue-gradient and severe-collapse cuts,
-  also for an encoder that underfills its budget (sustained >10% loss with a
-  delivery deficit), and cut on one damaged legacy one-second window.
-- Keep the budget and the encoder's target through idle, so motion resumes
-  at full rate at once. While idle, send short probe trains (new datagram
-  kind 16, only to viewers that set `probe_trains`); the viewer times their
-  packet pairs and reports `probe_kbps`. Two confident slow trains need
-  independent queue or delivery evidence to lower the target; unknown
-  capacity only limits resume pacing. Probe padding is outside the wire
-  budget and is skipped below an 8 Mbps retained budget. Report the
-  budget and application-limited state.
-- An underfilled stream cut by someone else's standing queue (or starved
-  pings) regains its earlier budget once the delay has been gone for a second, and an idle or
-  floor-bound sparse stream regrows by time after any cut, up to what probe
-  trains measured; waiting in the pacer is not sender pressure while pacing.
-- The queue-free loss rate test needs 4 Mbps of traffic, compares mean loss
-  before and during the test, and confirms only if the reduced budget (not
-  the content) lowered the load: sparse desktop streams under bursty loss no
-  longer confirm phantom policers at the floor. A pending keyframe never takes the
-  encoder target under half the ordinary one.
-- One parity policy and one parity layout for the server, the wire
-  reservation (now including the keyframe/recovery floor) and the transport
-  simulations. The pacer's burst is two datagrams or 1 ms of rate.
-- Add 1/3/5% random-loss/burst matrices at 20/50/100 Mbps, mixed-loss,
-  short-FIFO and capacity-drop-during-idle scenarios, parity overhead,
-  IDRs/min and idle-to-motion timing.
-
-## Unreleased — transport workstream
-
-- Batch Linux video sends/receives and macOS receives without waiting to fill
-  batches; reuse packetizer storage and hand complete frames to decode inline.
-- Faster delay-gradient bitrate feedback and recovery, persistent FEC protection
-  after radio bursts, and RTT-gated recovery IDRs. Protocol 1 stays compatible.
-- Add codec-free transport/FEC measurements and deterministic capacity-step,
-  240 fps, random/burst loss, long-RTT and jitter scenarios.
-- Cut for policers: uncorrected loss or lost frames cut at any raw loss, then
-  the climb holds just under the policed rate; 5–15 ms Wi-Fi ping
-  jitter no longer trips the queue threshold; a capacity collapse cuts on its
-  first report (100→20 Mbps at 10 ms RTT: 160→60 ms).
-- Hold steady caps: keep the last sustainable rate and probe above it in
-  bounded, RTT-aware steps instead of doubling to the ceiling after every
-  drain. Budget spread on a fixed 20/50/100 Mbps cap is 0.7/1.2/2.5 Mbps
-  (5.1: 1.6/3.5/7.1); 150–250 ms RTT paths no longer fill the queue.
-- Recovery counts the real time between reports, so 5.1's 250 ms and older
-  one-second viewers recover as fast as 50 ms ones; reports after more than
-  2 s of silence grant no growth.
-- A permanent lossless RTT increase (route change) is rebased instead of
-  pinning the budget at its floor.
-- The wire floor is 1 Mbps rather than a tenth of the requested rate, so a
-  100 Mbps request adapts to a 2–5 Mbps link.
-- Older viewers without repaired-loss reporting no longer lose their bitrate
-  to FEC-repaired radio loss.
-- A host that ends a stream half-closes and keeps reading briefly, and the
-  viewer closes its connection as soon as it has read the end: with 50 ms
-  reports in flight, a takeover could otherwise reset the connection before
-  the old viewer learned why it ended.
-- Windows viewers rearm Mio readiness after a batched receive, so packets
-  after an idle gap wake the receive loop instead of waiting for its 20 ms timer.
-- A recovery keyframe lost in a burst no longer freezes the picture for
-  400–550 ms: the host held every repeat of a keyframe request for 250 ms,
-  so the viewer's retries were ignored. It now answers a repeat once its
-  keyframe has been out for a round trip, the viewer asks again as soon as
-  another frame is lost, and retries every 50 ms (or the RTT) instead of
-  100 ms. Through 3 % loss with bursts the longest freeze is
-  about 230 ms (simulated, 24 minutes of stream; 5.1 rules: 400 ms).
-
-
 The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
-## Unreleased
+## 5.2.0 (2026-11-04)
 
-- A lost frame costs a small recovery frame instead of a keyframe, as on
-  GeForce NOW. Viewer and host negotiate `reference_invalidation`; after a
-  loss the viewer asks for a frame that predicts from the last one it
-  decoded (new datagrams 14 and 15; 13 stays reserved for microphone audio), falling back to a keyframe when the
-  host cannot. Recovery identities include the pipeline generation, so a
-  queued frame from before a capture reopen cannot alias a new reference.
-  The software H.264 encoder rolls back to that picture
-  (bit-exact) and AMD's AMF HEVC encoder uses long-term references; Media
-  Foundation, VideoToolbox, VA-API and NVENC still send an IDR. Linux host
-  → Mac at 1–3% induced burst loss: 34–51 IDRs a minute become 2–3 (the
-  startup ones), resume p50 113 → 41 ms, freeze p95 256–452 → 97–120 ms;
-  recovery frames are 3.3 kB where an IDR was 10–20 kB. Older viewers and
-  hosts keep `KeyframeRequest`.
-- Negotiate hardware-probed AV1, HEVC and H.264 High on the viewer; retain
-  Baseline's ten-access-unit software fallback and protocol-1 compatibility.
-- Decode AV1 through VideoToolbox on supported Macs, with selectable P010
-  Main10 output and IOSurface-to-Metal rendering.
-- Enumerate Windows Media Foundation decoders with D3D11/DXVA and accept
-  NV12/P010 output; import shared NV12 textures into D3D12/wgpu with
-  fenced GPU copies and CPU-readback fallback.
-- Retain native surfaces until GPU work completes; add a native present
-  measurement example and decode-to-render timestamps.
-- A viewer whose AV1, HEVC or H.264 High decoder fails (no picture for ten
-  frames, or three errors without one) asks the PC again without that
-  codec, down to Baseline, and says why, instead of asking for keyframes
-  forever: a picture returns within a second or two.
-- A Media Foundation decoder without transform attributes runs without the
-  low-latency hint instead of failing; a Windows renderer that cannot open
-  a shared picture stops drawing the last one.
-- No wait at a session's end can hang it: the host leaves a media thread
-  stuck in a capture or encoder call behind after 5 s (the session still
-  ends and lets go of the screen), and a second viewer gives up after 30 s,
-  rather than waiting for ever, on one that is still starting a stream. The
-  viewer's control writes time out after 2 s and its receive thread is
-  waited for at most 2 s.
-- CI: the loopback tests' sessions take turns (test mode sends input to the
-  newest test pattern, so the gamepad test's session took the key presses
-  of the picture test, which then waited for ever on a square that never
-  flipped: hours-long hangs on the macOS runner). A test still running after
-  60 s prints every thread's stack and fails the run, and every CI job has
-  a time limit.
+Latch no longer sets limits of its own. A stream can ask for up to 500 fps,
+1 Gbps and 16384 pixels a side, and the sharing machine fits the request to
+what its encoder and display take; the network sets the rest.
+
+- **Quality profiles that follow the display.** Balanced (the default: this
+  display's size at its own refresh rate), Competitive (1080p at the
+  display's rate, up to 360 fps), Cinematic (up to 4K and 120 fps at half
+  again the bitrate) and Custom (30–500 fps, 2–1000 Mbps, up to 8K). 5.1's
+  Smooth, Balanced and Sharp become Competitive, Balanced and Cinematic.
+- **A stats overlay**: **Stats**, or the host key with S (or F6), lays
+  frame rate, bitrate, round trip, loss and an estimated latency breakdown
+  over the picture's corner.
+- **Windows host**: hardware HEVC by default (on AMD through AMF directly),
+  and setup adds 90–360 Hz modes to the virtual display.
+- **Mac host**: VideoToolbox keeps up with fast streams (synthetic 1080p
+  HEVC on an M3 Pro: 240 fps, was 110).
+- **Linux host**: only what changed on screen is read, converted and
+  encoded. NVENC and VA-API hardware encoding is in place but has not yet
+  run on a GPU.
+- **Hardware decoding on Mac and Windows viewers** for AV1, HEVC (Main and
+  Main10) and H.264 High, each probed before it is offered. A codec whose
+  decoder fails gives way to the next, down to H.264 Baseline, in a second
+  or two. Linux viewers still decode H.264 in software.
+- **HDR10 and ten-bit colour** for HEVC streams from a Mac or Windows host
+  to a Mac or Windows viewer, used when both ends and the display can; there
+  is no setting. HDR brightness and colour on a physical panel are not yet
+  verified on either platform (offscreen and readback tests only). HEVC on
+  a Windows viewer needs Microsoft's HEVC Video Extension.
+- **Gamepads**, with rumble. A Windows host makes Xbox 360 and DualShock 4
+  pads through ViGEmBus (setup installs it), a Linux host Xbox 360 pads
+  through `/dev/uinput`; a Mac host takes none.
+- **Sound**: 5.1 and 7.1, a jitter buffer sized to the path instead of a
+  fixed 40 ms, and **Send my microphone** (off by default; a Linux host
+  needs nothing, a Windows host VB-CABLE and a Mac host BlackHole, and
+  neither of those has been tried yet).
+- **A lost frame costs a small recovery frame, not a keyframe**, on the
+  software H.264 encoder and AMD's AMF HEVC. VideoToolbox (`LATCH_MAC_LTR=1`)
+  and Media Foundation H.264 (`LATCH_MF_LTR=1`, not yet run on hardware)
+  are opt-in; the other encoders still send a keyframe.
+- **New congestion control, FEC first**: parity is spent before bitrate,
+  loss without a queue is tested before it is taken for a policer, steady
+  caps hold steady, and an idle stream keeps its budget, measured by short
+  probe trains, so motion resumes at full rate.
+- **Fixes**: Windows viewers connect over routed paths, debug builds no
+  longer panic on a Mac, ten-bit streams no longer flicker on a Mac, game
+  cameras turn on Windows hosts again, and more below.
+
+Older hosts and viewers keep working with 5.2: everything new is
+negotiated within protocol 1.
+
+### Limits and quality profiles
 
 - No Latch-imposed ceilings on a stream. The viewer allowed 30–240 fps and
   2–150 Mbps and the host clamped every request to 240 fps, 500 Mbps and
@@ -230,20 +98,13 @@ GitHub release notes, so each version gets a heading of the form
   FEC, dropped frames, decode and present times and an estimated latency
   breakdown over the picture's corner, without taking the mouse. The full
   Stream performance panel moved to More.
+
+### Hosts
+
 - Windows hardware HEVC is enabled by default. AMD HEVC can use the driver’s
   AMF runtime directly, with Media Foundation fallback; hardware AV1 MFTs
   are negotiated only after a keyframe probe. Windows honors requested
   frame rates and bitrates beyond the former 240 fps/500 Mbps limits.
-- Virtual display setup adds missing high-refresh gaming modes and 8K
-  sizes, preserves existing XML, and checks monitor arrival after restart.
-  Hardware timing and driver mode-count limitations are documented in
-  `docs/measurements/2026-11-03/windows-host/`.
-- Mac host keyframe requests discard queued pictures until the requested
-  IDR, coalesce retries, and clear on output. A bitrate change applies from
-  the next picture on, without an IDR.
-  HEVC uses its quality path through the pixel rate of 1080p120, recovering
-  the quality lost to the speed hint; faster streams retain the fast path.
-
 - A Mac host keeps up with fast streams. VideoToolbox no longer uses its
   low-latency rate control, which doubled each frame's encode time,
   dropped frames and sent a fifth of the asked-for bitrate; and a frame
@@ -256,20 +117,11 @@ GitHub release notes, so each version gets a heading of the form
   timing jitter could halve, keeps more surfaces so two frames in the
   encoder never starve it, and `LATCH_MAC_DISPLAY` picks a display other
   than the main one. HEVC Main10 from P010 surfaces is in place for HDR.
-
-- Gamepads. Pads connected to the viewer (Xbox, DualSense, DualShock 4,
-  Switch Pro and others, on a Mac, Windows or Linux) reach the host's games
-  as virtual pads, and the game's rumble comes back to them. A Windows PC
-  makes Xbox 360 and DualShock 4 pads through the ViGEmBus driver, which
-  setup now installs (checksum-pinned, never restarting Windows) and
-  uninstall removes only if setup installed it; a Linux host makes Xbox 360
-  pads through `/dev/uinput` (see the Linux notes for the permission it
-  needs); a Mac host takes none. Each pad's whole state is sent when it
-  changes and again until the host has it, so a lost packet never leaves a
-  button held; on the PC a state reaches XInput well under a millisecond
-  after the viewer sends it. The stream toolbar shows the connected pads.
-  Hosts and viewers from before this negotiate no gamepads and work as
-  before.
+- Mac host keyframe requests discard queued pictures until the requested
+  IDR, coalesce retries, and clear on output. A bitrate change applies from
+  the next picture on, without an IDR.
+  HEVC uses its quality path through the pixel rate of 1080p120, recovering
+  the quality lost to the speed hint; faster streams retain the fast path.
 - Linux host: only what changed on screen is read, converted and encoded.
   X Damage rectangles are kept apart instead of merged into one box, only
   those are read from the X server and converted to YUV (split across
@@ -293,6 +145,214 @@ GitHub release notes, so each version gets a heading of the form
   why a 1440p sweep went from 3.7 to 0.5 Mb/s. Colour conversion keeps
   its threads instead of starting them each frame (a whole 1080p frame:
   1.35 to 1.06 ms on four Neoverse N1 cores).
+
+### Windows setup
+
+- Virtual display setup adds missing high-refresh gaming modes and 8K
+  sizes, preserves existing XML, and checks monitor arrival after restart.
+  Hardware timing and driver mode-count limitations are documented in
+  `docs/measurements/2026-11-03/windows-host/`.
+- Avoid duplicate 8K virtual-display entries that pushed an existing
+  84-mode list to 102 and prevented monitor creation. A rejected update now
+  restores settings, removes an unused relocation, warns that virtual
+  display modes are unchanged, and completes the remaining steps.
+
+### Viewers
+
+- Negotiate hardware-probed AV1, HEVC and H.264 High on the viewer; retain
+  Baseline's ten-access-unit software fallback and protocol-1 compatibility.
+- Decode AV1 through VideoToolbox on supported Macs, with selectable P010
+  Main10 output and IOSurface-to-Metal rendering.
+- Enumerate Windows Media Foundation decoders with D3D11/DXVA and accept
+  NV12/P010 output; import shared NV12 textures into D3D12/wgpu with
+  fenced GPU copies and CPU-readback fallback. A codec whose decoder or
+  codec extension is missing (HEVC needs Microsoft's HEVC Video Extension)
+  is left out of negotiation.
+- Retain native surfaces until GPU work completes; add a native present
+  measurement example and decode-to-render timestamps.
+- A viewer whose AV1, HEVC or H.264 High decoder fails (no picture for ten
+  frames, or three errors without one) asks the PC again without that
+  codec, down to Baseline, and says why, instead of asking for keyframes
+  forever: a picture returns within a second or two.
+- A Media Foundation decoder without transform attributes runs without the
+  low-latency hint instead of failing; a Windows renderer that cannot open
+  a shared picture stops drawing the last one.
+- Mac viewer: bound every VideoToolbox decode call (1 s); a stalled session is
+  replaced and a keyframe requested instead of freezing the picture for good.
+  A codec may abandon three sessions per 10 minutes; past that only that
+  codec stops decoding until the window passes, and the stream renegotiates
+  without it.
+- One pointer while the mouse is captured. The Mac's arrow was hidden only
+  by egui's cursor, which macOS applies when the pointer moves over the
+  window; a captured pointer is held still, so the Mac's arrow could stay
+  in the picture beside the PC's (seen streaming the Windows PC). AppKit
+  now hides it for as long as the mouse is captured, and a pointer that
+  was off the window when the stream took it is moved onto the picture
+  first, so its clicks no longer reach another app.
+
+### HDR and ten-bit colour
+
+- Negotiate default-off ten-bit SDR and HDR10 colour, display peak luminance,
+  and mastering/content-light metadata within protocol 1. Legacy peers stay
+  SDR8. Ten-bit and HDR apply to HEVC streams from Mac and Windows hosts;
+  a viewer offers ten-bit when its GPU samples 16-bit textures and HDR when
+  its display reports a peak luminance.
+- Preserve scRGB on Advanced Color Windows desktops; GPU conversion to
+  RGB10/P010 feeds AMF or MF Main10 with explicit colour tags and HDR SEI.
+- Configure canonical HDR capture and PQ-tagged Main10 on Mac hosts, and add
+  colour-math, hardware roundtrip, native EDR and banding measurements.
+- Preserve P010 in viewers. Mac uses a float EDR Metal layer; Windows uses
+  a ten-bit SDR/HDR10 swapchain, with SDR tone mapping when HDR is
+  unavailable. Both are tested offscreen and by readback; brightness and
+  colour on a physical EDR or HDR10 panel are not yet verified.
+- Decoders get the negotiated colour: a ten-bit stream decodes to P010 on
+  VideoToolbox and Media Foundation (a hardware MFT starts on NV12 until the
+  sequence header), and a decoder giving another depth renegotiates the codec.
+- Controls, stats, settings, toasts and the hint no longer switch HDR video to
+  an SDR tone map: the Mac EDR layer sits under egui's (which turns
+  translucent over the picture), and Windows cuts its HDR10 window around
+  them. Both native renderers sample chroma at its signalled siting (left,
+  carried in the colour description) instead of centred.
+- An HDR desktop streamed to an SDR viewer keeps 203–1000-nit highlights
+  apart and in hue (gamut map plus a highlight shoulder) instead of clipping
+  each channel at SDR white. The Windows HDR10 presenter now draws (its
+  triangle was culled).
+- Mac viewer: no flicker on ten-bit streams. The EDR layer found its window
+  through `NSApplication.mainWindow`, nil whenever focus or a space changed,
+  so frames alternated between the EDR layer and egui's surface. It now
+  uses the NSView of egui's own surface, is used only for HDR (PQ) streams
+  (ten-bit SDR draws through the wgpu P010 shader), and the presenter is
+  chosen per stream and display, never per frame, on Windows' HDR10 window
+  too. A display that cannot be read for a moment (a space changing, an
+  occluded window) is no change, and a new one switches the presenter only
+  after 300 ms and at most once a second. Debug builds no longer panic when
+  the EDR layer is created (an untyped colour space in `setColorspace:`).
+  `LATCH_TEST_SERVE=ip:port` points the window at a test `serve`.
+
+### Loss recovery
+
+- A lost frame costs a small recovery frame instead of a keyframe, as on
+  GeForce NOW. Viewer and host negotiate `reference_invalidation`; after a
+  loss the viewer asks for a frame that predicts from the last one it
+  decoded (new datagrams 14 and 15; 13 stays reserved for microphone audio), falling back to a keyframe when the
+  host cannot. Recovery identities include the pipeline generation, so a
+  queued frame from before a capture reopen cannot alias a new reference.
+  The software H.264 encoder rolls back to that picture
+  (bit-exact) and AMD's AMF HEVC encoder uses long-term references; VA-API
+  and NVENC still send an IDR, and VideoToolbox and Media Foundation do
+  unless opted in (below). Linux host
+  → Mac at 1–3% induced burst loss: 34–51 IDRs a minute become 2–3 (the
+  startup ones), resume p50 113 → 41 ms, freeze p95 256–452 → 97–120 ms;
+  recovery frames are 3.3 kB where an IDR was 10–20 kB. Older viewers and
+  hosts keep `KeyframeRequest`.
+- Add VideoToolbox LTR recovery behind runtime support (`LATCH_MAC_LTR=1`
+  opts into the supporting low-latency mode), with exact VT/FFmpeg loss tests.
+- VideoToolbox recovery acknowledges only pictures the viewer decoded, and an
+  H.264 loss of pictures with long-term marks takes an IDR (the refresh made
+  the viewer's references overflow, which froze Apple's decoder).
+- Opted-in VideoToolbox sessions reopen in the ordinary mode when they miss
+  their frame rate or their low-latency encode fails; LTR stays off for Main10, Baseline and
+  HDR.
+- Mac host: every session (not only opted-in ones) is replaced by an
+  ordinary hardware session when it holds frames for 500 ms.
+- Media Foundation H.264 LTR recovery on Windows hosts, opt-in with
+  `LATCH_MF_LTR=1` until it has run on hardware, and only after an
+  encoder-open decode self-test passes; failed probes reopen with IDR
+  recovery. AMF HEVC LTR is unchanged.
+- Media Foundation LTR: periodic-content self-test with three losses, slots
+  covering ⅔ s, IDR when a slot's first picture is lost, a buffering MFT is
+  demoted instead of ending the pipeline, and the first picture after the
+  probe is an IDR (unverified on Windows hardware).
+
+### Transport and congestion control
+
+- Protect keyframes and reference-recovery frames with at least 30% parity
+  and four parity packets per block; adapt other frames to raw loss and
+  observed erasure runs, reserving their rounded wire cost before encoding.
+- Test moderate queue-free loss against a reversible 20% reduction of the rate
+  actually sent before treating it as a policer, and remember the random-loss
+  floor a confirmed test measured. Keep queue-gradient and severe-collapse cuts,
+  also for an encoder that underfills its budget (sustained >10% loss with a
+  delivery deficit), and cut on one damaged legacy one-second window.
+- Keep the budget and the encoder's target through idle, so motion resumes
+  at full rate at once. While idle, send short probe trains (new datagram
+  kind 16, only to viewers that set `probe_trains`); the viewer times their
+  packet pairs and reports `probe_kbps`. Estimates reject jitter, missing
+  positions and reordering, and deduplicate packets. Two confident slow
+  trains need independent queue or delivery evidence to lower the target;
+  unknown capacity only limits resume pacing. Probe padding is outside the
+  wire budget and is skipped below an 8 Mbps retained budget. Report the
+  budget and application-limited state.
+- An underfilled stream cut by someone else's standing queue (or starved
+  pings) regains its earlier budget once the delay has been gone for a second, and an idle or
+  floor-bound sparse stream regrows by time after any cut, up to what probe
+  trains measured; waiting in the pacer is not sender pressure while pacing.
+- The queue-free loss rate test needs 4 Mbps of traffic, compares mean loss
+  before and during the test, and confirms only if the reduced budget (not
+  the content) lowered the load: sparse desktop streams under bursty loss no
+  longer confirm phantom policers at the floor. A pending keyframe never takes the
+  encoder target under half the ordinary one.
+- One parity policy and one parity layout for the server, the wire
+  reservation (now including the keyframe/recovery floor) and the transport
+  simulations. The pacer's burst is two datagrams or 1 ms of rate.
+- Batch Linux video sends/receives and macOS receives without waiting to fill
+  batches; reuse packetizer storage and hand complete frames to decode inline.
+- Faster delay-gradient bitrate feedback and recovery, persistent FEC protection
+  after radio bursts, and RTT-gated recovery IDRs. Protocol 1 stays compatible.
+- Cut for policers: uncorrected loss or lost frames cut at any raw loss, then
+  the climb holds just under the policed rate; 5–15 ms Wi-Fi ping
+  jitter no longer trips the queue threshold; a capacity collapse cuts on its
+  first report (100→20 Mbps at 10 ms RTT: 160→60 ms).
+- Hold steady caps: keep the last sustainable rate and probe above it in
+  bounded, RTT-aware steps instead of doubling to the ceiling after every
+  drain. Budget spread on a fixed 20/50/100 Mbps cap is 0.7/1.2/2.5 Mbps
+  (5.1: 1.6/3.5/7.1); 150–250 ms RTT paths no longer fill the queue.
+- Recovery counts the real time between reports, so 5.1's 250 ms and older
+  one-second viewers recover as fast as 50 ms ones; reports after more than
+  2 s of silence grant no growth.
+- A permanent lossless RTT increase (route change) is rebased instead of
+  pinning the budget at its floor.
+- The wire floor is 1 Mbps rather than a tenth of the requested rate, so a
+  100 Mbps request adapts to a 2–5 Mbps link.
+- Older viewers without repaired-loss reporting no longer lose their bitrate
+  to FEC-repaired radio loss.
+- A recovery keyframe lost in a burst no longer freezes the picture for
+  400–550 ms: the host held every repeat of a keyframe request for 250 ms,
+  so the viewer's retries were ignored. It now answers a repeat once its
+  keyframe has been out for a round trip, the viewer asks again as soon as
+  another frame is lost, and retries every 50 ms (or the RTT) instead of
+  100 ms. Through 3 % loss with bursts the longest freeze is
+  about 230 ms (simulated, 24 minutes of stream; 5.1 rules: 400 ms).
+- A host that ends a stream half-closes and keeps reading briefly, and the
+  viewer closes its connection as soon as it has read the end: with 50 ms
+  reports in flight, a takeover could otherwise reset the connection before
+  the old viewer learned why it ended.
+- Windows viewers rearm Mio readiness after a batched receive, so packets
+  after an idle gap wake the receive loop instead of waiting for its 20 ms timer.
+- Add codec-free transport/FEC measurements and deterministic capacity-step,
+  240 fps, random/burst loss, long-RTT and jitter scenarios, and 1/3/5%
+  random-loss/burst matrices at 20/50/100 Mbps, mixed-loss, short-FIFO and
+  capacity-drop-during-idle scenarios, parity overhead, IDRs/min and
+  idle-to-motion timing.
+
+### Gamepads
+
+- Gamepads. Pads connected to the viewer (Xbox, DualSense, DualShock 4,
+  Switch Pro and others, on a Mac, Windows or Linux) reach the host's games
+  as virtual pads, and the game's rumble comes back to them. A Windows PC
+  makes Xbox 360 and DualShock 4 pads through the ViGEmBus driver, which
+  setup now installs (checksum-pinned, never restarting Windows) and
+  uninstall removes only if setup installed it; a Linux host makes Xbox 360
+  pads through `/dev/uinput` (see the Linux notes for the permission it
+  needs); a Mac host takes none. Each pad's whole state is sent when it
+  changes and again until the host has it, so a lost packet never leaves a
+  button held; on the PC a state reaches XInput well under a millisecond
+  after the viewer sends it. The stream toolbar shows the connected pads.
+  Hosts and viewers from before this negotiate no gamepads and work as
+  before.
+
+### Sound
+
 - The viewer no longer holds a fixed 40 ms of sound. The host sends each
   5 ms of sound as soon as it is captured, and the viewer's buffer holds
   what the measured jitter of the path needs (11–15 ms on a quiet LAN in
@@ -314,7 +374,8 @@ GitHub release notes, so each version gets a heading of the form
   on the PC as a microphone. A Linux host makes a "Latch Microphone"
   input for the session; Windows needs VB-CABLE and a Mac host BlackHole
   (or `LATCH_MIC_DEVICE`), since sound becomes a microphone there only
-  through a driver. macOS asks for the microphone the first time.
+  through a driver. macOS asks for the microphone the first time. The
+  Windows and Mac host paths have not yet been tried with those drivers.
 - Windows viewers play sound through their own `IAudioClient3` stream at
   the smallest engine period the driver offers (2.67–3 ms on most onboard
   and HDMI audio) with two periods written ahead, instead of cpal's
@@ -326,13 +387,50 @@ GitHub release notes, so each version gets a heading of the form
 - Audio latency can be measured: `LATCH_TEST_AUDIO=clicks` on a test host
   and `LATCH_AUDIO_PROBE=1` on `view` report `audio_click_ms`, the time
   from the host's click to the viewer's speaker.
-- One pointer while the mouse is captured. The Mac's arrow was hidden only
-  by egui's cursor, which macOS applies when the pointer moves over the
-  window; a captured pointer is held still, so the Mac's arrow could stay
-  in the picture beside the PC's (seen streaming the Windows PC). AppKit
-  now hides it for as long as the mouse is captured, and a pointer that
-  was off the window when the stream took it is moved onto the picture
-  first, so its clicks no longer reach another app.
+
+### Fixes
+
+- Windows viewers connect over routed paths. On Windows `getpeername` can
+  succeed while a non-blocking connect is still in flight, so a Windows
+  viewer's first write failed with `WSAENOTCONN` (10057) on every routed
+  path (loopback connects at once and hid it). The upgrade now waits for
+  the socket to become writable, then reads `SO_ERROR`.
+- Mac host: debug builds no longer panic as soon as real capture starts;
+  ScreenCaptureKit's background colour is passed as a typed `CGColorRef`.
+- Windows host: plain relative mouse moves again, as Sunshine sends them,
+  so game cameras turn (Genshin Impact and Honkai: Star Rail drop moves
+  flagged `MOUSE_MOVE_NOCOALESCE`). Keys go by fixed US scancodes, not
+  through the PC's layout, which moved game bindings on AZERTY and the
+  like. A display snapshot that no longer restores (an adapter went away
+  mid-stream) is dropped instead of refusing every later session with
+  "display topology already prepared".
+- Input: an event the host can never inject no longer holds every later
+  move, key-up and release behind it for the rest of the session; it is
+  retried for two seconds, then dropped.
+- Viewer: each session starts with the host's pointer off, as the host
+  does (a captured reconnect to a host that streams cursor shapes showed
+  no pointer at all), and keys typed after an IME commit in the same frame
+  reach the PC.
+- Host: an "audio is back" notice raised just before a session ends is
+  sent before the end instead of dropped.
+- No wait at a session's end can hang it: the host leaves a media thread
+  stuck in a capture or encoder call behind after 5 s (the session still
+  ends and lets go of the screen), and a second viewer gives up after 30 s,
+  rather than waiting for ever, on one that is still starting a stream. The
+  viewer's control writes time out after 2 s and its receive thread is
+  waited for at most 2 s.
+
+### Tests and CI
+
+- CI: the loopback tests' sessions take turns (test mode sends input to the
+  newest test pattern, so the gamepad test's session took the key presses
+  of the picture test, which then waited for ever on a square that never
+  flipped: hours-long hangs on the macOS runner). A test still running after
+  60 s prints every thread's stack and fails the run, and every CI job has
+  a time limit.
+- `view` gains `--moves N` and `--dump PREFIX`, which send relative moves
+  and save the picture either side of them, to check a game's camera from
+  another machine.
 
 ## 5.1.0 (2026-10-31)
 
