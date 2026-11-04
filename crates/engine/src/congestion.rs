@@ -4,6 +4,10 @@ use std::time::{Duration, Instant};
 
 /// How long a policer's rate caps the climb before it is probed again.
 const LOSSY_MEMORY: Duration = Duration::from_secs(3);
+/// Idle shorter than this (a typing pause) resumes at the full target.
+const IDLE_GRACE: Duration = Duration::from_secs(1);
+/// After the grace, the rate trusted for a resumed train halves this often.
+const IDLE_HALF_LIFE: Duration = Duration::from_millis(500);
 
 pub(crate) struct Controller {
     ceiling: u32,
@@ -17,10 +21,12 @@ pub(crate) struct Controller {
     sent_kbps: Option<u32>,
     app_limited_windows: u8,
     pacing: bool,
-    idle_since: Option<Instant>,
-    restart: Option<u32>,
-    restart_at: Instant,
-    resumed: bool,
+    /// When the current idle run started, and the most it has sent since.
+    idle_since: Option<(Instant, u32)>,
+    /// While idle: the aged wire rate a resumed frame train may use.
+    trusted: Option<u32>,
+    /// After idle: the retained target that restart probes climb back to.
+    goal: Option<u32>,
     previous_delay: f32,
     gradient: f32,
     /// Mean change in queueing delay between clean windows: radio jitter.
@@ -74,9 +80,8 @@ impl Controller {
             app_limited_windows: 0,
             pacing: false,
             idle_since: None,
-            restart: None,
-            restart_at: now,
-            resumed: false,
+            trusted: None,
+            goal: None,
             previous_delay: 0.0,
             gradient: 0.0,
             // Until windows show otherwise, assume a Wi-Fi-like path.
@@ -104,7 +109,7 @@ impl Controller {
 
     pub(crate) fn observe_sent(&mut self, kbps: u32) {
         self.sent_kbps = Some(kbps);
-        self.app_limited_windows = if kbps < self.budget * 4 / 5 {
+        self.app_limited_windows = if kbps < self.encoder_wire_budget() * 4 / 5 {
             self.app_limited_windows.saturating_add(1)
         } else {
             0
@@ -119,29 +124,22 @@ impl Controller {
         self.pacing
     }
 
-    /// After idle, the old target is not proof that a packet train still fits.
+    /// Pacer rate: congestion, an aged idle trust and restart probes all
+    /// spread frame trains; a clean, proven path sends them at once.
     pub(crate) fn pace_kbps(&self) -> u32 {
-        self.restart.map_or(
-            if self.pacing {
-                self.budget.saturating_mul(5) / 2
-            } else {
-                0
-            },
-            |rate| rate.min(self.budget),
-        )
+        if self.pacing || self.trusted.is_some() || self.goal.is_some() {
+            self.encoder_wire_budget().saturating_mul(5) / 2
+        } else {
+            0
+        }
     }
 
-    /// Bound restart frames to 80 ms of the probe rate; once motion is seen,
-    /// feed the encoder at that rate so a stale target cannot build a FIFO.
-    pub(crate) fn encoder_wire_budget(&self, fps: u32) -> u32 {
-        self.restart.map_or(self.budget, |rate| {
-            let frames = if self.resumed {
-                1.25
-            } else {
-                f64::from(fps) * 0.08
-            };
-            self.budget.min((f64::from(rate) * frames.max(1.0)) as u32)
-        })
+    /// What the encoder may spend. The budget is retained through idle, but
+    /// a long idle no longer proves the path carries it: the first resumed
+    /// frames use the aged trust and restart probes validate the rest.
+    pub(crate) fn encoder_wire_budget(&self) -> u32 {
+        self.trusted
+            .map_or(self.budget, |rate| rate.min(self.budget))
     }
 
     pub(crate) fn base_rtt(&self) -> Option<Duration> {
@@ -248,7 +246,7 @@ impl Controller {
         // A small probe needs a smaller queue threshold than an emergency
         // cut. Wait for its own feedback before increasing again.
         let probe_queued = self.probe.is_some() && delay > 3.0f32.max(self.jitter * 2.0);
-        queued |= probe_queued || (self.restart.is_some() && delay > 6.0);
+        queued |= probe_queued;
         let old = self.budget;
         let underfilled = self
             .sent_kbps
@@ -266,9 +264,13 @@ impl Controller {
         if underfilled && !queued && loss > 10.0 && !severe {
             damaged = false;
         }
+        // A confirmed policer test also measured the random loss left below
+        // the policer: loss at that floor is not a new overshoot. It lapses
+        // with the policer memory, so later loss is tested afresh.
         if self
             .random_floor
             .is_some_and(|floor| floor > 1.0 && report.loss_pct <= floor + 2.0)
+            && now < self.policer_until
             && !queued
         {
             damaged = false;
@@ -350,39 +352,46 @@ impl Controller {
             self.loss_probe = None;
             self.loss_since = None;
         }
-        // Expire idle capacity without lowering the encoder target. Restart
-        // with a conservative, strictly paced probe, then validate increases
-        // one feedback horizon at a time. Queueing or damage lowers the cap.
-        if self.application_limited()
-            && self.sent_kbps.unwrap_or(0) < self.budget / 2
-            && self
-                .restart
-                .is_none_or(|rate| self.sent_kbps.unwrap_or(0) < rate / 4)
-        {
-            let since = *self.idle_since.get_or_insert(now);
-            if now.duration_since(since) >= Duration::from_secs(2) {
-                self.restart = Some(self.sent_kbps.unwrap_or(0).max(5000).min(self.budget));
-                self.restart_at = now;
-                self.resumed = false;
+        // Idle keeps the budget, but not its proof: after a grace the rate
+        // trusted for a resumed train halves every IDLE_HALF_LIFE, down to
+        // twice the idle trickle's peak and 1/32 of the goal (five doublings).
+        // Time, not the encoder's output, ages it, so a content-limited
+        // encoder cannot spiral its own target down, and within one idle run
+        // the trust only falls. An encoder sending 60% of the trust resumed:
+        // parity and header rounding keep a full one near 80% at low rates.
+        let sent = self.sent_kbps.unwrap_or(0);
+        let resumed = self
+            .trusted
+            .is_some_and(|rate| u64::from(sent) * 5 >= u64::from(rate) * 3);
+        if !resumed && self.application_limited() && sent.saturating_mul(2) < self.budget {
+            let (since, peak) = self.idle_since.get_or_insert((now, 0));
+            *peak = (*peak).max(sent);
+            let (since, peak) = (*since, *peak);
+            let aged = now.duration_since(since).saturating_sub(IDLE_GRACE);
+            if !aged.is_zero() {
+                let halvings = aged.as_secs_f64() / IDLE_HALF_LIFE.as_secs_f64();
+                let decayed = (f64::from(self.budget) * 0.5f64.powf(halvings)) as u32;
+                // Relative to the retained goal, so repeated short bursts
+                // between idles cannot ratchet the restart point down.
+                let floor = (self.goal.unwrap_or(self.budget) / 32)
+                    .max(self.floor)
+                    .max(peak.saturating_mul(2));
+                let trusted = decayed.max(floor).min(self.trusted.unwrap_or(self.budget));
+                self.trusted = Some(trusted);
                 self.capacity = None;
+                self.goal.get_or_insert(self.budget);
             }
         } else {
             self.idle_since = None;
-        }
-        if let Some(rate) = self.restart {
-            if queued || damaged {
-                self.restart = Some(rate.min(report.received_kbps.max(self.floor)));
-                self.resumed = true;
-            } else if self.sent_kbps.is_some_and(|sent| sent >= rate * 4 / 5)
-                && now.duration_since(self.restart_at) >= horizon
-            {
-                self.restart_at = now;
-                self.resumed = true;
-                // Bound each probe to at most 4 ms of excess at the last
-                // delivered rate, even across a long feedback round trip.
-                let step = (0.004 / horizon.as_secs_f64()).min(1.0);
-                let next = (f64::from(rate) * (1.0 + step)) as u32;
-                self.restart = Some(next.min(self.budget));
+            if let Some(rate) = self.trusted.take() {
+                // Motion resumed: run at the aged trust, held as a probe until
+                // a feedback horizon validates it, then double toward the goal.
+                if rate < self.budget {
+                    self.budget = rate;
+                    self.probe = Some((rate, now));
+                    self.step = 0.0;
+                    self.overload = None;
+                }
             }
         }
         let pressure = queued || (queue_ms > 20.0 && !app_limited) || damaged;
@@ -451,8 +460,9 @@ impl Controller {
                 && now.duration_since(self.last_cut) < horizon * 3;
             if now.duration_since(self.last_cut) >= spacing && !late && !draining {
                 // A target cut above the encoder's actual wire rate has no effect.
-                let offered = if app_limited && queued && !damaged && self.restart.is_none() {
-                    self.budget
+                // An idle queue cuts the rate a resumed train may use.
+                let offered = if app_limited && queued && !damaged {
+                    self.encoder_wire_budget()
                 } else {
                     self.sent_kbps.unwrap_or(self.budget).min(self.budget)
                 };
@@ -465,7 +475,7 @@ impl Controller {
                 } else {
                     (f64::from(offered) * (1.0 - f64::from(loss.clamp(0.0, 100.0)) / 100.0)) as u32
                 };
-                let measured = if app_limited && queued && !damaged && self.restart.is_none() {
+                let measured = if app_limited && queued && !damaged {
                     offered
                 } else if received > 0 || damaged || collapsed {
                     (u64::from(through) * 107 / 100).min(u64::from(u32::MAX)) as u32
@@ -478,6 +488,9 @@ impl Controller {
                 let probe = self.probe.take();
                 self.step = 0.0;
                 self.overload = Some(offered);
+                // Congestion replaces the idle target with fresh evidence.
+                self.goal = None;
+                self.trusted = None;
                 if let Some((before, _)) = probe.filter(|_| !collapsed && !damaged) {
                     // Only the probe's excess queued: go as far under the
                     // last rate that held as the probe went over it, so that
@@ -524,12 +537,32 @@ impl Controller {
                         if !app_limited {
                             self.capacity = Some(self.budget);
                             self.step = (self.step.max(base) * 2.0).min(1.0);
+                        } else if self.goal.is_some() {
+                            // A restart step the encoder half used proves
+                            // only what it carried; bound the climb by that.
+                            let sent = self.sent_kbps.unwrap_or(0).min(self.budget);
+                            self.capacity = Some(self.capacity.unwrap_or(0).max(sent));
                         }
                         self.probe = None;
                     }
                 }
                 if self.probe.is_some() {
                     // Hold the probe's rate until its feedback arrives.
+                } else if let Some(goal) = self.goal.filter(|_| self.trusted.is_none()) {
+                    // Restart after idle: the retained target held before,
+                    // so double back to it one validated horizon at a time.
+                    let sent = self.sent_kbps.unwrap_or(0);
+                    if self.budget >= goal {
+                        self.goal = None;
+                    } else if sent >= self.budget / 2 {
+                        // Parity and header rounding keep a full encoder's
+                        // wire rate a little under small budgets: half
+                        // proves the encoder used the last step.
+                        // Double what was carried, not the budget: a step
+                        // overshoots by at most the rate that just held.
+                        self.probe = Some((self.budget, now));
+                        self.budget = sent.saturating_mul(2).max(self.budget).min(goal).min(cap);
+                    }
                 } else if let Some(capacity) = self.capacity {
                     let safe = (capacity * margin / 100).max(self.floor).min(cap);
                     if self.budget < safe {
@@ -553,6 +586,57 @@ impl Controller {
             }
         }
         self.budget != old
+    }
+}
+
+/// Pacer rate for one frame. Keyframes and recovery frames carry 30% parity
+/// and usually follow loss, when a FIFO is least able to absorb a burst: pace
+/// them at 1.5x the encoder's wire budget even on a clean path (simulated
+/// FIFO paths lose about a third fewer frames; 2.5x builds queue at 250 ms
+/// report cadence). Other frames follow the controller.
+pub(crate) fn frame_pace_kbps(pace: u32, wire_budget: u32, protected: bool) -> u32 {
+    let protect = wire_budget.saturating_mul(3) / 2;
+    match (protected, pace) {
+        (false, _) => pace,
+        (true, 0) => protect,
+        (true, pace) => pace.min(protect),
+    }
+}
+
+/// The host's parity policy, shared with the transport simulations so they
+/// measure exactly what the server sends: the path percentage (loss and RTT
+/// floors, capped at 30%) and the learned burst floor. Protected frames add
+/// their own floor in the packetizer and in [`video_budget`].
+#[derive(Default)]
+pub(crate) struct FecPolicy {
+    loss: f32,
+    burst: f32,
+}
+
+impl FecPolicy {
+    /// Fold one viewer report in; returns (percent, burst) for the packetizer.
+    pub(crate) fn update(
+        &mut self,
+        report: &Report,
+        controller: &Controller,
+        elapsed: Duration,
+    ) -> (u8, u8) {
+        self.loss = latch_proto::video::fec_loss_sample(self.loss, report.loss_pct, elapsed);
+        // Congestion loss is the controller's to fix, and a near-total loss
+        // window is a collapse, not a burst length worth protecting.
+        self.burst = latch_proto::video::fec_loss_sample(
+            self.burst,
+            if controller.pacing() || report.unrecovered_loss_pct.is_some_and(|loss| loss > 10.0) {
+                0.0
+            } else {
+                f32::from(report.loss_burst_packets)
+            },
+            elapsed,
+        );
+        (
+            latch_proto::video::transport_fec_percent(self.loss, controller.base_rtt()),
+            self.burst.round() as u8,
+        )
     }
 }
 
@@ -646,39 +730,56 @@ mod tests {
     }
 
     #[test]
-    fn idle_retains_a_sustainable_budget_and_zero_is_application_limited() {
+    fn idle_retains_the_budget_but_ages_its_proof_and_restarts_by_doubling() {
         let start = Instant::now();
         let mut c = Controller::new(50_000, start);
         c.capacity = Some(50_000);
+        let clean = |received| Report {
+            rtt_ms: 10.0,
+            received_kbps: received,
+            unrecovered_loss_pct: Some(0.0),
+            window_ms: 50,
+            ..Default::default()
+        };
         for _ in 0..4 {
             c.observe_sent(0);
         }
+        let mut t = start;
         for tick in 0..200 {
+            t = start + Duration::from_millis(tick * 50);
             c.observe_sent(if tick % 2 == 0 { 0 } else { 1000 });
-            c.update(
-                start + Duration::from_millis(tick * 50),
-                &Report {
-                    rtt_ms: 10.0,
-                    received_kbps: 1000,
-                    unrecovered_loss_pct: Some(0.0),
-                    window_ms: 50,
-                    ..Default::default()
-                },
-                10.0,
-                25.0,
-            );
+            c.update(t, &clean(1000), 10.0, 25.0);
             assert!(c.application_limited());
-            assert_eq!(c.budget(), 50_000);
-            if tick >= 40 {
-                assert!(c.capacity.is_none());
+            assert_eq!(c.budget(), 50_000, "idle keeps the target");
+            if tick < 20 {
+                assert_eq!(
+                    c.encoder_wire_budget(),
+                    50_000,
+                    "a short pause resumes at once"
+                );
             }
         }
-        assert!(c.pace_kbps() > 0);
-        assert!(c.encoder_wire_budget(120) < c.budget());
+        // Aged to twice the idle peak (above 1/32 of the goal); paced.
+        assert!(c.capacity.is_none());
+        assert_eq!(c.encoder_wire_budget(), 2000);
+        assert_eq!(c.pace_kbps(), 5000);
         assert!(video_budget(1000, 10, 0, 240, false, false) > 0);
-        c.observe_sent(50_000);
-        assert!(!c.application_limited());
+        // Motion: the first train runs at the trust, then doubles per
+        // validated horizon back to the retained target, and pacing ends.
+        let mut doublings = 0;
+        for _ in 0..40 {
+            t += Duration::from_millis(50);
+            let sent = c.encoder_wire_budget();
+            c.observe_sent(sent);
+            let before = c.budget();
+            c.update(t, &clean(sent), 10.0, 0.0);
+            assert!(!c.application_limited());
+            assert!(c.budget() <= before * 2);
+            doublings += usize::from(c.budget() == before * 2);
+        }
         assert_eq!(c.budget(), 50_000);
+        assert!(doublings >= 4);
+        assert_eq!(c.pace_kbps(), 0);
     }
 
     #[test]
@@ -921,5 +1022,139 @@ mod tests {
             c.update(t, &r, 10.0, 0.0);
         }
         assert_eq!(c.budget(), 100_000);
+    }
+
+    /// One fake-clock 50 ms window at 10 ms RTT with the given delivery.
+    fn window(c: &mut Controller, at: Instant, sent: u32, received: u32, residual: f32) {
+        let raw = (sent - received) as f32 * 100.0 / sent.max(1) as f32;
+        c.observe_sent(sent);
+        c.update(
+            at,
+            &Report {
+                rtt_ms: 10.0,
+                received_kbps: received,
+                loss_pct: raw,
+                unrecovered_loss_pct: Some(residual),
+                frames_lost: u64::from(residual > 0.0),
+                window_ms: 50,
+                ..Default::default()
+            },
+            10.0,
+            0.0,
+        );
+    }
+
+    #[test]
+    fn an_underfilled_encoder_still_backs_off_from_a_policer() {
+        // PR #58 review S1: a 100 Mbps budget, an encoder that only offers
+        // 10 Mbps, a queue-free 5 Mbps policer and 50% loss. Underfilling
+        // the budget is not evidence that the path carries the offer.
+        let start = Instant::now();
+        let mut c = Controller::new(100_000, start);
+        for tick in 0..600 {
+            let sent = c.budget().min(10_000);
+            let received = sent.min(5000);
+            let loss = (sent - received) as f32 * 100.0 / sent as f32;
+            window(
+                &mut c,
+                start + Duration::from_millis(tick * 50),
+                sent,
+                received,
+                loss,
+            );
+        }
+        assert!((4500..=5250).contains(&c.budget()), "{}", c.budget());
+        // Moderate loss takes the rate test, which must lower the actual
+        // offer (not just an unused budget) to learn anything.
+        let mut c = Controller::new(100_000, start);
+        let mut probed = false;
+        for tick in 0..160 {
+            let sent = c.budget().min(10_000);
+            probed |= sent <= 8000;
+            let received = sent.min(9200);
+            let loss = (sent - received) as f32 * 100.0 / sent as f32;
+            window(
+                &mut c,
+                start + Duration::from_millis(tick * 50),
+                sent,
+                received,
+                loss,
+            );
+        }
+        assert!(probed, "a budget-only probe never changes the load");
+        assert!((8500..=9400).contains(&c.budget()), "{}", c.budget());
+    }
+
+    #[test]
+    fn random_loss_under_a_policer_settles_below_it() {
+        // Review S11: a 90 Mbps policer plus 10% random loss, with residual
+        // damage in every window. Raw loss falls from 19% to 10% under the
+        // policer, which does not halve; the measured floor must not make
+        // the controller restore the overshoot or collapse to its floor.
+        let start = Instant::now();
+        let mut c = Controller::new(100_000, start);
+        let mut over = 0;
+        for tick in 0..1200 {
+            let sent = c.budget();
+            window(
+                &mut c,
+                start + Duration::from_millis(tick * 50),
+                sent,
+                sent.min(90_000) * 9 / 10,
+                4.0,
+            );
+            over += usize::from(tick >= 200 && c.budget() > 90_000);
+        }
+        assert!((85_000..=90_000).contains(&c.budget()), "{}", c.budget());
+        assert!(
+            over < 100,
+            "re-tested the overshoot in {over} of 1000 windows"
+        );
+    }
+
+    #[test]
+    fn protected_frames_fit_the_wire_reservation() {
+        // Review S4: payload sized by video_budget, packetized for real
+        // (keyframes and recovery frames get 30% and at least four parity
+        // shards), stays within the wire budget plus the 80-byte tunnel
+        // allowance. Below five minimum datagrams per frame slot the
+        // irreducible protected layout is the permitted burst.
+        use latch_proto::video::{OutFrame, Packetizer};
+        for (budget, fps) in [(1000, 240), (5000, 120), (20_000, 120), (100_000, 120)] {
+            for kind in 0..3 {
+                let protected = kind != 0;
+                let target = video_budget(budget, 10, 0, fps, false, protected);
+                let data = vec![0x5a; (target * 1000 / 8 / fps) as usize];
+                let mut p = Packetizer::new(1);
+                if kind == 2 {
+                    p.packetize(
+                        &OutFrame {
+                            data: &[],
+                            keyframe: true,
+                            host_delay: 0,
+                        },
+                        |_| {},
+                    );
+                    p.mark_recovery(0);
+                }
+                let mut wire = 0;
+                let frame = OutFrame {
+                    data: &data,
+                    keyframe: kind == 1,
+                    host_delay: 0,
+                };
+                p.packetize(&frame, |dg| wire += dg.len() + 80);
+                let wire_kbps = (wire * 8 * fps as usize / 1000) as u32;
+                let minimum = if protected {
+                    5 * 109 * 8 * fps / 1000
+                } else {
+                    0
+                };
+                assert!(
+                    wire_kbps <= budget.max(minimum),
+                    "{budget} kbps at {fps} fps, kind {kind}: {wire_kbps} kbps on the wire"
+                );
+            }
+        }
     }
 }

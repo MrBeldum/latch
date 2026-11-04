@@ -47,17 +47,19 @@ pub fn transport_fec_percent(loss_pct: f32, rtt: Option<Duration>) -> u8 {
     fec_percent_for(loss_pct, rtt).min(30)
 }
 
-/// Shared rounded parity layout for reservation and packetization.
+/// Parity shards for one block of `data` shards: the path percentage, the
+/// learned burst floor (bounded to half a block) and, for keyframes and
+/// recovery frames, 30% and at least four. The host's wire reservation uses
+/// the same layout, so the two cannot drift apart.
 pub fn fec_parity_shards(data: usize, percent: u8, burst: u8, protected: bool) -> usize {
-    let percent = percent.max(if protected { 30 } else { 0 });
+    let percent = percent
+        .clamp(MIN_FEC_PERCENT, MAX_FEC_PERCENT)
+        .max(if protected { 30 } else { 0 });
+    let burst = usize::from(burst.min(32));
     (data * usize::from(percent))
         .div_ceil(100)
         .max(if protected { 4 } else { 1 })
-        .max(if burst > 0 {
-            (usize::from(burst) + 2).min(data)
-        } else {
-            0
-        })
+        .max(if burst > 0 { (burst + 2).min(data) } else { 0 })
         .min(255 - data)
 }
 
@@ -121,6 +123,10 @@ impl Packetizer {
 
     pub fn fec_percent(&self) -> u8 {
         self.fec_percent
+    }
+
+    pub fn fec_burst(&self) -> u8 {
+        self.fec_burst
     }
 
     /// The number the next frame will get.

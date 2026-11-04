@@ -16,9 +16,7 @@ use latch_proto::audio::{AudioOut, AudioPacketizer, AudioReceiver};
 use latch_proto::control::{self, end, Accept, AudioFormat, End, Message, Notice, StreamRequest};
 use latch_proto::input::InputReceiver;
 use latch_proto::rtt::RttEstimator;
-use latch_proto::video::{
-    transport_fec_percent, KeyframeAnswers, OutFrame, Packetizer, DEFAULT_FEC_PERCENT,
-};
+use latch_proto::video::{KeyframeAnswers, OutFrame, Packetizer, DEFAULT_FEC_PERCENT};
 use latch_proto::wire::{self, Datagram};
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
@@ -650,8 +648,7 @@ impl Server {
         let mut controller =
             crate::congestion::Controller::new(accept.bitrate_kbps, Instant::now());
         let requested_bitrate = accept.bitrate_kbps;
-        let mut fec_loss = 0.0;
-        let mut fec_burst = 0.0;
+        let mut fec_policy = crate::congestion::FecPolicy::default();
         let mut last_keepalive = Instant::now();
         let mut last_hello = Instant::now() - HELLO_EVERY;
         let mut last_ping = Instant::now();
@@ -702,10 +699,10 @@ impl Server {
                     let queue_ms =
                         session.transport.queue_us.swap(0, Ordering::Relaxed) as f32 / 1000.0;
                     let changed = controller.update(Instant::now(), &r, host_rtt, queue_ms);
-                    session.transport.budget.store(
-                        controller.encoder_wire_budget(accept.fps),
-                        Ordering::Relaxed,
-                    );
+                    session
+                        .transport
+                        .budget
+                        .store(controller.encoder_wire_budget(), Ordering::Relaxed);
                     if changed {
                         tracing::debug!(
                             requested_bitrate,
@@ -720,23 +717,8 @@ impl Server {
                     session
                         .pace_kbps
                         .store(controller.pace_kbps(), Ordering::Relaxed);
-                    fec_loss =
-                        latch_proto::video::fec_loss_sample(fec_loss, r.loss_pct, now - then);
-                    let fec = transport_fec_percent(fec_loss, controller.base_rtt());
-                    fec_burst = latch_proto::video::fec_loss_sample(
-                        fec_burst,
-                        if controller.pacing()
-                            || r.unrecovered_loss_pct.is_some_and(|loss| loss > 10.0)
-                        {
-                            0.0
-                        } else {
-                            f32::from(r.loss_burst_packets)
-                        },
-                        now - then,
-                    );
-                    session
-                        .fec_burst
-                        .store(fec_burst.round() as u8, Ordering::Relaxed);
+                    let (fec, fec_burst) = fec_policy.update(&r, &controller, now - then);
+                    session.fec_burst.store(fec_burst, Ordering::Relaxed);
                     session.fec.store(fec, Ordering::Relaxed);
                     let status = self.status();
                     let report = control::Report {
@@ -1550,7 +1532,11 @@ fn paced_video(
             keyframe: frame.keyframe,
             host_delay: delay,
         };
-        let protected = frame.keyframe || frame.recovery.is_some();
+        let pace = crate::congestion::frame_pace_kbps(
+            session.pace_kbps.load(Ordering::Relaxed),
+            session.transport.budget.load(Ordering::Relaxed),
+            frame.keyframe || frame.recovery.is_some(),
+        );
         let number = packetizer.next_frame();
         if recovery.enabled {
             let mut sent = recovery.sent.lock();
@@ -1578,8 +1564,7 @@ fn paced_video(
             .queue_us
             .fetch_max(queued.elapsed().as_micros() as u64, Ordering::Relaxed);
         packetizer.packetize_batches(&out, |batch| {
-            let pace = session.pace_kbps.load(Ordering::Relaxed);
-            if pace == 0 && !protected {
+            if pace == 0 {
                 if !session.stopping() {
                     send_batch(&mut sender, &server.udp, session, batch, addr);
                 }
@@ -1594,18 +1579,7 @@ fn paced_video(
                         .transport
                         .queue_us
                         .fetch_max(queued.elapsed().as_micros() as u64, Ordering::Relaxed);
-                    let rate = session.pace_kbps.load(Ordering::Relaxed);
-                    let rate = if rate == 0 {
-                        session.transport.budget.load(Ordering::Relaxed)
-                    } else {
-                        rate
-                    };
-                    let rate = if protected {
-                        rate.min(session.transport.budget.load(Ordering::Relaxed))
-                    } else {
-                        rate
-                    };
-                    let wait = pacer.delay(Instant::now(), datagram.len(), rate);
+                    let wait = pacer.delay(Instant::now(), datagram.len(), pace);
                     if wait.is_zero() {
                         break;
                     }

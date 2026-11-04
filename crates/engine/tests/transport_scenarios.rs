@@ -1,5 +1,6 @@
 //! Codec-free, deterministic frame/FEC/FIFO feedback scenarios. Run --nocapture
 //! for measurements; all time is simulated, including delayed feedback and IDR.
+#[allow(dead_code)]
 #[path = "../src/congestion.rs"]
 mod congestion;
 use latch_proto::{
@@ -69,8 +70,7 @@ fn transport_scenarios() {
         let mut cut_at = None;
         let mut peak = 0;
         let mut minimum = ceiling;
-        let mut fec_loss = 0.0;
-        let mut fec_burst: f32 = 0.0;
+        let mut fec = congestion::FecPolicy::default();
         let mut tokens = 0.0f64;
         let mut seed = 0x9e37_79b9_u32;
         let mut damaged_windows = 0;
@@ -98,9 +98,9 @@ fn transport_scenarios() {
                 let keyframe = idr_due.is_some_and(|at| at <= now)
                     && now - last_idr >= Duration::from_millis(base);
                 let size = (u64::from(congestion::video_budget(
-                    controller.budget(),
+                    controller.encoder_wire_budget(),
                     tx.fec_percent(),
-                    fec_burst.round() as u8,
+                    tx.fec_burst(),
                     fps as u32,
                     false,
                     keyframe,
@@ -203,27 +203,10 @@ fn transport_scenarios() {
                 if name == "step" && (2500..8000).contains(&ms) && controller.budget() < before {
                     low_phase_cuts += 1;
                 }
-                fec_loss = latch_proto::video::fec_loss_sample(
-                    fec_loss,
-                    report.loss_pct,
-                    Duration::from_millis(50),
-                );
-                fec_burst = latch_proto::video::fec_loss_sample(
-                    fec_burst,
-                    if controller.pacing()
-                        || report.unrecovered_loss_pct.is_some_and(|loss| loss > 10.0)
-                    {
-                        0.0
-                    } else {
-                        f32::from(report.loss_burst_packets)
-                    },
-                    Duration::from_millis(50),
-                );
-                tx.set_fec_burst(fec_burst.round() as u8);
-                tx.set_fec_percent(latch_proto::video::transport_fec_percent(
-                    fec_loss,
-                    controller.base_rtt(),
-                ));
+                // The server's exact parity policy (shared helper).
+                let (percent, burst) = fec.update(&report, &controller, Duration::from_millis(50));
+                tx.set_fec_percent(percent);
+                tx.set_fec_burst(burst);
             }
             if ms >= 8000 && controller.budget() >= ceiling * 95 / 100 {
                 ceiling_at.get_or_insert(ms - 8000);

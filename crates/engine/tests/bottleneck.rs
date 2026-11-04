@@ -4,6 +4,7 @@
 //! checks convergence at 10 Mbps; an encoder budget is not measured traffic.
 
 // Exercise the production controller without widening its public API.
+#[allow(dead_code)]
 #[path = "../src/congestion.rs"]
 mod congestion;
 #[path = "support/relay.rs"]
