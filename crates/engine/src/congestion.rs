@@ -13,6 +13,8 @@ const PROBE_PAIR: Duration = Duration::from_millis(200);
 const PROBE_MEMORY: Duration = Duration::from_millis(2500);
 /// Below this budget a resumed frame is too small to need probing.
 const PROBE_MIN_KBPS: u32 = 4000;
+/// Below this send rate a loss test has too few datagrams to mean anything.
+const LOSS_TEST_MIN_KBPS: u32 = 4000;
 
 pub(crate) struct Controller {
     ceiling: u32,
@@ -61,7 +63,9 @@ pub(crate) struct Controller {
     overload: Option<u32>,
     /// A lossless RTT plateau that survives a fourfold load reduction.
     route: Option<(f32, Instant, u32)>,
+    /// Since when queue-free damage has lasted, and its raw loss (sum, windows).
     loss_since: Option<Instant>,
+    loss_before: (f32, u32),
     severe_since: Option<Instant>,
     /// A reversible 20% reduction tests whether queue-free loss follows load.
     loss_probe: Option<LossProbe>,
@@ -73,6 +77,9 @@ pub(crate) struct Controller {
 struct LossProbe {
     budget: u32,
     sent: u32,
+    /// The test's reduced budget, and what was sent while it was measured.
+    limit: u32,
+    sent_sum: u64,
     loss: f32,
     at: Instant,
     sum: f32,
@@ -113,6 +120,7 @@ impl Controller {
             overload: None,
             route: None,
             loss_since: None,
+            loss_before: (0.0, 0),
             severe_since: None,
             loss_probe: None,
             random_until: now,
@@ -314,6 +322,10 @@ impl Controller {
         {
             damaged = false;
         }
+        if self.loss_since.is_some() && self.loss_probe.is_none() {
+            self.loss_before.0 += report.loss_pct.max(loss);
+            self.loss_before.1 += 1;
+        }
         let app_limited = self.application_limited() && !self.pacing;
         // Give parity feedback a chance before testing loss against offered load.
         // A radio burst cannot prove a policer: loss must improve at a lower
@@ -330,10 +342,16 @@ impl Controller {
                 if now.duration_since(probe.at) >= horizon {
                     probe.sum += raw;
                     probe.samples += 1;
+                    probe.sent_sum += u64::from(self.sent_kbps.unwrap_or(0));
                 }
                 if now.duration_since(probe.at) >= horizon + Duration::from_secs(1) {
                     let probe = self.loss_probe.take().unwrap();
-                    confirmed = self.sent_kbps.unwrap_or(0) < probe.sent * 9 / 10
+                    // The test lowered the load only if the sender fell and
+                    // filled the reduced budget: a sparse, content-limited
+                    // stream's rate falls and rises on its own.
+                    let sent = probe.sent_sum / u64::from(probe.samples.max(1));
+                    confirmed = sent < u64::from(probe.sent) * 9 / 10
+                        && sent >= u64::from(probe.limit) * 85 / 100
                         && probe.samples > 0
                         && (probe.sum / (probe.samples as f32) < probe.loss * 0.5
                             || probe.loss - probe.sum / (probe.samples as f32)
@@ -366,18 +384,35 @@ impl Controller {
                     self.loss_since = None;
                 }
             } else if damaged && now >= self.random_until {
+                if self.loss_since.is_none() {
+                    self.loss_before = (raw, 1);
+                }
                 let since = *self.loss_since.get_or_insert(now);
-                if now.duration_since(since) >= Duration::from_millis(500) {
+                let (sum, windows) = self.loss_before;
+                let mean = sum / windows.max(1) as f32;
+                if now.duration_since(since) >= Duration::from_millis(500)
+                    && self.sent_kbps.unwrap_or(0) < LOSS_TEST_MIN_KBPS
+                {
+                    // A sparse stream sends a few datagrams a window: a
+                    // second of them cannot tell a policer from chance.
+                    // Parity, and the severe-loss escape, cover it.
+                    self.loss_since = None;
+                } else if now.duration_since(since) >= Duration::from_millis(500) {
+                    // Compare means over every window: one sparse window's
+                    // spike would always seem to fall by half in the test.
+                    let limit = (self.sent_kbps.unwrap_or(self.budget).min(self.budget) * 4 / 5)
+                        .max(self.floor);
                     self.loss_probe = Some(LossProbe {
                         budget: self.budget,
                         sent: self.sent_kbps.unwrap_or(self.budget),
-                        loss: raw.max(0.1),
+                        limit,
+                        sent_sum: 0,
+                        loss: mean.max(0.1),
                         at: now,
                         sum: 0.0,
                         samples: 0,
                     });
-                    self.budget = (self.sent_kbps.unwrap_or(self.budget).min(self.budget) * 4 / 5)
-                        .max(self.floor);
+                    self.budget = limit;
                 }
             } else if !damaged {
                 self.loss_since = None;
@@ -950,6 +985,34 @@ mod tests {
             }
             let regrown = if trains > 0 { 18_000 } else { 50_000 };
             assert_eq!(c.budget(), regrown, "trains {trains}");
+        }
+    }
+
+    #[test]
+    fn a_sparse_stream_does_not_rate_test_random_loss_spikes() {
+        // A 1.5 Mbps desktop stream sends a few datagrams a window, so a
+        // 4-packet burst reads as a 25% window: a second of such samples
+        // cannot confirm a policer (it did, by regression to the mean).
+        let start = Instant::now();
+        let mut c = Controller::new(20_000, start);
+        for tick in 0..600u64 {
+            let lossy = tick % 6 == 0;
+            c.observe_sent(1500);
+            c.update(
+                start + Duration::from_millis(tick * 50),
+                &Report {
+                    rtt_ms: 10.0,
+                    received_kbps: if lossy { 1100 } else { 1500 },
+                    loss_pct: if lossy { 25.0 } else { 0.0 },
+                    unrecovered_loss_pct: Some(if lossy { 25.0 } else { 0.0 }),
+                    frames_lost: u64::from(lossy),
+                    window_ms: 50,
+                    ..Default::default()
+                },
+                10.0,
+                0.0,
+            );
+            assert_eq!(c.budget(), 20_000, "tick {tick}");
         }
     }
 
