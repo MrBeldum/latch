@@ -325,8 +325,8 @@ through `libc`.
   plus a report window. A smoothed positive delay gradient detects filling
   queues; sustained delay above max(6 ms, 10% of base RTT, 3× measured ping
   jitter) also counts, so 5–15 ms of Wi-Fi jitter is not a queue. Recovered
-  random loss alone does not cut bitrate; uncorrected loss or lost frames do,
-  at any raw loss (a policer). Parity has a base-RTT floor of 15% at 40 ms and 20%
+  random loss alone does not cut bitrate. Moderate queue-free residual damage
+  first raises FEC, then tests whether loss improves with reduced offered load. Parity has a base-RTT floor of 15% at 40 ms and 20%
   at 100 ms (30% cap), with fast attack and a two-second decay after bursts.
 * **Send immediately on clean paths.** The bounded two-frame sender remains,
   with no token-bucket delay on a clean path. Queue or severe sustained loss
@@ -401,18 +401,23 @@ media. Audio, input acknowledgements and pings bypass the video queue.
 Under pressure video uses a wire-byte token bucket at 2.5 times the wire budget,
 with a sixteen-datagram burst. The encoder allowance reserves audio separately,
 then compounds header overhead with rounded FEC rather than adding the two.
-Cuts use the lower of current budget and actual successful send rate, bounded
-by received throughput +7% (a standing FIFO delivers its bottleneck rate; a
-viewer without `received_kbps` is credited the offered rate less its loss).
+For a loaded sender, cuts use the lower of budget and successful send rate,
+bounded by received throughput +7%. A persistently application-limited sender
+(four reports below 80% of budget, including zero-byte windows) retains its
+sustainable estimate; a new delay cut starts from that budget, without
+mistaking sparse throughput or a CPU sender stall for network capacity.
 Each cut removes 20%, or 40% for queue delay above 20 ms or loss above 10%.
 Loss in a window that delivered more than is now sent predates the last cut
 and is ignored, as is a queue still falling within three horizons of a cut
 (horizon: 2× base RTT plus one report window, two for windows ≥200 ms). Sender age above
-20 ms is also pressure. Uncorrected loss above 3% (raw loss for legacy
-reports) or lost frames in two windows running count at any raw loss. Loss
-without queue delay is treated as a policer: a smoothed received rate (+7%
-headers) caps the climb at 97% of it for three seconds, during which one
-damaged window near it cuts again. A 50 ms window holds only a few frames, so
+20 ms is pressure only for a loaded sender. Moderate queue-free damage with
+usable send/receive feedback gets 500 ms for FEC adaptation before a reversible
+20% reduction. After a feedback horizon plus one second, loss must fall by half
+and actual sending by 10% to confirm a policer; otherwise the budget returns
+and no further test runs for three seconds. Confirmed policers cap probing for
+ten seconds (legacy/severe-loss cuts retain the three-second memory).
+Uncorrected loss above 10%, unusable rate feedback and delay pressure retain
+conservative cuts. A 50 ms window holds only a few frames, so
 received/sent ratios are too coarse to be a signal on their own; they gate only
 the one-window collapse cut, together with loss above 10% or delay above 20 ms. The
 ping-jitter estimate starts at 3 ms and learns only from falling delay outside
@@ -435,6 +440,15 @@ is a route change: the RTT minima are rebased and the estimate dropped; loss or
 a falling RTT (a draining FIFO) cancels the evidence. Raw legacy loss under 10%
 without lost frames is treated as repaired radio loss. Rate setters run between
 frames at a 5% target change.
+Parity percentages retain the 30% path cap, but every keyframe/recovery block
+has at least 30% and four parity shards. Other frames add up to the measured
+burst plus two shards (at most their data count); burst evidence is bounded to
+32 and decays over two seconds, rounding to zero. Queue overflow is excluded
+from burst learning. The encoder allowance uses the exact rounded data/parity
+layout and 108 bytes per packet for Latch/IP/tunnel overhead, with 4% headroom.
+An exceptional keyframe's extra floor is measured as overhead rather than
+reserved on every normal frame. CPU time computing parity is excluded from
+unpaced sender queue age. See [FEC measurements](measurements/2026-11-04/transport-fec/README.md).
 This remains a heuristic controller; it is not a full GCC implementation.
 
 Linux sends up to 32 datagrams with `sendmmsg` and receives with `recvmmsg`.

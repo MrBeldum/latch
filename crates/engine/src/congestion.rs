@@ -15,6 +15,7 @@ pub(crate) struct Controller {
     clean_since: Instant,
     pressure_windows: u8,
     sent_kbps: Option<u32>,
+    app_limited_windows: u8,
     pacing: bool,
     previous_delay: f32,
     gradient: f32,
@@ -40,6 +41,7 @@ pub(crate) struct Controller {
     /// A reversible 20% reduction tests whether queue-free loss follows load.
     loss_probe: Option<LossProbe>,
     random_until: Instant,
+    policer_until: Instant,
 }
 
 struct LossProbe {
@@ -63,6 +65,7 @@ impl Controller {
             clean_since: now,
             pressure_windows: 0,
             sent_kbps: None,
+            app_limited_windows: 0,
             pacing: false,
             previous_delay: 0.0,
             gradient: 0.0,
@@ -79,6 +82,7 @@ impl Controller {
             loss_since: None,
             loss_probe: None,
             random_until: now,
+            policer_until: now,
         }
     }
 
@@ -88,11 +92,15 @@ impl Controller {
 
     pub(crate) fn observe_sent(&mut self, kbps: u32) {
         self.sent_kbps = Some(kbps);
+        self.app_limited_windows = if kbps < self.budget * 4 / 5 {
+            self.app_limited_windows.saturating_add(1)
+        } else {
+            0
+        };
     }
 
     pub(crate) fn application_limited(&self) -> bool {
-        self.sent_kbps
-            .is_some_and(|sent| sent < self.budget * 4 / 5)
+        self.app_limited_windows >= 4
     }
 
     pub(crate) fn pacing(&self) -> bool {
@@ -132,7 +140,11 @@ impl Controller {
         self.previous_delay = delay;
         let jitter = self
             .jitter
-            .max(if self.application_limited() { 3.0 } else { 0.0 });
+            .max(if self.application_limited() && !self.pacing {
+                3.0
+            } else {
+                0.0
+            });
         let threshold = 6.0f32.max(self.min_rtt[1].min(self.min_rtt[0]) * 0.1);
         queued |= delay > threshold.max(jitter * 3.0);
         queued |= delay > 3.0f32.max(jitter * 1.5) && self.gradient > jitter.max(1.0);
@@ -201,7 +213,7 @@ impl Controller {
         let probe_queued = self.probe.is_some() && delay > 3.0f32.max(self.jitter * 2.0);
         queued |= probe_queued;
         let old = self.budget;
-        let app_limited = self.application_limited();
+        let app_limited = self.application_limited() && !self.pacing;
         // Give parity feedback a chance before testing loss against offered load.
         // A radio burst cannot prove a policer: loss must improve at a lower
         // *actual* send rate. Never ratchet an inconclusive test down again.
@@ -246,6 +258,7 @@ impl Controller {
                 self.loss_since = None;
             }
             if confirmed {
+                self.policer_until = now + Duration::from_secs(10);
                 self.pressure_windows = 2;
             }
             damaged = confirmed;
@@ -279,7 +292,7 @@ impl Controller {
         // that overshoot, not a blip.
         let lossy = self
             .lossy
-            .filter(|(_, at)| now.duration_since(*at) < LOSSY_MEMORY)
+            .filter(|(_, at)| now.duration_since(*at) < LOSSY_MEMORY || now < self.policer_until)
             .map(|(kbps, _)| kbps);
         let elapsed = now.saturating_duration_since(self.last_step);
         // Reports up to 2 s apart integrate all elapsed time (including 5.1's
@@ -428,20 +441,38 @@ pub(crate) fn video_budget(wire_kbps: u32, fec: u8, burst: u8, fps: u32, audio: 
     let available = wire_kbps
         .saturating_sub(if audio { 1200 } else { 0 })
         .max(wire_kbps / 2);
-    let mut percent = u64::from(fec);
-    // Reserve the packet floor too: on a thin frame a short burst costs
-    // proportionally more parity than on a full 64-shard block.
-    for _ in 0..4 {
-        let video = u64::from(available) * 10000 / (112 * (102 + percent));
-        let bytes = video * 1000 / 8 / u64::from(fps.max(1));
-        let shards = bytes.div_ceil(latch_proto::MAX_SHARD_LEN as u64).max(1);
+    let fps = u64::from(fps.max(1));
+    let allowance = u64::from(available) * 1000 * 96 / 100 / 8 / fps;
+    let mut low = 0;
+    let mut high = available;
+    // Use the packetizer's rounded layout. Percentage-only reservation can
+    // exceed the wire budget on small frames once a burst needs extra shards.
+    while low < high {
+        let mid = low + (high - low).div_ceil(2);
+        let bytes = u64::from(mid) * 1000 / 8 / fps;
+        let len = bytes.clamp(1, latch_proto::MAX_SHARD_LEN as u64);
+        let shards = bytes.div_ceil(len).max(1);
         let blocks = shards.div_ceil(latch_proto::MAX_BLOCK_DATA as u64);
-        let data = shards / blocks;
-        if burst > 0 {
-            percent = percent.max((u64::from(burst) + 2).min(data) * 100 / data);
+        let mut packets = shards;
+        for block in 0..blocks {
+            let data = shards / blocks + u64::from(block < shards % blocks);
+            let parity = (data * u64::from(fec))
+                .div_ceil(100)
+                .max(1)
+                .max(if burst > 0 {
+                    (u64::from(burst) + 2).min(data)
+                } else {
+                    0
+                });
+            packets += parity;
+        }
+        if packets * (len + 108) <= allowance {
+            low = mid;
+        } else {
+            high = mid - 1;
         }
     }
-    ((u64::from(available) * 10000 / (112 * (102 + percent))) as u32).max(1)
+    low.max(1)
 }
 
 #[cfg(test)]
@@ -494,6 +525,9 @@ mod tests {
         let start = Instant::now();
         let mut c = Controller::new(50_000, start);
         c.capacity = Some(50_000);
+        for _ in 0..4 {
+            c.observe_sent(0);
+        }
         for tick in 0..200 {
             c.observe_sent(if tick % 2 == 0 { 0 } else { 1000 });
             c.update(
@@ -620,7 +654,9 @@ mod tests {
             rtt_ms: 12.0,
             ..Default::default()
         };
-        c.observe_sent(8_000);
+        for _ in 0..4 {
+            c.observe_sent(8_000);
+        }
         c.update(start, &r, 12.0, 0.0);
         assert!(!c.pacing());
         assert_eq!(c.base_rtt(), Some(Duration::from_millis(12)));

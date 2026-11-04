@@ -195,7 +195,10 @@ the last one padded with zeros, and splits them into
 `blocks = ceil(D / 64)` consecutive blocks of nearly equal size (the first
 `D mod blocks` blocks get one shard more). Each block gets
 `parity = ceil(data * fec_percent / 100)` parity shards, at least one, at
-most `255 - data`. The block's data and parity shards together form a
+most `255 - data`. Hosts may raise this within the existing field: keyframes
+and negotiated recovery frames now get at least 30% and four parity shards;
+normal frames cover an observed burst plus two shards, at most their data count.
+No datagram size changes. The block's data and parity shards together form a
 systematic Reed–Solomon code over GF(2⁸) (polynomial 0x11D) with a
 Cauchy generator matrix, as specified in `crates/proto/src/fec.rs`: any
 `data` of the block's shards rebuild it. `shard_len` is at most 1 172.
@@ -454,13 +457,15 @@ original four-field report. No datagram layout or protocol number changes.
 Viewer reports add `received_kbps` (received media rate), `frames_lost`
 (unrecovered frames in the last measurement window), `unrecovered_loss_pct`
 (optional; absence means legacy raw loss), `queue_ms` (decode queue age),
+`loss_burst_packets` (longest data-shard erasure run, bounded to 32),
 and `window_ms` (measurement duration). New measurements and reports use 50 ms
 windows (older peers retain their 250 ms or one-second windows). Raw `loss_pct` includes FEC-recovered shards; recovery alone is
 not congestion. RTT is milliseconds on the reporter's clock.
 
 Hosts may reply using the existing Report type, adding
 `requested_bitrate_kbps`, `applied_bitrate_kbps`, `pacing_queue_ms`,
-`send_errors`, `send_retries`, `socket_send_bytes`, `socket_receive_bytes`.
+`send_errors`, `send_retries`, `socket_send_bytes`, `socket_receive_bytes`,
+`wire_budget_kbps` and `application_limited`. All have serde defaults.
 Applied bitrate is the encoder target after wire overhead reservation;
 requested bitrate is the session ceiling. Error/retry counts are cumulative.
 Legacy viewers ignore host Reports as an unhandled existing message type.
@@ -480,20 +485,27 @@ ignored. Added report fields default on read; old JSON readers ignore them.
 `engine::congestion` is the only bitrate controller. New report windows are
 50 ms; old 250 ms / one-second reports remain valid. Host pings at 50 Hz supply
 each window's lowest RTT. A smoothed increasing delay gradient or standing rise
-above max(6 ms, base RTT / 10, 3× ping jitter) is pressure, as are uncorrected
-loss and lost frames at any raw loss. Two windows trigger a budget cut; one
-does when `received_kbps` is under half the host's send rate while loss is
-above 10% or delay above 20 ms (reports without `received_kbps` never do).
+above max(6 ms, base RTT / 10, 3× ping jitter) is pressure (idle senders retain
+a 3 ms jitter allowance). Severe residual loss or damage without usable rate
+feedback remains pressure. Moderate queue-free damage first raises FEC, then
+uses a reversible 20% rate reduction after 500 ms; only loss falling by half
+with actual load falling at least 10% confirms a policer after a horizon plus
+one second. Inconclusive tests restore the budget and wait three seconds.
+Delay/collapse cuts stay immediate under the existing two/one-window gates.
 Clean recovery doubles the budget per 400 ms of actual time between reports
 (up to 2 s apart) back to just under the last sustainable rate, then probes
 above it in bounded, RTT-aware steps; it is capped below a policer's rate for
-three seconds after loss without queueing. The wire floor is 1 Mbps. Legacy
+three seconds after severe/legacy loss without queueing, ten after a confirmed
+rate-correlation test. The wire floor is 1 Mbps. Legacy
 reports without `unrecovered_loss_pct` count raw loss above 10% (or any lost
 frame) as damage.
 The session starts at its ceiling, and clean paths bypass pacing. Recovered
 random loss alone enables neither cuts nor pacing. Parity uses fast-attack,
 two-second-decay raw loss with a base-RTT floor (15% at 40 ms, 20% at 100 ms),
-capped at 30%. Data shards precede parity computation and transmission; a
+capped at 30% before the per-frame packet floors above. The sender reserves
+rounded parity, padding and headers inside its wire budget. Four reports below
+80% of budget mark the encoder application-limited; idle sends do not lower a
+sustainable estimate or validate a higher capacity probe. Data shards precede parity computation and transmission; a
 completed frame is handed to decode immediately, including mid-receive-batch.
 Protocol 1 datagrams remain at most 1200 bytes. No MTU or socket-offload
 capability is advertised by this change.

@@ -19,6 +19,16 @@ use std::{
 #[test]
 fn transport_scenarios() {
     for (name, cap, ceiling, base, interval, back, legacy) in [
+        ("loss1cap20", 20000, 20000, 10, 50, 10, false),
+        ("loss3cap20", 20000, 20000, 10, 50, 10, false),
+        ("loss5cap20", 20000, 20000, 10, 50, 10, false),
+        ("loss1cap50", 50000, 50000, 10, 50, 10, false),
+        ("loss3cap50", 50000, 50000, 10, 50, 10, false),
+        ("loss5cap50", 50000, 50000, 10, 50, 10, false),
+        ("loss1cap100", 100000, 100000, 10, 50, 10, false),
+        ("loss3cap100", 100000, 100000, 10, 50, 10, false),
+        ("loss5cap100", 100000, 100000, 10, 50, 10, false),
+        ("idle_motion", 50000, 50000, 10, 50, 10, false),
         ("steady20", 20000, 100000, 10, 50, 10, false),
         ("steady50", 50000, 100000, 10, 50, 10, false),
         ("steady100", 100000, 200000, 10, 50, 10, false),
@@ -35,16 +45,6 @@ fn transport_scenarios() {
         ("cap5", 5000, 100000, 10, 50, 10, false),
         ("route", 100000, 100000, 10, 50, 10, false),
         ("lan1g", 1000000, 1000000, 1, 50, 1, false),
-        ("loss1cap20", 20000, 20000, 10, 50, 10, false),
-        ("loss3cap20", 20000, 20000, 10, 50, 10, false),
-        ("loss5cap20", 20000, 20000, 10, 50, 10, false),
-        ("loss1cap50", 50000, 50000, 10, 50, 10, false),
-        ("loss3cap50", 50000, 50000, 10, 50, 10, false),
-        ("loss5cap50", 50000, 50000, 10, 50, 10, false),
-        ("loss1cap100", 100000, 100000, 10, 50, 10, false),
-        ("loss3cap100", 100000, 100000, 10, 50, 10, false),
-        ("loss5cap100", 100000, 100000, 10, 50, 10, false),
-        ("idle_motion", 50000, 50000, 10, 50, 10, false),
     ] {
         let fps = 120;
         let random = name.starts_with("loss");
@@ -219,7 +219,16 @@ fn transport_scenarios() {
             while feedback.front().is_some_and(|(at, ..)| *at <= now) {
                 let (_, report, rtt, sent) = feedback.pop_front().unwrap();
                 controller.observe_sent(sent);
-                controller.update(now, &report, rtt, 0.0);
+                controller.update(
+                    now,
+                    &report,
+                    rtt,
+                    if name == "idle_motion" && (1000..5000).contains(&ms) {
+                        25.0
+                    } else {
+                        0.0
+                    },
+                );
                 fec_loss = latch_proto::video::fec_loss_sample(
                     fec_loss,
                     report.loss_pct,

@@ -524,7 +524,11 @@ impl Reassembler {
                             }
                             missing
                         }
-                        None => total / count + usize::from(i < total % count),
+                        None => {
+                            let missing = total / count + usize::from(i < total % count);
+                            self.loss_burst = self.loss_burst.max(missing.min(32) as u8);
+                            missing
+                        }
                     } as u64;
                 }
             }

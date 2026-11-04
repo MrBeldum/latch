@@ -726,7 +726,7 @@ impl Server {
                     );
                     fec_loss =
                         latch_proto::video::fec_loss_sample(fec_loss, r.loss_pct, now - then);
-                    let fec = fec_percent_for(fec_loss, controller.base_rtt());
+                    let fec = fec_percent_for(fec_loss, controller.base_rtt()).min(30);
                     fec_burst = latch_proto::video::fec_loss_sample(
                         fec_burst,
                         if controller.pacing()
