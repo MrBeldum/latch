@@ -228,7 +228,9 @@ fn noise_stream_adapts_to_sustained_queue_delay_and_recovers() {
             && s.applied_bitrate_kbps < baseline.applied_bitrate_kbps / 4
             && s.rtt_ms >= baseline.rtt_ms + 20
             && frame > last_frame
-            && s.fps >= 5.0
+            // 12 fps over a ~250 ms stats window is 1–3 frames: one frame
+            // reads as 3.8 fps, still a moving picture.
+            && s.fps >= 3.0
             && s.loss_pct < 3.0
         {
             clean += 1;
@@ -252,7 +254,7 @@ fn noise_stream_adapts_to_sustained_queue_delay_and_recovers() {
         if s.applied_bitrate_kbps > constrained * 2
             && s.rtt_ms < baseline.rtt_ms + 20
             && frames.seq() > recovery_frame + 10
-            && s.fps >= 5.0
+            && s.fps >= 3.0
             && s.loss_pct < 3.0
         {
             eprintln!("recovered: {s:?}");
