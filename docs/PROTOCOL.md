@@ -423,8 +423,8 @@ viewer deduplicates indexes and accepts only ordered, contiguous prefixes
 of at least four packets (a lost tail is allowed). It uses the median
 eight-position packet pair, rather than total span. Pair dispersion must
 be at least twice the measured pair timing variation; a dominant stall
-is rejected. Equal timestamps allow up to 1 ms of receive batching noise; an entirely
-batched train supplies only a high timing bound.
+is rejected. Equal timestamps allow up to 1 ms of receive batching noise;
+an entirely batched train supplies only a high timing bound.
 The fastest usable rate goes in `probe_kbps`; zero means unknown.
 
 These datagrams bypass the video pacer and **are outside the wire budget**

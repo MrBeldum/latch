@@ -1,0 +1,1895 @@
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.76s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.65s
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+FALSE_CUT ms=0 budget=100000
+FALSE_CUT ms=500 budget=100000
+FALSE_CUT ms=1000 budget=100000
+FALSE_CUT ms=1500 budget=100000
+FALSE_CUT ms=2000 budget=100000
+FALSE_CUT ms=2500 budget=100000
+FALSE_CUT ms=3000 budget=100000
+FALSE_CUT ms=3500 budget=100000
+FALSE_CUT ms=4000 budget=100000
+FALSE_CUT ms=4500 budget=100000
+FALSE_CUT ms=5000 budget=100000
+FALSE_CUT ms=5500 budget=100000
+R58B idle_drop_fifo4 lost=0 skipped=0 queue_peak=1.6 queue_p95=0.0 mean_enc=100000 motion_enc_mean=100000 full_rate_at=None final=100000 idr=[]
+R58B clean_resume_rtt10 lost=0 skipped=0 queue_peak=3.2 queue_p95=2.2 mean_enc=20000 motion_enc_mean=20000 full_rate_at=Some(8) final=20000 idr=[]
+R58B idle_drop_fifo4 lost=78 skipped=0 queue_peak=4.0 queue_p95=3.7 mean_enc=100000 motion_enc_mean=100000 full_rate_at=None final=100000 idr=[]
+R58B idle_drop_fifo4 lost=61 skipped=1 queue_peak=3.6 queue_p95=2.6 mean_enc=8700 motion_enc_mean=8700 full_rate_at=None final=8867 idr=[]
+R58B clean_resume_rtt50 lost=0 skipped=0 queue_peak=3.1 queue_p95=2.1 mean_enc=20000 motion_enc_mean=20000 full_rate_at=Some(28) final=20000 idr=[]
+R58B idle_drop_fifo4 lost=0 skipped=0 queue_peak=1.8 queue_p95=0.0 mean_enc=100000 motion_enc_mean=100000 full_rate_at=None final=100000 idr=[]
+R58B drop_30_or_70 lost=0 skipped=0 queue_peak=9.2 queue_p95=7.6 mean_enc=29962 motion_enc_mean=29962 full_rate_at=Some(1966) final=30742 idr=[]
+  T drop_30_or_70 225 budget=100000 enc=100000 sent=1781
+  T drop_30_or_70 325 budget=100000 enc=100000 sent=1714
+  T drop_30_or_70 425 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 525 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 625 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 725 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 825 budget=100000 enc=100000 sent=1647
+R58B idle_drop_fifo4 lost=78 skipped=0 queue_peak=4.0 queue_p95=3.8 mean_enc=100000 motion_enc_mean=100000 full_rate_at=None final=100000 idr=[]
+R58B clean_resume_rtt150 lost=0 skipped=0 queue_peak=3.1 queue_p95=2.1 mean_enc=20000 motion_enc_mean=20000 full_rate_at=Some(78) final=20000 idr=[]
+  T drop_30_or_70 925 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1025 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1125 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1225 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1325 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1425 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1525 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1625 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1725 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1825 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1925 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2025 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2125 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2225 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2325 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2425 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2525 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2625 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2725 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2825 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2925 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3025 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3125 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3225 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3325 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3425 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3525 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3625 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3725 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3825 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3925 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 4025 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 4125 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 4225 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 4325 budget=24575 enc=24575 sent=1647
+  T drop_30_or_70 4425 budget=24575 enc=24575 sent=1647
+  T drop_30_or_70 4525 budget=26486 enc=26486 sent=543
+  T drop_30_or_70 4625 budget=26486 enc=26486 sent=543
+  T drop_30_or_70 4725 budget=26486 enc=26486 sent=566
+  T drop_30_or_70 4825 budget=26486 enc=26486 sent=566
+  T drop_30_or_70 4925 budget=26486 enc=26486 sent=566
+  T drop_30_or_70 5025 budget=26486 enc=26486 sent=566
+  T drop_30_or_70 5125 budget=26486 enc=26486 sent=4568
+  T drop_30_or_70 5225 budget=27579 enc=27579 sent=24576
+  T drop_30_or_70 5325 budget=27579 enc=27579 sent=25190
+  T drop_30_or_70 5425 budget=27579 enc=27579 sent=25804
+  T drop_30_or_70 5525 budget=27579 enc=27579 sent=25804
+  T drop_30_or_70 5625 budget=27579 enc=27579 sent=25804
+  T drop_30_or_70 5725 budget=28130 enc=28130 sent=25804
+  T drop_30_or_70 5825 budget=28130 enc=28130 sent=25804
+  T drop_30_or_70 5925 budget=28130 enc=28130 sent=25804
+  T drop_30_or_70 6025 budget=28130 enc=28130 sent=25804
+  T drop_30_or_70 6125 budget=28130 enc=28130 sent=25804
+  T drop_30_or_70 6225 budget=28130 enc=28130 sent=25804
+  T drop_30_or_70 6325 budget=29255 enc=29255 sent=25804
+  T drop_30_or_70 6425 budget=29255 enc=29255 sent=26419
+  T drop_30_or_70 6525 budget=29255 enc=29255 sent=27033
+  T drop_30_or_70 6625 budget=29255 enc=29255 sent=27033
+  T drop_30_or_70 6725 budget=29255 enc=29255 sent=27033
+  T drop_30_or_70 6825 budget=31595 enc=31595 sent=27033
+  T drop_30_or_70 6925 budget=31595 enc=31595 sent=27033
+  T drop_30_or_70 7025 budget=29019 enc=29019 sent=29491
+  T drop_30_or_70 7125 budget=29019 enc=29019 sent=29491
+  T drop_30_or_70 7225 budget=29019 enc=29019 sent=27033
+  T drop_30_or_70 7325 budget=29019 enc=29019 sent=27033
+  T drop_30_or_70 7425 budget=29019 enc=29019 sent=27033
+  T drop_30_or_70 7525 budget=29019 enc=29019 sent=27033
+  T drop_30_or_70 7625 budget=29547 enc=29547 sent=27033
+  T drop_30_or_70 7725 budget=29547 enc=29547 sent=27648
+  T drop_30_or_70 7825 budget=29547 enc=29547 sent=28262
+  T drop_30_or_70 7925 budget=29547 enc=29547 sent=28262
+  T drop_30_or_70 8025 budget=29547 enc=29547 sent=28262
+  T drop_30_or_70 8125 budget=30137 enc=30137 sent=28262
+  T drop_30_or_70 8225 budget=30137 enc=30137 sent=28262
+  T drop_30_or_70 8325 budget=30137 enc=30137 sent=28262
+  T drop_30_or_70 8425 budget=30137 enc=30137 sent=28262
+  T drop_30_or_70 8525 budget=30137 enc=30137 sent=28262
+  T drop_30_or_70 8625 budget=30137 enc=30137 sent=28262
+  T drop_30_or_70 8725 budget=31342 enc=31342 sent=28262
+  T drop_30_or_70 8825 budget=31342 enc=31342 sent=28876
+  T drop_30_or_70 8925 budget=30137 enc=30137 sent=29491
+  T drop_30_or_70 9025 budget=30137 enc=30137 sent=29491
+  T drop_30_or_70 9125 budget=30137 enc=30137 sent=28262
+  T drop_30_or_70 9225 budget=30137 enc=30137 sent=28262
+  T drop_30_or_70 9325 budget=30137 enc=30137 sent=28262
+  T drop_30_or_70 9425 budget=30137 enc=30137 sent=28262
+  T drop_30_or_70 9525 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 9625 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 9725 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 9825 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 9925 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 10025 budget=31046 enc=31046 sent=28262
+  T drop_30_or_70 10125 budget=31046 enc=31046 sent=28262
+  T drop_30_or_70 10225 budget=30438 enc=30438 sent=29491
+  T drop_30_or_70 10325 budget=30438 enc=30438 sent=29491
+  T drop_30_or_70 10425 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 10525 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 10625 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 10725 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 10825 budget=30742 enc=30742 sent=28262
+  T drop_30_or_70 10925 budget=30742 enc=30742 sent=28876
+  T drop_30_or_70 11025 budget=30438 enc=30438 sent=29491
+  T drop_30_or_70 11125 budget=30438 enc=30438 sent=29491
+  T drop_30_or_70 11225 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 11325 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 11425 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 11525 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 11625 budget=30742 enc=30742 sent=28262
+  T drop_30_or_70 11725 budget=30742 enc=30742 sent=28876
+  T drop_30_or_70 11825 budget=30438 enc=30438 sent=29491
+  T drop_30_or_70 11925 budget=30438 enc=30438 sent=29491
+  T drop_30_or_70 12025 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 12125 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 12225 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 12325 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 12425 budget=30742 enc=30742 sent=28262
+  T drop_30_or_70 12525 budget=30742 enc=30742 sent=28876
+  T drop_30_or_70 12625 budget=30438 enc=30438 sent=29491
+  T drop_30_or_70 12725 budget=30438 enc=30438 sent=29491
+  T drop_30_or_70 12825 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 12925 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 13025 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 13125 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 13225 budget=30742 enc=30742 sent=28262
+  T drop_30_or_70 13325 budget=30742 enc=30742 sent=28876
+  T drop_30_or_70 13425 budget=30438 enc=30438 sent=29491
+  T drop_30_or_70 13525 budget=30438 enc=30438 sent=29491
+  T drop_30_or_70 13625 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 13725 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 13825 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 13925 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 14025 budget=30742 enc=30742 sent=28262
+  T drop_30_or_70 14125 budget=30742 enc=30742 sent=28876
+  T drop_30_or_70 14225 budget=30438 enc=30438 sent=29491
+  T drop_30_or_70 14325 budget=30438 enc=30438 sent=29491
+  T drop_30_or_70 14425 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 14525 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 14625 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 14725 budget=30438 enc=30438 sent=28262
+  T drop_30_or_70 14825 budget=30742 enc=30742 sent=28262
+  T drop_30_or_70 14925 budget=30742 enc=30742 sent=28876
+R58B idle_drop_fifo4 lost=86 skipped=13 queue_peak=4.0 queue_p95=2.6 mean_enc=8633 motion_enc_mean=8633 full_rate_at=None final=8922 idr=[]
+R58B clean_resume_rtt250 lost=0 skipped=0 queue_peak=3.1 queue_p95=2.1 mean_enc=20000 motion_enc_mean=20000 full_rate_at=Some(128) final=20000 idr=[]
+R58B idle_drop_fifo4 lost=0 skipped=0 queue_peak=1.8 queue_p95=0.0 mean_enc=100000 motion_enc_mean=100000 full_rate_at=None final=100000 idr=[]
+R58B idle_drop_fifo4 lost=77 skipped=0 queue_peak=4.0 queue_p95=3.7 mean_enc=100000 motion_enc_mean=100000 full_rate_at=None final=100000 idr=[]
+R58B desktop_2s_idle_1s_motion_rtt10 lost=0 skipped=0 queue_peak=3.2 queue_p95=1.2 mean_enc=20000 motion_enc_mean=20000 full_rate_at=None final=20000 idr=[]
+R58B idle_drop_fifo4 lost=81 skipped=16 queue_peak=4.0 queue_p95=3.1 mean_enc=8784 motion_enc_mean=8784 full_rate_at=None final=13516 idr=[]
+R58B idle_drop_fifo4 lost=0 skipped=0 queue_peak=1.8 queue_p95=0.0 mean_enc=100000 motion_enc_mean=100000 full_rate_at=None final=100000 idr=[]
+R58B idle_drop_fifo4 lost=77 skipped=0 queue_peak=4.0 queue_p95=3.7 mean_enc=100000 motion_enc_mean=100000 full_rate_at=None final=100000 idr=[]
+R58B desktop_2s_idle_1s_motion_rtt50 lost=0 skipped=0 queue_peak=3.1 queue_p95=1.1 mean_enc=20000 motion_enc_mean=20000 full_rate_at=None final=20000 idr=[]
+R58B sparse_idr_rtt20 lost=0 skipped=0 queue_peak=13.8 queue_p95=0.2 mean_enc=20000 motion_enc_mean=0 full_rate_at=None final=20000 idr=[(8000, 120000, 21), (15000, 120000, 21)]
+R58B idle_drop_fifo4 lost=106 skipped=10 queue_peak=4.0 queue_p95=3.1 mean_enc=8631 motion_enc_mean=8631 full_rate_at=None final=9640 idr=[]
+R58B sparse_spike_rtt20 lost=0 skipped=0 queue_peak=13.8 queue_p95=0.1 mean_enc=20000 motion_enc_mean=0 full_rate_at=None final=20000 idr=[(8000, 120000, 21)]
+R58B drop_30_or_70 lost=18 skipped=43 queue_peak=40.0 queue_p95=7.9 mean_enc=52055 motion_enc_mean=52055 full_rate_at=Some(135) final=71649 idr=[]
+  T drop_30_or_70 225 budget=100000 enc=100000 sent=1781
+  T drop_30_or_70 325 budget=100000 enc=100000 sent=1714
+  T drop_30_or_70 425 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 525 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 625 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 725 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 825 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 925 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1025 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1125 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1225 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1325 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1425 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1525 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1625 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1725 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1825 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 1925 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2025 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2125 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2225 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2325 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2425 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2525 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2625 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2725 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2825 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 2925 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3025 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3125 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3225 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3325 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3425 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3525 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3625 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3725 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3825 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 3925 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 4025 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 4125 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 4225 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 4325 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 4425 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 4525 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 4625 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 4725 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 4825 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 4925 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 5025 budget=100000 enc=100000 sent=1647
+  T drop_30_or_70 5125 budget=100000 enc=100000 sent=17142
+  T drop_30_or_70 5225 budget=1057 enc=1057 sent=94617
+  T drop_30_or_70 5325 budget=1057 enc=1057 sent=94617
+  T drop_30_or_70 5425 budget=1057 enc=1057 sent=1013
+  T drop_30_or_70 5525 budget=1057 enc=1057 sent=1013
+  T drop_30_or_70 5625 budget=1057 enc=1057 sent=1013
+  T drop_30_or_70 5725 budget=1152 enc=1152 sent=1099
+  T drop_30_or_70 5825 budget=1369 enc=1369 sent=1013
+  T drop_30_or_70 5925 budget=1627 enc=1627 sent=1155
+  T drop_30_or_70 6025 budget=1934 enc=1934 sent=1372
+  T drop_30_or_70 6125 budget=2299 enc=2299 sent=1632
+  T drop_30_or_70 6225 budget=2733 enc=2733 sent=1940
+  T drop_30_or_70 6325 budget=3249 enc=3249 sent=2305
+  T drop_30_or_70 6425 budget=3863 enc=3863 sent=2457
+  T drop_30_or_70 6525 budget=4593 enc=4593 sent=2457
+  T drop_30_or_70 6625 budget=5461 enc=5461 sent=3686
+  T drop_30_or_70 6725 budget=6493 enc=6493 sent=3686
+  T drop_30_or_70 6825 budget=7720 enc=7720 sent=4915
+  T drop_30_or_70 6925 budget=9179 enc=9179 sent=4915
+  T drop_30_or_70 7025 budget=10914 enc=10914 sent=7372
+  T drop_30_or_70 7125 budget=12978 enc=12978 sent=8601
+  T drop_30_or_70 7225 budget=15432 enc=15432 sent=9830
+  T drop_30_or_70 7325 budget=18351 enc=18351 sent=12902
+  T drop_30_or_70 7425 budget=21822 enc=21822 sent=15360
+  T drop_30_or_70 7525 budget=25950 enc=25950 sent=17203
+  T drop_30_or_70 7625 budget=30859 enc=30859 sent=20889
+  T drop_30_or_70 7725 budget=36696 enc=36696 sent=25190
+  T drop_30_or_70 7825 budget=43638 enc=43638 sent=30720
+  T drop_30_or_70 7925 budget=51893 enc=51893 sent=35635
+  T drop_30_or_70 8025 budget=56598 enc=56598 sent=43622
+  T drop_30_or_70 8125 budget=56598 enc=56598 sent=49766
+  T drop_30_or_70 8225 budget=56598 enc=56598 sent=52838
+  T drop_30_or_70 8325 budget=56598 enc=56598 sent=52838
+  T drop_30_or_70 8425 budget=56598 enc=56598 sent=52838
+  T drop_30_or_70 8525 budget=56598 enc=56598 sent=52838
+  T drop_30_or_70 8625 budget=57729 enc=57729 sent=52838
+  T drop_30_or_70 8725 budget=57729 enc=57729 sent=54067
+  T drop_30_or_70 8825 budget=57729 enc=57729 sent=55296
+  T drop_30_or_70 8925 budget=57729 enc=57729 sent=55296
+  T drop_30_or_70 9025 budget=57729 enc=57729 sent=55296
+  T drop_30_or_70 9125 budget=60038 enc=60038 sent=55296
+  T drop_30_or_70 9225 budget=60038 enc=60038 sent=55296
+  T drop_30_or_70 9325 budget=60038 enc=60038 sent=56524
+  T drop_30_or_70 9425 budget=60038 enc=60038 sent=55296
+  T drop_30_or_70 9525 budget=60038 enc=60038 sent=55910
+  T drop_30_or_70 9625 budget=60038 enc=60038 sent=56524
+  T drop_30_or_70 9725 budget=64841 enc=64841 sent=55910
+  T drop_30_or_70 9825 budget=64841 enc=64841 sent=58368
+  T drop_30_or_70 9925 budget=64841 enc=64841 sent=61440
+  T drop_30_or_70 10025 budget=64841 enc=64841 sent=61440
+  T drop_30_or_70 10125 budget=64841 enc=64841 sent=61440
+  T drop_30_or_70 10225 budget=75215 enc=75215 sent=60211
+  T drop_30_or_70 10325 budget=75215 enc=75215 sent=60825
+  T drop_30_or_70 10425 budget=59641 enc=59641 sent=70041
+  T drop_30_or_70 10525 budget=59641 enc=59641 sent=70656
+  T drop_30_or_70 10625 budget=64426 enc=64426 sent=56524
+  T drop_30_or_70 10725 budget=65479 enc=65479 sent=56524
+  T drop_30_or_70 10825 budget=65479 enc=65479 sent=62054
+  T drop_30_or_70 10925 budget=65479 enc=65479 sent=62668
+  T drop_30_or_70 11025 budget=68180 enc=68180 sent=62668
+  T drop_30_or_70 11125 budget=68180 enc=68180 sent=63897
+  T drop_30_or_70 11225 budget=68180 enc=68180 sent=65126
+  T drop_30_or_70 11325 budget=68180 enc=68180 sent=65126
+  T drop_30_or_70 11425 budget=68180 enc=68180 sent=65126
+  T drop_30_or_70 11525 budget=69543 enc=69543 sent=65126
+  T drop_30_or_70 11625 budget=69543 enc=69543 sent=65126
+  T drop_30_or_70 11725 budget=69543 enc=69543 sent=66355
+  T drop_30_or_70 11825 budget=69543 enc=69543 sent=66355
+  T drop_30_or_70 11925 budget=69543 enc=69543 sent=66355
+  T drop_30_or_70 12025 budget=69543 enc=69543 sent=66355
+  T drop_30_or_70 12125 budget=70238 enc=70238 sent=66355
+  T drop_30_or_70 12225 budget=70238 enc=70238 sent=66355
+  T drop_30_or_70 12325 budget=70238 enc=70238 sent=66355
+  T drop_30_or_70 12425 budget=70238 enc=70238 sent=66355
+  T drop_30_or_70 12525 budget=70238 enc=70238 sent=66355
+  T drop_30_or_70 12625 budget=75857 enc=75857 sent=66355
+  T drop_30_or_70 12725 budget=75857 enc=75857 sent=66355
+  T drop_30_or_70 12825 budget=67977 enc=67977 sent=72499
+  T drop_30_or_70 12925 budget=67977 enc=67977 sent=72499
+  T drop_30_or_70 13025 budget=67977 enc=67977 sent=65126
+  T drop_30_or_70 13125 budget=68130 enc=68130 sent=65126
+  T drop_30_or_70 13225 budget=68130 enc=68130 sent=65126
+  T drop_30_or_70 13325 budget=68130 enc=68130 sent=65126
+  T drop_30_or_70 13425 budget=70940 enc=70940 sent=65126
+  T drop_30_or_70 13525 budget=70940 enc=70940 sent=65740
+  T drop_30_or_70 13625 budget=70940 enc=70940 sent=66355
+  T drop_30_or_70 13725 budget=70940 enc=70940 sent=66355
+  T drop_30_or_70 13825 budget=70940 enc=70940 sent=66355
+  T drop_30_or_70 13925 budget=72358 enc=72358 sent=66355
+  T drop_30_or_70 14025 budget=72358 enc=72358 sent=66355
+  T drop_30_or_70 14125 budget=70940 enc=70940 sent=68812
+  T drop_30_or_70 14225 budget=70940 enc=70940 sent=68812
+  T drop_30_or_70 14325 budget=70940 enc=70940 sent=66355
+  T drop_30_or_70 14425 budget=70940 enc=70940 sent=66355
+  T drop_30_or_70 14525 budget=70940 enc=70940 sent=66355
+  T drop_30_or_70 14625 budget=70940 enc=70940 sent=66355
+  T drop_30_or_70 14725 budget=71649 enc=71649 sent=66355
+  T drop_30_or_70 14825 budget=71649 enc=71649 sent=66355
+  T drop_30_or_70 14925 budget=71649 enc=71649 sent=66355
+R58B idle_wifi100 lost=0 skipped=0 queue_peak=1.6 queue_p95=0.2 mean_enc=100000 motion_enc_mean=0 full_rate_at=None final=100000 idr=[]
+  T idle_wifi100 105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34905 budget=100000 enc=100000 sent=1103
+R58B resume_spike_rtt20 lost=0 skipped=0 queue_peak=3.2 queue_p95=2.2 mean_enc=19753 motion_enc_mean=19753 full_rate_at=Some(13) final=20000 idr=[]
+R58B idle_wifi100 lost=11 skipped=15 queue_peak=1.6 queue_p95=0.2 mean_enc=100000 motion_enc_mean=0 full_rate_at=None final=100000 idr=[]
+  T idle_wifi100 105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4005 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 4105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8605 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 8705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10005 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 10105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13005 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 13105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17605 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 17705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29605 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 29705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34905 budget=100000 enc=100000 sent=1103
+R58B overshoot_rtt100_fifo40_to8000 lost=0 skipped=0 queue_peak=22.3 queue_p95=7.7 mean_enc=9373 motion_enc_mean=9373 full_rate_at=Some(57) final=9477 idr=[]
+R58B idle_wifi100 lost=40 skipped=80 queue_peak=1.6 queue_p95=0.1 mean_enc=100000 motion_enc_mean=0 full_rate_at=None final=100000 idr=[]
+  T idle_wifi100 105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1105 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 1205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2905 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 3005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3805 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 3905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4105 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 4205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4605 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 4705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7605 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 7705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7805 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 7905 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 8005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8705 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 8805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11905 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 12005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12305 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 12405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13905 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 14005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14905 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 15005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17005 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 17105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20505 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 20605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21405 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 21505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21605 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 21705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24305 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 24405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25805 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 25905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30505 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 30605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30705 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 30805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32605 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 32705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34905 budget=100000 enc=100000 sent=1103
+R58B idle_wifi100 lost=98 skipped=186 queue_peak=1.6 queue_p95=0.1 mean_enc=100000 motion_enc_mean=0 full_rate_at=None final=100000 idr=[]
+  T idle_wifi100 105 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1005 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 1105 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 1205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 1905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 2905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3005 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 3105 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 3205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3505 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 3605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 3905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4005 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 4105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4205 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 4305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4705 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 4805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 4905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5005 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 5105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 5905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6605 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 6705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 6905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7605 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 7705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 7905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8005 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 8105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8405 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 8505 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 8605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 8905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 9805 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 9905 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 10005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10105 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 10205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10605 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 10705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 10805 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 10905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 11905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12005 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 12105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12305 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 12405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 12905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13005 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 13105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 13905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14305 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 14405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14605 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 14705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 14905 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 15005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 15905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16005 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 16105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16305 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 16405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 16905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 17905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18105 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 18205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18405 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 18505 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 18605 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 18705 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 18805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 18905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 19905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20705 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 20805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 20905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21005 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 21105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 21805 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 21905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22005 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 22105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22205 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 22305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22705 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 22805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 22905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23305 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 23405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 23905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24405 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 24505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 24905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25605 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 25705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 25905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 26905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27105 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 27205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27705 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 27805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 27905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28305 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 28405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 28905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29005 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 29105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 29905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30105 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 30205 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 30305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 30905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31205 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 31305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31405 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 31505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31705 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 31805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 31905 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 32005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32205 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 32305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32605 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 32705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 32905 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 33005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33405 budget=100000 enc=100000 sent=1654
+  T idle_wifi100 33505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33705 budget=100000 enc=100000 sent=2206
+  T idle_wifi100 33805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 33905 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34005 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34105 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34205 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34305 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34405 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34505 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34605 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34705 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34805 budget=100000 enc=100000 sent=1103
+  T idle_wifi100 34905 budget=100000 enc=100000 sent=2206
+R58B overshoot_rtt100_fifo40_to20000 lost=0 skipped=0 queue_peak=8.9 queue_p95=7.7 mean_enc=20008 motion_enc_mean=20008 full_rate_at=Some(166) final=19865 idr=[]
+R58B overshoot_rtt100_fifo40_to40000 lost=0 skipped=0 queue_peak=8.6 queue_p95=7.7 mean_enc=40018 motion_enc_mean=40018 full_rate_at=Some(57) final=39731 idr=[]
+R58B overshoot_rtt100_fifo40_to70000 lost=8 skipped=23 queue_peak=40.0 queue_p95=7.9 mean_enc=69345 motion_enc_mean=69345 full_rate_at=Some(60) final=71239 idr=[]
+R58B overshoot_rtt250_fifo40_to8000 lost=0 skipped=0 queue_peak=22.3 queue_p95=5.1 mean_enc=5741 motion_enc_mean=5741 full_rate_at=Some(132) final=6149 idr=[]
+R58B overshoot_rtt250_fifo40_to20000 lost=0 skipped=0 queue_peak=10.8 queue_p95=7.7 mean_enc=20125 motion_enc_mean=20125 full_rate_at=Some(366) final=20684 idr=[]
+R58B overshoot_rtt250_fifo40_to40000 lost=0 skipped=0 queue_peak=10.5 queue_p95=7.7 mean_enc=40251 motion_enc_mean=40251 full_rate_at=Some(132) final=41369 idr=[]
+R58B overshoot_rtt250_fifo40_to70000 lost=18 skipped=43 queue_peak=40.0 queue_p95=7.9 mean_enc=52055 motion_enc_mean=52055 full_rate_at=Some(135) final=71649 idr=[]
+R58B overshoot_rtt250_fifo200_to8000 lost=0 skipped=0 queue_peak=22.3 queue_p95=5.1 mean_enc=5741 motion_enc_mean=5741 full_rate_at=Some(132) final=6149 idr=[]
+R58B overshoot_rtt250_fifo200_to20000 lost=0 skipped=0 queue_peak=10.8 queue_p95=7.7 mean_enc=20125 motion_enc_mean=20125 full_rate_at=Some(366) final=20684 idr=[]
+R58B overshoot_rtt250_fifo200_to40000 lost=0 skipped=0 queue_peak=10.5 queue_p95=7.7 mean_enc=40251 motion_enc_mean=40251 full_rate_at=Some(132) final=41369 idr=[]
+R58B overshoot_rtt250_fifo200_to70000 lost=0 skipped=0 queue_peak=92.7 queue_p95=7.9 mean_enc=54742 motion_enc_mean=54742 full_rate_at=Some(135) final=71448 idr=[]
+R58B legacy1000_wifi3 lost=19 skipped=59 queue_peak=8.0 queue_p95=2.0 mean_enc=2148 motion_enc_mean=2148 full_rate_at=None final=1000 idr=[]
+R58B legacy1000_wifi1 lost=13 skipped=36 queue_peak=8.0 queue_p95=2.1 mean_enc=2157 motion_enc_mean=2157 full_rate_at=None final=1000 idr=[]
+R58B legacy1000_clean_jitter lost=0 skipped=0 queue_peak=8.0 queue_p95=8.0 mean_enc=50000 motion_enc_mean=50000 full_rate_at=None final=50000 idr=[]
+R58B v51_250_wifi3 lost=19 skipped=76 queue_peak=8.0 queue_p95=7.8 mean_enc=50000 motion_enc_mean=50000 full_rate_at=None final=50000 idr=[]
+R58B v50_wifi3 lost=22 skipped=88 queue_peak=8.0 queue_p95=7.8 mean_enc=50000 motion_enc_mean=50000 full_rate_at=None final=50000 idr=[]
+R58B v50_wifi8 lost=77 skipped=145 queue_peak=8.0 queue_p95=1.4 mean_enc=1053 motion_enc_mean=1053 full_rate_at=None final=1000 idr=[]
+R58B v50_clean lost=0 skipped=0 queue_peak=8.0 queue_p95=8.0 mean_enc=50000 motion_enc_mean=50000 full_rate_at=None final=50000 idr=[]
+R58B desktop_cap20_ceiling100_rtt250_fifo200 lost=0 skipped=0 queue_peak=11.7 queue_p95=6.7 mean_enc=19123 motion_enc_mean=18607 full_rate_at=None final=20455 idr=[]
+R58B desktop_cap20_ceiling100_rtt100_fifo40 lost=0 skipped=0 queue_peak=8.9 queue_p95=6.7 mean_enc=19933 motion_enc_mean=20070 full_rate_at=None final=19865 idr=[]
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
+MIXED ms=4950 sent=87300 raw=10 budget=87300
+MIXED ms=9950 sent=87300 raw=10 budget=87300
+MIXED ms=14950 sent=89357 raw=10.000336 budget=89357
+MIXED ms=19950 sent=89357 raw=10.000336 budget=89357
+MIXED ms=29950 sent=88945 raw=10.000562 budget=88945
+MIXED ms=34950 sent=100000 raw=19 budget=100000
+MIXED ms=39950 sent=89021 raw=10.001011 budget=89021
+MIXED ms=44950 sent=89021 raw=10.001011 budget=89021
+MIXED ms=54950 sent=89007 raw=10.000337 budget=89007
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+WIRE budget=20000 fps=120 target=14627 protected=false wire_kbps=18432
+WIRE budget=20000 fps=120 target=12377 protected=true wire_kbps=18432
+WIRE budget=20000 fps=120 recovery wire_kbps=18432
+WIRE budget=1000 fps=240 target=274 protected=false wire_kbps=960
+WIRE budget=1000 fps=240 target=137 protected=true wire_kbps=1718
+WIRE budget=1000 fps=240 recovery wire_kbps=1718
+WIRE budget=5000 fps=120 target=2251 protected=false wire_kbps=3686
+WIRE budget=5000 fps=120 target=1125 protected=true wire_kbps=6139
+WIRE budget=5000 fps=120 recovery wire_kbps=6139
+WIRE budget=100000 fps=120 target=78759 protected=false wire_kbps=95846
+WIRE budget=100000 fps=120 target=67508 protected=true wire_kbps=95846
+WIRE budget=100000 fps=120 recovery wire_kbps=95846
+WIRE budget=2000 fps=60 target=1125 protected=false wire_kbps=1843
+WIRE budget=2000 fps=60 target=562 protected=true wire_kbps=3067
+WIRE budget=2000 fps=60 recovery wire_kbps=3067
+WIRE budget=1000 fps=60 target=428 protected=false wire_kbps=959
+WIRE budget=1000 fps=60 target=214 protected=true wire_kbps=1327
+WIRE budget=1000 fps=60 recovery wire_kbps=1327
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+STEADY loss1cap20 mean=20000.0 sd=0.0 queue_p95=7.680 lost=17 skipped=61 min=20000 final=20000
+OVERHEAD loss1cap20 parity_pct=32.16 parity_mbps=5.924 wire_mbps=18.419 lost_per_min=29.1 idrs_per_min=56.6 motion_ms=-1
+RESTART loss1cap20 first_500ms_queue_peak=7.680 queue_peak=7.680 first_frame_ms=-1
+STEADY loss3cap20 mean=20000.0 sd=0.0 queue_p95=7.680 lost=21 skipped=74 min=20000 final=20000
+OVERHEAD loss3cap20 parity_pct=34.36 parity_mbps=6.326 wire_mbps=18.411 lost_per_min=36.0 idrs_per_min=70.3 motion_ms=-1
+RESTART loss3cap20 first_500ms_queue_peak=7.680 queue_peak=7.680 first_frame_ms=-1
+STEADY loss5cap20 mean=20000.0 sd=0.0 queue_p95=7.680 lost=19 skipped=69 min=20000 final=20000
+OVERHEAD loss5cap20 parity_pct=34.80 parity_mbps=6.396 wire_mbps=18.379 lost_per_min=32.6 idrs_per_min=63.4 motion_ms=-1
+RESTART loss5cap20 first_500ms_queue_peak=7.680 queue_peak=7.680 first_frame_ms=-1
+STEADY loss1cap50 mean=50000.0 sd=0.0 queue_p95=7.987 lost=10 skipped=40 min=50000 final=50000
+OVERHEAD loss1cap50 parity_pct=24.99 parity_mbps=11.976 wire_mbps=47.920 lost_per_min=17.1 idrs_per_min=36.0 motion_ms=-1
+RESTART loss1cap50 first_500ms_queue_peak=7.987 queue_peak=7.987 first_frame_ms=-1
+STEADY loss3cap50 mean=50000.0 sd=0.0 queue_p95=7.782 lost=16 skipped=64 min=50000 final=50000
+OVERHEAD loss3cap50 parity_pct=24.35 parity_mbps=11.669 wire_mbps=47.923 lost_per_min=27.4 idrs_per_min=56.6 motion_ms=-1
+RESTART loss3cap50 first_500ms_queue_peak=7.987 queue_peak=7.987 first_frame_ms=-1
+STEADY loss5cap50 mean=50000.0 sd=0.0 queue_p95=7.578 lost=17 skipped=68 min=50000 final=50000
+OVERHEAD loss5cap50 parity_pct=24.25 parity_mbps=11.623 wire_mbps=47.923 lost_per_min=29.1 idrs_per_min=60.0 motion_ms=-1
+RESTART loss5cap50 first_500ms_queue_peak=7.987 queue_peak=7.987 first_frame_ms=-1
+STEADY loss1cap100 mean=100000.0 sd=0.0 queue_p95=7.885 lost=2 skipped=8 min=100000 final=100000
+OVERHEAD loss1cap100 parity_pct=23.07 parity_mbps=22.112 wire_mbps=95.846 lost_per_min=3.4 idrs_per_min=8.6 motion_ms=-1
+RESTART loss1cap100 first_500ms_queue_peak=7.987 queue_peak=7.987 first_frame_ms=-1
+STEADY loss3cap100 mean=100000.0 sd=0.0 queue_p95=7.782 lost=6 skipped=24 min=100000 final=100000
+OVERHEAD loss3cap100 parity_pct=23.07 parity_mbps=22.112 wire_mbps=95.846 lost_per_min=10.3 idrs_per_min=22.3 motion_ms=-1
+RESTART loss3cap100 first_500ms_queue_peak=7.987 queue_peak=7.987 first_frame_ms=-1
+STEADY loss5cap100 mean=100000.0 sd=0.0 queue_p95=7.578 lost=5 skipped=15 min=100000 final=100000
+OVERHEAD loss5cap100 parity_pct=23.06 parity_mbps=22.098 wire_mbps=95.846 lost_per_min=8.6 idrs_per_min=15.4 motion_ms=-1
+RESTART loss5cap100 first_500ms_queue_peak=7.987 queue_peak=7.987 first_frame_ms=-1
+STEADY idle_motion mean=50000.0 sd=0.0 queue_p95=7.987 lost=0 skipped=0 min=50000 final=50000
+OVERHEAD idle_motion parity_pct=10.39 parity_mbps=4.284 wire_mbps=41.219 lost_per_min=0.0 idrs_per_min=1.7 motion_ms=13
+RESTART idle_motion first_500ms_queue_peak=7.987 queue_peak=7.987 first_frame_ms=13
+STEADY steady20 mean=21140.6 sd=291.8 queue_p95=8.384 lost=19 skipped=1 min=12884 final=21115
+OVERHEAD steady20 parity_pct=15.20 parity_mbps=3.010 wire_mbps=19.802 lost_per_min=32.6 idrs_per_min=10.3 motion_ms=-1
+RESTART steady20 first_500ms_queue_peak=8.576 queue_peak=10.712 first_frame_ms=-1
+STEADY steady50 mean=49447.2 sd=1871.9 queue_p95=7.578 lost=16 skipped=2 min=40304 final=48477
+OVERHEAD steady50 parity_pct=13.28 parity_mbps=6.229 wire_mbps=46.901 lost_per_min=27.4 idrs_per_min=8.6 motion_ms=-1
+RESTART steady50 first_500ms_queue_peak=9.571 queue_peak=15.413 first_frame_ms=-1
+STEADY steady100 mean=103603.3 sd=1648.7 queue_p95=8.576 lost=16 skipped=2 min=85725 final=107290
+OVERHEAD steady100 parity_pct=12.75 parity_mbps=12.634 wire_mbps=99.104 lost_per_min=27.4 idrs_per_min=8.6 motion_ms=-1
+RESTART steady100 first_500ms_queue_peak=9.571 queue_peak=10.683 first_frame_ms=-1
+STEADY cap20rtt150 mean=20523.2 sd=92.6 queue_p95=7.680 lost=48 skipped=13 min=12753 final=20464
+OVERHEAD cap20rtt150 parity_pct=20.17 parity_mbps=3.902 wire_mbps=19.345 lost_per_min=82.3 idrs_per_min=6.9 motion_ms=-1
+RESTART cap20rtt150 first_500ms_queue_peak=8.576 queue_peak=8.576 first_frame_ms=-1
+STEADY cap20rtt250 mean=20544.6 sd=103.9 queue_p95=7.680 lost=66 skipped=25 min=12753 final=20464
+OVERHEAD cap20rtt250 parity_pct=19.93 parity_mbps=3.939 wire_mbps=19.761 lost_per_min=113.1 idrs_per_min=6.9 motion_ms=-1
+RESTART cap20rtt250 first_500ms_queue_peak=8.576 queue_peak=8.576 first_frame_ms=-1
+STEADY cap100rtt150 mean=103254.0 sd=465.3 queue_p95=8.384 lost=33 skipped=10 min=85549 final=102959
+OVERHEAD cap100rtt150 parity_pct=18.34 parity_mbps=18.183 wire_mbps=99.142 lost_per_min=56.6 idrs_per_min=5.1 motion_ms=-1
+RESTART cap100rtt150 first_500ms_queue_peak=8.883 queue_peak=8.883 first_frame_ms=-1
+STEADY cap100rtt250 mean=102257.7 sd=344.7 queue_p95=8.179 lost=69 skipped=22 min=64294 final=102159
+OVERHEAD cap100rtt250 parity_pct=18.52 parity_mbps=18.034 wire_mbps=97.379 lost_per_min=118.3 idrs_per_min=6.9 motion_ms=-1
+RESTART cap100rtt250 first_500ms_queue_peak=7.987 queue_peak=8.883 first_frame_ms=-1
+STEADY rtt150 mean=52142.7 sd=235.1 queue_p95=8.576 lost=33 skipped=10 min=42774 final=51993
+OVERHEAD rtt150 parity_pct=18.28 parity_mbps=9.071 wire_mbps=49.630 lost_per_min=56.6 idrs_per_min=5.1 motion_ms=-1
+RESTART rtt150 first_500ms_queue_peak=10.523 queue_peak=10.904 first_frame_ms=-1
+STEADY rtt250 mean=52037.2 sd=197.1 queue_p95=8.384 lost=68 skipped=23 min=32080 final=51993
+OVERHEAD rtt250 parity_pct=18.30 parity_mbps=8.985 wire_mbps=49.109 lost_per_min=116.6 idrs_per_min=6.9 motion_ms=-1
+RESTART rtt250 first_500ms_queue_peak=11.285 queue_peak=11.285 first_frame_ms=-1
+STEADY slow250 mean=51971.2 sd=2248.2 queue_p95=12.845 lost=42 skipped=0 min=30228 final=51993
+OVERHEAD slow250 parity_pct=12.53 parity_mbps=6.183 wire_mbps=49.356 lost_per_min=72.0 idrs_per_min=29.1 motion_ms=-1
+RESTART slow250 first_500ms_queue_peak=8.576 queue_peak=28.413 first_frame_ms=-1
+STEADY legacy1000 mean=45621.2 sd=6914.1 queue_p95=17.470 lost=156 skipped=30 min=17928 final=51394
+OVERHEAD legacy1000 parity_pct=13.29 parity_mbps=5.695 wire_mbps=42.855 lost_per_min=267.4 idrs_per_min=154.3 motion_ms=-1
+RESTART legacy1000 first_500ms_queue_peak=5.734 queue_peak=40.000 first_frame_ms=-1
+STEADY legacy_radio mean=99214.0 sd=4209.0 queue_p95=7.680 lost=5 skipped=16 min=76676 final=100000
+OVERHEAD legacy_radio parity_pct=22.74 parity_mbps=21.185 wire_mbps=93.143 lost_per_min=8.6 idrs_per_min=15.4 motion_ms=-1
+RESTART legacy_radio first_500ms_queue_peak=6.042 queue_peak=7.987 first_frame_ms=-1
+STEADY cap2 mean=2008.5 sd=50.3 queue_p95=7.944 lost=20 skipped=1 min=1314 final=1986
+OVERHEAD cap2 parity_pct=43.17 parity_mbps=1.019 wire_mbps=2.362 lost_per_min=34.3 idrs_per_min=12.0 motion_ms=-1
+RESTART cap2 first_500ms_queue_peak=10.320 queue_peak=10.320 first_frame_ms=-1
+STEADY cap5 mean=4832.0 sd=0.0 queue_p95=6.144 lost=20 skipped=1 min=3155 final=4832
+OVERHEAD cap5 parity_pct=31.39 parity_mbps=1.291 wire_mbps=4.112 lost_per_min=34.3 idrs_per_min=13.7 motion_ms=-1
+RESTART cap5 first_500ms_queue_peak=6.144 queue_peak=6.144 first_frame_ms=-1
+STEADY route mean=86264.1 sd=32540.8 queue_p95=7.885 lost=0 skipped=0 min=1000 final=100000
+OVERHEAD route parity_pct=15.81 parity_mbps=13.224 wire_mbps=83.636 lost_per_min=0.0 idrs_per_min=1.7 motion_ms=-1
+RESTART route first_500ms_queue_peak=7.987 queue_peak=7.987 first_frame_ms=-1
+STEADY lan1g mean=1000000.0 sd=0.0 queue_p95=7.997 lost=0 skipped=0 min=1000000 final=1000000
+OVERHEAD lan1g parity_pct=9.22 parity_mbps=88.505 wire_mbps=959.693 lost_per_min=0.0 idrs_per_min=1.7 motion_ms=-1
+RESTART lan1g first_500ms_queue_peak=7.997 queue_peak=7.997 first_frame_ms=-1
+STEADY fifo2x mean=19782.1 sd=740.7 queue_p95=7.680 lost=16 skipped=2 min=16711 final=19467
+OVERHEAD fifo2x parity_pct=15.44 parity_mbps=2.914 wire_mbps=18.871 lost_per_min=27.4 idrs_per_min=8.6 motion_ms=-1
+RESTART fifo2x first_500ms_queue_peak=12.936 queue_peak=15.912 first_frame_ms=-1
+STEADY fifo2x_short mean=9422.5 sd=3679.2 queue_p95=3.072 lost=200 skipped=0 min=5521 final=6564
+OVERHEAD fifo2x_short parity_pct=30.72 parity_mbps=2.504 wire_mbps=8.150 lost_per_min=342.9 idrs_per_min=78.9 motion_ms=-1
+RESTART fifo2x_short first_500ms_queue_peak=3.072 queue_peak=3.584 first_frame_ms=-1
+STEADY step_loss mean=20947.9 sd=3873.3 queue_p95=8.384 lost=7 skipped=7 min=9584 final=21308
+OVERHEAD step_loss parity_pct=13.11 parity_mbps=3.986 wire_mbps=30.407 lost_per_min=12.0 idrs_per_min=6.9 motion_ms=-1
+RESTART step_loss first_500ms_queue_peak=39.936 queue_peak=39.936 first_frame_ms=-1
+STEADY loss3mixed mean=21199.1 sd=864.5 queue_p95=8.192 lost=43 skipped=82 min=10255 final=21520
+OVERHEAD loss3mixed parity_pct=30.08 parity_mbps=5.862 wire_mbps=19.485 lost_per_min=73.7 idrs_per_min=85.7 motion_ms=-1
+RESTART loss3mixed first_500ms_queue_peak=10.200 queue_peak=11.648 first_frame_ms=-1
+STEADY loss3mixed150 mean=20291.1 sd=917.8 queue_p95=7.680 lost=67 skipped=533 min=12490 final=20581
+OVERHEAD loss3mixed150 parity_pct=30.58 parity_mbps=5.927 wire_mbps=19.381 lost_per_min=114.9 idrs_per_min=68.6 motion_ms=-1
+RESTART loss3mixed150 first_500ms_queue_peak=8.576 queue_peak=8.576 first_frame_ms=-1
+STEADY loss3mixed250 mean=20461.5 sd=107.1 queue_p95=7.680 lost=83 skipped=681 min=12490 final=20382
+OVERHEAD loss3mixed250 parity_pct=31.26 parity_mbps=6.178 wire_mbps=19.760 lost_per_min=142.3 idrs_per_min=54.9 motion_ms=-1
+RESTART loss3mixed250 first_500ms_queue_peak=7.680 queue_peak=8.576 first_frame_ms=-1
+STEADY idle_drop mean=4966.0 sd=0.0 queue_p95=6.144 lost=0 skipped=0 min=4608 final=4966
+OVERHEAD idle_drop parity_pct=34.43 parity_mbps=1.164 wire_mbps=3.381 lost_per_min=0.0 idrs_per_min=1.7 motion_ms=-1
+RESTART idle_drop first_500ms_queue_peak=18.586 queue_peak=18.586 first_frame_ms=130
+STEADY idle_drop_idr mean=4970.7 sd=237.6 queue_p95=14.112 lost=0 skipped=0 min=2949 final=5066
+OVERHEAD idle_drop_idr parity_pct=31.71 parity_mbps=1.171 wire_mbps=3.694 lost_per_min=0.0 idrs_per_min=15.4 motion_ms=-1
+RESTART idle_drop_idr first_500ms_queue_peak=24.576 queue_peak=32.728 first_frame_ms=142
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.32s
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+POLICER ms=4950 sent=4026 recv=4026 loss=0 budget=4026
+POLICER ms=9950 sent=4026 recv=4026 loss=0 budget=4026
+POLICER ms=14950 sent=4850 recv=4850 loss=0 budget=4850
+POLICER ms=19950 sent=4850 recv=4850 loss=0 budget=4850
+POLICER ms=24950 sent=5547 recv=5000 loss=9.861186 budget=6339
+okPOLICER ms=29950 sent=4850 recv=4850 loss=0 budget=4850

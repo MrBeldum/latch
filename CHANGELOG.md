@@ -81,8 +81,10 @@
 - Keep the budget and the encoder's target through idle, so motion resumes
   at full rate at once. While idle, send short probe trains (new datagram
   kind 16, only to viewers that set `probe_trains`); the viewer times their
-  spread and reports `probe_kbps`, and two trains under 3/4 of the budget
-  lower it before motion resumes into a path that got slower. Report the
+  packet pairs and reports `probe_kbps`. Two confident slow trains need
+  independent queue or delivery evidence to lower the target; unknown
+  capacity only limits resume pacing. Probe padding is outside the wire
+  budget and is skipped below an 8 Mbps retained budget. Report the
   budget and application-limited state.
 - An underfilled stream cut by someone else's standing queue (or starved
   pings) regains its earlier budget once the delay has been gone for a second, and an idle or

@@ -1,5 +1,10 @@
 # FEC-first transport, 2026-11-04
 
+**Latest follow-up:** [C1/C2 confidence fix and final validation](review58c/README.md).
+The tables below record the earlier review rounds through `54dcbc5`; the
+follow-up supersedes their idle train estimator and downward-decision rules.
+
+
 Three revisions, each cell **main / e2fad22 / this branch**: main (engine
 of `ee3176a`, unchanged since `3d5d69e`), `e2fad22` (the first round of
 review fixes, re-reviewed in `review-58b`), and this branch after the second

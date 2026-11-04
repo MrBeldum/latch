@@ -1,0 +1,46 @@
+serving on 100.70.121.94:47968 (TCP and UDP)
+host UDP buffers: send=16777216 receive=16777216 bytes (requested 8388608/8388608; Linux may cap at net.core.wmem_max/rmem_max)
+view example is watching: 640×360 at 60 fps, 20000 kb/s, Latch software H.264 (test pattern)
+2026-11-04T14:58:48.927008Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1000 applied_kbps=15943 host_rtt=76.13899993896484 queue_ms=0.0820000022649765 loss=0.0
+2026-11-04T14:58:50.005737Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1152 applied_kbps=797 host_rtt=35.638999938964844 queue_ms=0.24500000476837158 loss=0.0
+2026-11-04T14:58:50.085958Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1323 applied_kbps=918 host_rtt=26.249000549316406 queue_ms=0.06700000166893005 loss=0.0
+2026-11-04T14:58:50.153959Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1347 applied_kbps=1054 host_rtt=33.444000244140625 queue_ms=0.08399999886751175 loss=0.0
+2026-11-04T14:58:50.211959Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1436 applied_kbps=1054 host_rtt=25.402000427246094 queue_ms=0.2240000069141388 loss=0.0
+2026-11-04T14:58:50.298690Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1347 applied_kbps=1144 host_rtt=48.4010009765625 queue_ms=0.07599999755620956 loss=0.0
+2026-11-04T14:58:50.744327Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1000 applied_kbps=1073 host_rtt=56.093997955322266 queue_ms=0.06499999761581421 loss=0.0
+2026-11-04T14:58:51.489810Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1133 applied_kbps=797 host_rtt=36.84400177001953 queue_ms=0.05900000035762787 loss=0.0
+2026-11-04T14:58:51.520873Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1195 applied_kbps=903 host_rtt=43.277000427246094 queue_ms=0.06700000166893005 loss=0.0
+2026-11-04T14:58:51.653059Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1363 applied_kbps=952 host_rtt=36.104000091552734 queue_ms=0.08299999684095383 loss=0.0
+2026-11-04T14:58:51.705227Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1469 applied_kbps=1086 host_rtt=35.987998962402344 queue_ms=0.061000000685453415 loss=0.0
+2026-11-04T14:58:51.779306Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1566 applied_kbps=1171 host_rtt=33.797000885009766 queue_ms=0.08900000154972076 loss=0.0
+2026-11-04T14:58:51.860682Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1469 applied_kbps=1248 host_rtt=37.5780029296875 queue_ms=0.06599999964237213 loss=0.0
+2026-11-04T14:58:52.056175Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1000 applied_kbps=1171 host_rtt=62.5099983215332 queue_ms=0.09200000017881393 loss=0.0
+2026-11-04T14:58:53.349099Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1154 applied_kbps=797 host_rtt=28.06100082397461 queue_ms=0.0689999982714653 loss=0.0
+2026-11-04T14:58:53.492290Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1000 applied_kbps=919 host_rtt=62.58799743652344 queue_ms=0.0560000017285347 loss=0.0
+2026-11-04T14:58:54.923819Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1222 applied_kbps=797 host_rtt=17.125 queue_ms=0.09700000286102295 loss=0.0
+2026-11-04T14:58:55.113905Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1000 applied_kbps=974 host_rtt=54.97700119018555 queue_ms=0.06400000303983688 loss=0.0
+2026-11-04T14:58:55.779390Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1100 applied_kbps=797 host_rtt=17.928001403808594 queue_ms=0.06300000101327896 loss=0.0
+2026-11-04T14:58:55.910938Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1000 applied_kbps=876 host_rtt=44.60199737548828 queue_ms=0.19499999284744263 loss=0.0
+2026-11-04T14:58:56.369328Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1230 applied_kbps=797 host_rtt=11.780000686645508 queue_ms=0.08399999886751175 loss=0.0
+2026-11-04T14:58:56.380486Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1254 applied_kbps=980 host_rtt=0.0 queue_ms=0.06599999964237213 loss=0.0
+2026-11-04T14:58:56.443725Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1387 applied_kbps=980 host_rtt=12.094999313354492 queue_ms=0.0689999982714653 loss=0.0
+2026-11-04T14:58:56.526312Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1476 applied_kbps=1105 host_rtt=11.972000122070313 queue_ms=0.08500000089406967 loss=0.0
+2026-11-04T14:58:56.659952Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1571 applied_kbps=1176 host_rtt=11.593999862670898 queue_ms=0.05700000002980232 loss=0.0
+2026-11-04T14:58:56.855327Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1774 applied_kbps=1252 host_rtt=12.236000061035156 queue_ms=0.10400000214576721 loss=0.0
+2026-11-04T14:58:56.985346Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=2233 applied_kbps=1414 host_rtt=11.829999923706055 queue_ms=0.05900000035762787 loss=0.0
+2026-11-04T14:58:57.134624Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=3390 applied_kbps=1780 host_rtt=11.772000312805176 queue_ms=0.06300000101327896 loss=0.0
+2026-11-04T14:58:57.270806Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=6780 applied_kbps=2702 host_rtt=11.638999938964844 queue_ms=0.07000000029802322 loss=0.0
+2026-11-04T14:58:57.371419Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=13560 applied_kbps=5404 host_rtt=11.738999366760254 queue_ms=0.0689999982714653 loss=0.0
+2026-11-04T14:58:57.483238Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=20000 applied_kbps=10809 host_rtt=12.4350004196167 queue_ms=0.07100000232458115 loss=0.0
+2026-11-04T14:58:58.667778Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1000 applied_kbps=15943 host_rtt=42.185001373291016 queue_ms=0.0560000017285347 loss=0.0
+2026-11-04T14:58:59.018976Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1151 applied_kbps=797 host_rtt=12.708000183105469 queue_ms=0.07800000160932541 loss=0.0
+2026-11-04T14:58:59.145828Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1329 applied_kbps=917 host_rtt=12.492000579833984 queue_ms=0.07699999958276749 loss=0.0
+2026-11-04T14:58:59.273299Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1000 applied_kbps=1059 host_rtt=56.55800247192383 queue_ms=0.07400000095367432 loss=0.0
+2026-11-04T14:58:59.679240Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1140 applied_kbps=797 host_rtt=12.199999809265137 queue_ms=0.07900000363588333 loss=0.0
+2026-11-04T14:58:59.806335Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1248 applied_kbps=908 host_rtt=16.36699867248535 queue_ms=0.06800000369548798 loss=0.0
+2026-11-04T14:58:59.944716Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1000 applied_kbps=994 host_rtt=28.29800033569336 queue_ms=0.0729999989271164 loss=0.0
+2026-11-04T14:59:00.182178Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1173 applied_kbps=797 host_rtt=12.640000343322754 queue_ms=0.054999999701976776 loss=0.0
+2026-11-04T14:59:00.194194Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1197 applied_kbps=935 host_rtt=13.312000274658203 queue_ms=0.07599999755620956 loss=0.0
+2026-11-04T14:59:00.242732Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1302 applied_kbps=935 host_rtt=12.848999977111816 queue_ms=0.07999999821186066 loss=0.0
+2026-11-04T14:59:00.355063Z DEBUG latch_engine::server: bitrate controller decision requested_bitrate=20000 wire_kbps=1374 applied_kbps=1037 host_rtt=12.51200008392334 queue_ms=0.07199999690055847 loss=0.0
+view example stopped watching after 12 s: the viewer disconnected

@@ -1,0 +1,10 @@
+cap=1000 n=6 jitter=0..4ms trials=10000 zero=0 false_slow=0 consecutive_false=0 valid_p50=1000 valid_p95=1056
+cap=1000 n=16 jitter=0..4ms trials=10000 zero=0 false_slow=0 consecutive_false=0 valid_p50=1000 valid_p95=1018
+cap=5000 n=6 jitter=0..4ms trials=10000 zero=701 false_slow=149 consecutive_false=3 valid_p50=4800 valid_p95=6324
+cap=5000 n=16 jitter=0..4ms trials=10000 zero=0 false_slow=0 consecutive_false=0 valid_p50=4948 valid_p95=5395
+cap=20000 n=6 jitter=0..4ms trials=10000 zero=4748 false_slow=3654 consecutive_false=1355 valid_p50=12623 valid_p95=25763
+cap=20000 n=16 jitter=0..4ms trials=10000 zero=8 false_slow=1239 consecutive_false=163 valid_p50=17170 valid_p95=22293
+cap=100000 n=6 jitter=0..4ms trials=10000 zero=6098 false_slow=3878 consecutive_false=1527 valid_p50=17232 valid_p95=37428
+cap=100000 n=16 jitter=0..4ms trials=10000 zero=52 false_slow=9705 consecutive_false=9416 valid_p50=39698 valid_p95=64204
+cap=500000 n=6 jitter=0..4ms trials=10000 zero=6299 false_slow=3701 consecutive_false=1339 valid_p50=17429 valid_p95=37167
+cap=500000 n=16 jitter=0..4ms trials=10000 zero=68 false_slow=9932 consecutive_false=9866 valid_p50=45132 valid_p95=76136

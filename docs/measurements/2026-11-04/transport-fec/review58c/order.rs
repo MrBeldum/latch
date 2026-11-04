@@ -1,0 +1,3 @@
+#[path="../../../../../crates/proto/src/probe.rs"]mod probe;
+use std::time::{Duration,Instant};
+fn main(){let start=Instant::now();for mode in ["interior4","duplicate","reordered_tail"]{let mut e=vec![];for i in 0..16u8{if mode=="interior4"&&(5..9).contains(&i){continue}let at=u64::from(i)*102400+if mode=="reordered_tail"&&(8..15).contains(&i){4000000}else{0};e.push((at,i));if mode=="duplicate"&&i<15{e.push((at+1000,i));}}e.sort();let mut m=probe::TrainMeter::default();for(at,i)in e{m.push(1,i,16,1200,start+Duration::from_nanos(at));}println!("{mode} 100Mbps estimate={}",m.take_kbps(start+Duration::from_secs(1)));}}
