@@ -207,12 +207,18 @@ fn noise_stream_adapts_to_sustained_queue_delay_and_recovers() {
     let baseline = loop {
         std::thread::sleep(Duration::from_millis(300));
         let s = session.stats();
-        if frames.seq() >= 10 && s.rtt_ms > 0 && s.applied_bitrate_kbps > 0 {
+        if frames.seq() >= 10 && s.rtt_ms > 0 && s.applied_bitrate_kbps > 0 && s.application_limited
+        {
             break s;
         }
         assert!(Instant::now() < deadline, "no baseline: {s:?}");
     };
     eprintln!("baseline: {baseline:?}");
+    assert!(baseline.wire_budget_kbps >= 40_000, "idle budget collapsed");
+    assert!(
+        baseline.application_limited,
+        "must exercise an underfilled encoder"
+    );
     queue_delay_ms.store(45, Ordering::Relaxed);
     let mut clean = 0;
     let mut constrained = 0;
@@ -231,9 +237,6 @@ fn noise_stream_adapts_to_sustained_queue_delay_and_recovers() {
         // whole settled run, not in every poll. 12 fps over a ~250 ms stats
         // window is 1–3 frames: one frame reads as 3.8 fps.
         if s.applied_bitrate_kbps > 0
-            // The budget follows what is actually sent, so this underfilled
-            // stream may already sit near the 1 Mbps wire floor (797 kbps of
-            // video) before the queue builds: at the floor counts as cut.
             && s.applied_bitrate_kbps < (baseline.applied_bitrate_kbps / 4).max(1_000)
             && s.rtt_ms >= baseline.rtt_ms + 20
             && s.fps >= 3.0
@@ -325,7 +328,7 @@ fn saturated_ten_megabit_fifo_converges_and_recovers_with_fake_clock() {
     }
     let mean = settled.iter().sum::<u32>() / settled.len() as u32;
     assert!((8_000..=10_500).contains(&mean), "did not converge: {mean}");
-    assert!(congestion::video_budget(10_000, 10, false) < 10_000);
+    assert!(congestion::video_budget(10_000, 10, 0, 120, false) < 10_000);
     assert!(pressured >= 4, "must exercise sustained overload");
     assert!(
         clean >= 8,

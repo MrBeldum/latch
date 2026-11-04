@@ -234,6 +234,13 @@ pub struct Report {
     pub frames_lost: u64,
     #[serde(default)]
     pub unrecovered_loss_pct: Option<f32>,
+    /// Longest observed run of erased video data shards in this window.
+    #[serde(default)]
+    pub loss_burst_packets: u8,
+    #[serde(default)]
+    pub wire_budget_kbps: u32,
+    #[serde(default)]
+    pub application_limited: bool,
     #[serde(default)]
     pub queue_ms: f32,
     #[serde(default)]

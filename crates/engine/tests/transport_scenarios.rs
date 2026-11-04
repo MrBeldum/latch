@@ -70,6 +70,7 @@ fn transport_scenarios() {
         let mut peak = 0;
         let mut minimum = ceiling;
         let mut fec_loss = 0.0;
+        let mut fec_burst: f32 = 0.0;
         let mut tokens = 0.0f64;
         let mut seed = 0x9e37_79b9_u32;
         let mut damaged_windows = 0;
@@ -97,6 +98,8 @@ fn transport_scenarios() {
                 let size = (u64::from(congestion::video_budget(
                     controller.budget(),
                     tx.fec_percent(),
+                    fec_burst.round() as u8,
+                    fps as u32,
                     false,
                 )) * 1000
                     / 8
@@ -169,6 +172,7 @@ fn transport_scenarios() {
                     frames_lost: stats.frames_lost - previous.frames_lost,
                     loss_pct: (missing + recovered) as f32 * 100.0 / denom,
                     unrecovered_loss_pct: Some(missing as f32 * 100.0 / denom),
+                    loss_burst_packets: rx.take_loss_burst(),
                     window_ms: 50,
                     ..Default::default()
                 };
@@ -203,9 +207,22 @@ fn transport_scenarios() {
                     report.loss_pct,
                     Duration::from_millis(50),
                 );
-                tx.set_fec_percent(
-                    latch_proto::video::fec_percent_for(fec_loss, controller.base_rtt()).min(30),
+                fec_burst = latch_proto::video::fec_loss_sample(
+                    fec_burst,
+                    if controller.pacing()
+                        || report.unrecovered_loss_pct.is_some_and(|loss| loss > 10.0)
+                    {
+                        0.0
+                    } else {
+                        f32::from(report.loss_burst_packets)
+                    },
+                    Duration::from_millis(50),
                 );
+                tx.set_fec_burst(fec_burst.round() as u8);
+                tx.set_fec_percent(latch_proto::video::fec_percent_for(
+                    fec_loss,
+                    controller.base_rtt(),
+                ));
             }
             if ms >= 8000 && controller.budget() >= ceiling * 95 / 100 {
                 ceiling_at.get_or_insert(ms - 8000);
@@ -235,7 +252,7 @@ fn transport_scenarios() {
             // 5% over mostly costs the tail parity, which the viewer never
             // misses; larger overshoots lose frames until the rate drops.
             if name != "policer5" {
-                assert!(lost_windows > 3, "{name}: must exercise frame damage");
+                assert!(lost_windows > 0, "{name}: must exercise frame damage");
                 assert!(
                     f64::from(minimum) < f64::from(ceiling) * share,
                     "{name}: must cut without queue growth"

@@ -173,6 +173,8 @@ pub struct Stats {
     /// Persistent video diagnosis, even while the transport is connected.
     pub video_problem: Option<String>,
     pub applied_bitrate_kbps: u32,
+    pub wire_budget_kbps: u32,
+    pub application_limited: bool,
     pub requested_bitrate_kbps: u32,
     pub pacing_queue_ms: f32,
     pub send_errors: u64,
@@ -1184,6 +1186,8 @@ fn control_loop(inner: &Arc<Inner>, tcp: &mut TcpStream, accept: &Accept) -> Out
                 inner.heard();
                 let mut stats = inner.stats.lock();
                 stats.applied_bitrate_kbps = report.applied_bitrate_kbps;
+                stats.wire_budget_kbps = report.wire_budget_kbps;
+                stats.application_limited = report.application_limited;
                 stats.requested_bitrate_kbps = report.requested_bitrate_kbps;
                 stats.pacing_queue_ms = report.pacing_queue_ms;
                 stats.send_errors = report.send_errors;
@@ -1510,6 +1514,7 @@ fn receive(
                     / 1000.0) as u32,
                 frames_lost: stats.frames_lost - report_base.frames_lost,
                 unrecovered_loss_pct: Some(loss),
+                loss_burst_packets: reassembler.take_loss_burst(),
                 window_ms: (secs * 1000.0) as u32,
                 ..Default::default()
             };

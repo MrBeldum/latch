@@ -35,12 +35,34 @@ fn transport_scenarios() {
         ("cap5", 5000, 100000, 10, 50, 10, false),
         ("route", 100000, 100000, 10, 50, 10, false),
         ("lan1g", 1000000, 1000000, 1, 50, 1, false),
+        ("loss1cap20", 20000, 20000, 10, 50, 10, false),
+        ("loss3cap20", 20000, 20000, 10, 50, 10, false),
+        ("loss5cap20", 20000, 20000, 10, 50, 10, false),
+        ("loss1cap50", 50000, 50000, 10, 50, 10, false),
+        ("loss3cap50", 50000, 50000, 10, 50, 10, false),
+        ("loss5cap50", 50000, 50000, 10, 50, 10, false),
+        ("loss1cap100", 100000, 100000, 10, 50, 10, false),
+        ("loss3cap100", 100000, 100000, 10, 50, 10, false),
+        ("loss5cap100", 100000, 100000, 10, 50, 10, false),
+        ("idle_motion", 50000, 50000, 10, 50, 10, false),
     ] {
         let fps = 120;
+        let random = name.starts_with("loss");
         let impairment = Impairment {
-            loss: if name == "legacy_radio" { 0.05 } else { 0.0 },
+            loss: if random {
+                f64::from(name.as_bytes()[4] - b'0') / 100.0
+            } else if name == "legacy_radio" {
+                0.05
+            } else {
+                0.0
+            },
+            burst_enter: if random { 0.002 } else { 0.0 },
+            burst_exit: 0.3,
+            duplicate: if random { 0.01 } else { 0.0 },
+            reorder: if random { 0.01 } else { 0.0 },
+            reorder_delay: Duration::from_millis(4),
+            jitter: Duration::from_millis(if random { 4 } else { 0 }),
             delay: Duration::from_millis(base / 2),
-            ..Impairment::NONE
         };
         let start = Instant::now();
         let mut pending = VecDeque::<Vec<u8>>::new();
@@ -60,6 +82,11 @@ fn transport_scenarios() {
         let mut ping_low = f32::MAX;
         let mut minimum = ceiling;
         let mut fec_loss = 0.0;
+        let mut fec_burst: f32 = 0.0;
+        let mut wire_bytes = 0u64;
+        let mut parity_bytes = 0u64;
+        let mut idrs = 0;
+        let mut full_rate_at = None;
         let mut budgets = Vec::new();
         let mut route_recovered = false;
         for ms in 0..35_000u64 {
@@ -70,16 +97,24 @@ fn transport_scenarios() {
                 let size = (u64::from(congestion::video_budget(
                     controller.budget(),
                     tx.fec_percent(),
+                    fec_burst.round() as u8,
+                    fps as u32,
                     false,
                 )) * 1000
                     / 8
                     / fps) as usize;
+                let size = if name == "idle_motion" && ms < 5000 {
+                    size / 100
+                } else {
+                    size
+                };
                 let data = vec![0x5a; size];
                 let keyframe = idr_due.is_some_and(|at| at <= now)
                     && now - last_idr >= Duration::from_millis(base);
                 if keyframe {
                     idr_due = None;
                     last_idr = now;
+                    idrs += 1;
                 }
                 tx.packetize(
                     &OutFrame {
@@ -88,6 +123,12 @@ fn transport_scenarios() {
                         host_delay: 0,
                     },
                     |dg| {
+                        wire_bytes += (dg.len() + 80) as u64;
+                        if let Ok(Datagram::Video { shard, .. }) = latch_proto::wire::parse(dg) {
+                            if shard.shard >= shard.data {
+                                parity_bytes += (dg.len() + 80) as u64;
+                            }
+                        }
                         pending.push_back(dg.to_vec());
                     },
                 );
@@ -126,6 +167,11 @@ fn transport_scenarios() {
                     rx.push(&shard, now);
                 }
                 while let Some(event) = rx.poll(now) {
+                    if let Reassembled::Frame(ref frame) = event {
+                        if name == "idle_motion" && ms >= 5000 && frame.data.len() > 30000 {
+                            full_rate_at.get_or_insert(ms - 5000);
+                        }
+                    }
                     if matches!(event, Reassembled::Lost { .. }) && idr_due.is_none() {
                         idr_due = Some(now + Duration::from_millis(base));
                     }
@@ -155,6 +201,7 @@ fn transport_scenarios() {
                     } else {
                         Some(missing as f32 * 100.0 / denom)
                     },
+                    loss_burst_packets: rx.take_loss_burst(),
                     window_ms: interval as u32,
                     ..Default::default()
                 };
@@ -178,9 +225,22 @@ fn transport_scenarios() {
                     report.loss_pct,
                     Duration::from_millis(interval),
                 );
-                tx.set_fec_percent(
-                    latch_proto::video::fec_percent_for(fec_loss, controller.base_rtt()).min(30),
+                fec_burst = latch_proto::video::fec_loss_sample(
+                    fec_burst,
+                    if controller.pacing()
+                        || report.unrecovered_loss_pct.is_some_and(|loss| loss > 10.0)
+                    {
+                        0.0
+                    } else {
+                        f32::from(report.loss_burst_packets)
+                    },
+                    Duration::from_millis(interval),
                 );
+                tx.set_fec_burst(fec_burst.round() as u8);
+                tx.set_fec_percent(latch_proto::video::fec_percent_for(
+                    fec_loss,
+                    controller.base_rtt(),
+                ));
             }
             minimum = minimum.min(controller.budget());
             if name == "route" && ms >= 15000 && controller.budget() == ceiling {
@@ -199,9 +259,35 @@ fn transport_scenarios() {
             stats.frames_skipped,
             controller.budget()
         );
+        println!("OVERHEAD {name} parity_pct={:.2} parity_mbps={:.3} wire_mbps={:.3} lost_per_min={:.1} idrs_per_min={:.1} motion_ms={}",
+            parity_bytes as f64 * 100.0 / wire_bytes as f64,
+            parity_bytes as f64 * 8.0 / 35_000_000.0,
+            wire_bytes as f64 * 8.0 / 35_000_000.0,
+            stats.frames_lost as f64 * 60.0 / 35.0, idrs as f64 * 60.0 / 35.0,
+            full_rate_at.map_or(-1, |ms| ms as i64));
+        if random {
+            assert!(
+                minimum >= cap * 4 / 5,
+                "{name}: random loss collapsed budget: {minimum}"
+            );
+        }
+        if name == "idle_motion" {
+            assert_eq!(minimum, ceiling, "idle encoder must retain the budget");
+            assert!(
+                full_rate_at.is_some_and(|ms| ms < 50),
+                "motion must use the budget immediately"
+            );
+        }
         // Main's controller spreads 1.7/3.5/7.1 Mbps at these caps (10 ms,
         // 50 ms reports); stay at or under it at every RTT and at 5.1's cadence.
-        if interval <= 250 && !legacy && name != "route" && name != "lan1g" && cap >= 20000 {
+        if interval <= 250
+            && !legacy
+            && name != "route"
+            && name != "lan1g"
+            && cap >= 20000
+            && !random
+            && name != "idle_motion"
+        {
             let sd_bound = match cap {
                 20000 => 1700.0,
                 50000 => 3500.0,

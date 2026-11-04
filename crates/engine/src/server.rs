@@ -436,6 +436,7 @@ impl Server {
             rtt_low: Mutex::new(None),
             pace_kbps: AtomicU32::new(0),
             fec: AtomicU8::new(DEFAULT_FEC_PERCENT),
+            fec_burst: AtomicU8::new(0),
             heard_us: AtomicU64::new(self.now_us()),
             frames: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
@@ -650,6 +651,7 @@ impl Server {
             crate::congestion::Controller::new(accept.bitrate_kbps, Instant::now());
         let requested_bitrate = accept.bitrate_kbps;
         let mut fec_loss = 0.0;
+        let mut fec_burst = 0.0;
         let mut last_keepalive = Instant::now();
         let mut last_hello = Instant::now() - HELLO_EVERY;
         let mut last_ping = Instant::now();
@@ -724,11 +726,27 @@ impl Server {
                     );
                     fec_loss =
                         latch_proto::video::fec_loss_sample(fec_loss, r.loss_pct, now - then);
-                    let fec = fec_percent_for(fec_loss, controller.base_rtt()).min(30);
+                    let fec = fec_percent_for(fec_loss, controller.base_rtt());
+                    fec_burst = latch_proto::video::fec_loss_sample(
+                        fec_burst,
+                        if controller.pacing()
+                            || r.unrecovered_loss_pct.is_some_and(|loss| loss > 10.0)
+                        {
+                            0.0
+                        } else {
+                            f32::from(r.loss_burst_packets)
+                        },
+                        now - then,
+                    );
+                    session
+                        .fec_burst
+                        .store(fec_burst.round() as u8, Ordering::Relaxed);
                     session.fec.store(fec, Ordering::Relaxed);
                     let status = self.status();
                     let report = control::Report {
                         requested_bitrate_kbps: requested_bitrate,
+                        wire_budget_kbps: controller.budget(),
+                        application_limited: controller.application_limited(),
                         applied_bitrate_kbps: session.transport.applied.load(Ordering::Relaxed),
                         pacing_queue_ms: queue_ms,
                         send_errors: status.send_errors,
@@ -931,6 +949,7 @@ struct Session {
     /// How fast to send a frame's datagrams; 0 sends each frame at once.
     pace_kbps: AtomicU32,
     fec: AtomicU8,
+    fec_burst: AtomicU8,
     /// When the viewer was last heard from, on the server's clock.
     heard_us: AtomicU64,
     frames: AtomicU64,
@@ -1363,6 +1382,8 @@ fn encode_video(
                 .load(Ordering::Relaxed)
                 .saturating_sub(session.surround_kbps),
             session.fec.load(Ordering::Relaxed),
+            session.fec_burst.load(Ordering::Relaxed),
+            config.fps,
             audio,
         );
         if applied == 0 || target.abs_diff(applied) >= (applied / 20).max(1) {
@@ -1509,6 +1530,7 @@ fn paced_video(
             continue;
         };
         packetizer.set_fec_percent(session.fec.load(Ordering::Relaxed));
+        packetizer.set_fec_burst(session.fec_burst.load(Ordering::Relaxed));
         let recovery = &session.recovery;
         let asked = frame.recovery.and_then(|base| {
             let (generation, picture, id) = recovery
@@ -1552,13 +1574,13 @@ fn paced_video(
                 },
             );
         }
+        session
+            .transport
+            .queue_us
+            .fetch_max(queued.elapsed().as_micros() as u64, Ordering::Relaxed);
         packetizer.packetize_batches(&out, |batch| {
             if pace == 0 {
                 if !session.stopping() {
-                    session
-                        .transport
-                        .queue_us
-                        .fetch_max(queued.elapsed().as_micros() as u64, Ordering::Relaxed);
                     send_batch(&mut sender, &server.udp, session, batch, addr);
                 }
                 return;

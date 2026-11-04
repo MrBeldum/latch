@@ -400,6 +400,8 @@ fn main() -> anyhow::Result<()> {
             "received_mbps": s.received_mbps, "frames_lost": s.frames_lost,
             "video_problem": s.video_problem, "rtt_var_ms": s.rtt_var_ms,
             "requested_bitrate_kbps": s.requested_bitrate_kbps,
+            "wire_budget_kbps": s.wire_budget_kbps,
+            "application_limited": s.application_limited,
             "applied_bitrate_kbps": s.applied_bitrate_kbps, "pacing_queue_ms": s.pacing_queue_ms,
             "send_errors": s.send_errors, "send_retries": s.send_retries,
             "socket_send_bytes": s.socket_send_bytes, "socket_receive_bytes": s.socket_receive_bytes,

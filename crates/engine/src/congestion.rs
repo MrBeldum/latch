@@ -36,6 +36,19 @@ pub(crate) struct Controller {
     overload: Option<u32>,
     /// A lossless RTT plateau that survives a fourfold load reduction.
     route: Option<(f32, Instant, u32)>,
+    loss_since: Option<Instant>,
+    /// A reversible 20% reduction tests whether queue-free loss follows load.
+    loss_probe: Option<LossProbe>,
+    random_until: Instant,
+}
+
+struct LossProbe {
+    budget: u32,
+    sent: u32,
+    loss: f32,
+    at: Instant,
+    sum: f32,
+    samples: u32,
 }
 
 impl Controller {
@@ -63,6 +76,9 @@ impl Controller {
             step: 0.0,
             overload: None,
             route: None,
+            loss_since: None,
+            loss_probe: None,
+            random_until: now,
         }
     }
 
@@ -71,7 +87,12 @@ impl Controller {
     }
 
     pub(crate) fn observe_sent(&mut self, kbps: u32) {
-        self.sent_kbps = (kbps > 0).then_some(kbps);
+        self.sent_kbps = Some(kbps);
+    }
+
+    pub(crate) fn application_limited(&self) -> bool {
+        self.sent_kbps
+            .is_some_and(|sent| sent < self.budget * 4 / 5)
     }
 
     pub(crate) fn pacing(&self) -> bool {
@@ -109,20 +130,20 @@ impl Controller {
         let falling = delay + 0.5 < self.previous_delay;
         self.gradient = self.gradient * 0.5 + (delay - self.previous_delay) * 0.5;
         self.previous_delay = delay;
+        let jitter = self
+            .jitter
+            .max(if self.application_limited() { 3.0 } else { 0.0 });
         let threshold = 6.0f32.max(self.min_rtt[1].min(self.min_rtt[0]) * 0.1);
-        queued |= delay > threshold.max(self.jitter * 3.0);
-        queued |= delay > 3.0f32.max(self.jitter * 1.5) && self.gradient > self.jitter.max(1.0);
+        queued |= delay > threshold.max(jitter * 3.0);
+        queued |= delay > 3.0f32.max(jitter * 1.5) && self.gradient > jitter.max(1.0);
         if !queued && !self.pacing {
             self.jitter += (fall - self.jitter) / 8.0;
         }
         let loss = report.unrecovered_loss_pct.unwrap_or(report.loss_pct);
-        // Legacy loss_pct is raw loss. FEC-recovered random radio loss does
-        // not cut a new viewer's budget. Uncorrected loss or lost frames in
-        // two windows running do, however low the raw loss: a policer drops
-        // only the overshoot and never queues, so delay never rises. An old
-        // viewer cannot label repaired shards: moderate raw loss with no frame
-        // damage is radio loss, and even low-raw frame loss catches policers.
-        let damaged = report.frames_lost > 0
+        // FEC-recovered loss is not congestion. Residual damage starts a
+        // rate-correlation test below; severe loss and legacy reports without
+        // usable rate feedback retain the conservative two-window fallback.
+        let mut damaged = report.frames_lost > 0
             || report
                 .unrecovered_loss_pct
                 .map_or(report.loss_pct > 10.0, |loss| loss > 3.0);
@@ -179,7 +200,60 @@ impl Controller {
         // cut. Wait for its own feedback before increasing again.
         let probe_queued = self.probe.is_some() && delay > 3.0f32.max(self.jitter * 2.0);
         queued |= probe_queued;
-        let pressure = queued || queue_ms > 20.0 || damaged;
+        let old = self.budget;
+        let app_limited = self.application_limited();
+        // Give parity feedback a chance before testing loss against offered load.
+        // A radio burst cannot prove a policer: loss must improve at a lower
+        // *actual* send rate. Never ratchet an inconclusive test down again.
+        if !queued
+            && self.sent_kbps.is_some()
+            && report.received_kbps > 0
+            && (report.loss_pct > 0.0 || self.loss_probe.is_some())
+            && loss <= 10.0
+        {
+            let raw = report.loss_pct.max(loss);
+            let mut confirmed = false;
+            if let Some(probe) = self.loss_probe.as_mut() {
+                if now.duration_since(probe.at) >= horizon {
+                    probe.sum += raw;
+                    probe.samples += 1;
+                }
+                if now.duration_since(probe.at) >= horizon + Duration::from_secs(1) {
+                    let probe = self.loss_probe.take().unwrap();
+                    confirmed = self.sent_kbps.unwrap_or(0) < probe.sent * 9 / 10
+                        && probe.samples > 0
+                        && probe.sum / (probe.samples as f32) < probe.loss * 0.5;
+                    if !confirmed {
+                        self.budget = probe.budget;
+                        self.random_until = now + LOSSY_MEMORY;
+                    }
+                    self.loss_since = None;
+                }
+            } else if damaged && now >= self.random_until {
+                let since = *self.loss_since.get_or_insert(now);
+                if now.duration_since(since) >= Duration::from_millis(500) && !app_limited {
+                    self.loss_probe = Some(LossProbe {
+                        budget: self.budget,
+                        sent: self.sent_kbps.unwrap_or(self.budget),
+                        loss: raw.max(0.1),
+                        at: now,
+                        sum: 0.0,
+                        samples: 0,
+                    });
+                    self.budget = self.budget * 4 / 5;
+                }
+            } else if !damaged {
+                self.loss_since = None;
+            }
+            if confirmed {
+                self.pressure_windows = 2;
+            }
+            damaged = confirmed;
+        } else if queued {
+            self.loss_probe = None;
+            self.loss_since = None;
+        }
+        let pressure = queued || (queue_ms > 20.0 && !app_limited) || damaged;
         self.pressure_windows = if pressure {
             self.pressure_windows.saturating_add(1)
         } else {
@@ -207,7 +281,6 @@ impl Controller {
             .lossy
             .filter(|(_, at)| now.duration_since(*at) < LOSSY_MEMORY)
             .map(|(kbps, _)| kbps);
-        let old = self.budget;
         let elapsed = now.saturating_duration_since(self.last_step);
         // Reports up to 2 s apart integrate all elapsed time (including 5.1's
         // 250 ms cadence). After a longer silence require fresh feedback;
@@ -244,7 +317,11 @@ impl Controller {
                 && now.duration_since(self.last_cut) < horizon * 3;
             if now.duration_since(self.last_cut) >= spacing && !late && !draining {
                 // A target cut above the encoder's actual wire rate has no effect.
-                let offered = self.sent_kbps.unwrap_or(self.budget).min(self.budget);
+                let offered = if app_limited && queued {
+                    self.budget
+                } else {
+                    self.sent_kbps.unwrap_or(self.budget).min(self.budget)
+                };
                 // What got through bounds the new offered rate: a standing
                 // FIFO delivers its bottleneck rate. A viewer that omits
                 // throughput still reports loss: about the offered rate less
@@ -254,7 +331,9 @@ impl Controller {
                 } else {
                     (f64::from(offered) * (1.0 - f64::from(loss.clamp(0.0, 100.0)) / 100.0)) as u32
                 };
-                let measured = if received > 0 || damaged || collapsed {
+                let measured = if app_limited && queued {
+                    offered
+                } else if received > 0 || damaged || collapsed {
                     (u64::from(through) * 107 / 100).min(u64::from(u32::MAX)) as u32
                 } else {
                     offered
@@ -276,8 +355,8 @@ impl Controller {
                     // A queue without loss or throughput feedback says only
                     // that the offered rate was too high, not what the path
                     // carries: recover by elapsed time.
-                    self.capacity =
-                        (received > 0 || loss > 0.0).then(|| through.min(offered).max(self.floor));
+                    self.capacity = (!app_limited && (received > 0 || loss > 0.0))
+                        .then(|| through.min(offered).max(self.floor));
                 }
                 self.probe_at = now + Duration::from_millis(500).max(horizon);
                 // Loss without a queue is a policer, whose rate stays put:
@@ -288,7 +367,10 @@ impl Controller {
                 }
                 self.last_cut = now;
             }
-        } else if !pressure && now.duration_since(self.clean_since) >= Duration::from_millis(200) {
+        } else if !pressure
+            && self.loss_probe.is_none()
+            && now.duration_since(self.clean_since) >= Duration::from_millis(200)
+        {
             self.pacing = false;
             if stale {
                 self.clean_since = now;
@@ -305,8 +387,10 @@ impl Controller {
                     if now.duration_since(at) >= horizon {
                         // The probe survived a feedback round trip: its rate
                         // holds, and the next probe may reach twice as far.
-                        self.capacity = Some(self.budget);
-                        self.step = (self.step.max(base) * 2.0).min(1.0);
+                        if !app_limited {
+                            self.capacity = Some(self.budget);
+                            self.step = (self.step.max(base) * 2.0).min(1.0);
+                        }
                         self.probe = None;
                     }
                 }
@@ -316,7 +400,7 @@ impl Controller {
                     let safe = (capacity * margin / 100).max(self.floor).min(cap);
                     if self.budget < safe {
                         self.budget = growth.min(safe);
-                    } else if now >= self.probe_at && self.budget < cap {
+                    } else if now >= self.probe_at && self.budget < cap && !app_limited {
                         self.probe = Some((self.budget, now));
                         let step = self.step.max(base);
                         let mut target = (f64::from(capacity) * (1.0 + step)) as u32;
@@ -340,16 +424,98 @@ impl Controller {
 
 /// The encoder budget accounts for rounded FEC and Latch/IP/tunnel headers.
 /// Audio is reserved separately; at tiny rates keep a usable video floor.
-pub(crate) fn video_budget(wire_kbps: u32, fec: u8, audio: bool) -> u32 {
+pub(crate) fn video_budget(wire_kbps: u32, fec: u8, burst: u8, fps: u32, audio: bool) -> u32 {
     let available = wire_kbps
         .saturating_sub(if audio { 1200 } else { 0 })
         .max(wire_kbps / 2);
-    ((u64::from(available) * 10000 / (112 * (102 + u64::from(fec)))) as u32).max(1)
+    let mut percent = u64::from(fec);
+    // Reserve the packet floor too: on a thin frame a short burst costs
+    // proportionally more parity than on a full 64-shard block.
+    for _ in 0..4 {
+        let video = u64::from(available) * 10000 / (112 * (102 + percent));
+        let bytes = video * 1000 / 8 / u64::from(fps.max(1));
+        let shards = bytes.div_ceil(latch_proto::MAX_SHARD_LEN as u64).max(1);
+        let blocks = shards.div_ceil(latch_proto::MAX_BLOCK_DATA as u64);
+        let data = shards / blocks;
+        if burst > 0 {
+            percent = percent.max((u64::from(burst) + 2).min(data) * 100 / data);
+        }
+    }
+    ((u64::from(available) * 10000 / (112 * (102 + percent))) as u32).max(1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn loss_only_reductions_require_rate_correlation() {
+        for policer in [false, true] {
+            let start = Instant::now();
+            let mut c = Controller::new(100_000, start);
+            let mut minimum = c.budget();
+            for tick in 0..160 {
+                let sent = c.budget();
+                let raw = if policer {
+                    if sent > 85_000 {
+                        8.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    5.0
+                };
+                c.observe_sent(sent);
+                c.update(
+                    start + Duration::from_millis(tick * 50),
+                    &Report {
+                        rtt_ms: 10.0,
+                        window_ms: 50,
+                        loss_pct: raw,
+                        unrecovered_loss_pct: Some(if raw > 0.0 { 4.0 } else { 0.0 }),
+                        frames_lost: u64::from(raw > 0.0),
+                        received_kbps: (sent as f32 * (1.0 - raw / 100.0)) as u32,
+                        ..Default::default()
+                    },
+                    10.0,
+                    0.0,
+                );
+                minimum = minimum.min(c.budget());
+            }
+            if policer {
+                assert!(minimum < 80_000, "must confirm the rate test");
+            } else {
+                assert!(minimum >= 80_000, "random loss ratcheted budget: {minimum}");
+            }
+        }
+    }
+
+    #[test]
+    fn idle_retains_a_sustainable_budget_and_zero_is_application_limited() {
+        let start = Instant::now();
+        let mut c = Controller::new(50_000, start);
+        c.capacity = Some(50_000);
+        for tick in 0..200 {
+            c.observe_sent(if tick % 2 == 0 { 0 } else { 1000 });
+            c.update(
+                start + Duration::from_millis(tick * 50),
+                &Report {
+                    rtt_ms: 10.0,
+                    received_kbps: 1000,
+                    window_ms: 50,
+                    ..Default::default()
+                },
+                10.0,
+                25.0,
+            );
+            assert!(c.application_limited());
+            assert_eq!(c.budget(), 50_000);
+            assert_eq!(c.capacity, Some(50_000));
+        }
+        c.observe_sent(50_000);
+        assert!(!c.application_limited());
+        assert_eq!(c.budget(), 50_000);
+    }
+
     #[test]
     fn recovery_integrates_report_time_and_rejects_stale_credit() {
         // Same fake-clock setup as the independent review's recovery probe.
@@ -466,7 +632,7 @@ mod tests {
             c.update(start + Duration::from_millis(tick * 250), &r, 40.0, 0.0);
         }
         assert!(c.pacing());
-        assert_eq!(c.budget(), 4_800);
+        assert_eq!(c.budget(), 30_000);
         r.rtt_ms = 12.0;
         c.update(start + Duration::from_secs(3), &r, 12.0, 0.0);
         assert!(!c.pacing());

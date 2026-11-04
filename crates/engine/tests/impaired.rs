@@ -212,8 +212,8 @@ fn a_bad_network_slows_the_picture_but_loses_no_key() {
         std::thread::sleep(Duration::from_secs(1));
         let s = session.stats();
         eprintln!(
-            "{:5.1} fps {:5.2} Mbps loss {:4.1}% fec {:3} decode {:4.1} ms",
-            s.fps, s.mbps, s.loss_pct, s.fec_recovered, s.decode_ms
+            "{:5.1} fps {:5.2} Mbps loss {:4.1}% fec {:3} decode {:4.1} ms budget {} kbps",
+            s.fps, s.mbps, s.loss_pct, s.fec_recovered, s.decode_ms, s.wire_budget_kbps
         );
         seconds.push(s);
     }
@@ -256,6 +256,11 @@ fn a_bad_network_slows_the_picture_but_loses_no_key() {
     assert!(
         recovered > 0,
         "FEC never had to rebuild anything: was there loss?"
+    );
+    assert!(
+        tail.iter().all(|s| s.wire_budget_kbps >= 4800),
+        "random loss collapsed the budget: {:?}",
+        tail.iter().map(|s| s.wire_budget_kbps).collect::<Vec<_>>()
     );
     session.stop();
 }
