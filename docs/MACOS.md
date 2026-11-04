@@ -373,15 +373,20 @@ P-frame capped too), and `BaseFrameQP` works only under the low-latency
 rate control above. So a lost frame is best answered without an IDR
 (reference invalidation), and the IDR that remains is paced on the wire.
 
-A Mac host still answers a loss with an IDR: its encoder refuses recovery
-requests. VideoToolbox does have public long-term references since macOS 12
-(`kVTCompressionPropertyKey_EnableLTR`, the per-sample
-`kVTSampleAttachmentKey_RequireLTRAcknowledgementToken`, and the frame
-options `kVTEncodeFrameOptionKey_AcknowledgedLTRTokens` and
-`kVTEncodeFrameOptionKey_ForceLTRRefresh`): acknowledging the tokens of
-frames up to the viewer's last delivered one and forcing a refresh should
-make a recovery frame. That is not built yet; it needs a test that decodes
-the refreshed stream after dropped frames.
+VideoToolbox recovery uses the public macOS 12 LTR API, loaded at runtime.
+`EnableLTR` must succeed before recovery is advertised. Only tokens attached to
+pictures at or before the viewer's delivered base are acknowledged, then
+`ForceLTRRefresh` requests a P-frame. Queued pictures before that submission
+are discarded; a dropped refresh requests an IDR. Requests cannot cross an
+IDR, an already acknowledged newer base, or an encoder replacement.
+
+On M3 Pro the ordinary mode rejects LTR. `LATCH_MAC_LTR=1` opts into
+`EnableLowLatencyRateControl`, where H.264 High and HEVC accept it. This mode
+remains opt-in because of its throughput/rate-control cost documented above.
+The IOSurface test `ltr_recovery_matches_uninterrupted_decoding` compares
+uninterrupted and dropped-frame output byte for byte in VideoToolbox and
+FFmpeg, including a lost recovery frame. No Screen Recording permission is
+needed. Unsupported sessions retain IDR recovery.
 
 ## Permissions
 

@@ -929,7 +929,7 @@ fn main10_iosurface_roundtrip() {
         bitrate_kbps: 20_000,
         codec: Codec::Hevc,
     };
-    assert!(Encoder::open(&config, true, Depth::Ten)
+    assert!(Encoder::open(&config, true, Depth::Ten, false)
         .map(|_| ())
         .and_then(|()| {
             Encoder::open(
@@ -940,10 +940,11 @@ fn main10_iosurface_roundtrip() {
                 },
                 true,
                 Depth::Ten,
+                false,
             )
         })
         .is_err());
-    let mut encoder = Encoder::open(&config, true, Depth::Ten).unwrap();
+    let mut encoder = Encoder::open(&config, true, Depth::Ten, false).unwrap();
     // SAFETY: as surface(), in P010; each plane is written at its own stride.
     let image = unsafe {
         let empty = dictionary(&[]);
@@ -1400,5 +1401,131 @@ fn color_latency_benchmark() {
         enc.sort_by(f64::total_cmp);
         dec.sort_by(f64::total_cmp);
         eprintln!("COLOR {mode} 960x540@60: encode_p50={:.3} encode_p95={:.3} decode_p50={:.3} decode_p95={:.3} Mbps={:.3} decoded_gradient_levels={}",enc[60],enc[114],dec[60],dec[114],bytes as f64*8.0/2.0/1e6,levels.len());
+    }
+}
+
+/// A real IOSurface stream decoded twice: continuously and with missing frames.
+/// No Screen Recording permission is needed. Also checks an independent decoder.
+#[test]
+fn ltr_recovery_matches_uninterrupted_decoding() {
+    let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    for codec in [Codec::H264High, Codec::Hevc] {
+        let config = VideoConfig {
+            width: WIDTH as u32,
+            height: HEIGHT as u32,
+            fps: FPS,
+            bitrate_kbps: 10_000,
+            codec,
+            color: Default::default(),
+        };
+        let mut encoder = Encoder::open(&config, true, Depth::Eight, true).unwrap();
+        eprintln!(
+            "{codec:?}: hardware={} LTR={}",
+            encoder.hardware,
+            encoder.recovers()
+        );
+        if !encoder.recovers() {
+            continue;
+        }
+        let mut full_decoder = latch_stream::video::new_decoder(codec).unwrap();
+        let mut loss_decoder = latch_stream::video::new_decoder(codec).unwrap();
+        let image = surface();
+        let mut full = Vec::new();
+        let mut loss = Vec::new();
+        let mut kept = Vec::new();
+        let mut delivered = 0;
+        for n in 0..120 {
+            let dropped = (20..28).contains(&n) || (60..64).contains(&n);
+            if n == 24 || n == 28 || n == 64 {
+                assert!(encoder.recover_from(delivered), "no token at {n}");
+            }
+            fill(&image, &pattern(n));
+            let frame = encoder
+                .encode(image.0, Instant::now(), n == 0)
+                .unwrap()
+                .expect("encoded picture");
+            if n == 24 || n == 28 || n == 64 {
+                eprintln!(
+                    "refresh {n}: IDR={} recovery={:?} {} B",
+                    frame.keyframe,
+                    frame.recovery,
+                    frame.data.len()
+                );
+                assert_eq!(frame.recovery, Some(delivered));
+            }
+            let expected = full_decoder
+                .decode(&frame.data, frame.keyframe, None)
+                .unwrap()
+                .expect("full decode");
+            full.extend_from_slice(&frame.data);
+            if !dropped {
+                let actual = loss_decoder
+                    .decode(&frame.data, frame.keyframe, None)
+                    .unwrap()
+                    .expect("loss decode");
+                let pixels = |f: &latch_stream::video::Frame| {
+                    f.with_planes(|y, ys, uv, cs| {
+                        let mut out = Vec::new();
+                        for (p, stride, rows) in [(y, ys, HEIGHT), (uv, cs, HEIGHT / 2)] {
+                            for row in p.chunks(stride).take(rows) {
+                                out.extend_from_slice(&row[..WIDTH]);
+                            }
+                        }
+                        out
+                    })
+                };
+                assert_eq!(pixels(&expected), pixels(&actual), "VT mismatch at {n}");
+                loss.extend_from_slice(&frame.data);
+                kept.push(n);
+                delivered = frame.picture;
+            }
+        }
+        if let Some(ffmpeg) = ffmpeg() {
+            let dir =
+                std::env::temp_dir().join(format!("latch-vt-ltr-{}-{codec:?}", std::process::id()));
+            fs::create_dir_all(&dir).unwrap();
+            let ext = if codec == Codec::Hevc { "hevc" } else { "h264" };
+            for (name, bytes) in [("full", full), ("loss", loss)] {
+                let input = dir.join(format!("{name}.{ext}"));
+                fs::write(&input, bytes).unwrap();
+                let result = Command::new(&ffmpeg)
+                    .args(["-v", "error", "-y", "-threads", "1", "-i"])
+                    .arg(input)
+                    .args([
+                        "-fps_mode",
+                        "passthrough",
+                        "-pix_fmt",
+                        "nv12",
+                        "-f",
+                        "rawvideo",
+                    ])
+                    .arg(dir.join(format!("{name}.nv12")))
+                    .output()
+                    .unwrap();
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                assert!(
+                    result.stderr.is_empty(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            }
+            let full = fs::read(dir.join("full.nv12")).unwrap();
+            let loss = fs::read(dir.join("loss.nv12")).unwrap();
+            let size = WIDTH * HEIGHT * 3 / 2;
+            assert_eq!(full.len(), 120 * size);
+            assert_eq!(loss.len(), kept.len() * size);
+            for (i, &n) in kept.iter().enumerate() {
+                assert_eq!(
+                    &loss[i * size..(i + 1) * size],
+                    &full[n * size..(n + 1) * size],
+                    "FFmpeg mismatch at {n}"
+                );
+            }
+            fs::remove_dir_all(dir).unwrap();
+        }
     }
 }

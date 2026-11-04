@@ -282,6 +282,12 @@ impl VideoPipeline for Video {
             self.capture.shared.ready.wait_for(&mut state, wait);
         }
     }
+    fn recovers(&self) -> bool {
+        self.encoder.recovers()
+    }
+    fn recover_from(&mut self, picture: u64) -> bool {
+        self.encoder.recover_from(picture)
+    }
     fn set_bitrate(&mut self, kbps: u32) {
         if kbps > 0 && kbps != self.config.bitrate_kbps && self.pending.take().is_some() {
             self.encoder.request_keyframe();

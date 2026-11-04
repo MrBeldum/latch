@@ -44,6 +44,8 @@ struct Output {
     hevc: bool,
     pending: VecDeque<(i64, Instant)>,
     done: VecDeque<Done>,
+    tokens: VecDeque<(u64, i64)>,
+    latest_idr: u64,
 }
 type Wake = Box<dyn Fn() + Send + Sync>;
 struct Callback {
@@ -64,17 +66,33 @@ pub(super) struct Encoder {
     /// Discard output until an IDR submitted at or after this boundary.
     recovery: Option<i64>,
     forced: Option<i64>,
+    ltr: bool,
+    /// No recovery may cross an IDR or a previously acknowledged base.
+    ltr_floor: u64,
+    acknowledged_base: u64,
+    refresh: Option<(i64, u64)>,
+    acknowledged: Vec<i64>,
 }
 
 impl Encoder {
     pub fn new(config: &VideoConfig, depth: Depth) -> Result<Self> {
-        Self::open(config, true, depth)
+        Self::open(
+            config,
+            true,
+            depth,
+            std::env::var_os("LATCH_MAC_LTR").is_some_and(|v| v == "1"),
+        )
     }
     #[cfg(test)]
     fn create(config: &VideoConfig, allow_hardware: bool) -> Result<Self> {
-        Self::open(config, allow_hardware, Depth::Eight)
+        Self::open(config, allow_hardware, Depth::Eight, false)
     }
-    fn open(config: &VideoConfig, allow_hardware: bool, depth: Depth) -> Result<Self> {
+    fn open(
+        config: &VideoConfig,
+        allow_hardware: bool,
+        depth: Depth,
+        low_latency: bool,
+    ) -> Result<Self> {
         ensure!(
             config.width > 0
                 && config.height > 0
@@ -97,6 +115,8 @@ impl Encoder {
                 hevc: config.codec == Codec::Hevc,
                 pending: VecDeque::new(),
                 done: VecDeque::new(),
+                tokens: VecDeque::new(),
+                latest_idr: 0,
             }),
             ready: Condvar::new(),
             wake: Mutex::new(None),
@@ -114,7 +134,7 @@ impl Encoder {
                 if hardware && !allow_hardware {
                     continue;
                 }
-                let spec = dictionary(&[if hardware {
+                let mut spec = vec![if hardware {
                     (
                         kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
                         kCFBooleanTrue,
@@ -126,7 +146,15 @@ impl Encoder {
                         kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
                         kCFBooleanFalse,
                     )
-                }]);
+                }];
+                if hardware && low_latency {
+                    if let Some(key) =
+                        optional(c"kVTVideoEncoderSpecification_EnableLowLatencyRateControl")
+                    {
+                        spec.push((key, kCFBooleanTrue));
+                    }
+                }
+                let spec = dictionary(&spec);
                 last_status = VTCompressionSessionCreate(
                     ptr::null(),
                     config.width as i32,
@@ -173,6 +201,11 @@ impl Encoder {
             index: 0,
             recovery: None,
             forced: None,
+            ltr: false,
+            ltr_floor: 0,
+            acknowledged_base: 0,
+            refresh: None,
+            acknowledged: Vec::new(),
         };
         // SAFETY: the session is live and each property receives the documented CF value type.
         unsafe {
@@ -273,6 +306,13 @@ impl Encoder {
                     }
                     tracing::debug!(%error, "VideoToolbox encoder does not take colour tags");
                 }
+            }
+            if let Some(key) = optional(c"kVTCompressionPropertyKey_EnableLTR") {
+                encoder.ltr = optional(c"kVTEncodeFrameOptionKey_AcknowledgedLTRTokens").is_some()
+                    && optional(c"kVTEncodeFrameOptionKey_ForceLTRRefresh").is_some()
+                    && optional(c"kVTSampleAttachmentKey_RequireLTRAcknowledgementToken").is_some()
+                    && VTSessionSetProperty(encoder.session.0, key, kCFBooleanTrue) == 0;
+                tracing::debug!(codec = ?config.codec, ltr = encoder.ltr, "VideoToolbox reference control");
             }
             encoder.bitrate(config.bitrate_kbps)?;
             check(
@@ -409,7 +449,9 @@ impl Encoder {
             VTCompressionSessionInvalidate(self.session.0);
         }
         let wake = self.output.wake.lock().take();
-        *self = Self::open(&self.config, false, self.depth)?;
+        let index = self.index;
+        *self = Self::open(&self.config, false, self.depth, false)?;
+        self.index = index;
         *self.output.wake.lock() = wake;
         self.request_keyframe();
         Ok(())
@@ -441,6 +483,10 @@ impl Encoder {
         self.index += 1;
         let recovery_keyframe = self.recovery.is_some() && self.forced.is_none();
         let keyframe = keyframe || recovery_keyframe;
+        if keyframe {
+            self.ltr_floor = index as u64 + 1;
+            self.refresh = None;
+        }
         self.output
             .output
             .lock()
@@ -449,14 +495,43 @@ impl Encoder {
         // SAFETY: the caller retains image until this returns; VideoToolbox retains it while
         // encoding. The frame refcon carries only the index, never a pointer.
         let status = unsafe {
-            let options = dictionary(&[(
+            let mut properties = vec![(
                 kVTEncodeFrameOptionKey_ForceKeyFrame,
                 if keyframe {
                     kCFBooleanTrue
                 } else {
                     kCFBooleanFalse
                 },
-            )]);
+            )];
+            if self.refresh.is_some_and(|(boundary, _)| boundary == index) {
+                properties.push((
+                    optional(c"kVTEncodeFrameOptionKey_ForceLTRRefresh").unwrap(),
+                    kCFBooleanTrue,
+                ));
+            }
+            let numbers: Vec<_> = self
+                .acknowledged
+                .iter()
+                .map(|&token| number(token))
+                .collect();
+            let values: Vec<_> = numbers.iter().map(|n| n.0).collect();
+            let tokens = if values.is_empty() {
+                None
+            } else {
+                Some(Owned::new(CFArrayCreate(
+                    ptr::null(),
+                    values.as_ptr(),
+                    values.len() as isize,
+                    &kCFTypeArrayCallBacks,
+                ))?)
+            };
+            if !values.is_empty() {
+                properties.push((
+                    optional(c"kVTEncodeFrameOptionKey_AcknowledgedLTRTokens").unwrap(),
+                    tokens.as_ref().unwrap().0,
+                ));
+            }
+            let options = dictionary(&properties);
             VTCompressionSessionEncodeFrame(
                 self.session.0,
                 image,
@@ -475,20 +550,52 @@ impl Encoder {
                 .retain(|(i, _)| *i != index);
             return Err(error);
         }
+        self.acknowledged.clear();
         if recovery_keyframe {
             self.forced = Some(index);
         }
         Ok(index)
     }
+    pub fn recovers(&self) -> bool {
+        self.ltr
+    }
+    pub fn recover_from(&mut self, picture: u64) -> bool {
+        if !self.ltr
+            || self.recovery.is_some()
+            || picture < self.ltr_floor
+            || picture < self.acknowledged_base
+            || picture > self.index as u64
+        {
+            return false;
+        }
+        let out = self.output.output.lock();
+        if picture < out.latest_idr {
+            return false;
+        }
+        self.acknowledged = out
+            .tokens
+            .iter()
+            .filter(|(p, _)| *p >= self.ltr_floor && *p <= picture)
+            .map(|(_, token)| *token)
+            .collect();
+        if self.acknowledged.is_empty() {
+            return false;
+        }
+        self.acknowledged_base = picture;
+        self.refresh = Some((self.index, picture));
+        true
+    }
     /// Repeated requests while an IDR is pending share the same boundary.
     pub fn request_keyframe(&mut self) {
+        self.refresh = None;
+        self.acknowledged.clear();
         if self.recovery.is_none() {
             self.recovery = Some(self.index);
             self.forced = None;
         }
     }
     pub fn needs_keyframe(&self) -> bool {
-        self.recovery.is_some()
+        self.recovery.is_some() || self.refresh.is_some()
     }
     /// The oldest usable output. During recovery, nothing before the fresh
     /// IDR may leave: those P-frames can reference pictures the viewer lost.
@@ -523,6 +630,22 @@ impl Encoder {
                         }
                         continue;
                     }
+                }
+            }
+            let mut done = done;
+            if let Some((boundary, base)) = self.refresh {
+                if done.0 < boundary {
+                    continue;
+                }
+                if let Some(Ok(frame)) = &mut done.2 {
+                    if !frame.keyframe {
+                        frame.recovery = Some(base);
+                    }
+                    self.refresh = None;
+                } else {
+                    // A lost refresh cannot authorize any later dependent output.
+                    self.request_keyframe();
+                    continue;
                 }
             }
             return Some(done);
@@ -575,8 +698,34 @@ unsafe extern "C" fn encoded(
         let hevc = out.hevc;
         let frame = callback_frame(status, sample.is_null(), || {
             // SAFETY: the callback's sample and all of its borrowed data stay live for this scope.
-            unsafe { annex_b(sample, hevc, captured) }
+            unsafe {
+                if let Some(key) =
+                    optional(c"kVTSampleAttachmentKey_RequireLTRAcknowledgementToken")
+                {
+                    let mut token = CMGetAttachment(sample, key, ptr::null_mut());
+                    let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, false);
+                    if token.is_null() && !attachments.is_null() && CFArrayGetCount(attachments) > 0
+                    {
+                        token = CFDictionaryGetValue(CFArrayGetValueAtIndex(attachments, 0), key);
+                    }
+                    let mut value = 0i64;
+                    if !token.is_null()
+                        && CFNumberGetValue(token, 4, (&mut value as *mut i64).cast())
+                    {
+                        out.tokens.push_back((index as u64 + 1, value));
+                        while out.tokens.len() > 256 {
+                            out.tokens.pop_front();
+                        }
+                    }
+                }
+                let mut frame = annex_b(sample, hevc, captured)?;
+                frame.picture = index as u64 + 1;
+                Ok(frame)
+            }
         });
+        if matches!(&frame, Some(Ok(f)) if f.keyframe) {
+            out.latest_idr = index as u64 + 1;
+        }
         out.done.push_back((index, Instant::now(), frame));
     }
     callback.ready.notify_all();
