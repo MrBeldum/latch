@@ -387,7 +387,7 @@ impl Resources {
         });
         Self {
             #[cfg(windows)]
-            hdr10: hdr10::Hdr10::new().ok(),
+            hdr10: None,
             #[cfg(windows)]
             hdr10_active: false,
             #[cfg(target_os = "macos")]
@@ -925,10 +925,27 @@ pub fn color_capabilities() -> latch_proto::color::ColorCapabilities {
 pub fn begin_frame(frame: &eframe::Frame) {
     #[cfg(any(target_os = "macos", windows))]
     if let Some(state) = frame.wgpu_render_state() {
-        if let Some(r) = state.renderer.read().callback_resources.get::<Resources>() {
+        if let Some(r) = state
+            .renderer
+            .write()
+            .callback_resources
+            .get_mut::<Resources>()
+        {
             #[cfg(target_os = "macos")]
             if let Some(edr) = &r.edr {
                 edr.hide();
+            }
+            #[cfg(windows)]
+            if r.hdr10.is_none() {
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(handle) = frame.window_handle() {
+                    if let RawWindowHandle::Win32(handle) = handle.as_raw() {
+                        r.hdr10 = hdr10::Hdr10::new(windows::Win32::Foundation::HWND(
+                            handle.hwnd.get() as *mut std::ffi::c_void,
+                        ))
+                        .ok();
+                    }
+                }
             }
             #[cfg(windows)]
             if let Some(hdr) = &r.hdr10 {

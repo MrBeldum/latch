@@ -11,7 +11,7 @@ use windows::{
             Direct3D11::*,
             Dxgi::{Common::*, *},
         },
-        UI::{Input::KeyboardAndMouse::GetActiveWindow, WindowsAndMessaging::*},
+        UI::WindowsAndMessaging::*,
     },
 };
 static PEAK: AtomicU32 = AtomicU32::new(0);
@@ -73,9 +73,8 @@ pub(super) struct Hdr10 {
 unsafe impl Send for Hdr10 {}
 unsafe impl Sync for Hdr10 {}
 impl Hdr10 {
-    pub fn new() -> Result<Self> {
+    pub fn new(parent: HWND) -> Result<Self> {
         unsafe {
-            let parent = GetActiveWindow();
             anyhow::ensure!(!parent.is_invalid(), "no active viewer window");
             let (mut device, mut context) = (None, None);
             D3D11CreateDevice(
@@ -387,5 +386,15 @@ impl Drop for Hdr10 {
             self.context.ClearState();
             let _ = DestroyWindow(self.window);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn hdr10_shaders_compile_with_the_system_compiler() {
+        shader(s!("vs"), s!("vs_5_0")).unwrap();
+        shader(s!("ps"), s!("ps_5_0")).unwrap();
     }
 }
