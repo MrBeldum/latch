@@ -180,7 +180,15 @@ LATCH_TEST_VIDEO_LOSS=3:4 target/release/examples/view 100.70.121.94 \
 
 ## Validation and limits
 
-Validation results are recorded in the PR. No new dependency or native build
+Validation commands/results are in [validation.txt](validation.txt) and the PR.
+Mac workspace tests, release transport harnesses, all three clippy targets,
+fmt and the native-code audit pass. The physical Windows PC's MSVC linker and
+then a parallel rustc invocation crashed. A single-job bundled-linker release
+retry lost SSH connectivity before reporting its result. That result, remote
+process state and deletion of `C:\Users\Daniel\gfn-transport-fec` remain
+unverified while the PC is unreachable. No Windows interactive listener,
+scheduled task or firewall rule was created; no reboot was issued. CI's
+Windows release job remains the pending final platform check. No new dependency or native build
 step was added. The Mac lacks shell screen-recording permission; capture was
 synthetic. The real path was not a saturated capacity test. No on-device
 Windows desktop session, 4K motion/IDR-spike test, real Wi-Fi AP test or long
