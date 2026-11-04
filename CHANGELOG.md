@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased — transport workstream
+
+- Batch Linux video sends/receives and macOS receives without waiting to fill
+  batches; reuse packetizer storage and hand complete frames to decode inline.
+- Faster delay-gradient bitrate feedback and recovery, persistent FEC protection
+  after radio bursts, and RTT-gated recovery IDRs. Protocol 1 stays compatible.
+- Add codec-free transport/FEC measurements and deterministic capacity-step,
+  240 fps, random/burst loss, long-RTT and jitter scenarios.
+- Cut for policers: uncorrected loss or lost frames cut at any raw loss, then
+  the climb holds just under the policed rate; 5–15 ms Wi-Fi ping
+  jitter no longer trips the queue threshold; a capacity collapse cuts on its
+  first report (100→20 Mbps at 10 ms RTT: 160→60 ms).
+- Hold steady caps: keep the last sustainable rate and probe above it in
+  bounded, RTT-aware steps instead of doubling to the ceiling after every
+  drain. Budget spread on a fixed 20/50/100 Mbps cap is 0.7/1.2/2.5 Mbps
+  (5.1: 1.6/3.5/7.1); 150–250 ms RTT paths no longer fill the queue.
+- Recovery counts the real time between reports, so 5.1's 250 ms and older
+  one-second viewers recover as fast as 50 ms ones; reports after more than
+  2 s of silence grant no growth.
+- A permanent lossless RTT increase (route change) is rebased instead of
+  pinning the budget at its floor.
+- The wire floor is 1 Mbps rather than a tenth of the requested rate, so a
+  100 Mbps request adapts to a 2–5 Mbps link.
+- Older viewers without repaired-loss reporting no longer lose their bitrate
+  to FEC-repaired radio loss.
+- A host that ends a stream half-closes and keeps reading briefly, and the
+  viewer closes its connection as soon as it has read the end: with 50 ms
+  reports in flight, a takeover could otherwise reset the connection before
+  the old viewer learned why it ended.
+- Windows viewers rearm Mio readiness after a batched receive, so packets
+  after an idle gap wake the receive loop instead of waiting for its 20 ms timer.
+
+
 The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.

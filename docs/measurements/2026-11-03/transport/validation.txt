@@ -1,0 +1,19 @@
+Validation on macOS, 2026-11-03
+cargo fmt --all -- --check: passed
+cargo clippy --locked --workspace --all-targets -- -D warnings: passed
+cargo test --locked --workspace --all-targets: passed
+  42 test binaries/doc-test groups, 598 passed, 25 ignored, 0 failed
+bash scripts/audit-native.sh: passed
+Linux ARM64 release proto unit tests: 23 passed, 1 ignored, 0 failed
+Release transport_scenarios: 4 passed
+Release bottleneck: 5 passed
+Windows: no build/run (no Windows socket code changed)
+
+Earlier retries (not hidden):
+- An unrelated client refresh test timed out with WouldBlock under concurrent
+  build load; its isolated retry and the final complete workspace run passed.
+- 50-ms display-stat sampling aliased a 12-fps stream. Feedback is now separate
+  from 250-ms display stats; the final real-stream bottleneck test passed.
+- The old fixed-tick FIFO assertion was replaced with clean-window counts,
+  since fast recovery now probes capacity repeatedly. The new deterministic
+  scenarios independently bound recovery time, queue delay and lost frames.

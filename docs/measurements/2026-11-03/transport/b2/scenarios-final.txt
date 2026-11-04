@@ -1,0 +1,81 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Finished `release` profile [optimized] target(s) in 2m 05s
+     Running tests/transport_scenarios.rs (target/release/deps/transport_scenarios-4346293584bc7d77)
+
+running 6 tests
+test congestion::tests::a_policer_rate_caps_the_climb_until_it_lapses ... ok
+test policer_damage_does_not_need_high_raw_loss ... ok
+test congestion::tests::underfilled_encoder_cuts_actual_rate_and_only_pressure_enables_pacing ... ok
+test congestion::tests::a_lone_late_window_does_not_stall_recovery ... ok
+test congestion::tests::capacity_steps_random_loss_and_steady_path ... ok
+step: low_phase_cuts=16 ceiling_ms=910 cut_ms=60 queue_p95_ms=10.60 lost=7 skipped=7 peak_kbps=100000 min_kbps=10000 low_raw_damage_windows=0 lost_windows=1 raw_loss_median_when_lost=81.6
+240fps: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=4.22 lost=0 skipped=0 peak_kbps=200000 min_kbps=200000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+random2: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=7.99 lost=0 skipped=0 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+wifi: low_phase_cuts=0 ceiling_ms=1410 cut_ms=-1 queue_p95_ms=7.68 lost=11 skipped=30 peak_kbps=100000 min_kbps=69772 low_raw_damage_windows=3 lost_windows=11 raw_loss_median_when_lost=3.1
+rtt100: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=8.38 lost=0 skipped=0 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+jitter: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=8.38 lost=0 skipped=0 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+wifi_jitter: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=0.00 lost=0 skipped=0 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+policer5: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=0.00 lost=1 skipped=3 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=1 raw_loss_median_when_lost=14.6
+policer10: low_phase_cuts=0 ceiling_ms=1110 cut_ms=-1 queue_p95_ms=0.00 lost=22 skipped=14 peak_kbps=100000 min_kbps=75556 low_raw_damage_windows=0 lost_windows=10 raw_loss_median_when_lost=0.6
+policer20: low_phase_cuts=0 ceiling_ms=-1 cut_ms=-1 queue_p95_ms=0.00 lost=22 skipped=18 peak_kbps=100000 min_kbps=69246 low_raw_damage_windows=1 lost_windows=11 raw_loss_median_when_lost=0.7
+test transport_scenarios ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.01s
+
+  Compiling tracing-attributes v0.1.31
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling toml_edit v0.22.27
+   Compiling coreaudio-rs v0.14.2
+   Compiling tracing v0.1.44
+   Compiling latch-proto v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-34d55af7/crates/proto)
+   Compiling objc2-core-graphics v0.3.2
+   Compiling directories v5.0.1
+   Compiling if-addrs v0.15.0
+   Compiling webpki-roots v1.0.11
+   Compiling mach2 v0.6.0
+   Compiling latch-codec v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-34d55af7/crates/codec)
+   Compiling rustls-graviola v0.4.0
+   Compiling semver v1.0.28
+   Compiling lazy_static v1.5.0
+   Compiling dasp_sample v0.11.0
+   Compiling sharded-slab v0.1.7
+   Compiling gethostname v1.1.0
+   Compiling objc2-screen-capture-kit v0.3.2
+   Compiling mio v1.2.4
+   Compiling matchers v0.2.0
+   Compiling tracing-log v0.2.0
+   Compiling thread_local v1.1.10
+   Compiling nu-ansi-term v0.50.3
+   Compiling x11rb-protocol v0.13.2
+   Compiling tracing-subscriber v0.3.23
+   Compiling toml v0.8.23
+   Compiling latch-engine v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-34d55af7/crates/engine)
+   Compiling image v0.25.10
+   Compiling latch-core v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-34d55af7/crates/core)
+   Compiling x11rb v0.13.2
+   Compiling latch-stream v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-34d55af7/crates/stream)
+    Finished `release` profile [optimized] target(s) in 2m 29s
+     Running tests/transport_scenarios.rs (target/release/deps/transport_scenarios-4346293584bc7d77)
+
+running 6 tests
+test congestion::tests::a_lone_late_window_does_not_stall_recovery ... ok
+test congestion::tests::a_policer_rate_caps_the_climb_until_it_lapses ... ok
+test congestion::tests::underfilled_encoder_cuts_actual_rate_and_only_pressure_enables_pacing ... ok
+test congestion::tests::capacity_steps_random_loss_and_steady_path ... ok
+test policer_damage_does_not_need_high_raw_loss ... ok
+step: low_phase_cuts=16 ceiling_ms=910 cut_ms=60 queue_p95_ms=10.60 lost=7 skipped=7 peak_kbps=100000 min_kbps=10000 low_raw_damage_windows=0 lost_windows=1 raw_loss_median_when_lost=81.6
+240fps: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=4.22 lost=0 skipped=0 peak_kbps=200000 min_kbps=200000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+random2: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=7.99 lost=0 skipped=0 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+wifi: low_phase_cuts=0 ceiling_ms=1410 cut_ms=-1 queue_p95_ms=7.68 lost=11 skipped=30 peak_kbps=100000 min_kbps=69772 low_raw_damage_windows=3 lost_windows=11 raw_loss_median_when_lost=3.1
+rtt100: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=8.38 lost=0 skipped=0 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+jitter: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=8.38 lost=0 skipped=0 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+wifi_jitter: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=0.00 lost=0 skipped=0 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+policer5: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=0.00 lost=1 skipped=3 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=1 raw_loss_median_when_lost=14.6
+policer10: low_phase_cuts=0 ceiling_ms=1110 cut_ms=-1 queue_p95_ms=0.00 lost=22 skipped=14 peak_kbps=100000 min_kbps=75556 low_raw_damage_windows=0 lost_windows=10 raw_loss_median_when_lost=0.6
+policer20: low_phase_cuts=0 ceiling_ms=-1 cut_ms=-1 queue_p95_ms=0.00 lost=22 skipped=18 peak_kbps=100000 min_kbps=69246 low_raw_damage_windows=1 lost_windows=11 raw_loss_median_when_lost=0.7
+test transport_scenarios ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.18s
+

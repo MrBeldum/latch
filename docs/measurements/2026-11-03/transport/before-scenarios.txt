@@ -1,0 +1,21 @@
+   Compiling latch-proto v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-cf8a2264/crates/proto)
+warning: method `pacing` is never used
+  --> /tmp/latch-congestion-before.rs:42:19
+   |
+18 | impl Controller {
+   | --------------- method in this implementation
+...
+42 |     pub(crate) fn pacing(&self) -> bool {
+   |                   ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `latch-proto` (example "baseline_scenarios") generated 1 warning
+    Finished `release` profile [optimized] target(s) in 2.69s
+     Running `target/release/examples/baseline_scenarios`
+step: ceiling_ms=-1 cut_ms=3110 queue_p95_ms=38.70 lost=300 skipped=21 peak_kbps=100000
+240fps: ceiling_ms=-1 cut_ms=-1 queue_p95_ms=9.48 lost=0 skipped=0 peak_kbps=200000
+random2: ceiling_ms=0 cut_ms=-1 queue_p95_ms=14.48 lost=0 skipped=0 peak_kbps=100000
+wifi: ceiling_ms=-1 cut_ms=-1 queue_p95_ms=6.86 lost=24 skipped=72 peak_kbps=100000
+rtt100: ceiling_ms=0 cut_ms=-1 queue_p95_ms=27.68 lost=0 skipped=0 peak_kbps=100000
+jitter: ceiling_ms=3560 cut_ms=-1 queue_p95_ms=9.00 lost=0 skipped=0 peak_kbps=100000
