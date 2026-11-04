@@ -590,8 +590,32 @@ extended linear Display P3. PQ is decoded to absolute luminance, converted
 from BT.2020 to P3, and mapped into NSScreen's current EDR headroom. The
 viewer advertises HDR only when the native path initializes on an EDR
 screen; moving to an SDR screen compresses highlights to that screen.
-Ten-bit SDR also uses the float layer, preserving gradations. The existing
-eight-bit SDR shader and surface path remain in use for legacy streams.
+Only PQ streams use the float layer. Ten-bit SDR (an SDR desktop streamed
+in Main10) is drawn by the wgpu P010 shader in egui's own surface, like
+eight-bit SDR.
+
+The presenter (EDR layer or wgpu) is chosen when a stream starts and when
+the window moves to another screen, never per frame: two surfaces taking
+turns is a flicker. The layer is attached to the NSView egui's wgpu surface
+draws in, taken from the window handle, not to `NSApplication.mainWindow`
+(nil while another app or window is key, or a space is changing, which made
+the first HDR build, PR #55, alternate paths several times a second). A frame with
+no free drawable is dropped, as a late frame would be; a real EDR failure
+gives the rest of the stream to wgpu and is logged once. A window on no
+screen for a moment (a space changing) keeps the screen it had, so that is
+no change; a new screen counts once it has held for 300 ms, and screen
+changes switch the presenter at most once a second. Every switch is
+logged (`video presenter -> …`, with its rate), and with
+`RUST_LOG=info,latch_client::video=debug` a line a second counts the
+frames each presenter drew.
+
+To check this in the real window, start Latch.app's executable with
+`LATCH_TEST_SERVE=<ip>:<port>` naming a test host (the engine's `serve`
+example) and `LATCH_DATA_DIR` set to a scratch folder: the window connects to
+it at once, without any control-service request, and sends it no input,
+sound or gamepads. `LATCH_TEST_EXERCISE=<seconds>` then steps through the
+stats overlay, the toolbar and full screen and logs focus changes, so a
+presenter switch shows in `panel.log` beside its cause.
 
 The float layer is inserted *below* wgpu's Metal layer. While it shows,
 wgpu's layer is made non-opaque and the video callback writes transparent

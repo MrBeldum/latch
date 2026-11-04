@@ -915,6 +915,36 @@ pub fn connect(c: Connect) {
     });
 }
 
+/// `LATCH_TEST_SERVE=100.x.y.z:47898`: a test host (the engine's `serve`
+/// example) stands in for a PC, so the real window can be checked against
+/// it without going near an installed host. The window connects at once
+/// (see [`test_pc`]) and sends the test host no input and asks it for no
+/// sound; nothing goes to a control service.
+pub fn test_serve() -> Option<SocketAddr> {
+    static ADDR: std::sync::OnceLock<Option<SocketAddr>> = std::sync::OnceLock::new();
+    *ADDR.get_or_init(|| {
+        let addr = std::env::var("LATCH_TEST_SERVE").ok()?.parse().ok()?;
+        tracing::warn!("test mode: streaming from the test host at {addr}");
+        Some(addr)
+    })
+}
+
+/// The PC shown for [`test_serve`]. Its address is TEST-NET-1, which no
+/// clipboard, display or power request from the window can reach.
+pub fn test_pc() -> Option<Pc> {
+    let addr = test_serve()?;
+    let mut host = Status::default();
+    host.streamer.protocol = 1;
+    Some(Pc {
+        node_id: "test-serve".into(),
+        name: format!("Test host {addr}"),
+        ip: Some(Ipv4Addr::new(192, 0, 2, 1)),
+        online: true,
+        host: Some(host),
+        ..Default::default()
+    })
+}
+
 fn stale(progress: &Mutex<Progress>, generation: u64) -> bool {
     let p = progress.lock();
     p.cancel || p.generation != generation
@@ -970,7 +1000,10 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
         if stale(&c.progress, generation) {
             bail!("cancelled");
         }
-        if let Some(host) = host_status(t.ip, Duration::from_millis(1500)) {
+        if let Some(host) = test_pc()
+            .and_then(|pc| pc.host)
+            .or_else(|| host_status(t.ip, Duration::from_millis(1500)))
+        {
             break host;
         }
         report(
@@ -1019,7 +1052,11 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     }
 
     report(Step::Launching, "Measuring the path…".into());
-    let path = measure_path(&t.node_id, t.ip, &t.path, || stale(&c.progress, generation));
+    let path = if test_serve().is_some() {
+        t.path.clone()
+    } else {
+        measure_path(&t.node_id, t.ip, &t.path, || stale(&c.progress, generation))
+    };
     #[cfg(target_os = "linux")]
     let hz = crate::refresh::hz().or(c.display_hz).unwrap_or(60);
     #[cfg(not(target_os = "linux"))]
@@ -1052,10 +1089,11 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
     let frames = Arc::new(FrameSlot::default());
     let (tx, rx) = std::sync::mpsc::channel();
     let ctx = c.ctx.clone();
+    let test = test_serve();
     let session = Session::start(
         Server {
-            address: IpAddr::V4(t.ip),
-            port: CONTROL_PORT,
+            address: test.map_or(IpAddr::V4(t.ip), |a| a.ip()),
+            port: test.map_or(CONTROL_PORT, |a| a.port()),
         },
         Settings {
             color: crate::video::color_capabilities(),
@@ -1065,11 +1103,11 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             bitrate_kbps: settings.bitrate_kbps,
             hevc: settings.codec.allows().0,
             av1: settings.codec.allows().1,
-            audio: true,
+            audio: test.is_none(),
             name: latch_core::config::machine_name(),
             cursor: true,
-            gamepads: true,
-            mic: settings.mic,
+            gamepads: test.is_none(),
+            mic: settings.mic && test.is_none(),
         },
         frames.clone(),
         tx,

@@ -229,7 +229,8 @@ impl Capture {
             config.setScalesToFit(true);
             config.setPreservesAspectRatio(true);
             // Constant CGColors live for the process; SCK borrows this colour.
-            // The untyped send avoids adding a CoreGraphics binding dependency.
+            // Typed as CGColor so the send carries the `^{CGColor=}` the
+            // method declares (debug builds check it).
             let black = CGColorGetConstantColor(kCGColorBlack);
             let _: () = msg_send![&config, setBackgroundColor: black];
             let fitted = DisplayRect {
