@@ -1653,6 +1653,7 @@ mod tests {
 
     /// Ten-bit SDR is drawn by egui's own surface (the P010 shader), never
     /// the EDR layer, even with an EDR presenter ready: only HDR needs it.
+    #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "requires Metal"]
     fn ten_bit_sdr_stays_on_the_wgpu_path() {
