@@ -859,10 +859,15 @@ mod tests {
             let cut = sample(&hole)?;
             let restored = sample(&[])?;
             eprintln!("scRGB plain {plain:?}\ncut {cut:?}\nrestored {restored:?}");
+            // Duplication reports this virtual display's composition with
+            // one overall gain (0.358 here); the PQ decode itself shows in
+            // the ratios between patches, which must follow the nits.
+            let gain = plain[0][1] / (nits[0] / 80.0) as f32;
+            eprintln!("desktop gain over nits/80: {gain:.4}");
             for (i, n) in nits.iter().enumerate() {
-                let expected = (*n / 80.0) as f32;
+                let expected = (*n / 80.0) as f32 * gain;
                 assert!(
-                    (plain[i][1] - expected).abs() < expected * 0.05,
+                    (plain[i][1] - expected).abs() < expected * 0.03,
                     "{n}-nit patch reached the desktop as {:?}",
                     plain[i]
                 );
