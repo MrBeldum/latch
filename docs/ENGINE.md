@@ -422,10 +422,12 @@ bottleneck spreads a train to its own rate. Two trains within 2.5 s both under
 of the faster train (that is its capacity; pacing on) before motion resumes
 into it, and later trains above 5/4 of that restore up to the earlier budget.
 Trains a viewer cannot time (one receive batch) read as fast, which changes
-nothing; an older viewer gets none, and idle then works as on main. An
+nothing; a train with one gap over half its span timed a stalled receiver
+or relay and is dropped; an older viewer gets none, and idle then works as on main. An
 underfilled stream that a standing delay cut while it still delivered
-everything (someone else's queue) gets back what it delivered once the delay
-has been gone for a second: it can never fill a probe to prove it. Likewise an
+everything (someone else's queue, or pings starved on a loaded machine) gets
+back the budget it had once the delay has been gone for a second: it can
+never fill a probe to prove it, and trains still guard its idle resume. Likewise an
 idle stream (or an underfilled one at the floor), a second after any cut's
 signal clears, regrows by time but never past the last pair of trains (only
 fresh trains act at all); the regrown rate stands in for capacity, so motion

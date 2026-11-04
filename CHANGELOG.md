@@ -57,8 +57,8 @@
   spread and reports `probe_kbps`, and two trains under 3/4 of the budget
   lower it before motion resumes into a path that got slower. Report the
   budget and application-limited state.
-- An underfilled stream cut by someone else's standing queue regains what it
-  delivered once the queue has been gone for a second, and an idle or
+- An underfilled stream cut by someone else's standing queue (or starved
+  pings) regains its earlier budget once the delay has been gone for a second, and an idle or
   floor-bound sparse stream regrows by time after any cut, up to what probe
   trains measured; waiting in the pacer is not sender pressure while pacing.
 - The queue-free loss rate test needs 4 Mbps of traffic, compares mean loss

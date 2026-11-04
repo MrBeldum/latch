@@ -1,5 +1,6 @@
 # Mac loopback through the review relay (optional 5 Mbps, 40 ms FIFO downstream), serve -> view at 50 Mbps, 12 s, own port 47966.
 # wire_budget is the host's reported budget (0 = an older viewer that does not show it); applied is the encoder target, Mbps.
+# First matrix (main and e2fad22 hosts; this host's rows are from an earlier build of this round):
 mainhost-thisview-still-capnone: exit=0 frames=115 p95=116.8 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
 mainhost-thisview-still-cap5000: exit=0 frames=113 p95=158.0 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 0, 1, 2, 4, 10, 14, 0, 0, 13, 14, 16]
 mainhost-thisview-sweep-capnone: exit=0 frames=715 p95=26.0 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 1, 2, 2, 39, 2, 10, 10, 39, 39, 39, 39]
@@ -24,20 +25,12 @@ thishost-mainview-still-capnone: exit=0 frames=119 p95=121.7 lost=0 wire_budget=
 thishost-mainview-still-cap5000: exit=0 frames=120 p95=112.9 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[31, 38, 38, 39, 39, 39, 39, 39, 39, 39, 39, 39]
 thishost-mainview-sweep-capnone: exit=0 frames=720 p95=26.0 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 38, 38]
 thishost-mainview-sweep-cap5000: exit=0 frames=721 p95=29.5 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 39, 39, 39, 39, 39, 39, 37, 37, 31, 37, 39]
-# rerun with the final code (this viewer):
-mainhost-thisview-still-capnone: exit=0 frames=120 p95=101.2 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
-mainhost-thisview-still-cap5000: exit=0 frames=120 p95=101.5 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
-mainhost-thisview-sweep-capnone: exit=0 frames=718 p95=18.9 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
-mainhost-thisview-sweep-cap5000: exit=0 frames=719 p95=20.3 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
-e2fad22host-thisview-still-capnone: exit=0 frames=120 p95=101.3 lost=0 wire_budget=[50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50] applied=[39, 12, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
-e2fad22host-thisview-still-cap5000: exit=0 frames=120 p95=101.9 lost=0 wire_budget=[50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50] applied=[39, 12, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
-e2fad22host-thisview-sweep-capnone: exit=0 frames=718 p95=18.4 lost=0 wire_budget=[50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50] applied=[39, 15, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
-e2fad22host-thisview-sweep-cap5000: exit=0 frames=719 p95=20.3 lost=0 wire_budget=[50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50] applied=[39, 13, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2]
-thishost-thisview-still-capnone: exit=0 frames=120 p95=101.4 lost=0 wire_budget=[50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
-thishost-thisview-still-cap5000: exit=0 frames=120 p95=101.8 lost=0 wire_budget=[4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4] applied=[39, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
-thishost-thisview-sweep-capnone: exit=0 frames=719 p95=18.9 lost=0 wire_budget=[50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
-thishost-thisview-sweep-cap5000: exit=0 frames=717 p95=20.7 lost=0 wire_budget=[50, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4] applied=[39, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
-thishost-mainview-still-capnone: exit=0 frames=120 p95=101.9 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
-thishost-mainview-still-cap5000: exit=0 frames=120 p95=101.4 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
-thishost-mainview-sweep-capnone: exit=0 frames=719 p95=18.7 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
-thishost-mainview-sweep-cap5000: exit=0 frames=720 p95=20.5 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
+# This host with the final code:
+thishost-thisview-still-capnone: exit=0 frames=120 p95=101.2 lost=0 wire_budget=[50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
+thishost-thisview-still-cap5000: exit=0 frames=120 p95=101.1 lost=0 wire_budget=[4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4] applied=[3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+thishost-thisview-sweep-capnone: exit=0 frames=718 p95=18.5 lost=0 wire_budget=[50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
+thishost-thisview-sweep-cap5000: exit=0 frames=718 p95=20.6 lost=0 wire_budget=[4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4] applied=[39, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+thishost-mainview-still-capnone: exit=0 frames=120 p95=101.1 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
+thishost-mainview-still-cap5000: exit=0 frames=120 p95=101.1 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
+thishost-mainview-sweep-capnone: exit=0 frames=720 p95=19.0 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
+thishost-mainview-sweep-cap5000: exit=0 frames=719 p95=20.2 lost=0 wire_budget=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] applied=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]

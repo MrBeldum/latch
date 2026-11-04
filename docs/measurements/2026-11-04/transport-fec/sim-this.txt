@@ -1,27 +1,20 @@
-   --> crates/engine/tests/../src/congestion.rs:954:17
-    |
-954 |             let mut step = |c: &mut Controller, t: Instant, lost: u64, probe: u32| {
-    |                 ----^^^^
-    |                 |
-    |                 help: remove this `mut`
-    |
-    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
-running 16 tests
-test congestion::tests::a_lone_late_window_does_not_stall_recovery ... ok
+running 17 tests
+test congestion::tests::a_policer_rate_caps_the_climb_until_it_lapses ... ok
 RECOVERY interval=50 cut=36000 double_ms=600 ceiling_ms=750
+test congestion::tests::a_lone_late_window_does_not_stall_recovery ... ok
 RECOVERY interval=250 cut=36000 double_ms=500 ceiling_ms=750
-test congestion::tests::an_underfilled_stream_recovers_once_the_queue_clears ... ok
 RECOVERY interval=1000 cut=36000 double_ms=1000 ceiling_ms=1000
 test congestion::tests::a_sparse_stream_cut_by_loss_regrows_while_idle_up_to_its_trains ... ok
-test congestion::tests::a_policer_rate_caps_the_climb_until_it_lapses ... ok
-test congestion::tests::capacity_steps_random_loss_and_steady_path ... ok
+test congestion::tests::an_underfilled_stream_recovers_once_the_queue_clears ... ok
+test congestion::tests::a_sparse_stream_does_not_rate_test_random_loss_spikes ... ok
 test congestion::tests::an_underfilled_encoder_still_backs_off_from_a_policer ... ok
 test congestion::tests::idle_keeps_the_budget_and_only_measured_trains_lower_it ... ok
-test congestion::tests::route_rebase_requires_lossless_delay_unresponsive_to_load_reduction ... ok
 test congestion::tests::loss_only_reductions_require_rate_correlation ... ok
+test congestion::tests::capacity_steps_random_loss_and_steady_path ... ok
+test congestion::tests::route_rebase_requires_lossless_delay_unresponsive_to_load_reduction ... ok
 test congestion::tests::underfilled_encoder_cuts_actual_rate_and_only_pressure_enables_pacing ... ok
-test congestion::tests::random_loss_under_a_policer_settles_below_it ... ok
 test congestion::tests::recovery_integrates_report_time_and_rejects_stale_credit ... ok
+test congestion::tests::random_loss_under_a_policer_settles_below_it ... ok
 test pacing::tests::clean_path_never_waits_even_for_large_keyframes ... ok
 test pacing::tests::keyframe_is_a_train_with_a_bounded_initial_burst ... ok
 test congestion::tests::protected_frames_fit_the_wire_reservation ... ok
@@ -128,24 +121,25 @@ STEADY idle_drop_idr mean=4970.7 sd=237.6 queue_p95=14.112 lost=0 skipped=0 min=
 OVERHEAD idle_drop_idr parity_pct=31.71 parity_mbps=1.171 wire_mbps=3.694 lost_per_min=0.0 idrs_per_min=15.4 motion_ms=-1
 RESTART idle_drop_idr first_500ms_queue_peak=24.576 queue_peak=32.728 first_frame_ms=142
 test transport_scenarios ... ok
-test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.39s
-running 15 tests
-RECOVERY interval=50 cut=36000 double_ms=600 ceiling_ms=750
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.30s
+running 16 tests
 test congestion::tests::a_lone_late_window_does_not_stall_recovery ... ok
-RECOVERY interval=250 cut=36000 double_ms=500 ceiling_ms=750
-RECOVERY interval=1000 cut=36000 double_ms=1000 ceiling_ms=1000
 test congestion::tests::a_policer_rate_caps_the_climb_until_it_lapses ... ok
+RECOVERY interval=50 cut=36000 double_ms=600 ceiling_ms=750
 test congestion::tests::a_sparse_stream_cut_by_loss_regrows_while_idle_up_to_its_trains ... ok
 test congestion::tests::an_underfilled_stream_recovers_once_the_queue_clears ... ok
-test congestion::tests::an_underfilled_encoder_still_backs_off_from_a_policer ... ok
+RECOVERY interval=250 cut=36000 double_ms=500 ceiling_ms=750
+test congestion::tests::a_sparse_stream_does_not_rate_test_random_loss_spikes ... ok
+RECOVERY interval=1000 cut=36000 double_ms=1000 ceiling_ms=1000
 test congestion::tests::capacity_steps_random_loss_and_steady_path ... ok
 test congestion::tests::loss_only_reductions_require_rate_correlation ... ok
 test congestion::tests::idle_keeps_the_budget_and_only_measured_trains_lower_it ... ok
-test congestion::tests::route_rebase_requires_lossless_delay_unresponsive_to_load_reduction ... ok
+test congestion::tests::an_underfilled_encoder_still_backs_off_from_a_policer ... ok
 test congestion::tests::random_loss_under_a_policer_settles_below_it ... ok
-test congestion::tests::recovery_integrates_report_time_and_rejects_stale_credit ... ok
 test congestion::tests::underfilled_encoder_cuts_actual_rate_and_only_pressure_enables_pacing ... ok
+test congestion::tests::route_rebase_requires_lossless_delay_unresponsive_to_load_reduction ... ok
 test policer_damage_does_not_need_high_raw_loss ... ok
+test congestion::tests::recovery_integrates_report_time_and_rejects_stale_credit ... ok
 test congestion::tests::protected_frames_fit_the_wire_reservation ... ok
 step: low_phase_cuts=9 ceiling_ms=710 cut_ms=60 queue_p95_ms=7.99 lost=7 skipped=7 peak_kbps=100000 min_kbps=9584 low_raw_damage_windows=0 lost_windows=1 raw_loss_median_when_lost=81.5
 240fps: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=3.99 lost=0 skipped=0 peak_kbps=200000 min_kbps=200000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
@@ -158,4 +152,4 @@ policer5: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=0.00 lost=1 skipp
 policer10: low_phase_cuts=0 ceiling_ms=-1 cut_ms=-1 queue_p95_ms=0.00 lost=8 skipped=2 peak_kbps=100000 min_kbps=74375 low_raw_damage_windows=0 lost_windows=4 raw_loss_median_when_lost=1.0
 policer20: low_phase_cuts=0 ceiling_ms=-1 cut_ms=-1 queue_p95_ms=0.00 lost=8 skipped=2 peak_kbps=100000 min_kbps=74216 low_raw_damage_windows=0 lost_windows=4 raw_loss_median_when_lost=2.1
 test transport_scenarios ... ok
-test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s

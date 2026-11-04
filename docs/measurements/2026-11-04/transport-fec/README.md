@@ -15,23 +15,21 @@ viewer that asks for it, and new JSON fields default on read.
 | N1: clean idle 5 s → motion, first full-rate frame delivered (20 Mbps, 60 fps; RTT 10 / 50 / 150 / 250 ms) | 8 / 28 / 78 / 128 ms | 678 / 1315 / 2614 / 3614 ms | **8 / 28 / 78 / 128 ms** |
 | N1: desktop pattern (2 s idle, 1 s motion), mean encoder target during motion, RTT 10 / 50 ms | 20.0 / 20.0 Mbps | 17.0 / 14.4 Mbps | **20.0 / 20.0 Mbps** |
 | N1: sparse 0.5 Mbps stream, a forced 120 KB IDR delivered in | 21 ms | 98 ms | **21 ms** |
-| N1: real Linux → Mac sweep stream (≈0.5 Mbps), host's applied encoder target at 20 / 50 Mbps | 15 / 39 Mbps median; floor dips in 4 of 8 clean runs | **≈2 / ≈2 Mbps** in 8 of 8 | **15 / 39 Mbps** in 8 of 8, no dips |
+| N1: real Linux → Mac sweep stream (≈0.5 Mbps), host's applied encoder target at 20 / 50 Mbps | 15 / 39 Mbps median; floor dips in 4 of 8 clean runs | **≈2 / ≈2 Mbps** in 8 of 8 | **15 / 39 Mbps**; one dip (recovered) in 12 clean runs |
 | N1: `idle_motion` (50 Mbps, 10 ms RTT) idle→full-rate frame, no fake idle queue | **13 ms** (published as 3179 ms) | 678 ms | 13 ms |
 | N2: capacity 100 → 20 Mbps during idle, 250 ms RTT, 200 ms FIFO: queue p95 / lost frames | 13.1 ms / 16 | 119.0 ms / 0 | **7.7 ms / 0** |
 | N2: same, → 40 Mbps | 7.7 ms / 6 | 91.1 ms / 3 | **7.7 ms / 0** |
 | N3: restart state on a sparse stream | none | never ends | none (removed); probe trains stop when idle ends |
 | N4: encoder target while a protected frame is owed, 1 Mbps / 240 fps (ordinary 274 kbps) | 274 kbps (no floor) | 3 kbps | **137 kbps** (bounded to half) |
 | N4: same, 2 Mbps / 60 fps (ordinary 1125) and 5 Mbps / 120 fps (ordinary 2251) | no floor | 332 / 857 kbps | 562 / 1125 kbps |
-| CI: `bottleneck`, a 12 fps stream after a standing 40 ms queue clears | recovers | stuck at the 1 Mbps floor (macOS runner) | back to what it delivered, 1 s after the queue clears |
+| CI: `bottleneck` (a 12 fps stream after a standing 40 ms queue clears); `impaired` on a loaded runner | recover | stuck at the 1 Mbps floor (macOS runner) | earlier budget back 1 s after the delay clears; 4/4 and 8/8 under 11 busy loops |
 | S3 (`idle_drop`: 100 → 5 Mbps during 5 s idle, 250 ms RTT): queue peak 5.0–5.5 s / lost frames | 40.0 ms / 95 | 4.1 ms / 1 | **18.4 ms / 0** |
 | S3 with a 4× keyframe on resume | 40.0 ms / 96 | 10.5 ms / 1 | 24.6 ms / 0 |
 
 The first review's fixes (S1, S2, S4, S11, `slow250`, one shared FEC policy)
-still hold: the S1 and S11 unit tests pass their bounds (4.5–5.25 Mbps under
-the 5 Mbps policer; 85–90 Mbps under the 90 Mbps policer with 10% random
-loss), `slow250` queue p95 is 12.8 ms (bound 16), and every non-idle
-simulation row below is identical to e2fad22. The loss rate test now also
-needs 4 Mbps of traffic and compares means (see the real-path section).
+are unchanged and still verified: S1 settles at 4.85 Mbps, S11 at 87.3 Mbps,
+`slow250` queue p95 is 12.8 ms (bound 16), and every non-idle row below is
+identical to e2fad22.
 
 ### What changed
 
@@ -44,18 +42,21 @@ needs 4 Mbps of traffic and compares means (see the real-path section).
   host sends two short trains of padding back to back, 200 ms apart, then one
   a second: 6–16 full datagrams, about 3 ms of the budget. A viewer that asked
   for them (`StreamRequest.probe_trains`) times their spread, which is the
-  bottleneck's rate, and reports the fastest in `Report.probe_kbps`. Two
+  bottleneck's rate, and reports the fastest in `Report.probe_kbps` (a
+  train with one gap over half its span timed a stalled receiver and is
+  dropped). Two
   trains within 2.5 s both under 3/4 of the budget lower it to 90% of the
   faster one (pacing on) **before** motion resumes into a path that got
   slower; later faster trains restore the earlier budget. This protects S3,
   the N2 deep-buffer cases and the desktop capacity cases without delaying
   anything on a clean path. Older viewers get no trains, and idle is main's.
-* **An underfilled stream regains what it delivered** once a standing delay
-  that still delivered everything (someone else's queue) has been gone for a
-  second, and waiting in the pacer is not sender pressure while pacing. This
-  was the `bottleneck` CI failure: a 12 fps stream at the floor whose 81 ms
-  pacer queue counted as pressure forever, and whose probes an underfilled
-  encoder can never prove.
+* **An underfilled stream regains its earlier budget** once a standing delay
+  that still delivered everything (someone else's queue, or starved pings)
+  has been gone for a second, and waiting in the pacer is not sender
+  pressure while pacing. This was the `bottleneck` CI failure (a 12 fps
+  stream at the floor whose 81 ms pacer queue counted as pressure forever,
+  and whose probes an underfilled encoder can never prove) and, on a loaded
+  runner, the `impaired` one (starved pings read as delay).
 * **The protected-frame reservation is bounded** to half the ordinary
   encoder target; at very low rates the excess is one frame's burst.
 
@@ -204,9 +205,9 @@ desktop-like stream of about 0.5–2 Mbps), Mac `view` at 640×360@60 for 15 s
 per run: both this branch's viewer and main's (old viewers send no
 `probe_trains`, so they also test compatibility), 20 and 50 Mbps requested,
 clean and with viewer-side `LATCH_TEST_VIDEO_LOSS=3:4` (3% of video
-datagrams, in four-packet bursts). Two rounds of eight runs per host; the
-main and e2fad22 rounds ran about an hour before this branch's final rounds
-on the same tailnet. "Applied" is the host's encoder target as each run's
+datagrams, in four-packet bursts). Eight runs per round; the
+main and e2fad22 rounds ran one to two hours before this branch's final
+three rounds on the same tailnet. "Applied" is the host's encoder target as each run's
 viewer reported it each second. Raw per-run lines: [real-path.txt](real-path.txt).
 
 | Host | Condition | Requested | Runs | Applied target, median of per-run medians (Mbps) | Runs that fell below 1 Mbps / ended there | Frame interval p95 (median of runs) ms | Worst gap ms |
@@ -219,22 +220,30 @@ viewer reported it each second. Raw per-run lines: [real-path.txt](real-path.txt
 | e2fad22 | clean | 50 Mbps | 4 | 2 | 1 / 0 | 18.8 | 431 |
 | e2fad22 | loss3x4 | 20 Mbps | 4 | 0.5 | 4 / 4 | 19.5 | 479 |
 | e2fad22 | loss3x4 | 50 Mbps | 4 | 0 | 3 / 3 | 18.9 | 250 |
-| this | clean | 20 Mbps | 4 | 15 | 0 / 0 | 18.1 | 101 |
-| this | clean | 50 Mbps | 4 | 39 | 0 / 0 | 18.4 | 95 |
-| this | loss3x4 | 20 Mbps | 4 | 12 | 0 / 0 | 19.1 | 104 |
-| this | loss3x4 | 50 Mbps | 4 | 33 | 0 / 0 | 18.6 | 102 |
+| this | clean | 20 Mbps | 6 | 15 | 0 / 0 | 18.8 | 251 |
+| this | clean | 50 Mbps | 6 | 39 | 1 / 0 | 18.4 | 425 |
+| this | loss3x4 | 20 Mbps | 6 | 12 | 0 / 0 | 19.0 | 125 |
+| this | loss3x4 | 50 Mbps | 6 | 33 | 1 / 1 | 18.6 | 244 |
 
-All 48 runs exited cleanly with 739–902 frames. On a clean path this branch
-holds the encoder target in every run, as main mostly does (main's
+All 56 runs exited cleanly with 683–902 frames: two rounds of eight per host
+for main and e2fad22, three for this branch's final code. On a clean path
+this branch holds the encoder target, as main mostly does (main's
 occasional dips to the floor are tailnet delay spikes) and e2fad22 never
-did. Under bursty loss this branch kept its target in all eight runs. Its
-first final round did not: a sparse stream's queue-free loss rate test
-"confirmed" phantom 2 Mbps policers. One noisy window started the test, its
-mean afterwards looked like an improvement, and the stream's content moved
-its send rate. The test now needs 4 Mbps of traffic, compares means and
-checks that the reduced budget (not the content) lowered the load. A stream
-cut to the floor while idle or underfilled regrows by time, capped by the
-last probe trains.
+did. Under bursty loss it kept its target in 11 of 12 runs. The two dips
+(one clean run that recovered, one lossy run that stayed at the floor) came
+back to back during a disturbance on the path: viewer fps fell to 46–47 and
+frame p95 to 60–97 ms in both, with 425 ms gaps.
+
+Before the final code, the lossy runs showed the queue-free loss rate test
+"confirming" phantom 2 Mbps policers on this sparse stream. One noisy window
+started the test, its mean afterwards looked like an improvement, and the
+stream's content moved its send rate. The test now needs 4 Mbps of
+traffic, compares means and checks that the reduced budget (not the content)
+lowered the load. A stream cut to the floor while idle or underfilled
+regrows by time, capped by the last probe trains. An underfilled stream cut
+by a delay that still delivered everything gets its earlier budget back a
+second after the delay clears; this fixed the loaded-runner `impaired` and
+`bottleneck` failures.
 
 Mac loopback through the review relay with a 5 Mbps / 40 ms FIFO cap
 ([loopback.txt](loopback.txt)), 50 Mbps requested: this host with this

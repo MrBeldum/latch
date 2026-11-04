@@ -420,7 +420,8 @@ each 6 to 16 datagrams (about 3 ms of the wire budget). The bottleneck
 spreads a train to its own rate, so the viewer times it: wire bytes
 (datagram length + 80) after the first datagram, over the time from the
 first to the last arrival, for a train of which at least four (or all)
-arrived. The fastest train since the last `Report` goes in its
+arrived; a train whose largest gap is over half that time is dropped (it
+timed a stalled receiver). The fastest train since the last `Report` goes in its
 `probe_kbps`. Probes carry no video and are not counted in
 `received_kbps`.
 
@@ -540,7 +541,7 @@ at once, unpaced on a clean path. While idle the host sends probe trains to a
 viewer that times them; two recent trains both under 3/4 of the budget lower
 it to 90% of the faster one (with pacing) before motion resumes, and later
 faster trains restore it. An underfilled stream cut by a standing delay that
-still delivered everything gets back what it delivered once the delay has
+still delivered everything gets back its earlier budget once the delay has
 been gone for a second; an idle one (or an underfilled one at the floor)
 regrows by time a second after a cut, never past the last trains. While
 pacing, the pacer's own local queue is not sender pressure. Data shards precede parity computation and transmission; a
