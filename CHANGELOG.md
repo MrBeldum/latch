@@ -2,6 +2,14 @@
 
 ## Unreleased — HDR and ten-bit colour
 
+- Mac viewer: no flicker on ten-bit streams. The EDR layer found its window
+  through `NSApplication.mainWindow`, nil whenever focus or a space changed,
+  so frames alternated between the EDR layer and egui's surface. It now
+  uses the NSView of egui's own surface, is used only for HDR (PQ) streams
+  (ten-bit SDR draws through the wgpu P010 shader), and the presenter is
+  chosen per stream and display, never per frame, on Windows' HDR10 window
+  too. `LATCH_TEST_SERVE=ip:port` points the window at a test `serve`.
+
 - Negotiate default-off ten-bit SDR and HDR10 colour, display peak luminance,
   and mastering/content-light metadata within protocol 1. Legacy peers stay SDR8.
 - Preserve scRGB on Advanced Color Windows desktops; GPU conversion to

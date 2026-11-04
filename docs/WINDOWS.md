@@ -543,6 +543,11 @@ egui draws above the picture — toolbar, stats, toasts, dialogs, menus, the
 host cursor — and egui shows its own (tone-mapped) copy of the frame
 under those controls only; the rest of the picture stays HDR. The shader
 samples chroma at its signalled siting (left, as the video processor's
-`*_LEFT_*` colour spaces produce it).
+`*_LEFT_*` colour spaces produce it). The child window or the wgpu path is
+chosen when a stream starts and when the window's output or its HDR mode
+changes, never per frame: a PQ stream on an SDR output goes to the tone map
+from the start, and a failed draw gives the rest of the stream to wgpu
+(logged once) rather than being retried each frame, which would alternate
+the two surfaces.
 
 [HDR measurements and remaining validation](measurements/2026-11-03/hdr/README.md).
