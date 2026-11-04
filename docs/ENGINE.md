@@ -416,7 +416,7 @@ usable send/receive feedback gets 500 ms for FEC adaptation before a reversible
 and actual sending by 10% to confirm a policer; otherwise the budget returns
 and no further test runs for three seconds. Confirmed policers cap probing for
 ten seconds (legacy/severe-loss cuts retain the three-second memory).
-Uncorrected loss above 10%, unusable rate feedback and delay pressure retain
+Uncorrected loss above 10% on a loaded sender, unusable rate feedback and delay pressure retain
 conservative cuts. A 50 ms window holds only a few frames, so
 received/sent ratios are too coarse to be a signal on their own; they gate only
 the one-window collapse cut, together with loss above 10% or delay above 20 ms. The

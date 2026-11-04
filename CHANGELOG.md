@@ -29,6 +29,18 @@
   update now restores settings, removes an unused relocation, warns that
   virtual display modes are unchanged, and completes the remaining steps.
 
+## Unreleased — FEC-first transport
+
+- Protect keyframes and reference-recovery frames with at least 30% parity
+  and four parity packets per block; adapt other frames to raw loss and
+  observed erasure runs, reserving their rounded wire cost before encoding.
+- Test moderate queue-free loss against a reversible 20% rate reduction
+  before treating it as a policer. Keep queue-gradient and severe-collapse cuts.
+- Keep idle encoders application-limited without lowering the sustainable
+  estimate; report the wire budget and application-limited state.
+- Add 1/3/5% random-loss/burst matrices at 20/50/100 Mbps, parity overhead,
+  IDRs/min and idle-to-motion timing.
+
 ## Unreleased — transport workstream
 
 - Batch Linux video sends/receives and macOS receives without waiting to fill

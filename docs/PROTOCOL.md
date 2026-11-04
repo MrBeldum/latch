@@ -486,7 +486,7 @@ ignored. Added report fields default on read; old JSON readers ignore them.
 50 ms; old 250 ms / one-second reports remain valid. Host pings at 50 Hz supply
 each window's lowest RTT. A smoothed increasing delay gradient or standing rise
 above max(6 ms, base RTT / 10, 3× ping jitter) is pressure (idle senders retain
-a 3 ms jitter allowance). Severe residual loss or damage without usable rate
+a 3 ms jitter allowance). Severe residual loss on a loaded sender, or damage without usable rate
 feedback remains pressure. Moderate queue-free damage first raises FEC, then
 uses a reversible 20% rate reduction after 500 ms; only loss falling by half
 with actual load falling at least 10% confirms a policer after a horizon plus

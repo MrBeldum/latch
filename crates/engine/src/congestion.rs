@@ -214,6 +214,9 @@ impl Controller {
         queued |= probe_queued;
         let old = self.budget;
         let app_limited = self.application_limited() && !self.pacing;
+        let loss_app_limited = self
+            .sent_kbps
+            .is_some_and(|sent| sent < self.budget * 4 / 5);
         // Give parity feedback a chance before testing loss against offered load.
         // A radio burst cannot prove a policer: loss must improve at a lower
         // *actual* send rate. Never ratchet an inconclusive test down again.
@@ -221,7 +224,7 @@ impl Controller {
             && self.sent_kbps.is_some()
             && report.received_kbps > 0
             && (report.loss_pct > 0.0 || self.loss_probe.is_some())
-            && loss <= 10.0
+            && (loss <= 10.0 || loss_app_limited)
         {
             let raw = report.loss_pct.max(loss);
             let mut confirmed = false;
@@ -243,7 +246,7 @@ impl Controller {
                 }
             } else if damaged && now >= self.random_until {
                 let since = *self.loss_since.get_or_insert(now);
-                if now.duration_since(since) >= Duration::from_millis(500) && !app_limited {
+                if now.duration_since(since) >= Duration::from_millis(500) && !loss_app_limited {
                     self.loss_probe = Some(LossProbe {
                         budget: self.budget,
                         sent: self.sent_kbps.unwrap_or(self.budget),
@@ -252,7 +255,7 @@ impl Controller {
                         sum: 0.0,
                         samples: 0,
                     });
-                    self.budget = self.budget * 4 / 5;
+                    self.budget = (self.budget * 4 / 5).max(self.floor);
                 }
             } else if !damaged {
                 self.loss_since = None;
@@ -286,8 +289,10 @@ impl Controller {
             *kbps = (*kbps).max(self.received_kbps as u32);
         }
         let sent = self.sent_kbps.unwrap_or(0);
-        let collapsed =
-            received > 0 && sent >= 2000 && received < sent / 2 && (loss > 10.0 || delay > 20.0);
+        let collapsed = received > 0
+            && sent >= 2000
+            && received < sent / 2
+            && ((loss > 10.0 && !loss_app_limited) || delay > 20.0);
         // While a policer's rate is remembered, damage near it is a repeat of
         // that overshoot, not a blip.
         let lossy = self
@@ -535,6 +540,9 @@ mod tests {
                 &Report {
                     rtt_ms: 10.0,
                     received_kbps: 1000,
+                    loss_pct: 28.0,
+                    unrecovered_loss_pct: Some(20.0),
+                    frames_lost: 1,
                     window_ms: 50,
                     ..Default::default()
                 },
