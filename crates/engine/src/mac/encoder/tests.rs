@@ -1271,6 +1271,8 @@ fn a_bitrate_change_keeps_the_reference_chain_and_applies_to_the_next_picture() 
     }
 }
 
+#[path = "ltr_pipeline.rs"]
+mod ltr_pipeline;
 #[path = "quality.rs"]
 mod quality;
 
@@ -1436,14 +1438,32 @@ fn ltr_recovery_matches_uninterrupted_decoding() {
         let mut loss = Vec::new();
         let mut kept = Vec::new();
         let mut delivered = 0;
+        let mut refreshes = 0;
         for n in 0..120 {
             let dropped = (20..28).contains(&n) || (60..64).contains(&n);
+            let mut refreshed = false;
             if n == 24 || n == 28 || n == 64 {
-                assert!(encoder.recover_from(delivered), "no token at {n}");
+                refreshed = encoder.recover_from(delivered);
+                // H.264 withholds a refresh after dropped pictures with
+                // long-term marks (refresh_safe), and takes an IDR.
+                let marked = encoder
+                    .output
+                    .output
+                    .lock()
+                    .tokens
+                    .iter()
+                    .any(|&(p, _)| p > delivered && p <= n as u64);
+                assert_eq!(
+                    refreshed,
+                    codec == Codec::Hevc || !marked,
+                    "refresh at {n}"
+                );
+                refreshes += refreshed as usize;
             }
             fill(&image, &pattern(n));
+            let idr = n == 0 || ((n == 24 || n == 28 || n == 64) && !refreshed);
             let frame = encoder
-                .encode(image.0, Instant::now(), n == 0)
+                .encode(image.0, Instant::now(), idr)
                 .unwrap()
                 .expect("encoded picture");
             if n == 24 || n == 28 || n == 64 {
@@ -1453,7 +1473,11 @@ fn ltr_recovery_matches_uninterrupted_decoding() {
                     frame.recovery,
                     frame.data.len()
                 );
-                assert_eq!(frame.recovery, Some(delivered));
+                if refreshed {
+                    assert_eq!(frame.recovery, Some(delivered));
+                } else {
+                    assert!(frame.keyframe);
+                }
             }
             let expected = full_decoder
                 .decode(&frame.data, frame.keyframe, None)
@@ -1528,6 +1552,9 @@ fn ltr_recovery_matches_uninterrupted_decoding() {
                 );
             }
             fs::remove_dir_all(dir).unwrap();
+        }
+        if codec == Codec::Hevc {
+            assert_eq!(refreshes, 3);
         }
     }
 }

@@ -240,6 +240,31 @@ impl VideoPipeline for Video {
                 self.restart_capture()?;
                 continue;
             }
+            if self.encoder.stalled() {
+                drop(state);
+                tracing::warn!(
+                    low_latency = self.encoder.low_latency(),
+                    "VideoToolbox gave no frame back in {:?}; reopening the encoder",
+                    encoder::STALL
+                );
+                if self.encoder.hardware {
+                    self.encoder.reopen_ordinary()?;
+                } else {
+                    self.encoder.software()?;
+                }
+                self.wake();
+                continue;
+            }
+            if self.encoder.misses_pace() {
+                drop(state);
+                tracing::warn!(
+                    "VideoToolbox low-latency mode missed the frame rate; \
+                     continuing in the ordinary mode, recovering with IDRs"
+                );
+                self.encoder.reopen_ordinary()?;
+                self.wake();
+                continue;
+            }
             let now = Instant::now();
             let changed = state.generation != self.generation;
             // A new picture or a keyframe goes at the pacer's next slot; an
@@ -279,6 +304,12 @@ impl VideoPipeline for Video {
                 Duration::from_secs(1)
             } else {
                 ready_at - now
+            };
+            // Frames in the encoder: look at it again soon in case it stopped.
+            let wait = if self.encoder.in_flight() > 0 {
+                wait.min(Duration::from_millis(100))
+            } else {
+                wait
             };
             self.capture.shared.ready.wait_for(&mut state, wait);
         }

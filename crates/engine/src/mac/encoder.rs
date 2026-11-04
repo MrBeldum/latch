@@ -42,14 +42,46 @@ pub type Done = (i64, Instant, Option<Result<EncodedVideo>>);
 /// the encoder, by index, and what came out, oldest first.
 struct Output {
     hevc: bool,
-    pending: VecDeque<(i64, Instant)>,
+    /// Index, capture time and submission time of each frame in the encoder.
+    pending: VecDeque<(i64, Instant, Instant)>,
+    pace: Pace,
     done: VecDeque<Done>,
     tokens: VecDeque<(u64, i64)>,
     latest_idr: u64,
+    /// Every picture VideoToolbox produced, including those discarded at a
+    /// boundary: (index, bytes, IDR), once a simulator asks for them.
+    #[cfg(test)]
+    tap: Option<Vec<(i64, Vec<u8>, bool)>>,
 }
+/// How the low-latency mode keeps up, over the current window.
+struct Pace {
+    since: Instant,
+    frames: u32,
+    /// Frames that took longer than the pipeline can overlap.
+    late: u32,
+    worst: Duration,
+}
+impl Pace {
+    fn new() -> Self {
+        Self {
+            since: Instant::now(),
+            frames: 0,
+            late: 0,
+            worst: Duration::ZERO,
+        }
+    }
+}
+/// A session that has frames in it and gives none back for this long has
+/// stopped (EnableLowLatencyRateControl at 3024×1964@120 H.264 does).
+pub const STALL: Duration = Duration::from_millis(500);
+/// The low-latency mode is judged over windows this long.
+const PACE_WINDOW: Duration = Duration::from_secs(2);
 type Wake = Box<dyn Fn() + Send + Sync>;
 struct Callback {
     output: Mutex<Output>,
+    /// Longer than this, a frame holds up the next: the frames in flight
+    /// overlap only that much.
+    late: Duration,
     ready: Condvar,
     /// Also called when a frame comes out, after `output` is unlocked, so a
     /// caller can wait for a frame and a picture on one condition.
@@ -72,16 +104,28 @@ pub(super) struct Encoder {
     acknowledged_base: u64,
     refresh: Option<(i64, u64)>,
     acknowledged: Vec<i64>,
+    /// Pictures the viewer does not have since the last IDR: each recovery
+    /// gives up everything after its base, sent or discarded in flight.
+    /// Their tokens may never be acknowledged again.
+    missing: Vec<(u64, u64)>,
+    /// EnableLowLatencyRateControl, which LTR needs on Apple Silicon.
+    low_latency: bool,
+    /// The session stopped: dropping it must not wait for its frames.
+    stalled: bool,
+    /// Test only: refresh even when H.264 pictures with long-term marks
+    /// were dropped, to reproduce what that does to a viewer.
+    #[cfg(test)]
+    unsafe_h264_refresh: bool,
 }
 
 impl Encoder {
     pub fn new(config: &VideoConfig, depth: Depth) -> Result<Self> {
-        Self::open(
-            config,
-            true,
-            depth,
-            std::env::var_os("LATCH_MAC_LTR").is_some_and(|v| v == "1"),
-        )
+        // LTR recovery is validated for 8-bit H.264 High and HEVC Main only,
+        // and the low-latency mode it needs is worth its cost only with it.
+        let ltr = std::env::var_os("LATCH_MAC_LTR").is_some_and(|v| v == "1")
+            && depth == Depth::Eight
+            && matches!(config.codec, Codec::H264High | Codec::Hevc);
+        Self::open(config, true, depth, ltr)
     }
     #[cfg(test)]
     fn create(config: &VideoConfig, allow_hardware: bool) -> Result<Self> {
@@ -114,12 +158,16 @@ impl Encoder {
             output: Mutex::new(Output {
                 hevc: config.codec == Codec::Hevc,
                 pending: VecDeque::new(),
+                pace: Pace::new(),
                 done: VecDeque::new(),
                 tokens: VecDeque::new(),
                 latest_idr: 0,
+                #[cfg(test)]
+                tap: None,
             }),
             ready: Condvar::new(),
             wake: Mutex::new(None),
+            late: Duration::from_secs(super::IN_FLIGHT as u64) / config.fps.max(1),
         });
         let mut session = ptr::null();
         let mut last_status = 0;
@@ -206,6 +254,11 @@ impl Encoder {
             acknowledged_base: 0,
             refresh: None,
             acknowledged: Vec::new(),
+            missing: Vec::new(),
+            low_latency: low_latency && required_hardware,
+            stalled: false,
+            #[cfg(test)]
+            unsafe_h264_refresh: false,
         };
         // SAFETY: the session is live and each property receives the documented CF value type.
         unsafe {
@@ -307,7 +360,9 @@ impl Encoder {
                     tracing::debug!(%error, "VideoToolbox encoder does not take colour tags");
                 }
             }
-            if let Some(key) = optional(c"kVTCompressionPropertyKey_EnableLTR") {
+            if let Some(key) = optional(c"kVTCompressionPropertyKey_EnableLTR")
+                .filter(|_| depth == Depth::Eight && config.codec != Codec::H264Baseline)
+            {
                 encoder.ltr = optional(c"kVTEncodeFrameOptionKey_AcknowledgedLTRTokens").is_some()
                     && optional(c"kVTEncodeFrameOptionKey_ForceLTRRefresh").is_some()
                     && optional(c"kVTSampleAttachmentKey_RequireLTRAcknowledgementToken").is_some()
@@ -456,6 +511,57 @@ impl Encoder {
         self.request_keyframe();
         Ok(())
     }
+    /// Replaces the session with an ordinary hardware one: no low-latency
+    /// rate control, so no LTR either. Frames still in the old session are
+    /// lost, so the next frame must be a keyframe. A stopped session is
+    /// let go on a thread of its own, since invalidating it may block too.
+    pub fn reopen_ordinary(&mut self) -> Result<()> {
+        let wake = self.output.wake.lock().take();
+        let index = self.index;
+        let replacement = Self::open(&self.config, true, self.depth, false)?;
+        let old = std::mem::replace(self, replacement);
+        if old.stalled {
+            let _ = std::thread::Builder::new()
+                .name("latch-vt-abandon".into())
+                .spawn(move || drop(old));
+        }
+        self.index = index;
+        *self.output.wake.lock() = wake;
+        self.request_keyframe();
+        Ok(())
+    }
+    /// Whether frames have been in the session for [`STALL`] with nothing
+    /// coming out; marks the session so that it is not waited for.
+    pub fn stalled(&mut self) -> bool {
+        let out = self.output.output.lock();
+        // Software is slow enough at large sizes to need more time.
+        let bound = if self.hardware { STALL } else { STALL * 10 };
+        let stalled = out
+            .pending
+            .front()
+            .is_some_and(|&(.., submitted)| submitted.elapsed() >= bound);
+        drop(out);
+        self.stalled |= stalled;
+        stalled
+    }
+    /// In low-latency mode, whether the last window missed the frame rate:
+    /// more than one frame in twenty took longer than the frames in flight
+    /// overlap, or one took over a quarter of a second.
+    pub fn misses_pace(&self) -> bool {
+        if !self.low_latency {
+            return false;
+        }
+        let mut out = self.output.output.lock();
+        if out.pace.since.elapsed() < PACE_WINDOW {
+            return false;
+        }
+        let pace = std::mem::replace(&mut out.pace, Pace::new());
+        pace.frames >= 10
+            && (pace.late * 20 > pace.frames || pace.worst > Duration::from_millis(250))
+    }
+    pub fn low_latency(&self) -> bool {
+        self.low_latency
+    }
     fn encode_once(
         &mut self,
         image: Ref,
@@ -486,12 +592,13 @@ impl Encoder {
         if keyframe {
             self.ltr_floor = index as u64 + 1;
             self.refresh = None;
+            self.missing.clear();
         }
         self.output
             .output
             .lock()
             .pending
-            .push_back((index, captured));
+            .push_back((index, captured, Instant::now()));
         // SAFETY: the caller retains image until this returns; VideoToolbox retains it while
         // encoding. The frame refcon carries only the index, never a pointer.
         let status = unsafe {
@@ -547,7 +654,7 @@ impl Encoder {
                 .output
                 .lock()
                 .pending
-                .retain(|(i, _)| *i != index);
+                .retain(|(i, ..)| *i != index);
             return Err(error);
         }
         self.acknowledged.clear();
@@ -559,6 +666,22 @@ impl Encoder {
     pub fn recovers(&self) -> bool {
         self.ltr
     }
+    /// Whether a refresh may follow pictures `(base, last]` that the
+    /// viewer will not have. In H.264 a picture that carried an LTR token
+    /// marked a long-term slot (MMCO 6), and VideoToolbox's refresh does not
+    /// unmark it: the encoder later re-marks that slot as a replacement,
+    /// while for the viewer, whose frame_num gap filled its other slots, it
+    /// is one picture too many. Its references then exceed
+    /// `max_num_ref_frames`, which FFmpeg tolerates and Apple's decoder
+    /// answers by blocking forever. Such a loss takes an IDR. HEVC lists its
+    /// references in every slice, so a missing one is only absent.
+    fn refresh_safe(&self, out: &Output, base: u64, last: u64) -> bool {
+        #[cfg(test)]
+        if self.unsafe_h264_refresh {
+            return true;
+        }
+        out.hevc || !out.tokens.iter().any(|&(p, _)| p > base && p <= last)
+    }
     pub fn recover_from(&mut self, picture: u64) -> bool {
         if !self.ltr
             || self.recovery.is_some()
@@ -568,18 +691,31 @@ impl Encoder {
         {
             return false;
         }
+        let last = self.index as u64;
         let out = self.output.output.lock();
-        if picture < out.latest_idr {
+        if picture < out.latest_idr || !self.refresh_safe(&out, picture, last) {
             return false;
         }
+        // Only pictures the viewer decoded: not those after this base, nor
+        // those an earlier loss took, nor frames discarded in flight then.
+        // VideoToolbox may also start an IDR of its own (latest_idr).
+        let floor = self.ltr_floor.max(out.latest_idr);
+        let missing = &self.missing;
         self.acknowledged = out
             .tokens
             .iter()
-            .filter(|(p, _)| *p >= self.ltr_floor && *p <= picture)
+            .filter(|(p, _)| *p >= floor && *p <= picture)
+            .filter(|(p, _)| !missing.iter().any(|&(a, b)| (a..=b).contains(p)))
             .map(|(_, token)| *token)
             .collect();
+        drop(out);
         if self.acknowledged.is_empty() {
             return false;
+        }
+        // Everything submitted after the base is gone for the viewer: lost,
+        // or discarded at the boundary below before it was sent.
+        if picture < last {
+            self.missing.push((picture + 1, last));
         }
         self.acknowledged_base = picture;
         self.refresh = Some((self.index, picture));
@@ -646,6 +782,14 @@ impl Encoder {
                         self.request_keyframe();
                         continue;
                     }
+                    // Frames that were in flight at the request have called
+                    // back by now (output is in order): they decide too.
+                    if !frame.keyframe
+                        && !self.refresh_safe(&self.output.output.lock(), base, boundary as u64)
+                    {
+                        self.request_keyframe();
+                        continue;
+                    }
                     if !frame.keyframe {
                         frame.recovery = Some(base);
                     }
@@ -671,9 +815,13 @@ impl Encoder {
 impl Drop for Encoder {
     fn drop(&mut self) {
         // SAFETY: completing every pending frame, then invalidating, leaves no
-        // callback that could outlive the boxed output state.
+        // callback that could outlive the boxed output state. A stalled
+        // session's frames will not complete; invalidating alone ends its
+        // callbacks.
         unsafe {
-            VTCompressionSessionCompleteFrames(self.session.0, INVALID_TIME);
+            if !self.stalled {
+                VTCompressionSessionCompleteFrames(self.session.0, INVALID_TIME);
+            }
             VTCompressionSessionInvalidate(self.session.0);
         }
     }
@@ -693,13 +841,17 @@ unsafe extern "C" fn encoded(
         // Frames come out in order; any older one still listed was dropped
         // without a callback.
         let mut captured = None;
-        while let Some(&(i, at)) = out.pending.front() {
+        while let Some(&(i, at, submitted)) = out.pending.front() {
             if i > index {
                 break;
             }
             out.pending.pop_front();
             if i == index {
                 captured = Some(at);
+                let took = submitted.elapsed();
+                out.pace.frames += 1;
+                out.pace.late += u32::from(took > callback.late);
+                out.pace.worst = out.pace.worst.max(took);
             }
         }
         let captured = captured.unwrap_or_else(Instant::now);
@@ -733,6 +885,10 @@ unsafe extern "C" fn encoded(
         });
         if matches!(&frame, Some(Ok(f)) if f.keyframe) {
             out.latest_idr = index as u64 + 1;
+        }
+        #[cfg(test)]
+        if let (Some(Ok(f)), Some(tap)) = (&frame, &mut out.tap) {
+            tap.push((index, f.data.clone(), f.keyframe));
         }
         out.done.push_back((index, Instant::now(), frame));
     }
