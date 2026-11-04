@@ -547,15 +547,6 @@ impl View {
                         egui_wgpu::Callback::new_paint_callback(
                             video,
                             video::Paint {
-                                // Native video sits above egui's surface. Use
-                                // the SDR tone map while controls cover it.
-                                allow_native: !(bar_visible
-                                    || self.stats
-                                    || self.settings.is_some()
-                                    || self.confirm_disconnect.is_some()
-                                    || interruption.is_some()
-                                    || !self.toasts.is_empty()
-                                    || self.hint_since.is_some()),
                                 rect: video,
                                 frames: live.frames.clone(),
                             },
@@ -982,7 +973,7 @@ impl View {
         let rows = overlay_rows(env.live, stats, &self.presented);
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Middle,
-            Id::new("stats-overlay"),
+            Id::new(video::PAINTED_OVERLAYS[0]),
         ));
         let font = theme::mono(theme::text::MONO - 1.0);
         let lay =
@@ -1859,7 +1850,7 @@ impl View {
                                 );
                                 let painter = ctx.layer_painter(egui::LayerId::new(
                                     egui::Order::Middle,
-                                    egui::Id::new("host_cursor"),
+                                    egui::Id::new(video::PAINTED_OVERLAYS[1]),
                                 ));
                                 painter.image(
                                     tex.id(),
@@ -3145,6 +3136,52 @@ pub(crate) mod tests {
             h.run_steps(3);
             assert!(!overlay(&h), "Hide stats removes the overlay at {size}");
         }
+    }
+
+    /// Windows' HDR10 child window is cut around what egui draws above the
+    /// picture; the toolbar and the stats overlay must both be in that set.
+    #[test]
+    fn controls_and_stats_are_reported_as_overlays_over_the_video() {
+        let mut h = harness(Vec2::new(1920.0, 1080.0));
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let store = seen.clone();
+        h.ctx.on_end_pass(
+            "test overlays",
+            std::sync::Arc::new(move |ctx| *store.lock() = video::overlay_rects(ctx)),
+        );
+        h.state()
+            .live
+            .as_ref()
+            .unwrap()
+            .frames
+            .publish(latch_stream::video::Frame::default());
+        h.run_steps(2);
+        let stats_text = |h: &egui_kittest::Harness<'_, Fixture>| {
+            h.output().shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.job.text.contains("shown / 60") => {
+                    Some(t.visual_bounding_rect())
+                }
+                _ => None,
+            })
+        };
+        let bar = bar_control_rects(&h)
+            .into_iter()
+            .find(|(name, _)| name == "Stats")
+            .unwrap()
+            .1;
+        assert!(seen.lock().iter().any(|r| r.contains_rect(bar)), "toolbar");
+        assert!(stats_text(&h).is_none());
+        h.get_by_label("Stats").simulate_click();
+        h.run_steps(3);
+        let text = stats_text(&h).expect("stats overlay");
+        assert!(
+            seen.lock().iter().any(|r| r.contains_rect(text)),
+            "stats overlay {text:?} in {:?}",
+            seen.lock()
+        );
+        h.get_by_label("Hide stats").simulate_click();
+        h.run_steps(3);
+        assert!(!seen.lock().iter().any(|r| r.contains_rect(text)));
     }
 
     #[test]

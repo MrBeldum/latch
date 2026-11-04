@@ -218,7 +218,7 @@ impl ClientApp {
     ) -> Self {
         ui::apply(&cc.egui_ctx);
         if let Some(rs) = &cc.wgpu_render_state {
-            crate::video::install(rs);
+            crate::video::install(&cc.egui_ctx, rs);
         }
         let (save_tx, rx) = std::sync::mpsc::channel::<ConfigEdit>();
         let save_worker = std::thread::spawn(move || {

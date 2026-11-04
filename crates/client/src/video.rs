@@ -14,6 +14,10 @@ use std::sync::{
     Arc,
 };
 static TEN_BIT: AtomicBool = AtomicBool::new(false);
+/// What egui drew above the video in the last finished pass, in points.
+/// Windows' HDR10 child window is cut around these so the controls show.
+#[cfg(windows)]
+static OVERLAYS: parking_lot::Mutex<Vec<egui::Rect>> = parking_lot::Mutex::new(Vec::new());
 
 #[cfg(target_os = "macos")]
 mod macos_zero_copy {
@@ -168,6 +172,19 @@ struct InFlightFrame {
     bind_group: wgpu::BindGroup,
 }
 
+/// Transparent where the EDR layer below egui's shows the picture.
+#[cfg(target_os = "macos")]
+const HOLE: &str = r#"
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(f32(i32(i & 1u) * 4 - 1), f32(i32(i >> 1u) * 4 - 1), 0.0, 1.0);
+}
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0);
+}
+"#;
+
 const SHADER: &str = r#"
 struct Uniforms {
     full_range: u32,
@@ -283,6 +300,13 @@ pub struct Resources {
     edr: Option<edr::Edr>,
     #[cfg(target_os = "macos")]
     edr_active: bool,
+    /// Clears the video rect to transparent while the EDR layer below shows.
+    #[cfg(target_os = "macos")]
+    hole: wgpu::RenderPipeline,
+    /// egui's own copy of the picture matches `retained`, for the parts of
+    /// the video the HDR10 child window leaves to it.
+    #[cfg(windows)]
+    planes_current: bool,
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -372,6 +396,43 @@ impl Resources {
             multiview: None,
             cache: None,
         });
+        #[cfg(target_os = "macos")]
+        let hole = {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("latch video hole"),
+                source: wgpu::ShaderSource::Wgsl(HOLE.into()),
+            });
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("latch video hole"),
+                bind_group_layouts: &[],
+                push_constant_ranges: &[],
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("latch video hole"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("latch video"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -400,6 +461,10 @@ impl Resources {
             },
             #[cfg(target_os = "macos")]
             edr_active: false,
+            #[cfg(target_os = "macos")]
+            hole,
+            #[cfg(windows)]
+            planes_current: false,
             pipeline,
             layout,
             sampler,
@@ -503,7 +568,9 @@ impl Resources {
         self.planes.as_ref().unwrap()
     }
 
-    /// Upload the newest frame, if there is one.
+    /// Upload the newest frame, if there is one. HDR and ten-bit frames go
+    /// to the native presenter whatever egui draws over them: controls are
+    /// composited above the picture, never by tone-mapping it to SDR.
     fn upload(
         &mut self,
         device: &wgpu::Device,
@@ -511,18 +578,35 @@ impl Resources {
         slot: &FrameSlot,
         rect: egui::Rect,
         pixels_per_point: f32,
-        allow_native: bool,
     ) {
         #[cfg(target_os = "macos")]
-        if self.edr_active && allow_native {
+        if self.edr_active {
             if let Some(edr) = &self.edr {
                 edr.show();
             }
         }
         #[cfg(windows)]
-        if self.hdr10_active && allow_native {
-            if let Some(hdr) = &self.hdr10 {
+        let overlays: Vec<egui::Rect> = OVERLAYS
+            .lock()
+            .iter()
+            .map(|o| o.intersect(rect))
+            .filter(|o| o.is_positive())
+            .collect();
+        #[cfg(windows)]
+        if self.hdr10_active {
+            if let Some(hdr) = &mut self.hdr10 {
+                if let Err(e) = hdr.clip(&overlays, rect, pixels_per_point) {
+                    tracing::warn!("HDR10 overlay clip: {e:#}");
+                }
                 hdr.show();
+            }
+            // Controls appeared over a still picture: egui's copy shows there.
+            if !overlays.is_empty() && !self.planes_current {
+                if let Some(frame) = self.retained.take() {
+                    self.write_planes(device, queue, &frame);
+                    self.retained = Some(frame);
+                    self.planes_current = true;
+                }
             }
         }
         let frame = match slot.take() {
@@ -532,20 +616,22 @@ impl Resources {
                 }
                 frame
             }
-            None if !allow_native => {
-                let Some(frame) = self.retained.take() else {
-                    return;
-                };
-                frame
-            }
             None => return,
         };
         #[cfg(windows)]
         if let Some(hdr) = &mut self.hdr10 {
-            if allow_native && frame.color.bit_depth == 10 {
-                match hdr.draw(&frame, rect, pixels_per_point) {
+            if frame.color.bit_depth == 10 {
+                match hdr
+                    .draw(&frame, rect, pixels_per_point)
+                    .and_then(|()| hdr.clip(&overlays, rect, pixels_per_point))
+                {
                     Ok(()) => {
                         self.hdr10_active = true;
+                        // Only the parts under the controls need egui's copy.
+                        self.planes_current = !overlays.is_empty();
+                        if self.planes_current {
+                            self.write_planes(device, queue, &frame);
+                        }
                         self.retained = Some(frame);
                         return;
                     }
@@ -559,7 +645,7 @@ impl Resources {
         let _ = (rect, pixels_per_point);
         #[cfg(target_os = "macos")]
         if let Some(edr) = &mut self.edr {
-            if allow_native && frame.color.bit_depth == 10 && frame.native.is_some() {
+            if frame.color.bit_depth == 10 && frame.native.is_some() {
                 match edr.draw(&frame, rect, pixels_per_point) {
                     Ok(()) => {
                         self.edr_active = true;
@@ -817,6 +903,11 @@ impl Resources {
             old.frame.native = None;
             slot.recycle(old.frame);
         }
+        self.write_planes(device, queue, &frame);
+        slot.recycle(frame);
+    }
+
+    fn write_planes(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &Frame) {
         let srgb = self.srgb_target;
         let planes = self.planes(
             device,
@@ -866,13 +957,11 @@ impl Resources {
             hdr: frame.color.is_hdr() as u32,
         };
         queue.write_buffer(&self.uniforms, 0, &u.bytes());
-        slot.recycle(frame);
     }
 }
 
 /// The paint callback egui runs for the video rect.
 pub struct Paint {
-    pub allow_native: bool,
     pub rect: egui::Rect,
     pub frames: Arc<FrameSlot>,
 }
@@ -893,7 +982,6 @@ impl egui_wgpu::CallbackTrait for Paint {
                 &self.frames,
                 self.rect,
                 _screen.pixels_per_point,
-                self.allow_native,
             );
         }
         Vec::new()
@@ -908,6 +996,12 @@ impl egui_wgpu::CallbackTrait for Paint {
         let Some(r) = resources.get::<Resources>() else {
             return;
         };
+        #[cfg(target_os = "macos")]
+        if r.edr_active {
+            pass.set_pipeline(&r.hole);
+            pass.draw(0..3, 0..1);
+            return;
+        }
         let Some(bind_group) = r.bind_group() else {
             return;
         };
@@ -918,9 +1012,45 @@ impl egui_wgpu::CallbackTrait for Paint {
 }
 
 /// Install the shared GPU resources; call once when the window is created.
-pub fn install(render_state: &egui_wgpu::RenderState) {
+pub fn install(ctx: &egui::Context, render_state: &egui_wgpu::RenderState) {
     let res = Resources::new(&render_state.device, render_state.target_format);
     render_state.renderer.write().callback_resources.insert(res);
+    #[cfg(windows)]
+    ctx.on_end_pass(
+        "latch video overlays",
+        std::sync::Arc::new(|ctx| *OVERLAYS.lock() = overlay_rects(ctx)),
+    );
+    #[cfg(not(windows))]
+    let _ = ctx;
+}
+
+/// Layers the stream view paints into directly rather than through an Area.
+pub(crate) const PAINTED_OVERLAYS: [&str; 2] = ["stats-overlay", "host_cursor"];
+
+/// The bounds of everything drawn this pass above the background layer the
+/// video is painted in: toolbar, stats, toasts, dialogs, menus, the cursor.
+#[cfg_attr(not(windows), allow(dead_code))] // Mac composites by layer order.
+pub(crate) fn overlay_rects(ctx: &egui::Context) -> Vec<egui::Rect> {
+    let mut layers: Vec<egui::LayerId> = ctx.memory(|m| m.layer_ids().collect());
+    for name in PAINTED_OVERLAYS {
+        let layer = egui::LayerId::new(egui::Order::Middle, egui::Id::new(name));
+        if !layers.contains(&layer) {
+            layers.push(layer);
+        }
+    }
+    ctx.graphics(|g| {
+        layers
+            .iter()
+            .filter(|l| l.order != egui::Order::Background)
+            .filter_map(|l| g.get(*l))
+            .map(|list| {
+                list.all_entries().fold(egui::Rect::NOTHING, |r, s| {
+                    r.union(s.shape.visual_bounding_rect().intersect(s.clip_rect))
+                })
+            })
+            .filter(|r| r.is_positive())
+            .collect()
+    })
 }
 
 /// HDR is offered only after the native layer can be created. Headless tools
@@ -993,7 +1123,6 @@ mod tests {
                         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                             rect,
                             Paint {
-                                allow_native: true,
                                 rect,
                                 frames: self.0.clone(),
                             },
@@ -1028,7 +1157,7 @@ mod tests {
             .wgpu_setup(crate::native_options().wgpu_options.wgpu_setup)
             .with_size(egui::vec2(960.0, 540.0))
             .build_eframe(move |cc| {
-                install(cc.wgpu_render_state.as_ref().unwrap());
+                install(&cc.egui_ctx, cc.wgpu_render_state.as_ref().unwrap());
                 TestApp(frames)
             });
         harness.run_steps(2);
@@ -1065,6 +1194,237 @@ mod tests {
         }
     }
 
+    /// A P010 IOSurface frame: luma `code(x)` and neutral chroma.
+    #[cfg(target_os = "macos")]
+    fn p010_frame(
+        width: usize,
+        height: usize,
+        code: impl Fn(usize) -> u16,
+        color: latch_proto::color::ColorDescription,
+    ) -> Frame {
+        use std::ffi::c_void;
+        #[link(name = "CoreFoundation", kind = "framework")]
+        extern "C" {
+            static kCFTypeDictionaryKeyCallBacks: c_void;
+            static kCFTypeDictionaryValueCallBacks: c_void;
+            static kCVPixelBufferIOSurfacePropertiesKey: *const c_void;
+            static kCVPixelBufferMetalCompatibilityKey: *const c_void;
+            static kCFBooleanTrue: *const c_void;
+            fn CFDictionaryCreate(
+                allocator: *const c_void,
+                keys: *const *const c_void,
+                values: *const *const c_void,
+                num: isize,
+                key_callbacks: *const c_void,
+                value_callbacks: *const c_void,
+            ) -> *const c_void;
+            fn CFRelease(cf: *const c_void);
+            fn CVPixelBufferCreate(
+                allocator: *const c_void,
+                width: usize,
+                height: usize,
+                format: u32,
+                attributes: *const c_void,
+                out: *mut *const c_void,
+            ) -> i32;
+            fn CVPixelBufferLockBaseAddress(pb: *const c_void, flags: u64) -> i32;
+            fn CVPixelBufferUnlockBaseAddress(pb: *const c_void, flags: u64) -> i32;
+            fn CVPixelBufferGetBaseAddressOfPlane(pb: *const c_void, plane: usize) -> *mut u8;
+            fn CVPixelBufferGetBytesPerRowOfPlane(pb: *const c_void, plane: usize) -> usize;
+        }
+        // SAFETY: CoreFoundation objects are released after use; the buffer is
+        // locked while both planes are written within their strides.
+        unsafe {
+            let empty = CFDictionaryCreate(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks,
+            );
+            let keys = [
+                kCVPixelBufferIOSurfacePropertiesKey,
+                kCVPixelBufferMetalCompatibilityKey,
+            ];
+            let values = [empty, kCFBooleanTrue];
+            let attrs = CFDictionaryCreate(
+                std::ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                2,
+                &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks,
+            );
+            let mut pb = std::ptr::null();
+            let status = CVPixelBufferCreate(
+                std::ptr::null(),
+                width,
+                height,
+                u32::from_be_bytes(*b"x420"),
+                attrs,
+                &mut pb,
+            );
+            CFRelease(attrs);
+            CFRelease(empty);
+            assert_eq!(status, 0, "CVPixelBufferCreate P010");
+            assert_eq!(CVPixelBufferLockBaseAddress(pb, 0), 0);
+            for plane in 0..2 {
+                let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, plane);
+                let base = CVPixelBufferGetBaseAddressOfPlane(pb, plane);
+                for row in 0..if plane == 0 { height } else { height / 2 } {
+                    let line = base.add(row * stride).cast::<u16>();
+                    for x in 0..width {
+                        let v = if plane == 0 { code(x) } else { 512 };
+                        line.add(x).write_unaligned(v << 6);
+                    }
+                }
+            }
+            assert_eq!(CVPixelBufferUnlockBaseAddress(pb, 0), 0);
+            Frame {
+                color,
+                width: width as u32,
+                height: height as u32,
+                y_stride: CVPixelBufferGetBytesPerRowOfPlane(pb, 0),
+                uv_stride: CVPixelBufferGetBytesPerRowOfPlane(pb, 1),
+                native: Some(latch_stream::video::NativeFrame::new(pb)),
+                ..Default::default()
+            }
+        }
+    }
+
+    /// Controls over HDR video are composited, not a reason to tone-map the
+    /// picture: with and without an overlay the EDR layer gets the same HDR
+    /// values, and egui's surface is transparent over the picture except
+    /// where the overlay is. CoreAnimation puts egui's layer over the EDR one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires Metal"]
+    fn hdr_patches_keep_their_luminance_while_an_overlay_shows() {
+        use parking_lot::Mutex;
+        const W: usize = 256;
+        const H: usize = 128;
+        /// Whether EDR presented, and its last picture.
+        type Presented = Arc<Mutex<Option<(bool, Vec<[f32; 4]>)>>>;
+        struct TestApp {
+            frames: Arc<FrameSlot>,
+            overlay: Arc<AtomicBool>,
+            edr: Presented,
+        }
+        impl eframe::App for TestApp {
+            fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+                let state = frame.wgpu_render_state().unwrap();
+                if let Some(r) = state
+                    .renderer
+                    .write()
+                    .callback_resources
+                    .get_mut::<Resources>()
+                {
+                    let active = r.edr_active;
+                    *self.edr.lock() = Some((active, r.edr.as_mut().unwrap().read()));
+                }
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(egui::Color32::BLACK))
+                    .show(ctx, |ui| {
+                        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                            ui.max_rect(),
+                            Paint {
+                                rect: ui.max_rect(),
+                                frames: self.frames.clone(),
+                            },
+                        ));
+                    });
+                if self.overlay.load(Ordering::Relaxed) {
+                    egui::Area::new(egui::Id::new("stats"))
+                        .fixed_pos(egui::pos2(0.0, 0.0))
+                        .show(ctx, |ui| {
+                            egui::Frame::new()
+                                .fill(egui::Color32::from_black_alpha(200))
+                                .show(ui, |ui| ui.set_min_size(egui::vec2(64.0, 32.0)));
+                        });
+                }
+            }
+        }
+        let color = latch_proto::color::ColorDescription::negotiate(
+            latch_proto::color::ColorCapabilities {
+                hdr: true,
+                ten_bit: true,
+                peak_nits: 1000,
+            },
+            true,
+            true,
+        );
+        let code = |nits: f64| (64.0 + 876.0 * latch_proto::color::pq_oetf(nits)).round() as u16;
+        let (bright, white) = (code(1000.0), code(203.0));
+        let picture = || p010_frame(W, H, |x| if x < W / 2 { bright } else { white }, color);
+        let frames = Arc::new(FrameSlot::default());
+        let overlay = Arc::new(AtomicBool::new(false));
+        let edr = Arc::new(Mutex::new(None));
+        let app = TestApp {
+            frames: frames.clone(),
+            overlay: overlay.clone(),
+            edr: edr.clone(),
+        };
+        let mut harness = egui_kittest::Harness::builder()
+            .wgpu()
+            .with_size(egui::vec2(W as f32, H as f32))
+            .build_eframe(move |cc| {
+                let state = cc.wgpu_render_state.as_ref().unwrap();
+                install(&cc.egui_ctx, state);
+                state
+                    .renderer
+                    .write()
+                    .callback_resources
+                    .get_mut::<Resources>()
+                    .unwrap()
+                    .edr = Some(edr::Edr::offscreen(W as u64, H as u64, 4.0).unwrap());
+                app
+            });
+        let mut sample = |shown: bool| {
+            overlay.store(shown, Ordering::Relaxed);
+            // Areas appear a frame or two after they are first shown; each
+            // frame brings a new picture, so the EDR layer redraws under it.
+            for _ in 0..4 {
+                frames.publish(picture());
+                harness.run_steps(1);
+            }
+            let image = harness.render().unwrap();
+            // The next update reads what this frame drew into the EDR layer.
+            harness.run_steps(1);
+            let (active, pixels) = edr.lock().take().expect("EDR picture");
+            (active, pixels, image)
+        };
+        sample(false);
+        let (active, plain, image) = sample(false);
+        assert!(active, "HDR frame goes to the EDR layer");
+        let (still_active, covered, overlaid) = sample(true);
+        assert!(
+            still_active,
+            "an overlay must not switch EDR presentation off"
+        );
+        for (x, y) in [(32, 64), (96, 100), (200, 64)] {
+            let at = y * W + x;
+            assert_eq!(plain[at], covered[at], "EDR value at ({x},{y})");
+            // Transparent egui: the compositor shows the EDR value unchanged.
+            assert_eq!(image.get_pixel(x as u32, y as u32).0[3], 0);
+            assert_eq!(overlaid.get_pixel(x as u32, y as u32).0[3], 0);
+        }
+        assert!(
+            (plain[64 * W + 32][0] - 3.85).abs() < 0.05,
+            "{:?}",
+            plain[64 * W + 32]
+        );
+        assert!(
+            (plain[64 * W + 200][0] - 1.0).abs() < 0.02,
+            "{:?}",
+            plain[64 * W + 200]
+        );
+        // The overlay is drawn by egui over the hole, at SDR levels.
+        let ui = overlaid.get_pixel(10, 10).0;
+        assert!((195..=205).contains(&ui[3]), "overlay alpha {ui:?}");
+        assert_eq!(image.get_pixel(10, 10).0[3], 0);
+    }
+
     #[test]
     #[ignore = "requires a GPU"]
     fn decoded_frame_reaches_the_render_target() {
@@ -1077,7 +1437,6 @@ mod tests {
                         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                             ui.max_rect(),
                             Paint {
-                                allow_native: true,
                                 rect: ui.max_rect(),
                                 frames: self.0.clone(),
                             },
@@ -1102,7 +1461,7 @@ mod tests {
             .wgpu()
             .with_size(egui::vec2(128.0, 128.0))
             .build_eframe(move |cc| {
-                install(cc.wgpu_render_state.as_ref().unwrap());
+                install(&cc.egui_ctx, cc.wgpu_render_state.as_ref().unwrap());
                 TestApp(frames)
             });
         harness.run_steps(2);
@@ -1130,7 +1489,6 @@ mod tests {
                         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                             ui.max_rect(),
                             Paint {
-                                allow_native: true,
                                 rect: ui.max_rect(),
                                 frames: self.0.clone(),
                             },
@@ -1157,7 +1515,7 @@ mod tests {
             .wgpu()
             .with_size(egui::vec2(128.0, 128.0))
             .build_eframe(move |cc| {
-                install(cc.wgpu_render_state.as_ref().unwrap());
+                install(&cc.egui_ctx, cc.wgpu_render_state.as_ref().unwrap());
                 TestApp(frames)
             });
         harness.run_steps(2);
@@ -1201,7 +1559,6 @@ mod tests {
                         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                             ui.max_rect(),
                             Paint {
-                                allow_native: true,
                                 rect: ui.max_rect(),
                                 frames: self.0.clone(),
                             },
@@ -1312,7 +1669,7 @@ mod tests {
             .wgpu()
             .with_size(egui::vec2(width as f32, height as f32))
             .build_eframe(move |cc| {
-                install(cc.wgpu_render_state.as_ref().unwrap());
+                install(&cc.egui_ctx, cc.wgpu_render_state.as_ref().unwrap());
                 BenchApp(frames_clone)
             });
 
