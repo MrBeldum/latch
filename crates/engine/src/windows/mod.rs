@@ -89,10 +89,14 @@ struct MfPipeline {
     last_sent: Instant,
     last_capture: Instant,
     /// AMF inputs whose output is still to come, oldest first: when each
-    /// was captured, and whether it was forced to be a keyframe.
-    ahead: VecDeque<(Instant, bool)>,
+    /// was captured, whether it was forced to be a keyframe, its picture
+    /// number and the picture a recovery frame recovers from.
+    ahead: VecDeque<(Instant, bool, u64, Option<u64>)>,
     /// The display changed while a frame was ahead; reopen before the next.
     moved: bool,
+    /// A recovery frame is owed: encode the next picture without waiting
+    /// for the screen to change.
+    prompt: bool,
 }
 impl MfPipeline {
     fn info(&self) -> VideoInfo {
@@ -151,13 +155,14 @@ impl MfPipeline {
         self.pacer.wait();
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut force = keyframe;
+        let prompt = std::mem::take(&mut self.prompt);
         if std::mem::take(&mut self.moved) {
             self.reopen()?;
             force = true;
         }
         let mut buffered = false;
         loop {
-            let timeout = if self.capture.has_frame && (force || buffered) {
+            let timeout = if self.capture.has_frame && (force || buffered || prompt) {
                 Duration::ZERO
             } else if self.capture.has_frame {
                 // Returns as soon as the screen changes; the idle repeat is due
@@ -179,7 +184,7 @@ impl MfPipeline {
                 self.last_capture = self.capture.captured;
             }
             if self.capture.has_frame
-                && (changed || force || buffered || self.last_sent.elapsed() >= idle)
+                && (changed || force || buffered || prompt || self.last_sent.elapsed() >= idle)
             {
                 // A repeat is stamped when it is sent again, so the viewer's
                 // host delay is about this frame.
@@ -191,8 +196,9 @@ impl MfPipeline {
                 }
                 let picture = self.converter.convert(&self.capture.frame)?;
                 if let VideoEncoder::Amf(encoder) = &mut self.encoder {
-                    encoder.submit(&picture.texture, force)?;
-                    self.ahead.push_back((self.last_capture, force));
+                    let (number, recovery) = encoder.submit(&picture.texture, force)?;
+                    self.ahead
+                        .push_back((self.last_capture, force, number, recovery));
                     return self.collect(true);
                 }
                 let sample = self.sample(&picture)?;
@@ -241,7 +247,7 @@ impl MfPipeline {
             };
             // Waits up to the encoder's 1 ms query timeout.
             if let Some((data, idr)) = encoder.receive(Duration::ZERO)? {
-                let (captured, forced) =
+                let (captured, forced, picture, recovery) =
                     self.ahead.pop_front().context("AMF output without input")?;
                 if forced && !idr {
                     bail!("AMF encoder did not honour force-IDR");
@@ -251,8 +257,8 @@ impl MfPipeline {
                     data,
                     keyframe: idr,
                     captured,
-                    picture: 0,
-                    recovery: None,
+                    picture,
+                    recovery: recovery.filter(|_| !idr),
                 });
             }
             if allow_ahead
@@ -272,8 +278,9 @@ impl MfPipeline {
                         self.pacer.taken(Instant::now());
                         self.last_capture = self.capture.captured;
                         let picture = self.converter.convert(&self.capture.frame)?;
-                        encoder.submit(&picture.texture, false)?;
-                        self.ahead.push_back((self.last_capture, false));
+                        let (number, recovery) = encoder.submit(&picture.texture, false)?;
+                        self.ahead
+                            .push_back((self.last_capture, false, number, recovery));
                     }
                 }
             }
@@ -319,6 +326,7 @@ impl Pipeline {
                         last_capture: Instant::now(),
                         ahead: VecDeque::new(),
                         moved: false,
+                        prompt: false,
                     })))
                 }
                 Err(e) if matches!(config.codec, Codec::Hevc | Codec::Av1) => {
@@ -402,6 +410,27 @@ impl Pipeline {
             _ => bail!("Windows video pipeline has no fallback"),
         }
     }
+    fn recovers(&self) -> bool {
+        match self {
+            Self::Mf(p) => matches!(&p.encoder, VideoEncoder::Amf(e) if e.recovers()),
+            Self::Software(p) => p.recovers(),
+            Self::Failed(_) => false,
+        }
+    }
+    fn recover_from(&mut self, picture: u64) -> bool {
+        match self {
+            Self::Mf(p) => {
+                let VideoEncoder::Amf(encoder) = &mut p.encoder else {
+                    return false;
+                };
+                let done = encoder.recover_from(picture);
+                p.prompt |= done;
+                done
+            }
+            Self::Software(p) => p.recover_from(picture),
+            Self::Failed(_) => false,
+        }
+    }
     fn bitrate(&mut self, kbps: u32) {
         match self {
             Self::Mf(p) => match p.encoder.bitrate(kbps) {
@@ -420,11 +449,17 @@ enum Request {
         reply: mpsc::SyncSender<Result<(EncodedVideo, VideoInfo)>>,
     },
     Bitrate(u32),
+    Recover {
+        picture: u64,
+        reply: mpsc::SyncSender<(bool, bool)>,
+    },
     Shutdown,
 }
 struct VideoProxy {
     requests: mpsc::Sender<Request>,
     info: VideoInfo,
+    /// Whether the pipeline makes recovery frames, as of the last answer.
+    recovers: bool,
     worker: Option<thread::JoinHandle<()>>,
 }
 impl Drop for VideoProxy {
@@ -454,6 +489,24 @@ impl VideoPipeline for VideoProxy {
     }
     fn set_bitrate(&mut self, kbps: u32) {
         let _ = self.requests.send(Request::Bitrate(kbps));
+    }
+    fn recovers(&self) -> bool {
+        self.recovers
+    }
+    fn recover_from(&mut self, picture: u64) -> bool {
+        let (reply, receive) = mpsc::sync_channel(1);
+        if self
+            .requests
+            .send(Request::Recover { picture, reply })
+            .is_err()
+        {
+            return false;
+        }
+        let Ok((done, recovers)) = receive.recv() else {
+            return false;
+        };
+        self.recovers = recovers;
+        done
     }
 }
 pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
@@ -497,7 +550,10 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
                     return;
                 }
             };
-            if ready.send(Ok(pipeline.info())).is_err() {
+            if ready
+                .send(Ok((pipeline.info(), pipeline.recovers())))
+                .is_err()
+            {
                 return;
             }
             for request in receive {
@@ -513,17 +569,21 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
                         let _ = reply.send(result);
                     }
                     Request::Bitrate(kbps) => pipeline.bitrate(kbps),
+                    Request::Recover { picture, reply } => {
+                        let done = pipeline.recover_from(picture);
+                        let _ = reply.send((done, pipeline.recovers()));
+                    }
                     Request::Shutdown => break,
                 }
             }
         })
         .context("spawn video worker")?;
-    let info = match startup
+    let (info, recovers) = match startup
         .recv()
         .context("video worker stopped during startup")
         .and_then(|v| v)
     {
-        Ok(info) => info,
+        Ok(started) => started,
         Err(e) => {
             let _ = worker.join();
             return Err(e);
@@ -532,6 +592,7 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
     Ok(Box::new(VideoProxy {
         requests,
         info,
+        recovers,
         worker: Some(worker),
     }))
 }
@@ -666,6 +727,7 @@ mod tests {
                 height: 2,
                 display: Default::default(),
             },
+            recovers: false,
             worker: Some(worker),
         });
         assert!(released.load(std::sync::atomic::Ordering::SeqCst));

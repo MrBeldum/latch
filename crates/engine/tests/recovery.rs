@@ -74,7 +74,7 @@ fn draw(picture: &mut Yuv420, frame: u32) {
     for row in 0..HEIGHT as usize {
         for col in 0..WIDTH as usize {
             let at = row * picture.y_stride + col;
-            let glyph = ((col / 3) * 2654435761 ^ (row / 4) * 40503) >> 7 & 1 == 1;
+            let glyph = ((((col / 3) * 2654435761) ^ ((row / 4) * 40503)) >> 7) & 1 == 1;
             picture.y[at] = if (x..x + 24).contains(&col) {
                 220
             } else if (60..92).contains(&row) && (200..232).contains(&col) {
@@ -136,7 +136,8 @@ fn simulate(impairment: Impairment, recover: bool, seed: u64) -> Outcome {
     let mut decoder = Decoder::new();
     let mut recovery = Recovery::new();
     let mut keyframes = KeyframeRequests::new();
-    let rtt = Some(impairment.delay * 2);
+    let round_trip = impairment.delay * 2;
+    let rtt = Some(round_trip);
     let mut out = Vec::new();
     let mut outcome = Outcome::default();
     let mut lost_at: Option<(Instant, Option<Instant>)> = None;
@@ -194,7 +195,7 @@ fn simulate(impairment: Impairment, recover: bool, seed: u64) -> Outcome {
             let keyframe = frame == 0
                 || (keyframe_owed
                     && last_keyframe
-                        .is_none_or(|t| now - t >= rtt.unwrap().max(Duration::from_millis(50))));
+                        .is_none_or(|t| now - t >= round_trip.max(Duration::from_millis(50))));
             draw(&mut picture, frame);
             let mut data = Vec::new();
             let info = encoder.encode(&picture, keyframe, &mut data).unwrap();
