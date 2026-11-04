@@ -1,0 +1,5 @@
+128 uninterrupted / 112 delivered pictures: all YUV bytes equal; four recoveries across LTR slot reuse, no decoder errors
+full.hevc sha256 b90b79cd637d9f4db2808bb174bace89896d9a2e4c3bfe8fc5cef72b8eba4a1f
+kept.txt sha256 5351d1738bf4f3f6f3b34d140a8685c933990682a6229a108d2b0894712f6ea4
+loss.hevc sha256 4092e35859886884f8f3ea23df49ebc25e85d4bd98f825e413f9efdf76bf13d0
+ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers
