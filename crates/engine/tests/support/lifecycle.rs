@@ -61,7 +61,7 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         frames: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
         transport: TransportState::new(1000),
-        keyframe_request: Mutex::new(None),
+        keyframe_requests: Mutex::default(),
         audio_enabled: false,
         cursor_supported: false,
         draw_cursor: AtomicBool::new(true),
@@ -161,11 +161,30 @@ fn a_viewer_that_does_not_read_cannot_block_the_control_writer() {
 fn an_opening_reservation_is_busy_before_a_viewer_is_installed() {
     let server = Server::bind(0, Options::default()).unwrap();
     assert!(!server.busy());
-    let guard = server.opening.lock();
+    let guard = server.opening.lock(Duration::ZERO).unwrap();
     assert!(server.busy());
     assert!(server.status().viewer.is_none());
+    // A second opening gives up instead of waiting for ever.
+    let start = Instant::now();
+    assert!(server.opening.lock(Duration::from_millis(50)).is_none());
+    assert!(start.elapsed() >= Duration::from_millis(50));
     drop(guard);
     assert!(!server.busy());
+    assert!(server.opening.lock(Duration::ZERO).is_some());
+}
+
+#[test]
+fn a_stuck_media_thread_is_left_behind_at_the_deadline() {
+    let (release, stuck) = mpsc::channel::<()>();
+    let thread = std::thread::spawn(move || {
+        let _ = stuck.recv();
+    });
+    let start = Instant::now();
+    assert!(!join_by(thread, start + Duration::from_millis(50)));
+    assert!(start.elapsed() < Duration::from_secs(2));
+    drop(release);
+    let done = std::thread::spawn(|| {});
+    assert!(join_by(done, Instant::now() + Duration::from_secs(5)));
 }
 
 #[test]

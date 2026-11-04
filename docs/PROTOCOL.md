@@ -249,10 +249,16 @@ once for every `Input` datagram.
 ### KeyframeRequest (6)
 
 `u32 last` at offset 8: the last frame the reassembler delivered to decode. The viewer sends
-it when a frame is lost, and again every 100 ms (or the measured round
-trip, if longer) until a keyframe newer than `last` arrives. The host
-answers with an IDR frame; it encodes at most one requested keyframe per max(50 ms, smoothed RTT).
-Duplicate requests with the same `last` are additionally throttled for 250 ms.
+it when a frame is lost, and again every 50 ms (or the measured round
+trip, if longer) until a keyframe newer than `last` arrives. Every further
+frame lost meanwhile (perhaps the keyframe that answered) sends a repeat at
+once. Older viewers repeat every 100 ms only.
+The host answers with an IDR frame; it encodes at most one requested keyframe per max(50 ms, smoothed RTT).
+A repeat with the same `last` is a duplicate, and ignored, until a keyframe
+has gone out since the request it repeats and a round trip (smoothed RTT
+less its variation) has passed since then: the viewer still asking means
+that keyframe was lost too. After 250 ms a repeat is answered regardless.
+Older hosts hold every repeat for 250 ms.
 
 At session start the viewer waits for the host's first keyframe without
 requesting another one, unless a frame is declared lost.

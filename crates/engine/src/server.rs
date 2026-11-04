@@ -16,7 +16,9 @@ use latch_proto::audio::AudioPacketizer;
 use latch_proto::control::{self, end, Accept, AudioFormat, End, Message, Notice, StreamRequest};
 use latch_proto::input::InputReceiver;
 use latch_proto::rtt::RttEstimator;
-use latch_proto::video::{fec_percent_for, OutFrame, Packetizer, DEFAULT_FEC_PERCENT};
+use latch_proto::video::{
+    fec_percent_for, KeyframeAnswers, OutFrame, Packetizer, DEFAULT_FEC_PERCENT,
+};
 use latch_proto::wire::{self, Datagram};
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
@@ -48,6 +50,10 @@ const KEYFRAME_GAP: Duration = Duration::from_millis(50);
 /// screen and the encoder.
 /// Initial capture can wait 10 seconds; undo commands can take another 15.
 const TAKEOVER_WAIT: Duration = Duration::from_secs(30);
+/// How long a session's end waits for its media threads. One stuck in a
+/// capture or encoder call is left behind (it stops at its next check of
+/// the session) so that the session still ends and the screen is let go.
+const MEDIA_STOP: Duration = Duration::from_secs(5);
 const VIDEO_RECOVERY_WINDOW: Duration = Duration::from_secs(60);
 const VIDEO_RECOVERIES: usize = 3;
 /// Capture supplies 10 ms; each coded packet carries 5 ms to fit the MTU,
@@ -252,7 +258,12 @@ impl Server {
         req.height = height;
         req.fps = fps;
         req.bitrate_kbps = req.bitrate_kbps.clamp(500, limits.max_kbps);
-        let opening = self.opening.lock();
+        let Some(opening) = self.opening.lock(TAKEOVER_WAIT) else {
+            return Err(Refusal::new(
+                503,
+                "another viewer is still starting a stream here; try again",
+            ));
+        };
         let running = self.current.lock().clone();
         if let Some(old) = running {
             self.log(format!(
@@ -393,7 +404,7 @@ impl Server {
             frames: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             transport: TransportState::new(config.bitrate_kbps),
-            keyframe_request: Mutex::new(None),
+            keyframe_requests: Mutex::default(),
             audio_enabled: prepared.audio.is_some(),
             cursor_supported,
             draw_cursor: AtomicBool::new(!cursor_supported),
@@ -728,11 +739,15 @@ impl Server {
             }
         }
         let _ = tcp.shutdown(Shutdown::Both);
-        if let Some(v) = video {
-            let _ = v.join();
-        }
-        if let Some(a) = audio {
-            let _ = a.join();
+        let deadline = Instant::now() + MEDIA_STOP;
+        for (what, thread) in [("video", video), ("audio", audio)] {
+            if let Some(thread) = thread {
+                if !join_by(thread, deadline) {
+                    self.log(format!(
+                        "the {what} thread did not stop within {MEDIA_STOP:?}; leaving it behind"
+                    ));
+                }
+            }
         }
         reason
     }
@@ -746,14 +761,31 @@ struct Opening {
 }
 
 impl Opening {
-    fn lock(self: &Arc<Self>) -> OpeningGuard {
+    /// The reservation, once the one holding it lets go; None after `limit`.
+    fn lock(self: &Arc<Self>, limit: Duration) -> Option<OpeningGuard> {
+        let deadline = Instant::now() + limit;
         let mut busy = self.busy.lock();
         while *busy {
-            self.cv.wait(&mut busy);
+            if self.cv.wait_until(&mut busy, deadline).timed_out() && *busy {
+                return None;
+            }
         }
         *busy = true;
-        OpeningGuard(self.clone())
+        Some(OpeningGuard(self.clone()))
     }
+}
+
+/// Joins `thread` if it ends by `deadline`; otherwise leaves it to end by
+/// itself and returns false.
+fn join_by(thread: std::thread::JoinHandle<()>, deadline: Instant) -> bool {
+    while !thread.is_finished() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let _ = thread.join();
+    true
 }
 
 struct OpeningGuard(Arc<Opening>);
@@ -841,7 +873,8 @@ struct Session {
     frames: AtomicU64,
     bytes: AtomicU64,
     transport: TransportState,
-    keyframe_request: Mutex<Option<(u32, Instant)>>,
+    /// Which keyframe requests ask for a keyframe not already sent.
+    keyframe_requests: Mutex<KeyframeAnswers>,
     audio_enabled: bool,
     cursor_supported: bool,
     draw_cursor: AtomicBool,
@@ -1045,13 +1078,15 @@ fn receive(server: Weak<Server>) {
                 }
             }
             Datagram::KeyframeRequest { last, .. } => {
-                let now = Instant::now();
-                let mut previous = session.keyframe_request.lock();
-                if previous.is_none_or(|(n, at)| {
-                    latch_proto::video::before(n, last)
-                        || (n == last && now - at >= Duration::from_millis(250))
-                }) {
-                    *previous = Some((last, now));
+                let rtt = {
+                    let rtt = session.rtt.lock();
+                    rtt.srtt().map(|srtt| srtt.saturating_sub(rtt.rttvar()))
+                };
+                let wanted = session
+                    .keyframe_requests
+                    .lock()
+                    .request(last, Instant::now(), rtt);
+                if wanted {
                     session.keyframe.store(true, Ordering::Release);
                 }
             }
@@ -1265,6 +1300,9 @@ fn paced_video(
                 send(&server.udp, session, datagram, addr);
             }
         });
+        if frame.keyframe {
+            session.keyframe_requests.lock().sent(Instant::now());
+        }
         session.frames.fetch_add(1, Ordering::Relaxed);
     }
 }

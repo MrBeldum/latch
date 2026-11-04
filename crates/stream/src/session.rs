@@ -57,6 +57,12 @@ const DECODER_STOP: Duration = Duration::from_secs(1);
 /// the same way. Ten access units is a sixth of a second at 60 fps.
 const HARDWARE_PROBATION: u32 = 10;
 const HARDWARE_ERRORS: u32 = 3;
+/// How long the end waits for the receive thread, which also plays sound.
+const RECEIVER_STOP: Duration = Duration::from_secs(2);
+/// A control message the host does not take within this breaks the
+/// session, rather than blocking whoever sent it (the UI, for a cursor
+/// change).
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -750,6 +756,7 @@ fn attempt(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     };
     let _ = tcp.set_nodelay(true);
     let _ = tcp.set_read_timeout(Some(START_TIMEOUT));
+    let _ = tcp.set_write_timeout(Some(CONTROL_WRITE_TIMEOUT));
     *inner.tcp.lock() = tcp.try_clone().ok();
     *inner.control_writer.lock() = tcp.try_clone().ok();
     if inner.stopping() {
@@ -860,9 +867,9 @@ fn attempt(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     let receiver = {
         let inner = inner.clone();
         let accept = accept.clone();
-        std::thread::Builder::new()
-            .name("stream-receive".into())
-            .spawn(move || receive(&inner, udp, media, &accept, token, player))
+        Worker::spawn("stream-receive", move || {
+            receive(&inner, udp, media, &accept, token, player)
+        })
     };
     let decoding = {
         let inner = inner.clone();
@@ -880,7 +887,11 @@ fn attempt(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     inner.tcp.lock().take();
     drop(tcp);
     if let Ok(r) = receiver {
-        let _ = r.join();
+        if !r.join_within(RECEIVER_STOP) {
+            tracing::warn!(
+                "the receiver did not return within {RECEIVER_STOP:?}; leaving it behind"
+            );
+        }
     }
     if let Ok(d) = decoding {
         if !d.join_within(DECODER_STOP) {
@@ -1190,6 +1201,7 @@ fn receive(
                         hand_off_video(
                             inner,
                             &mut reassembler,
+                            &mut keyframes,
                             &mut throughput,
                             &mut arrivals,
                             Instant::now(),
@@ -1247,7 +1259,14 @@ fn receive(
                 }
             }
         }
-        hand_off_video(inner, &mut reassembler, &mut throughput, &mut arrivals, now);
+        hand_off_video(
+            inner,
+            &mut reassembler,
+            &mut keyframes,
+            &mut throughput,
+            &mut arrivals,
+            now,
+        );
         let waiting = reassembler.needs_keyframe(accepted, now) || inner.queue.lock().want_keyframe;
         if keyframes.due(waiting, now, rtt.srtt()) {
             wire::write_keyframe_request(
@@ -1335,6 +1354,7 @@ fn receive(
 fn hand_off_video(
     inner: &Arc<Inner>,
     reassembler: &mut Reassembler,
+    keyframes: &mut KeyframeRequests,
     throughput: &mut Throughput,
     arrivals: &mut Arrivals,
     now: Instant,
@@ -1363,6 +1383,8 @@ fn hand_off_video(
             }
             Reassembled::Lost { frame } => {
                 tracing::debug!("video frame {frame} lost");
+                // Perhaps the keyframe asked for: ask again.
+                keyframes.lost();
             }
         }
     }

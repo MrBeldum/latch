@@ -31,6 +31,13 @@
   the old viewer learned why it ended.
 - Windows viewers rearm Mio readiness after a batched receive, so packets
   after an idle gap wake the receive loop instead of waiting for its 20 ms timer.
+- A recovery keyframe lost in a burst no longer freezes the picture for
+  400–550 ms: the host held every repeat of a keyframe request for 250 ms,
+  so the viewer's retries were ignored. It now answers a repeat once its
+  keyframe has been out for a round trip, the viewer asks again as soon as
+  another frame is lost, and retries every 50 ms (or the RTT) instead of
+  100 ms. Through 3 % loss with bursts the longest freeze is
+  about 230 ms (simulated, 24 minutes of stream; 5.1 rules: 400 ms).
 
 
 The release workflow publishes the section that matches the tag as the
@@ -55,6 +62,19 @@ GitHub release notes, so each version gets a heading of the form
 - A Media Foundation decoder without transform attributes runs without the
   low-latency hint instead of failing; a Windows renderer that cannot open
   a shared picture stops drawing the last one.
+- No wait at a session's end can hang it: the host leaves a media thread
+  stuck in a capture or encoder call behind after 5 s (the session still
+  ends and lets go of the screen), and a second viewer gives up after 30 s,
+  rather than waiting for ever, on one that is still starting a stream. The
+  viewer's control writes time out after 2 s and its receive thread is
+  waited for at most 2 s.
+- CI: the loopback tests' sessions take turns (test mode sends input to the
+  newest test pattern, so the gamepad test's session took the key presses
+  of the picture test, which then waited for ever on a square that never
+  flipped: hours-long hangs on the macOS runner). A test still running after
+  60 s prints every thread's stack and fails the run, and every CI job has
+  a time limit.
+
 - No Latch-imposed ceilings on a stream. The viewer allowed 30–240 fps and
   2–150 Mbps and the host clamped every request to 240 fps, 500 Mbps and
   8192 pixels; the software H.264 encoder refused anything over 240 fps.
