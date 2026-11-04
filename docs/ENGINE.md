@@ -503,7 +503,9 @@ and Windows cuts the child window around everything egui draws above the
 background layer. Native renderers sample chroma at the colour
 description's siting (`chroma`, left by default). Eight-bit SDR keeps the
 existing rendering path. Which presenter draws is decided per stream (and
-again when the window's display changes), never per frame; a native
+again when the window's display changes and the change has held for
+300 ms, at most once a second), never per frame. A display that cannot be
+read for a moment is no change. A native
 presenter that fails hands that stream to wgpu instead of being retried
 frame by frame, which alternated surfaces (a flicker).
 

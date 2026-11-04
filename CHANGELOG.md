@@ -8,7 +8,11 @@
   uses the NSView of egui's own surface, is used only for HDR (PQ) streams
   (ten-bit SDR draws through the wgpu P010 shader), and the presenter is
   chosen per stream and display, never per frame, on Windows' HDR10 window
-  too. `LATCH_TEST_SERVE=ip:port` points the window at a test `serve`.
+  too. A display that cannot be read for a moment (a space changing, an
+  occluded window) is no change, and a new one switches the presenter only
+  after 300 ms and at most once a second. Debug builds no longer panic when
+  the EDR layer is created (an untyped colour space in `setColorspace:`).
+  `LATCH_TEST_SERVE=ip:port` points the window at a test `serve`.
 
 - Negotiate default-off ten-bit SDR and HDR10 colour, display peak luminance,
   and mastering/content-light metadata within protocol 1. Legacy peers stay SDR8.

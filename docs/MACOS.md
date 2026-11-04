@@ -536,7 +536,10 @@ draws in, taken from the window handle, not to `NSApplication.mainWindow`
 (nil while another app or window is key, or a space is changing, which made
 the first HDR build, PR #55, alternate paths several times a second). A frame with
 no free drawable is dropped, as a late frame would be; a real EDR failure
-gives the rest of the stream to wgpu and is logged once. Every switch is
+gives the rest of the stream to wgpu and is logged once. A window on no
+screen for a moment (a space changing) keeps the screen it had, so that is
+no change; a new screen counts once it has held for 300 ms, and screen
+changes switch the presenter at most once a second. Every switch is
 logged (`video presenter -> …`, with its rate), and with
 `RUST_LOG=info,latch_client::video=debug` a line a second counts the
 frames each presenter drew.
