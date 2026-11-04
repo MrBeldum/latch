@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VideoConfig {
+    pub color: latch_proto::color::ColorDescription,
     /// The picture size to send. A pipeline that cannot scale sends the
     /// desktop's own size and says so in [`VideoInfo`].
     pub width: u32,
@@ -28,6 +29,7 @@ pub struct EncodedVideo {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VideoInfo {
+    pub color: latch_proto::color::ColorDescription,
     /// For people: "VideoToolbox HEVC", "Media Foundation H.264 (NVIDIA)",
     /// "Latch software H.264".
     pub encoder: String,
@@ -253,6 +255,10 @@ pub fn encodable() -> Vec<Codec> {
 
 /// Opens this platform's pipeline for `config`.
 pub fn open(config: &VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>> {
+    anyhow::ensure!(
+        config.color.supported(),
+        "unsupported stream colour description"
+    );
     if let Some(motion) = crate::testmode::motion() {
         return crate::testmode::open_video(config, motion);
     }

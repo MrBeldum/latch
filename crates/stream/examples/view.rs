@@ -135,6 +135,11 @@ fn main() -> anyhow::Result<()> {
             port,
         },
         Settings {
+            color: latch_proto::color::ColorCapabilities {
+                ten_bit: flag("--ten-bit"),
+                hdr: flag("--hdr"),
+                peak_nits: if flag("--hdr") { 1000 } else { 0 },
+            },
             width,
             height,
             fps,

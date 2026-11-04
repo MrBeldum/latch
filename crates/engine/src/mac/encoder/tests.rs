@@ -123,6 +123,7 @@ fn roundtrip(codec: Codec, allow_hardware: bool) {
         return;
     };
     let config = VideoConfig {
+        color: Default::default(),
         width: WIDTH as u32,
         height: HEIGHT as u32,
         fps: FPS,
@@ -246,6 +247,7 @@ fn dropped_callback_is_no_output_but_status_errors_propagate() {
 fn software_session_encodes_an_iosurface() {
     let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let config = VideoConfig {
+        color: Default::default(),
         width: WIDTH as u32,
         height: HEIGHT as u32,
         fps: FPS,
@@ -399,6 +401,7 @@ pub fn run_encoder_benchmark_case(
     }
 
     let config = VideoConfig {
+        color: Default::default(),
         width,
         height,
         fps,
@@ -631,6 +634,7 @@ fn sessions_are_real_time_without_reordering_and_tagged_bt709() {
         (Codec::H264Baseline, false),
     ] {
         let config = VideoConfig {
+            color: Default::default(),
             width: WIDTH as u32,
             height: HEIGHT as u32,
             fps: FPS,
@@ -784,6 +788,7 @@ fn realtime_case(
         .collect();
     let mut encoder = Encoder::create(
         &VideoConfig {
+            color: Default::default(),
             width,
             height,
             fps,
@@ -857,6 +862,7 @@ fn realtime_case(
 fn pipelined_frames_come_out_in_order_with_their_capture_times() {
     let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let config = VideoConfig {
+        color: Default::default(),
         width: WIDTH as u32,
         height: HEIGHT as u32,
         fps: FPS,
@@ -908,6 +914,7 @@ fn main10_iosurface_roundtrip() {
         return;
     };
     let config = VideoConfig {
+        color: Default::default(),
         width: WIDTH as u32,
         height: HEIGHT as u32,
         fps: FPS,
@@ -919,6 +926,7 @@ fn main10_iosurface_roundtrip() {
         .and_then(|()| {
             Encoder::open(
                 &VideoConfig {
+                    color: Default::default(),
                     codec: Codec::H264High,
                     ..config.clone()
                 },
@@ -1029,6 +1037,7 @@ fn recovery_skips_queued_pictures_and_coalesces_retries() {
     for codec in [Codec::Hevc, Codec::H264High] {
         let mut encoder = Encoder::create(
             &VideoConfig {
+                color: Default::default(),
                 width: WIDTH as u32,
                 height: HEIGHT as u32,
                 fps: FPS,
@@ -1077,6 +1086,7 @@ fn a_dropped_recovery_idr_is_retried_before_any_p_frame_leaves() {
     let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let mut encoder = Encoder::create(
         &VideoConfig {
+            color: Default::default(),
             width: WIDTH as u32,
             height: HEIGHT as u32,
             fps: FPS,
@@ -1119,6 +1129,7 @@ fn a_bitrate_change_keeps_the_reference_chain_and_applies_to_the_next_picture() 
     for codec in [Codec::Hevc, Codec::H264High] {
         let mut encoder = Encoder::create(
             &VideoConfig {
+                color: Default::default(),
                 width: WIDTH as u32,
                 height: HEIGHT as u32,
                 fps: FPS,

@@ -164,8 +164,8 @@ const SHADER: &str = r#"
 struct Uniforms {
     full_range: u32,
     srgb_target: u32,
-    _pad0: u32,
-    _pad1: u32,
+    ten_bit: u32,
+    hdr: u32,
 };
 @group(0) @binding(0) var y_tex: texture_2d<f32>;
 @group(0) @binding(1) var uv_tex: texture_2d<f32>;
@@ -201,7 +201,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     var yy: f32;
     var cb: f32;
     var cr: f32;
-    if (u.full_range == 1u) {
+    if (u.ten_bit == 1u) {
+        yy = (y * 65535.0/64.0 - 64.0) / 876.0;
+        cb = (c.x * 65535.0/64.0 - 512.0) / 896.0;
+        cr = (c.y * 65535.0/64.0 - 512.0) / 896.0;
+    } else if (u.full_range == 1u) {
         yy = y;
         cb = c.x - 128.0 / 255.0;
         cr = c.y - 128.0 / 255.0;
@@ -209,6 +213,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         yy = (y - 16.0 / 255.0) * (255.0 / 219.0);
         cb = (c.x - 128.0 / 255.0) * (255.0 / 224.0);
         cr = (c.y - 128.0 / 255.0) * (255.0 / 224.0);
+    }
+    if (u.hdr == 1u) {
+        let pq = max(vec3<f32>(yy + 1.4746*cr, yy - 0.164553*cb - 0.571353*cr, yy + 1.8814*cb),vec3<f32>(0.0));
+        let p = pow(pq,vec3<f32>(32.0/2523.0));
+        let wide = 10000.0 * pow(max(p - 3424.0/4096.0,vec3<f32>(0.0))/(2413.0/128.0 - (2392.0/128.0)*p),vec3<f32>(16384.0/2610.0));
+        var linear = max(vec3<f32>(dot(wide,vec3<f32>(1.660491,-0.587641,-0.072850)), dot(wide,vec3<f32>(-0.124550,1.132900,-0.008349)), dot(wide,vec3<f32>(-0.018151,-0.100579,1.118730)))/203.0,vec3<f32>(0.0));
+        let peak = max(max(linear.r,linear.g),linear.b);
+        if (peak > 0.75) { linear *= (0.75 + 0.25*(1.0-exp(-(peak-0.75)/0.25)))/peak; }
+        if (u.srgb_target == 0u) { linear = select(1.055*pow(linear,vec3<f32>(1.0/2.4))-0.055,12.92*linear,linear <= vec3<f32>(0.0031308)); }
+        return vec4<f32>(linear,1.0);
     }
     let r = yy + 1.5748 * cr;
     let g = yy - 0.1873 * cb - 0.4681 * cr;
@@ -226,7 +240,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 struct Uniforms {
     full_range: u32,
     srgb_target: u32,
-    _pad: [u32; 2],
+    ten_bit: u32,
+    hdr: u32,
 }
 
 impl Uniforms {
@@ -234,6 +249,8 @@ impl Uniforms {
         let mut b = [0u8; 16];
         b[..4].copy_from_slice(&self.full_range.to_ne_bytes());
         b[4..8].copy_from_slice(&self.srgb_target.to_ne_bytes());
+        b[8..12].copy_from_slice(&self.ten_bit.to_ne_bytes());
+        b[12..16].copy_from_slice(&self.hdr.to_ne_bytes());
         b
     }
 }
@@ -241,6 +258,7 @@ impl Uniforms {
 struct Planes {
     width: u32,
     height: u32,
+    ten_bit: bool,
     y: wgpu::Texture,
     uv: wgpu::Texture,
     bind_group: wgpu::BindGroup,
@@ -369,11 +387,11 @@ impl Resources {
         self.planes.as_ref().map(|p| &p.bind_group)
     }
 
-    fn planes(&mut self, device: &wgpu::Device, width: u32, height: u32) -> &Planes {
+    fn planes(&mut self, device: &wgpu::Device, width: u32, height: u32, ten_bit: bool) -> &Planes {
         let stale = self
             .planes
             .as_ref()
-            .is_none_or(|p| p.width != width || p.height != height);
+            .is_none_or(|p| p.width != width || p.height != height || p.ten_bit != ten_bit);
         if stale {
             let make = |w, h, format, label| {
                 device.create_texture(&wgpu::TextureDescriptor {
@@ -391,11 +409,24 @@ impl Resources {
                     view_formats: &[],
                 })
             };
-            let y = make(width, height, wgpu::TextureFormat::R8Unorm, "latch y");
+            let y = make(
+                width,
+                height,
+                if ten_bit {
+                    wgpu::TextureFormat::R16Unorm
+                } else {
+                    wgpu::TextureFormat::R8Unorm
+                },
+                "latch y",
+            );
             let uv = make(
                 width.div_ceil(2),
                 height.div_ceil(2),
-                wgpu::TextureFormat::Rg8Unorm,
+                if ten_bit {
+                    wgpu::TextureFormat::Rg16Unorm
+                } else {
+                    wgpu::TextureFormat::Rg8Unorm
+                },
                 "latch uv",
             );
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -427,6 +458,7 @@ impl Resources {
             self.planes = Some(Planes {
                 width,
                 height,
+                ten_bit,
                 y,
                 uv,
                 bind_group,
@@ -497,10 +529,25 @@ impl Resources {
             }
         }
         let cache = self.metal_cache.as_ref().unwrap();
+        let ten_bit = frame.color.bit_depth == 10;
+        let y_format = if ten_bit {
+            wgpu::TextureFormat::R16Unorm
+        } else {
+            wgpu::TextureFormat::R8Unorm
+        };
+        let uv_format = if ten_bit {
+            wgpu::TextureFormat::Rg16Unorm
+        } else {
+            wgpu::TextureFormat::Rg8Unorm
+        };
 
         let (mtl_y, cv_y) = match cache.create_texture(
             pb,
-            metal::MTLPixelFormat::R8Unorm as usize,
+            if ten_bit {
+                metal::MTLPixelFormat::R16Unorm
+            } else {
+                metal::MTLPixelFormat::R8Unorm
+            } as usize,
             frame.width as usize,
             frame.height as usize,
             0,
@@ -518,7 +565,11 @@ impl Resources {
         let uv_h = frame.height.div_ceil(2);
         let (mtl_uv, cv_uv) = match cache.create_texture(
             pb,
-            metal::MTLPixelFormat::RG8Unorm as usize,
+            if ten_bit {
+                metal::MTLPixelFormat::RG16Unorm
+            } else {
+                metal::MTLPixelFormat::RG8Unorm
+            } as usize,
             uv_w as usize,
             uv_h as usize,
             1,
@@ -535,7 +586,7 @@ impl Resources {
         let hal_tex_y = unsafe {
             hal::metal::Device::texture_from_raw(
                 mtl_y,
-                wgpu::TextureFormat::R8Unorm,
+                y_format,
                 metal::MTLTextureType::D2,
                 1,
                 1,
@@ -556,7 +607,7 @@ impl Resources {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format: y_format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         };
@@ -565,7 +616,7 @@ impl Resources {
         let hal_tex_uv = unsafe {
             hal::metal::Device::texture_from_raw(
                 mtl_uv,
-                wgpu::TextureFormat::Rg8Unorm,
+                uv_format,
                 metal::MTLTextureType::D2,
                 1,
                 1,
@@ -586,7 +637,7 @@ impl Resources {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rg8Unorm,
+            format: uv_format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         };
@@ -622,7 +673,8 @@ impl Resources {
         let u = Uniforms {
             full_range: frame.full_range as u32,
             srgb_target: self.srgb_target as u32,
-            _pad: [0; 2],
+            ten_bit: ten_bit as u32,
+            hdr: frame.color.is_hdr() as u32,
         };
         queue.write_buffer(&self.uniforms, 0, &u.bytes());
 
@@ -663,7 +715,12 @@ impl Resources {
             slot.recycle(old.frame);
         }
         let srgb = self.srgb_target;
-        let planes = self.planes(device, frame.width, frame.height);
+        let planes = self.planes(
+            device,
+            frame.width,
+            frame.height,
+            frame.color.bit_depth == 10,
+        );
         let write = |tex: &wgpu::Texture, data: &[u8], stride: usize, w: u32, h: u32| {
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -702,7 +759,8 @@ impl Resources {
         let u = Uniforms {
             full_range: frame.full_range as u32,
             srgb_target: srgb as u32,
-            _pad: [0; 2],
+            ten_bit: (frame.color.bit_depth == 10) as u32,
+            hdr: frame.color.is_hdr() as u32,
         };
         queue.write_buffer(&self.uniforms, 0, &u.bytes());
         slot.recycle(frame);
@@ -828,6 +886,7 @@ mod tests {
         }
         let frames = Arc::new(FrameSlot::default());
         frames.publish(latch_stream::Frame {
+            color: Default::default(),
             width: 64,
             height: 64,
             y: (0..64)
@@ -968,6 +1027,7 @@ mod tests {
                 let ys = CVPixelBufferGetBytesPerRowOfPlane(pb, 0);
                 let uvs = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
                 Frame {
+                    color: Default::default(),
                     width: width as u32,
                     height: height as u32,
                     y_stride: ys,
@@ -980,6 +1040,7 @@ mod tests {
 
         #[cfg(not(target_os = "macos"))]
         let make_frame = || Frame {
+            color: Default::default(),
             width: width as u32,
             height: height as u32,
             y: vec![16; width * height],

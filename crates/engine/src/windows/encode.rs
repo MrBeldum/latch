@@ -84,8 +84,30 @@ pub(super) fn media_type(subtype: &GUID, config: &VideoConfig) -> Result<IMFMedi
         ty.SetUINT64(&MF_MT_FRAME_RATE, (u64::from(config.fps) << 32) | 1)?;
         ty.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1)?;
         ty.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-        ty.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32)?;
-        ty.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32)?;
+        ty.SetUINT32(
+            &MF_MT_VIDEO_PRIMARIES,
+            if config.color.is_hdr() {
+                MFVideoPrimaries_BT2020.0 as u32
+            } else {
+                MFVideoPrimaries_BT709.0 as u32
+            },
+        )?;
+        ty.SetUINT32(
+            &MF_MT_TRANSFER_FUNCTION,
+            if config.color.is_hdr() {
+                MFVideoTransFunc_2084.0 as u32
+            } else {
+                MFVideoTransFunc_709.0 as u32
+            },
+        )?;
+        ty.SetUINT32(
+            &MF_MT_YUV_MATRIX,
+            if config.color.is_hdr() {
+                MFVideoTransferMatrix_BT2020_10.0 as u32
+            } else {
+                MFVideoTransferMatrix_BT709.0 as u32
+            },
+        )?;
         ty.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32)?;
         Ok(ty)
     }
@@ -220,6 +242,7 @@ pub(super) fn codec_available(codec: Codec) -> bool {
         return false;
     };
     let config = VideoConfig {
+        color: Default::default(),
         width: 1920,
         height: 1080,
         fps: 60,
@@ -461,7 +484,14 @@ impl Encoder {
                     .SetOutputType(0, &output, 0)
                     .context("encoder AV1 output type")?;
             } else if codec == Codec::Hevc {
-                output.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH265VProfile_Main_420_8.0 as u32)?;
+                output.SetUINT32(
+                    &MF_MT_MPEG2_PROFILE,
+                    if config.color.bit_depth == 10 {
+                        eAVEncH265VProfile_Main_420_10.0 as u32
+                    } else {
+                        eAVEncH265VProfile_Main_420_8.0 as u32
+                    },
+                )?;
                 transform
                     .SetOutputType(0, &output, 0)
                     .context("encoder HEVC output type")?;
@@ -483,7 +513,18 @@ impl Encoder {
                 }
             }
             transform
-                .SetInputType(0, &media_type(&MFVideoFormat_NV12, config)?, 0)
+                .SetInputType(
+                    0,
+                    &media_type(
+                        &(if config.color.bit_depth == 10 {
+                            MFVideoFormat_P010
+                        } else {
+                            MFVideoFormat_NV12
+                        }),
+                        config,
+                    )?,
+                    0,
+                )
                 .context("encoder NV12 input type")?;
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
@@ -776,6 +817,7 @@ mod tests {
             }
         };
         let config = VideoConfig {
+            color: Default::default(),
             width: 160,
             height: 96,
             fps: 30,
@@ -833,6 +875,7 @@ mod hardware_tests {
         for codec in [Codec::H264High, Codec::Hevc, Codec::Av1] {
             eprintln!("{codec:?}: {} hardware MFTs", hardware(codec)?.len());
             let config = VideoConfig {
+                color: Default::default(),
                 width: 1920,
                 height: 1080,
                 fps: 60,

@@ -49,6 +49,16 @@ pub fn native_options() -> eframe::NativeOptions {
         wgpu_options: egui_wgpu::WgpuConfiguration {
             present_mode: egui_wgpu::wgpu::PresentMode::AutoNoVsync,
             desired_maximum_frame_latency: Some(1),
+            wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
+                device_descriptor: std::sync::Arc::new(|adapter| {
+                    let mut descriptor =
+                        (egui_wgpu::WgpuSetupCreateNew::default().device_descriptor)(adapter);
+                    descriptor.required_features |=
+                        egui_wgpu::wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+                    descriptor
+                }),
+                ..Default::default()
+            }),
             ..Default::default()
         },
         ..Default::default()

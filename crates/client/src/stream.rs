@@ -2810,6 +2810,7 @@ pub(crate) mod tests {
         let session = latch_stream::Session::start(
             server,
             latch_stream::Settings {
+                color: Default::default(),
                 width: requested.0,
                 height: requested.1,
                 fps: requested.2,

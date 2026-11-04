@@ -225,7 +225,16 @@ pub(super) struct Encoder {
 }
 impl Encoder {
     pub fn new(config: &VideoConfig, gpu: &Gpu) -> Result<Self> {
-        Self::open(config, gpu, NV12, &[])
+        Self::open(
+            config,
+            gpu,
+            if config.color.bit_depth == 10 {
+                P010
+            } else {
+                NV12
+            },
+            &[],
+        )
     }
     /// `extra` properties are set after Latch's own, before the encoder
     /// starts; `format` is the input surface format.
@@ -265,7 +274,24 @@ impl Encoder {
             // Usage first: it resets every other property to its defaults.
             component.set("HevcUsage", Variant::int(1))?; // ultra low latency
             component.set("HevcQualityPreset", Variant::int(10))?; // speed
-            component.set("HevcProfile", Variant::int(1))?; // Main
+            component.set(
+                "HevcProfile",
+                Variant::int(if config.color.bit_depth == 10 { 2 } else { 1 }),
+            )?;
+            component.set(
+                "HevcColorBitDepth",
+                Variant::int(i64::from(config.color.bit_depth)),
+            )?;
+            for prefix in ["HevcIn", "HevcOut"] {
+                for (suffix, value) in [
+                    ("ColorPrimaries", config.color.primaries),
+                    ("ColorTransferChar", config.color.transfer),
+                    ("MatrixCoeff", config.color.matrix),
+                ] {
+                    component.set(&format!("{prefix}{suffix}"), Variant::int(i64::from(value)))?;
+                }
+            }
+            component.set("HevcNominalRange", Variant::int(0))?; // Main
             component.set(
                 "HevcFrameSize",
                 Variant::pair(5, config.width, config.height),
@@ -480,6 +506,7 @@ mod tests {
         let _runtime = super::super::Runtime::new(false)?;
         let gpu = Gpu::new(&display::select()?.adapter)?;
         let config = |width, height, bitrate_kbps| VideoConfig {
+            color: Default::default(),
             width,
             height,
             fps: 240,

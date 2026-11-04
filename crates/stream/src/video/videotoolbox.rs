@@ -204,6 +204,7 @@ pub(crate) unsafe fn cv_pixel_buffer_get_base_address_of_plane(
 }
 
 pub struct VideoToolbox {
+    depth: u8,
     hevc: bool,
     hardware: bool,
     format: CMFormatDescriptionRef,
@@ -216,8 +217,13 @@ pub struct VideoToolbox {
 unsafe impl Send for VideoToolbox {}
 
 impl VideoToolbox {
+    #[cfg(test)]
     pub fn new(hevc: bool) -> Result<Self> {
+        Self::with_depth(hevc, 8)
+    }
+    pub fn with_depth(hevc: bool, depth: u8) -> Result<Self> {
         Ok(Self {
+            depth,
             hevc,
             hardware: false,
             format: ptr::null(),
@@ -306,7 +312,11 @@ impl VideoToolbox {
     fn create_session(&mut self) -> Result<()> {
         unsafe {
             // The stream is limited range (`COLOR_RANGE_LIMITED`).
-            let pixel_format = K_CV_PIXEL_FORMAT_420V as i32;
+            let pixel_format = if self.depth == 10 {
+                u32::from_be_bytes(*b"x420")
+            } else {
+                K_CV_PIXEL_FORMAT_420V
+            } as i32;
             let number = CFNumberCreate(
                 ptr::null(),
                 K_CF_NUMBER_SINT32,
@@ -442,6 +452,7 @@ unsafe extern "C" fn output(
     let format = CVPixelBufferGetPixelFormatType(image);
     if CVPixelBufferGetPlaneCount(image) != 2
         || !matches!(format, K_CV_PIXEL_FORMAT_420V | K_CV_PIXEL_FORMAT_420F)
+            && format != u32::from_be_bytes(*b"x420")
     {
         out.error = Some("VideoToolbox returned a non-NV12 picture");
         return;
@@ -456,6 +467,14 @@ unsafe extern "C" fn output(
     frame.y_stride = ys;
     frame.uv_stride = uvs;
     frame.full_range = format == K_CV_PIXEL_FORMAT_420F;
+    frame.color = latch_proto::color::ColorDescription {
+        bit_depth: if format == u32::from_be_bytes(*b"x420") {
+            10
+        } else {
+            8
+        },
+        ..Default::default()
+    };
     frame.y.clear();
     frame.uv.clear();
     CFRetain(image);

@@ -121,6 +121,7 @@ pub struct Request {
     pub display: Option<u32>,
     /// NV12 or P010 (see `encoder::Depth`).
     pub pixel_format: u32,
+    pub hdr: bool,
 }
 impl Capture {
     pub fn video(request: Request) -> Result<Self> {
@@ -134,6 +135,7 @@ impl Capture {
                 fps: 1,
                 display: None,
                 pixel_format: NV12,
+                hdr: false,
             },
             true,
         )
@@ -145,6 +147,7 @@ impl Capture {
             fps,
             display: wanted,
             pixel_format,
+            hdr,
         } = request;
         permission()?;
         let (tx, rx) = mpsc::sync_channel(1);
@@ -222,6 +225,17 @@ impl Capture {
             // delay: each picture is delivered as soon as it is drawn.
             config.setQueueDepth(5);
             config.setPixelFormat(pixel_format);
+            if hdr {
+                anyhow::ensure!(
+                    config.respondsToSelector(objc2::sel!(setCaptureDynamicRange:)),
+                    "HDR capture requires macOS 15"
+                );
+                let _: () = msg_send![&config, setCaptureDynamicRange: 2isize];
+                let space = CGColorSpaceCreateWithName(kCGColorSpaceITUR_2100_PQ);
+                anyhow::ensure!(!space.is_null(), "PQ capture colour space unavailable");
+                let _: () = msg_send![&config, setColorSpace: space];
+                CFRelease(space);
+            }
             config.setShowsCursor(true);
             config.setScalesToFit(true);
             config.setPreservesAspectRatio(true);
@@ -243,7 +257,11 @@ impl Capture {
                 ),
             ));
             config.setColorMatrix(
-                &*(kCVImageBufferYCbCrMatrix_ITU_R_709_2 as *const objc2_core_foundation::CFString),
+                &*((if hdr {
+                    kCVImageBufferYCbCrMatrix_ITU_R_2020
+                } else {
+                    kCVImageBufferYCbCrMatrix_ITU_R_709_2
+                }) as *const objc2_core_foundation::CFString),
             );
             config.setCapturesAudio(audio);
             config.setExcludesCurrentProcessAudio(true);

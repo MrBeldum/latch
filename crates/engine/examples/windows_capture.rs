@@ -18,6 +18,7 @@ fn main() -> anyhow::Result<()> {
     );
     let path = args.next().unwrap_or_else(|| "capture.h264".into());
     let config = VideoConfig {
+        color: Default::default(),
         width: args.next().unwrap_or_else(|| "1920".into()).parse()?,
         height: args.next().unwrap_or_else(|| "1080".into()).parse()?,
         fps: args.next().unwrap_or_else(|| "60".into()).parse()?,

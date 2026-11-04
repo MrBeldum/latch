@@ -325,6 +325,7 @@ mod tests {
     #[allow(clippy::needless_update)]
     fn test_pixel_oracle_validation() {
         let mut f = Frame {
+            color: Default::default(),
             width: 64,
             height: 64,
             y_stride: 64,
@@ -347,6 +348,7 @@ mod tests {
         assert!(validate_pixel_oracle(&black).is_err());
 
         let wrong = Frame {
+            color: Default::default(),
             width: 32,
             height: 32,
             ..Default::default()

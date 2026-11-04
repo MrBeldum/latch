@@ -62,6 +62,7 @@ impl NativeFrame {
 
 #[derive(Default)]
 pub struct Frame {
+    pub color: latch_proto::color::ColorDescription,
     pub width: u32,
     pub height: u32,
     pub y: Vec<u8>,
@@ -94,6 +95,7 @@ impl Frame {
         self.y_stride = y_stride;
         self.uv_stride = uv_stride;
         self.full_range = full_range;
+        self.color = Default::default();
         self.y.clear();
         self.y.extend_from_slice(y);
         self.uv.clear();
@@ -192,6 +194,32 @@ impl Frame {
     /// Check visible NV12 pixels, excluding row padding. A completely black
     /// capture can still be a valid, successfully decoded video stream.
     pub fn is_black(&self) -> bool {
+        if self.color.bit_depth == 10 {
+            return self.with_planes(|y, ys, uv, uvs| {
+                let max = if self.full_range { 4u16 } else { 68u16 };
+                let w = self.width as usize * 2;
+                if w == 0
+                    || ys < w
+                    || uvs < w
+                    || y.len() < ys * self.height as usize
+                    || uv.len() < uvs * self.height.div_ceil(2) as usize
+                {
+                    return false;
+                }
+                y.chunks(ys).take(self.height as usize).all(|r| {
+                    r[..w]
+                        .chunks_exact(2)
+                        .all(|v| u16::from_le_bytes([v[0], v[1]]) >> 6 <= max)
+                }) && uv
+                    .chunks(uvs)
+                    .take(self.height.div_ceil(2) as usize)
+                    .all(|r| {
+                        r[..w]
+                            .chunks_exact(2)
+                            .all(|v| (u16::from_le_bytes([v[0], v[1]]) >> 6).abs_diff(512) <= 4)
+                    })
+            });
+        }
         self.with_planes(|y, y_stride, uv, uv_stride| {
             let width = self.width as usize;
             let height = self.height as usize;
@@ -302,10 +330,22 @@ pub fn decodable() -> Vec<Codec> {
 /// A decoder for `codec`: the platform's where there is one, else
 /// `latch-codec`'s for Constrained Baseline.
 pub fn new_decoder(codec: Codec) -> Result<Box<dyn Decoder>> {
+    new_decoder_color(codec, Default::default())
+}
+pub fn new_decoder_color(
+    codec: Codec,
+    color: latch_proto::color::ColorDescription,
+) -> Result<Box<dyn Decoder>> {
+    anyhow::ensure!(
+        color.supported() && (color.bit_depth == 8 || codec == Codec::Hevc),
+        "unsupported stream colour"
+    );
+    #[cfg(not(any(target_os = "macos", windows)))]
+    anyhow::ensure!(color.bit_depth == 8, "10-bit decoding is unavailable");
     anyhow::ensure!(codec != Codec::Av1, "AV1 decoding is unavailable");
     #[cfg(target_os = "macos")]
     {
-        match videotoolbox::VideoToolbox::new(codec == Codec::Hevc) {
+        match videotoolbox::VideoToolbox::with_depth(codec == Codec::Hevc, color.bit_depth) {
             Ok(d) if codec == Codec::H264Baseline => {
                 return Ok(Box::new(Fallback::new(Box::new(d))));
             }
@@ -318,9 +358,12 @@ pub fn new_decoder(codec: Codec) -> Result<Box<dyn Decoder>> {
     }
     #[cfg(windows)]
     {
-        if codec == Codec::H264Baseline {
-            match mediafoundation::MfDecoder::new() {
-                Ok(d) => return Ok(Box::new(Fallback::new(Box::new(MediaFoundation(d))))),
+        if matches!(codec, Codec::Hevc | Codec::H264Baseline) {
+            match mediafoundation::MfDecoder::with_codec(codec == Codec::Hevc) {
+                Ok(d) if codec == Codec::H264Baseline => {
+                    return Ok(Box::new(Fallback::new(Box::new(MediaFoundation(d)))))
+                }
+                Ok(d) => return Ok(Box::new(MediaFoundation(d))),
                 Err(e) => tracing::warn!("Media Foundation: {e:#}; decoding in software"),
             }
         }
@@ -427,6 +470,10 @@ impl Decoder for MediaFoundation {
         _spare: Option<Frame>,
     ) -> Result<Option<Frame>> {
         Ok(self.0.decode(annexb)?.map(|d| Frame {
+            color: latch_proto::color::ColorDescription {
+                bit_depth: d.bit_depth,
+                ..Default::default()
+            },
             width: d.width,
             height: d.height,
             y: d.y,
@@ -544,6 +591,7 @@ mod tests {
     #[allow(clippy::needless_update)]
     fn black_detection_checks_visible_pixels_and_both_ranges() {
         let mut frame = Frame {
+            color: Default::default(),
             width: 2,
             height: 2,
             y: vec![16, 16, 255, 16, 16, 255],
@@ -591,6 +639,7 @@ mod tests {
     fn slot_keeps_only_the_newest() {
         let slot = FrameSlot::default();
         let f = |w| Frame {
+            color: Default::default(),
             width: w,
             height: 1,
             y: vec![],

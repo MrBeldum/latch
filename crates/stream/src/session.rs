@@ -85,6 +85,7 @@ pub struct Server {
 
 #[derive(Debug, Clone)]
 pub struct Settings {
+    pub color: latch_proto::color::ColorCapabilities,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -642,6 +643,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     let udp_port = udp.local_addr().map(|a| a.port()).unwrap_or(0);
     let codecs = offer(settings);
     let request = StreamRequest {
+        color: settings.color,
         protocol: latch_proto::PROTOCOL,
         width: settings.width,
         height: settings.height,
@@ -729,7 +731,13 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
             format!("the host chose {:?}, which was not offered", accept.codec),
         );
     }
-    let decoder = match video::new_decoder(accept.codec) {
+    if !accept.color.supported()
+        || (accept.color.bit_depth == 10 && !settings.color.ten_bit)
+        || (accept.color.is_hdr() && (!settings.color.hdr || settings.color.peak_nits == 0))
+    {
+        return fail("connecting", "host selected unoffered colour format".into());
+    }
+    let decoder = match video::new_decoder_color(accept.codec, accept.color) {
         Ok(d) => d,
         Err(e) => return fail("decoding", format!("{e:#}")),
     };
@@ -799,7 +807,9 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     };
     let decoding = {
         let inner = inner.clone();
-        Worker::spawn("stream-decode", move || decode(&inner, decoder))
+        Worker::spawn("stream-decode", move || {
+            decode_color(&inner, decoder, accept.color)
+        })
     };
     let outcome = control_loop(inner, &mut tcp, &accept);
     inner.stop.store(true, Ordering::Release);
@@ -1463,7 +1473,15 @@ fn handle(
 }
 
 /// The decode thread: frames in order, newest picture out.
-fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
+#[cfg(test)]
+fn decode(inner: &Arc<Inner>, decoder: Box<dyn Decoder>) {
+    decode_color(inner, decoder, Default::default());
+}
+fn decode_color(
+    inner: &Arc<Inner>,
+    mut decoder: Box<dyn Decoder>,
+    color: latch_proto::color::ColorDescription,
+) {
     crate::priority::media_thread();
     // A decoder knows whether it runs on hardware only once it has a
     // session, after the first keyframe; the stats follow it.
@@ -1506,7 +1524,12 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
             return;
         }
         match decoded {
-            Ok(Some(picture)) => {
+            Ok(Some(mut picture)) => {
+                if picture.color.bit_depth != color.bit_depth {
+                    tracing::error!("decoder bit depth differs from negotiated stream");
+                    return;
+                }
+                picture.color = color;
                 let decoded = Instant::now();
                 if decoder.name() != named {
                     named = decoder.name();
@@ -1740,6 +1763,7 @@ mod tests {
     #[test]
     fn hevc_is_offered_only_when_the_settings_allow_it() {
         let mut s = Settings {
+            color: Default::default(),
             cursor: false,
             gamepads: false,
             width: 1920,
@@ -1770,6 +1794,7 @@ mod tests {
                 port,
             },
             Settings {
+                color: Default::default(),
                 cursor: false,
                 gamepads: false,
                 width: 1920,

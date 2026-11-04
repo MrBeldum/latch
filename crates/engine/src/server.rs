@@ -290,6 +290,11 @@ impl Server {
             opening: Some(opening),
         };
         let mut config = VideoConfig {
+            color: latch_proto::color::ColorDescription::negotiate(
+                prepared.req.color,
+                codec == video::Codec::Hevc,
+                cfg!(any(target_os = "macos", windows)),
+            ),
             width: prepared.req.width,
             height: prepared.req.height,
             fps: prepared.req.fps,
@@ -304,6 +309,11 @@ impl Server {
                 Err(e) if video::Unencodable::is(e) => {
                     self.log(format!("{e:#}; trying {}", next.name()));
                     config.codec = next;
+                    config.color = latch_proto::color::ColorDescription::negotiate(
+                        prepared.req.color,
+                        next == video::Codec::Hevc,
+                        cfg!(any(target_os = "macos", windows)),
+                    );
                     config.bitrate_kbps = config.bitrate_kbps.min(video::limits(next).max_kbps);
                     if let Some(ceiling) =
                         crate::software::ceiling().filter(|_| !video::hardware_encodes(next))
@@ -421,6 +431,7 @@ impl Server {
         }
         let audio = prepared.audio.take();
         let accept = Accept {
+            color: info.color,
             session: id,
             token: control::token_hex(&token),
             codec: info.codec,
@@ -1121,7 +1132,7 @@ fn encode_video(
         // Short idle repeats bound how long a request arriving inside next
         // waits. Send every returned frame: discarding an encoded repeat
         // would discard a reference needed by subsequent P-frames.
-        let frame = match pipeline.next(keyframe, IDLE_REPEAT) {
+        let mut frame = match pipeline.next(keyframe, IDLE_REPEAT) {
             Ok(f) => f,
             Err(e) => {
                 if session.stopping() {
@@ -1171,6 +1182,13 @@ fn encode_video(
                 continue;
             }
         };
+        if frame.keyframe {
+            if let Some(meta) = pipeline.info().color.hdr {
+                let mut data = latch_proto::color::hevc_hdr_sei(meta);
+                data.extend_from_slice(&frame.data);
+                frame.data = data;
+            }
+        }
         if let Some(update) = pipeline.take_cursor().filter(|_| session.cursor_supported) {
             session.send_control(&Message::Cursor(control::Cursor {
                 visible: update.visible,

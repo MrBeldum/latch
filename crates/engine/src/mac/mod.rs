@@ -28,7 +28,11 @@ fn wanted_display() -> Option<u32> {
 
 pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
     capture::permission()?;
-    let depth = Depth::Eight;
+    let depth = if config.color.bit_depth == 10 {
+        Depth::Ten
+    } else {
+        Depth::Eight
+    };
     let encoder = Encoder::new(config, depth)?;
     let request = capture::Request {
         width: config.width,
@@ -36,6 +40,7 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
         fps: config.fps,
         display: wanted_display(),
         pixel_format: depth.pixel_format(),
+        hdr: config.color.is_hdr(),
     };
     let capture = Capture::video(request)?;
     let mut video = Video {
@@ -108,6 +113,7 @@ pub fn encodable() -> Vec<Codec> {
         .filter(|codec| {
             Encoder::new(
                 &VideoConfig {
+                    color: Default::default(),
                     width: 640,
                     height: 480,
                     fps: 60,
@@ -164,6 +170,7 @@ impl Video {
 impl VideoPipeline for Video {
     fn info(&self) -> VideoInfo {
         VideoInfo {
+            color: Default::default(),
             encoder: format!(
                 "VideoToolbox {}",
                 if self.config.codec == Codec::Hevc {

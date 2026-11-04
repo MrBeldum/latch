@@ -156,17 +156,27 @@ struct CursorRenderer {
 const SHADER: &str = r#"
 Texture2D<float4> desktop : register(t0);
 Texture2D<uint> shape : register(t1);
-cbuffer C : register(b0) { int2 origin; uint2 size; uint kind; uint rotation; uint2 rawsize; uint hdr; float white; uint2 padding; };
+cbuffer C : register(b0) { int2 origin; uint2 size; uint kind; uint rotation; uint2 rawsize; uint hdr; float white; uint output_pq; uint padding; };
 float4 vs(uint id : SV_VertexID) : SV_Position {
     return float4(id == 2 ? 3 : -1, id == 1 ? 3 : -1, 0, 1);
 }
+float3 pq(float3 lin) {
+    float3 n = pow(clamp(lin,0,1000)/10000.0, 2610.0/16384.0);
+    return pow((3424.0/4096.0 + (2413.0/128.0)*n)/(1+(2392.0/128.0)*n),2523.0/32.0);
+}
+float3 wide(float3 rgb) {
+    return mul(float3x3(0.627404,0.329283,0.043313,0.069097,0.919540,0.011362,0.016391,0.088013,0.895595),rgb);
+}
+float3 linearize(float3 c) { return float3(c.r <= 0.04045 ? c.r/12.92 : pow((c.r+0.055)/1.055,2.4),c.g <= 0.04045 ? c.g/12.92 : pow((c.g+0.055)/1.055,2.4),c.b <= 0.04045 ? c.b/12.92 : pow((c.b+0.055)/1.055,2.4)); }
 float4 ps(float4 p : SV_Position) : SV_Target {
     int2 pos = int2(p.xy); int2 src = pos;
     if(rotation == 2) src = int2(pos.y, rawsize.y - 1 - pos.x);
     if(rotation == 3) src = int2(rawsize.x - 1 - pos.x, rawsize.y - 1 - pos.y);
     if(rotation == 4) src = int2(rawsize.x - 1 - pos.y, pos.x);
     float4 bg = desktop.Load(int3(src,0));
-    if(hdr != 0) {
+    if(output_pq != 0) {
+        bg.rgb = pq(wide(hdr != 0 ? bg.rgb*80.0 : linearize(bg.rgb)*white*80.0));
+    } else if(hdr != 0) {
         // scRGB is linear, with SDR white given by the display's white level.
         // Clip highlights to SDR and apply the sRGB transfer before cursor blending.
         float3 lin = saturate(bg.rgb / white);
@@ -179,6 +189,12 @@ float4 ps(float4 p : SV_Position) : SV_Target {
     uint v = shape.Load(int3(c,0));
     uint3 rgb = uint3((v >> 16) & 255, (v >> 8) & 255, v & 255);
     uint a = v >> 24;
+    if(output_pq != 0) {
+        float3 cursor = pq(wide(linearize(float3(rgb)/255.0)*white*80.0));
+        if(kind == 2) return float4(cursor*(a/255.0)+bg.rgb*(1-a/255.0),1);
+        if(kind == 4) return a == 255 ? float4(abs(bg.rgb-cursor),1) : float4(cursor,1);
+        return float4(cursor,1);
+    }
     if(kind == 2) return float4(float3(rgb)*(a/65025.0) + bg.rgb*(1-a/255.0), 1);
     uint3 screen = uint3(round(saturate(bg.rgb)*255));
     if(kind == 4) rgb = a == 255 ? screen ^ rgb : rgb;
@@ -391,7 +407,7 @@ impl CursorRenderer {
                 raw.Height,
                 u32::from(raw.Format == DXGI_FORMAT_R16G16B16A16_FLOAT),
                 white.to_bits(),
-                0,
+                u32::from(dst.Format == DXGI_FORMAT_R10G10B10A2_UNORM),
                 0,
             ];
             gpu.context.UpdateSubresource(
@@ -426,6 +442,7 @@ impl CursorRenderer {
     }
 }
 pub(super) struct Capture {
+    pub hdr_output: bool,
     pub gpu: Gpu,
     duplication: Option<IDXGIOutputDuplication>,
     source: ID3D11Texture2D,
@@ -514,8 +531,19 @@ fn duplicate(output: &display::Output, gpu: &Gpu) -> Result<IDXGIOutputDuplicati
 unsafe impl Send for Capture {}
 impl Capture {
     pub fn new() -> Result<Self> {
+        Self::new_color(false)
+    }
+    pub fn new_color(want_hdr: bool) -> Result<Self> {
         let _dpi = display::DpiAwareness::physical();
         let output = display::select()?;
+        let hdr_output = want_hdr
+            && unsafe {
+                output
+                    .output
+                    .cast::<IDXGIOutput6>()
+                    .and_then(|o| o.GetDesc1())
+                    .is_ok_and(|d| d.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
+            };
         let gpu = Gpu::new(&output.adapter)?;
         let duplication = duplicate(&output, &gpu)?;
         // SAFETY: The duplication owns its descriptor.
@@ -531,12 +559,17 @@ impl Capture {
         let frame = gpu.texture(
             display.width,
             display.height,
-            DXGI_FORMAT_B8G8R8A8_UNORM,
+            if hdr_output {
+                DXGI_FORMAT_R10G10B10A2_UNORM
+            } else {
+                DXGI_FORMAT_B8G8R8A8_UNORM
+            },
             D3D11_BIND_RENDER_TARGET.0 as u32,
             false,
         )?;
         let renderer = CursorRenderer::new(&gpu)?;
         Ok(Self {
+            hdr_output,
             gpu,
             duplication: Some(duplication),
             source,
@@ -580,7 +613,7 @@ impl Capture {
             )
         };
         if old.HighPart != new.HighPart || old.LowPart != new.LowPart {
-            *self = Self::new()?;
+            *self = Self::new_color(self.hdr_output)?;
             return Ok(());
         }
         let duplication = duplicate(&output, &self.gpu)?;
@@ -597,7 +630,11 @@ impl Capture {
         let frame = self.gpu.texture(
             display.width,
             display.height,
-            DXGI_FORMAT_B8G8R8A8_UNORM,
+            if self.hdr_output {
+                DXGI_FORMAT_R10G10B10A2_UNORM
+            } else {
+                DXGI_FORMAT_B8G8R8A8_UNORM
+            },
             D3D11_BIND_RENDER_TARGET.0 as u32,
             false,
         )?;
@@ -692,7 +729,11 @@ impl Capture {
                 self.frame = self.gpu.texture(
                     width,
                     height,
-                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    if self.hdr_output {
+                        DXGI_FORMAT_R10G10B10A2_UNORM
+                    } else {
+                        DXGI_FORMAT_B8G8R8A8_UNORM
+                    },
                     D3D11_BIND_RENDER_TARGET.0 as u32,
                     false,
                 )?;
@@ -720,7 +761,8 @@ impl Capture {
                 .context("read DXGI pointer shape")?;
                 shape_bytes = Some(bytes);
             }
-            composite = self.pointer.Visible.as_bool()
+            composite = self.hdr_output
+                || self.pointer.Visible.as_bool()
                 || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM
                 || !matches!(
                     self.rotation,
@@ -838,6 +880,20 @@ pub(super) struct Converter {
 }
 impl Converter {
     pub fn new(gpu: &Gpu, input: (u32, u32), output: (u32, u32), fps: u32) -> Result<Self> {
+        Self::with_color(gpu, input, output, fps, Default::default())
+    }
+    pub fn with_color(
+        gpu: &Gpu,
+        input: (u32, u32),
+        output: (u32, u32),
+        fps: u32,
+        color: latch_proto::color::ColorDescription,
+    ) -> Result<Self> {
+        let format = if color.bit_depth == 10 {
+            DXGI_FORMAT_P010
+        } else {
+            DXGI_FORMAT_NV12
+        };
         // SAFETY: D3D video interfaces refer to the same device/context.
         unsafe {
             let video: ID3D11VideoDevice = gpu.device.cast().context("D3D11 video device")?;
@@ -865,7 +921,7 @@ impl Converter {
                 "video processor cannot read BGRA"
             );
             anyhow::ensure!(
-                enumerator.CheckVideoProcessorFormat(DXGI_FORMAT_NV12)?
+                enumerator.CheckVideoProcessorFormat(format)?
                     & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT.0 as u32
                     != 0,
                 "video processor cannot produce NV12"
@@ -888,15 +944,28 @@ impl Converter {
                     _bitfield: (1 << 2) | (1 << 4),
                 },
             );
+            if color.is_hdr() {
+                context
+                    .cast::<ID3D11VideoContext1>()
+                    .context("HDR colour conversion requires D3D11.1")?;
+            }
             if let Ok(context1) = context.cast::<ID3D11VideoContext1>() {
                 context1.VideoProcessorSetStreamColorSpace1(
                     &processor,
                     0,
-                    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+                    if color.is_hdr() {
+                        DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+                    } else {
+                        DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
+                    },
                 );
                 context1.VideoProcessorSetOutputColorSpace1(
                     &processor,
-                    DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+                    if color.is_hdr() {
+                        DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020
+                    } else {
+                        DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709
+                    },
                 );
             }
             context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
@@ -939,7 +1008,7 @@ impl Converter {
                 let texture = gpu.texture(
                     output.0,
                     output.1,
-                    DXGI_FORMAT_NV12,
+                    format,
                     D3D11_BIND_RENDER_TARGET.0 as u32,
                     false,
                 )?;

@@ -174,6 +174,7 @@ fn post_accept_end_close_and_missing_media_are_reported_as_failures() {
                 port,
             },
             Settings {
+                color: Default::default(),
                 width: 64,
                 height: 64,
                 fps: 60,

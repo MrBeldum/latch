@@ -13,6 +13,7 @@ use windows::{
 };
 
 pub struct DecodedNv12 {
+    pub bit_depth: u8,
     pub width: u32,
     pub height: u32,
     pub y: Vec<u8>,
@@ -30,6 +31,9 @@ pub struct MfDecoder {
 }
 impl MfDecoder {
     pub fn new() -> Result<Self> {
+        Self::with_codec(false)
+    }
+    pub fn with_codec(hevc: bool) -> Result<Self> {
         let (requests, receive) = mpsc::channel::<Request>();
         let (ready, startup) = mpsc::sync_channel(1);
         thread::Builder::new()
@@ -37,7 +41,8 @@ impl MfDecoder {
             .spawn(move || {
                 let initialized = (|| {
                     let runtime = Runtime::new()?;
-                    let decoder = State::new(true).or_else(|_| State::new(false))?;
+                    let decoder =
+                        State::new_codec(true, hevc).or_else(|_| State::new_codec(false, hevc))?;
                     Ok::<_, anyhow::Error>((runtime, decoder))
                 })();
                 let (_runtime, mut decoder) = match initialized {
@@ -182,7 +187,7 @@ impl Gpu {
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             texture.GetDesc(&mut desc);
             ensure!(
-                desc.Format == DXGI_FORMAT_NV12
+                (desc.Format == DXGI_FORMAT_NV12 || desc.Format == DXGI_FORMAT_P010)
                     && layout.coded_width <= desc.Width
                     && layout.coded_height <= desc.Height,
                 "invalid DXVA NV12 texture dimensions"
@@ -225,6 +230,7 @@ impl Gpu {
 }
 #[derive(Clone, Copy)]
 struct Layout {
+    bit_depth: u8,
     coded_width: u32,
     coded_height: u32,
     left: u32,
@@ -249,7 +255,13 @@ impl Layout {
                     && coded_height <= 16384,
                 "invalid decoded dimensions"
             );
+            let bit_depth = if ty.GetGUID(&MF_MT_SUBTYPE)? == MFVideoFormat_P010 {
+                10
+            } else {
+                8
+            };
             let mut layout = Self {
+                bit_depth,
                 coded_width,
                 coded_height,
                 left: 0,
@@ -258,7 +270,8 @@ impl Layout {
                 height: coded_height,
                 stride: ty
                     .GetUINT32(&MF_MT_DEFAULT_STRIDE)
-                    .unwrap_or(coded_width.div_ceil(2) * 2) as usize,
+                    .unwrap_or(coded_width.div_ceil(2) * 2 * if bit_depth == 10 { 2 } else { 1 })
+                    as usize,
             };
             for key in [MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_GEOMETRIC_APERTURE] {
                 if let Ok(size) = ty.GetBlobSize(&key) {
@@ -297,12 +310,13 @@ impl Layout {
     }
     fn copy(self, bytes: &[u8], stride: usize, surface_height: usize) -> Result<DecodedNv12> {
         let (left, top, width, height) = (
-            self.left as usize,
+            self.left as usize * if self.bit_depth == 10 { 2 } else { 1 },
             self.top as usize,
-            self.width as usize,
+            self.width as usize * if self.bit_depth == 10 { 2 } else { 1 },
             self.height as usize,
         );
-        let uv_width = width.div_ceil(2) * 2;
+        let uv_width =
+            self.width.div_ceil(2) as usize * 2 * if self.bit_depth == 10 { 2 } else { 1 };
         ensure!(
             stride >= left + uv_width && surface_height >= top + height,
             "invalid NV12 pitch or height"
@@ -332,6 +346,7 @@ impl Layout {
             );
         }
         Ok(DecodedNv12 {
+            bit_depth: self.bit_depth,
             width: self.width,
             height: self.height,
             y,
@@ -357,12 +372,23 @@ impl State {
             "Media Foundation (software)"
         }
     }
+    #[cfg(test)]
     fn new(dxva: bool) -> Result<Self> {
+        Self::new_codec(dxva, false)
+    }
+    fn new_codec(dxva: bool, hevc: bool) -> Result<Self> {
         // SAFETY: This runs only in the initialized decoder MTA.
         unsafe {
-            let transform: IMFTransform =
-                CoCreateInstance(&CLSID_MSH264DecoderMFT, None, CLSCTX_INPROC_SERVER)
-                    .context("create Microsoft H.264 decoder")?;
+            let transform: IMFTransform = CoCreateInstance(
+                &(if hevc {
+                    CLSID_MSH265DecoderMFT
+                } else {
+                    CLSID_MSH264DecoderMFT
+                }),
+                None,
+                CLSCTX_INPROC_SERVER,
+            )
+            .context("create Microsoft H.264 decoder")?;
             // The H.264 decoder exposes this as a UINT32 transform attribute,
             // not the VT_BOOL encoder property on ICodecAPI. Set it before types.
             transform
@@ -377,7 +403,14 @@ impl State {
             };
             let input = mf::MFCreateMediaType()?;
             input.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            input.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
+            input.SetGUID(
+                &MF_MT_SUBTYPE,
+                &(if hevc {
+                    MFVideoFormat_HEVC
+                } else {
+                    MFVideoFormat_H264
+                }),
+            )?;
             transform
                 .SetInputType(0, &input, 0)
                 .context("decoder H.264 input type")?;
@@ -410,7 +443,10 @@ impl State {
                     Err(e) if e.code() == MF_E_NO_MORE_TYPES => break,
                     Err(e) => return Err(e).context("enumerate decoder output types"),
                 };
-                if ty.GetGUID(&MF_MT_SUBTYPE)? == MFVideoFormat_NV12 {
+                if matches!(
+                    ty.GetGUID(&MF_MT_SUBTYPE)?,
+                    MFVideoFormat_NV12 | MFVideoFormat_P010
+                ) {
                     match self.transform.SetOutputType(0, &ty, 0) {
                         Err(e) if e.code() == MF_E_UNSUPPORTED_D3D_TYPE && self.gpu.is_some() => {
                             self.transform
@@ -598,6 +634,7 @@ mod tests {
     #[test]
     fn crop_preserves_visible_planes_and_ignores_padding() -> Result<()> {
         let layout = Layout {
+            bit_depth: 8,
             coded_width: 8,
             coded_height: 6,
             left: 2,

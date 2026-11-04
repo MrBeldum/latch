@@ -1058,6 +1058,10 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             port: CONTROL_PORT,
         },
         Settings {
+            color: latch_proto::color::ColorCapabilities {
+                ten_bit: cfg!(any(target_os = "macos", windows)),
+                ..Default::default()
+            },
             width: w,
             height: h,
             fps,

@@ -91,6 +91,7 @@ fn connect_with(
             port,
         },
         Settings {
+            color: Default::default(),
             width: W,
             height: H,
             fps: FPS,

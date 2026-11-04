@@ -97,6 +97,7 @@ struct MfPipeline {
 impl MfPipeline {
     fn info(&self) -> VideoInfo {
         VideoInfo {
+            color: Default::default(),
             encoder: self.encoder.name().to_string(),
             hardware: self.encoder.hardware(),
             codec: self.config.codec,
@@ -123,11 +124,12 @@ impl MfPipeline {
     }
     /// A new converter, encoder and samples for the display's new device or size.
     fn reopen(&mut self) -> Result<()> {
-        self.converter = Converter::new(
+        self.converter = Converter::with_color(
             &self.capture.gpu,
             (self.capture.display.width, self.capture.display.height),
             (self.config.width, self.config.height),
             self.config.fps,
+            self.config.color,
         )?;
         self.samples = vec![None; capture::RING];
         self.ahead.clear();
@@ -290,14 +292,23 @@ enum Pipeline {
 }
 impl Pipeline {
     fn new(config: &VideoConfig, mf: bool) -> Result<Self> {
-        let capture = Capture::new()?;
+        let capture = Capture::new_color(config.color.is_hdr())?;
+        let mut config = config.clone();
+        if config.color.is_hdr() && !capture.hdr_output {
+            config.color = latch_proto::color::ColorDescription {
+                bit_depth: 10,
+                ..Default::default()
+            };
+        }
+        let config = &config;
         if mf {
             let attempt = (|| {
-                let converter = Converter::new(
+                let converter = Converter::with_color(
                     &capture.gpu,
                     (capture.display.width, capture.display.height),
                     (config.width, config.height),
                     config.fps,
+                    config.color,
                 )?;
                 let encoder = VideoEncoder::new(config, &capture.gpu)?;
                 Ok::<_, anyhow::Error>((converter, encoder))
@@ -628,6 +639,7 @@ mod tests {
         use super::*;
         let _runtime = Runtime::new(true)?;
         let config = VideoConfig {
+            color: Default::default(),
             width: 1920,
             height: 1080,
             fps: 1000,
@@ -655,6 +667,7 @@ mod tests {
         drop(VideoProxy {
             requests,
             info: VideoInfo {
+                color: Default::default(),
                 encoder: String::new(),
                 hardware: false,
                 codec: Codec::H264Baseline,
@@ -678,6 +691,7 @@ mod tests {
             }
         };
         let config = VideoConfig {
+            color: Default::default(),
             width: 160,
             height: 98,
             fps: 30,
