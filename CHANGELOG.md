@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — Windows setup
+
+- Windows setup: avoid duplicate 8K virtual-display entries that pushed an
+  existing 84-mode list to 102 and prevented monitor creation. A rejected
+  update now restores settings, removes an unused relocation, warns that
+  virtual display modes are unchanged, and completes the remaining steps.
+
 ## Unreleased — transport workstream
 
 - Batch Linux video sends/receives and macOS receives without waiting to fill

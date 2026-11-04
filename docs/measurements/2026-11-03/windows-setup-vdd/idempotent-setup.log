@@ -1,0 +1,15 @@
+[16:48:43] Latch setup started
+[16:48:43] Removing the previous streaming service
+[16:48:47] Opening TCP and UDP 47850 to the tailnet for Latch
+[16:48:49] Opening UDP 9 to check the wake path while this PC is awake
+[16:48:49] Letting a viewer control windows that run as administrator
+[16:48:49] Listing virtual display resolutions and refresh rates
+  every resolution and refresh rate is listed already
+[16:48:50] Recording the power settings this PC had before Latch
+  kept from an earlier setup
+[16:48:50] Installing the ViGEmBus gamepad driver, so a viewer's gamepads reach games
+  already installed (1.22.0)
+[16:48:50] Turning Fast Startup off so a shut-down PC can wake
+[16:48:50] Keeping this PC awake when plugged in so Tailscale stays reachable
+[16:48:50] Enabling Wake-on-LAN on 'Ethernet'
+[16:48:51] Latch setup finished

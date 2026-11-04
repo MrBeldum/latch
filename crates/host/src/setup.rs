@@ -254,7 +254,8 @@ powercfg /change hibernate-timeout-ac 0
 if ($LASTEXITCODE -ne 0) {{ $setupFailed = $true }}
 {adapter}
 if ($setupFailed) {{ Step "Some setup steps failed. See the lines above."; exit 1 }}
-Step "Latch setup finished"
+if ($vddModesUnchanged) {{ Step "Latch setup finished (virtual display modes unchanged)" }}
+else {{ Step "Latch setup finished" }}
 exit 0
 "#,
         protection = include_str!("../../../scripts/setup-protection.ps1"),

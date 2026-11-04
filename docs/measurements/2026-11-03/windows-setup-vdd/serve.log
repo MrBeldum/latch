@@ -1,0 +1,5 @@
+serving on 100.106.23.40:47897 (TCP and UDP)
+host UDP buffers: send=8388608 receive=8388608 bytes (requested 8388608/8388608; Linux may cap at net.core.wmem_max/rmem_max)
+view example is watching: 1920×1080 at 240 fps, 80000 kb/s, AMF HEVC (AMD)
+[2m2026-11-04T07:50:51.649207Z[0m [32m INFO[0m [2mlatch_engine::windows::input[0m[2m:[0m input goes through the elevated helper, so windows that run as administrator follow the viewer too
+view example stopped watching after 12 s: the viewer disconnected
