@@ -919,6 +919,17 @@ impl RecoveryState {
                 *self.asked.lock() = Some((picture, request.id));
             }
             _ => {
+                tracing::info!(
+                    frame = request.last_delivered,
+                    "recovery refused ({}); sending a keyframe",
+                    if keyframe_owed {
+                        "a keyframe is owed"
+                    } else if picture.is_none() {
+                        "frame not sent recently"
+                    } else {
+                        "the encoder no longer holds it"
+                    }
+                );
                 self.refused.fetch_add(1, Ordering::Relaxed);
                 session.keyframe.store(true, Ordering::Release);
                 self.answer(
