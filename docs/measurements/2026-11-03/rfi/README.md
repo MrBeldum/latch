@@ -1,7 +1,7 @@
 # Recovery frames against keyframes (2026-11-03)
 
 What a lost frame costs before and after reference invalidation
-([PROTOCOL.md](../../../PROTOCOL.md#recoveryrequest-13-and-recoveryack-14)).
+([PROTOCOL.md](../../../PROTOCOL.md#recoveryrequest-14-and-recoveryack-15)).
 "Before" is the same build with the viewer's `LATCH_TEST_NO_RECOVERY=1`:
 it asks for keyframes exactly as 5.1 does. Loss is induced at the viewer
 with `LATCH_TEST_VIDEO_LOSS=<percent>:<burst>` (that share of the host's

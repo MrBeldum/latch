@@ -211,6 +211,7 @@ impl MfPipeline {
                     }
                     self.last_sent = Instant::now();
                     return Ok(EncodedVideo {
+                        generation: 0,
                         data,
                         keyframe: idr,
                         captured: self.last_capture,
@@ -254,6 +255,7 @@ impl MfPipeline {
                 }
                 self.last_sent = Instant::now();
                 return Ok(EncodedVideo {
+                    generation: 0,
                     data,
                     keyframe: idr,
                     captured,

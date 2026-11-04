@@ -49,7 +49,7 @@ Content-Length: <n>
 | `name` | string | the viewer's machine name, for the host's log |
 | `cursor` | bool | optional, default false; viewer can draw pointer locally and handle shape updates |
 | `gamepads` | bool | optional, default false; the viewer sends gamepads (see [Gamepads](#gamepads-912)) |
-| `reference_invalidation` | bool | optional, default false; after a loss the viewer asks for a recovery frame (see [RecoveryRequest](#recoveryrequest-13-and-recoveryack-14)) |
+| `reference_invalidation` | bool | optional, default false; after a loss the viewer asks for a recovery frame (see [RecoveryRequest](#recoveryrequest-14-and-recoveryack-15)) |
 
 A request is taken within 64 to 16384 pixels a side, 1 to 500 fps and
 500 kbps to 1 Gbps (`latch_proto::control::MAX_*`). The host then meets
@@ -145,8 +145,9 @@ not match its kind is dropped without an answer.
 | 10 | `PadAck` | host → viewer |
 | 11 | `PadFeedback` | host → viewer |
 | 12 | `PadFeedbackAck` | viewer → host |
-| 13 | `RecoveryRequest` | viewer → host |
-| 14 | `RecoveryAck` | host → viewer |
+| 13 | `Mic` (reserved for negotiated microphone audio) | viewer → host |
+| 14 | `RecoveryRequest` | viewer → host |
+| 15 | `RecoveryAck` | host → viewer |
 
 ### Hello (1)
 
@@ -268,7 +269,7 @@ Duplicate requests with the same `last` are additionally throttled for 250 ms.
 At session start the viewer waits for the host's first keyframe without
 requesting another one, unless a frame is declared lost.
 
-### RecoveryRequest (13) and RecoveryAck (14)
+### RecoveryRequest (14) and RecoveryAck (15)
 
 Only after a `StreamRequest` and an `Accept` that both have
 `reference_invalidation` true; an older host or viewer never sees these
@@ -481,7 +482,7 @@ viewers do not offer AV1 until their decoder workstream adds support.
 
 ## Reference invalidation (additive)
 
-Implemented as [RecoveryRequest and RecoveryAck](#recoveryrequest-13-and-recoveryack-14).
+Implemented as [RecoveryRequest and RecoveryAck](#recoveryrequest-14-and-recoveryack-15).
 Measurements: [recovery frames against keyframes](measurements/2026-11-03/rfi/README.md).
 The viewer test knobs `LATCH_TEST_VIDEO_LOSS=<percent>[:<burst>]` (drop
 that share of video datagrams on arrival, in bursts) and

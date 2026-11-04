@@ -534,6 +534,7 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
         let picture = if picture > 0 { base + picture } else { 0 };
         self.last_picture = self.last_picture.max(picture);
         Ok(EncodedVideo {
+            generation: 0,
             data,
             keyframe: sent_keyframe,
             captured: self.captured,

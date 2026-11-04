@@ -861,11 +861,11 @@ struct RecoveryState {
     request: Mutex<Option<wire::RecoveryRequest>>,
     /// The answer to the newest request, repeated to a repeat.
     answer: Mutex<Option<wire::RecoveryAck>>,
-    /// The picture a recovery frame was asked from, and the request.
-    asked: Mutex<Option<(u64, u32)>>,
-    /// Frame numbers sent and the pipeline's numbers for their pictures,
+    /// The generation and picture a recovery frame was asked from, and the request.
+    asked: Mutex<Option<(u64, u64, u32)>>,
+    /// Frame numbers sent, pipeline generations and picture numbers,
     /// newest last.
-    sent: Mutex<VecDeque<(u32, u64)>>,
+    sent: Mutex<VecDeque<(u32, u64, u64)>>,
     /// Recovery frames sent and requests refused.
     frames: AtomicU64,
     refused: AtomicU64,
@@ -901,7 +901,13 @@ impl RecoveryState {
 
     /// The encoder thread, before each frame: hands the newest request to
     /// the pipeline, or refuses it and asks for a keyframe.
-    fn take(&self, server: &Server, session: &Session, pipeline: &mut dyn VideoPipeline) {
+    fn take(
+        &self,
+        server: &Server,
+        session: &Session,
+        pipeline: &mut dyn VideoPipeline,
+        generation: u64,
+    ) {
         let Some(request) = self.request.lock().take() else {
             return;
         };
@@ -910,13 +916,13 @@ impl RecoveryState {
             .lock()
             .iter()
             .rev()
-            .find(|(frame, _)| *frame == request.last_delivered)
-            .map(|&(_, picture)| picture)
+            .find(|(frame, g, _)| *frame == request.last_delivered && *g == generation)
+            .map(|&(_, _, picture)| picture)
             .filter(|&p| p != 0);
         let keyframe_owed = session.keyframe.load(Ordering::Acquire);
         match picture {
             Some(picture) if !keyframe_owed && pipeline.recover_from(picture) => {
-                *self.asked.lock() = Some((picture, request.id));
+                *self.asked.lock() = Some((generation, picture, request.id));
             }
             _ => {
                 tracing::info!(
@@ -1219,6 +1225,7 @@ fn encode_video(
     tx: mpsc::SyncSender<(video::EncodedVideo, Instant)>,
 ) {
     crate::priority::media_thread();
+    let mut generation = 0;
     let mut last_keyframe: Option<Instant> = None;
     let mut info = pipeline.info();
     let mut recoveries = VecDeque::new();
@@ -1238,14 +1245,16 @@ fn encode_video(
         }
         pipeline.set_cursor_drawn(session.draw_cursor.load(Ordering::Relaxed));
         if session.recovery.enabled {
-            session.recovery.take(server, session, pipeline.as_mut());
+            session
+                .recovery
+                .take(server, session, pipeline.as_mut(), generation);
         }
         let due = recovery_due(last_keyframe, Instant::now(), session.rtt.lock().srtt());
         let keyframe = due && session.keyframe.swap(false, Ordering::AcqRel);
         // Short idle repeats bound how long a request arriving inside next
         // waits. Send every returned frame: discarding an encoded repeat
         // would discard a reference needed by subsequent P-frames.
-        let frame = match pipeline.next(keyframe, IDLE_REPEAT) {
+        let mut frame = match pipeline.next(keyframe, IDLE_REPEAT) {
             Ok(f) => f,
             Err(e) => {
                 if session.stopping() {
@@ -1277,7 +1286,8 @@ fn encode_video(
                     match reopen(&config) {
                         Ok(p) => {
                             pipeline = p;
-                            // The new pipeline numbers its pictures afresh.
+                            // Queued frames can still arrive from the old pipeline.
+                            generation += 1;
                             session.recovery.sent.lock().clear();
                             session.recovery.asked.lock().take();
                             break;
@@ -1298,6 +1308,7 @@ fn encode_video(
                 continue;
             }
         };
+        frame.generation = generation;
         if let Some(update) = pipeline.take_cursor().filter(|_| session.cursor_supported) {
             session.send_control(&Message::Cursor(control::Cursor {
                 visible: update.visible,
@@ -1358,9 +1369,15 @@ fn paced_video(
         packetizer.set_fec_percent(session.fec.load(Ordering::Relaxed));
         let recovery = &session.recovery;
         let asked = frame.recovery.and_then(|base| {
-            let (picture, id) = recovery.asked.lock().take_if(|(p, _)| *p == base)?;
+            let (generation, picture, id) = recovery
+                .asked
+                .lock()
+                .take_if(|(g, p, _)| *g == frame.generation && *p == base)?;
             let sent = recovery.sent.lock();
-            let &(number, _) = sent.iter().rev().find(|(_, p)| *p == picture)?;
+            let &(number, _, _) = sent
+                .iter()
+                .rev()
+                .find(|(_, g, p)| *g == generation && *p == picture)?;
             packetizer.mark_recovery(number);
             Some(id)
         });
@@ -1377,7 +1394,7 @@ fn paced_video(
             if sent.len() >= RECOVERY_SENT {
                 sent.pop_front();
             }
-            sent.push_back((number, frame.picture));
+            sent.push_back((number, frame.generation, frame.picture));
         }
         if let Some(id) = asked {
             // Before the frame's datagrams, so the viewer hears it is

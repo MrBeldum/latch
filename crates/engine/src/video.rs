@@ -27,6 +27,9 @@ pub struct EncodedVideo {
     /// The pipeline's number for this frame, which
     /// [`VideoPipeline::recover_from`] takes; 0 where it recovers nothing.
     pub picture: u64,
+    /// Assigned by the session encoder thread before enqueueing. Recovery
+    /// identities are (generation, picture), including after capture reopens.
+    pub generation: u64,
     /// A recovery frame: it predicts only from this picture (see
     /// [`VideoPipeline::recover_from`]).
     pub recovery: Option<u64>,
