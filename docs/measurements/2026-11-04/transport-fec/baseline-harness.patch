@@ -1,0 +1,145 @@
+--- a/crates/engine/tests/steady_transport.rs
++++ b/crates/engine/tests/steady_transport.rs
+@@ -19,6 +19,16 @@
+ #[test]
+ fn transport_scenarios() {
+     for (name, cap, ceiling, base, interval, back, legacy) in [
++        ("loss1cap20", 20000, 20000, 10, 50, 10, false),
++        ("loss3cap20", 20000, 20000, 10, 50, 10, false),
++        ("loss5cap20", 20000, 20000, 10, 50, 10, false),
++        ("loss1cap50", 50000, 50000, 10, 50, 10, false),
++        ("loss3cap50", 50000, 50000, 10, 50, 10, false),
++        ("loss5cap50", 50000, 50000, 10, 50, 10, false),
++        ("loss1cap100", 100000, 100000, 10, 50, 10, false),
++        ("loss3cap100", 100000, 100000, 10, 50, 10, false),
++        ("loss5cap100", 100000, 100000, 10, 50, 10, false),
++        ("idle_motion", 50000, 50000, 10, 50, 10, false),
+         ("steady20", 20000, 100000, 10, 50, 10, false),
+         ("steady50", 50000, 100000, 10, 50, 10, false),
+         ("steady100", 100000, 200000, 10, 50, 10, false),
+@@ -37,10 +47,22 @@
+         ("lan1g", 1000000, 1000000, 1, 50, 1, false),
+     ] {
+         let fps = 120;
++        let random = name.starts_with("loss");
+         let impairment = Impairment {
+-            loss: if name == "legacy_radio" { 0.05 } else { 0.0 },
++            loss: if random {
++                f64::from(name.as_bytes()[4] - b'0') / 100.0
++            } else if name == "legacy_radio" {
++                0.05
++            } else {
++                0.0
++            },
++            burst_enter: if random { 0.002 } else { 0.0 },
++            burst_exit: 0.3,
++            duplicate: if random { 0.01 } else { 0.0 },
++            reorder: if random { 0.01 } else { 0.0 },
++            reorder_delay: Duration::from_millis(4),
++            jitter: Duration::from_millis(if random { 4 } else { 0 }),
+             delay: Duration::from_millis(base / 2),
+-            ..Impairment::NONE
+         };
+         let start = Instant::now();
+         let mut pending = VecDeque::<Vec<u8>>::new();
+@@ -60,6 +82,11 @@
+         let mut ping_low = f32::MAX;
+         let mut minimum = ceiling;
+         let mut fec_loss = 0.0;
++        
++        let mut wire_bytes = 0u64;
++        let mut parity_bytes = 0u64;
++        let mut idrs = 0;
++        let mut full_rate_at = None;
+         let mut budgets = Vec::new();
+         let mut route_recovered = false;
+         for ms in 0..35_000u64 {
+@@ -74,12 +101,18 @@
+                 )) * 1000
+                     / 8
+                     / fps) as usize;
++                let size = if name == "idle_motion" && ms < 5000 {
++                    size / 100
++                } else {
++                    size
++                };
+                 let data = vec![0x5a; size];
+                 let keyframe = idr_due.is_some_and(|at| at <= now)
+                     && now - last_idr >= Duration::from_millis(base);
+                 if keyframe {
+                     idr_due = None;
+                     last_idr = now;
++                    idrs += 1;
+                 }
+                 tx.packetize(
+                     &OutFrame {
+@@ -88,6 +121,12 @@
+                         host_delay: 0,
+                     },
+                     |dg| {
++                        wire_bytes += (dg.len() + 80) as u64;
++                        if let Ok(Datagram::Video { shard, .. }) = latch_proto::wire::parse(dg) {
++                            if shard.shard >= shard.data {
++                                parity_bytes += (dg.len() + 80) as u64;
++                            }
++                        }
+                         pending.push_back(dg.to_vec());
+                     },
+                 );
+@@ -126,6 +165,11 @@
+                     rx.push(&shard, now);
+                 }
+                 while let Some(event) = rx.poll(now) {
++                    if let Reassembled::Frame(ref frame) = event {
++                        if name == "idle_motion" && ms >= 5000 && frame.data.len() > 30000 {
++                            full_rate_at.get_or_insert(ms - 5000);
++                        }
++                    }
+                     if matches!(event, Reassembled::Lost { .. }) && idr_due.is_none() {
+                         idr_due = Some(now + Duration::from_millis(base));
+                     }
+@@ -172,15 +216,16 @@
+             while feedback.front().is_some_and(|(at, ..)| *at <= now) {
+                 let (_, report, rtt, sent) = feedback.pop_front().unwrap();
+                 controller.observe_sent(sent);
+-                controller.update(now, &report, rtt, 0.0);
++                controller.update(now, &report, rtt, if name == "idle_motion" && (1000..5000).contains(&ms) { 25.0 } else { 0.0 });
+                 fec_loss = latch_proto::video::fec_loss_sample(
+                     fec_loss,
+                     report.loss_pct,
+                     Duration::from_millis(interval),
+                 );
+-                tx.set_fec_percent(
+-                    latch_proto::video::fec_percent_for(fec_loss, controller.base_rtt()).min(30),
+-                );
++                tx.set_fec_percent(latch_proto::video::fec_percent_for(
++                    fec_loss,
++                    controller.base_rtt(),
++                ).min(30));
+             }
+             minimum = minimum.min(controller.budget());
+             if name == "route" && ms >= 15000 && controller.budget() == ceiling {
+@@ -199,9 +244,22 @@
+             stats.frames_skipped,
+             controller.budget()
+         );
++        println!("OVERHEAD {name} parity_pct={:.2} parity_mbps={:.3} wire_mbps={:.3} lost_per_min={:.1} idrs_per_min={:.1} motion_ms={}",
++            parity_bytes as f64 * 100.0 / wire_bytes as f64,
++            parity_bytes as f64 * 8.0 / 35_000_000.0,
++            wire_bytes as f64 * 8.0 / 35_000_000.0,
++            stats.frames_lost as f64 * 60.0 / 35.0, idrs as f64 * 60.0 / 35.0,
++            full_rate_at.map_or(-1, |ms| ms as i64));
+         // Main's controller spreads 1.7/3.5/7.1 Mbps at these caps (10 ms,
+         // 50 ms reports); stay at or under it at every RTT and at 5.1's cadence.
+-        if interval <= 250 && !legacy && name != "route" && name != "lan1g" && cap >= 20000 {
++        if interval <= 250
++            && !legacy
++            && name != "route"
++            && name != "lan1g"
++            && cap >= 20000
++            && !random
++            && name != "idle_motion"
++        {
+             let sd_bound = match cap {
+                 20000 => 1700.0,
+                 50000 => 3500.0,

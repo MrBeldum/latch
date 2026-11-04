@@ -1,0 +1,26 @@
+STEADY steady20 mean=19288.6 sd=733.6 queue_p95=8.992 lost=19 skipped=1 min=12884 final=19327
+STEADY steady50 mean=49211.7 sd=1211.2 queue_p95=7.987 lost=16 skipped=2 min=42950 final=48670
+STEADY steady100 mean=101636.3 sd=2500.7 queue_p95=8.802 lost=16 skipped=2 min=85725 final=107228
+STEADY cap20rtt150 mean=19534.6 sd=581.4 queue_p95=14.664 lost=48 skipped=13 min=12753 final=20224
+STEADY cap20rtt250 mean=19491.0 sd=225.4 queue_p95=10.520 lost=66 skipped=25 min=12753 final=19423
+STEADY cap100rtt150 mean=102166.6 sd=1126.4 queue_p95=9.002 lost=33 skipped=10 min=85549 final=101470
+STEADY cap100rtt250 mean=98684.3 sd=1949.3 queue_p95=7.885 lost=76 skipped=15 min=64294 final=97142
+STEADY rtt150 mean=50494.4 sd=538.9 queue_p95=8.576 lost=33 skipped=10 min=42774 final=50470
+STEADY rtt250 mean=49234.0 sd=971.1 queue_p95=7.987 lost=69 skipped=22 min=32080 final=48471
+STEADY slow250 mean=50710.1 sd=656.0 queue_p95=11.411 lost=42 skipped=0 min=31450 final=50339
+STEADY legacy1000 mean=50229.8 sd=772.6 queue_p95=22.691 lost=238 skipped=0 min=32100 final=51006
+STEADY legacy_radio mean=100000.0 sd=0.0 queue_p95=7.782 lost=10 skipped=31 min=100000 final=100000
+STEADY cap2 mean=1082.7 sd=108.0 queue_p95=14.608 lost=20 skipped=1 min=1000 final=1000
+STEADY cap5 mean=3062.1 sd=832.8 queue_p95=28.264 lost=20 skipped=1 min=2045 final=2943
+STEADY route mean=86303.9 sd=32455.8 queue_p95=8.384 lost=0 skipped=0 min=1000 final=100000
+STEADY lan1g mean=1000000.0 sd=0.0 queue_p95=7.997 lost=0 skipped=0 min=1000000 final=1000000
+step: low_phase_cuts=10 ceiling_ms=1110 cut_ms=60 queue_p95_ms=9.38 lost=7 skipped=7 peak_kbps=100000 min_kbps=10886 low_raw_damage_windows=0 lost_windows=1 raw_loss_median_when_lost=81.6
+240fps: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=4.22 lost=0 skipped=0 peak_kbps=200000 min_kbps=200000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+random2: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=7.99 lost=0 skipped=0 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+wifi: low_phase_cuts=0 ceiling_ms=1460 cut_ms=-1 queue_p95_ms=7.58 lost=11 skipped=28 peak_kbps=100000 min_kbps=68896 low_raw_damage_windows=3 lost_windows=10 raw_loss_median_when_lost=3.1
+rtt100: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=8.38 lost=0 skipped=0 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+jitter: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=8.38 lost=0 skipped=0 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+wifi_jitter: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=0.00 lost=0 skipped=0 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+policer5: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=0.00 lost=1 skipped=3 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=1 raw_loss_median_when_lost=14.6
+policer10: low_phase_cuts=0 ceiling_ms=1110 cut_ms=-1 queue_p95_ms=0.00 lost=21 skipped=11 peak_kbps=100000 min_kbps=75382 low_raw_damage_windows=0 lost_windows=9 raw_loss_median_when_lost=0.6
+policer20: low_phase_cuts=0 ceiling_ms=-1 cut_ms=-1 queue_p95_ms=0.00 lost=25 skipped=12 peak_kbps=100000 min_kbps=69246 low_raw_damage_windows=2 lost_windows=11 raw_loss_median_when_lost=1.1

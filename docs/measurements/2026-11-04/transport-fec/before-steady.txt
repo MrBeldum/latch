@@ -1,0 +1,52 @@
+STEADY loss1cap20 mean=19603.7 sd=494.7 queue_p95=8.576 lost=25 skipped=88 min=15952 final=19640
+OVERHEAD loss1cap20 parity_pct=24.76 parity_mbps=4.886 wire_mbps=19.735 lost_per_min=42.9 idrs_per_min=77.1 motion_ms=-1
+STEADY loss3cap20 mean=16583.5 sd=3249.0 queue_p95=7.704 lost=34 skipped=120 min=7362 final=9692
+OVERHEAD loss3cap20 parity_pct=25.32 parity_mbps=4.450 wire_mbps=17.575 lost_per_min=58.3 idrs_per_min=111.4 motion_ms=-1
+STEADY loss5cap20 mean=19608.6 sd=843.2 queue_p95=8.792 lost=42 skipped=156 min=15415 final=19103
+OVERHEAD loss5cap20 parity_pct=24.08 parity_mbps=4.875 wire_mbps=20.246 lost_per_min=72.0 idrs_per_min=137.1 motion_ms=-1
+STEADY loss1cap50 mean=50000.0 sd=0.0 queue_p95=8.779 lost=13 skipped=52 min=50000 final=50000
+OVERHEAD loss1cap50 parity_pct=24.36 parity_mbps=12.274 wire_mbps=50.378 lost_per_min=22.3 idrs_per_min=46.3 motion_ms=-1
+STEADY loss3cap50 mean=50000.0 sd=0.0 queue_p95=8.384 lost=15 skipped=60 min=50000 final=50000
+OVERHEAD loss3cap50 parity_pct=24.36 parity_mbps=12.272 wire_mbps=50.377 lost_per_min=25.7 idrs_per_min=53.1 motion_ms=-1
+STEADY loss5cap50 mean=50000.0 sd=0.0 queue_p95=8.179 lost=13 skipped=52 min=50000 final=50000
+OVERHEAD loss5cap50 parity_pct=24.36 parity_mbps=12.274 wire_mbps=50.378 lost_per_min=22.3 idrs_per_min=46.3 motion_ms=-1
+STEADY loss1cap100 mean=100000.0 sd=0.0 queue_p95=8.192 lost=1 skipped=4 min=100000 final=100000
+OVERHEAD loss1cap100 parity_pct=23.72 parity_mbps=23.316 wire_mbps=98.300 lost_per_min=1.7 idrs_per_min=5.1 motion_ms=-1
+STEADY loss3cap100 mean=100000.0 sd=0.0 queue_p95=7.987 lost=3 skipped=12 min=100000 final=100000
+OVERHEAD loss3cap100 parity_pct=23.72 parity_mbps=23.320 wire_mbps=98.302 lost_per_min=5.1 idrs_per_min=12.0 motion_ms=-1
+STEADY loss5cap100 mean=100000.0 sd=0.0 queue_p95=7.782 lost=3 skipped=7 min=100000 final=100000
+OVERHEAD loss5cap100 parity_pct=23.72 parity_mbps=23.321 wire_mbps=98.302 lost_per_min=5.1 idrs_per_min=8.6 motion_ms=-1
+STEADY idle_motion mean=43455.1 sd=12785.4 queue_p95=7.782 lost=0 skipped=0 min=1000 final=47512
+OVERHEAD idle_motion parity_pct=10.62 parity_mbps=3.901 wire_mbps=36.752 lost_per_min=0.0 idrs_per_min=1.7 motion_ms=3179
+STEADY steady20 mean=19288.6 sd=733.6 queue_p95=8.992 lost=19 skipped=1 min=12884 final=19327
+OVERHEAD steady20 parity_pct=15.14 parity_mbps=3.025 wire_mbps=19.982 lost_per_min=32.6 idrs_per_min=10.3 motion_ms=-1
+STEADY steady50 mean=49211.7 sd=1211.2 queue_p95=7.987 lost=16 skipped=2 min=42950 final=48670
+OVERHEAD steady50 parity_pct=12.93 parity_mbps=6.285 wire_mbps=48.593 lost_per_min=27.4 idrs_per_min=8.6 motion_ms=-1
+STEADY steady100 mean=101636.3 sd=2500.7 queue_p95=8.802 lost=16 skipped=2 min=85725 final=107228
+OVERHEAD steady100 parity_pct=12.76 parity_mbps=12.689 wire_mbps=99.421 lost_per_min=27.4 idrs_per_min=8.6 motion_ms=-1
+STEADY cap20rtt150 mean=19534.6 sd=581.4 queue_p95=14.664 lost=48 skipped=13 min=12753 final=20224
+OVERHEAD cap20rtt150 parity_pct=19.51 parity_mbps=4.018 wire_mbps=20.590 lost_per_min=82.3 idrs_per_min=6.9 motion_ms=-1
+STEADY cap20rtt250 mean=19491.0 sd=225.4 queue_p95=10.520 lost=66 skipped=25 min=12753 final=19423
+OVERHEAD cap20rtt250 parity_pct=19.49 parity_mbps=4.055 wire_mbps=20.808 lost_per_min=113.1 idrs_per_min=6.9 motion_ms=-1
+STEADY cap100rtt150 mean=102166.6 sd=1126.4 queue_p95=9.002 lost=33 skipped=10 min=85549 final=101470
+OVERHEAD cap100rtt150 parity_pct=18.17 parity_mbps=18.251 wire_mbps=100.433 lost_per_min=56.6 idrs_per_min=5.1 motion_ms=-1
+STEADY cap100rtt250 mean=98684.3 sd=1949.3 queue_p95=7.885 lost=76 skipped=15 min=64294 final=97142
+OVERHEAD cap100rtt250 parity_pct=18.03 parity_mbps=17.407 wire_mbps=96.525 lost_per_min=130.3 idrs_per_min=6.9 motion_ms=-1
+STEADY rtt150 mean=50494.4 sd=538.9 queue_p95=8.576 lost=33 skipped=10 min=42774 final=50470
+OVERHEAD rtt150 parity_pct=18.31 parity_mbps=9.092 wire_mbps=49.650 lost_per_min=56.6 idrs_per_min=5.1 motion_ms=-1
+STEADY rtt250 mean=49234.0 sd=971.1 queue_p95=7.987 lost=69 skipped=22 min=32080 final=48471
+OVERHEAD rtt250 parity_pct=18.66 parity_mbps=9.102 wire_mbps=48.770 lost_per_min=118.3 idrs_per_min=6.9 motion_ms=-1
+STEADY slow250 mean=50710.1 sd=656.0 queue_p95=11.411 lost=42 skipped=0 min=31450 final=50339
+OVERHEAD slow250 parity_pct=12.54 parity_mbps=6.242 wire_mbps=49.765 lost_per_min=72.0 idrs_per_min=29.1 motion_ms=-1
+STEADY legacy1000 mean=50229.8 sd=772.6 queue_p95=22.691 lost=238 skipped=0 min=32100 final=51006
+OVERHEAD legacy1000 parity_pct=12.88 parity_mbps=6.603 wire_mbps=51.281 lost_per_min=408.0 idrs_per_min=197.1 motion_ms=-1
+STEADY legacy_radio mean=100000.0 sd=0.0 queue_p95=7.782 lost=10 skipped=31 min=100000 final=100000
+OVERHEAD legacy_radio parity_pct=23.08 parity_mbps=22.604 wire_mbps=97.953 lost_per_min=17.1 idrs_per_min=30.9 motion_ms=-1
+STEADY cap2 mean=1082.7 sd=108.0 queue_p95=14.608 lost=20 skipped=1 min=1000 final=1000
+OVERHEAD cap2 parity_pct=42.70 parity_mbps=1.006 wire_mbps=2.357 lost_per_min=34.3 idrs_per_min=13.7 motion_ms=-1
+STEADY cap5 mean=3062.1 sd=832.8 queue_p95=28.264 lost=20 skipped=1 min=2045 final=2943
+OVERHEAD cap5 parity_pct=26.08 parity_mbps=1.291 wire_mbps=4.949 lost_per_min=34.3 idrs_per_min=13.7 motion_ms=-1
+STEADY route mean=86303.9 sd=32455.8 queue_p95=8.384 lost=0 skipped=0 min=1000 final=100000
+OVERHEAD route parity_pct=16.32 parity_mbps=14.145 wire_mbps=86.685 lost_per_min=0.0 idrs_per_min=1.7 motion_ms=-1
+STEADY lan1g mean=1000000.0 sd=0.0 queue_p95=7.997 lost=0 skipped=0 min=1000000 final=1000000
+OVERHEAD lan1g parity_pct=9.22 parity_mbps=88.474 wire_mbps=959.693 lost_per_min=0.0 idrs_per_min=1.7 motion_ms=-1
