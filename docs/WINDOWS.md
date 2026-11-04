@@ -257,13 +257,25 @@ uses the lowest sufficient refresh, then the highest available. There is
 no fixed 240→120 mapping in the selector.
 
 The installed VDD 11.30.4.434 accepted 98 mode combinations on the test PC,
-but the full cross-product prevented monitor creation. This is why setup
+with 100 also working; 101 and 102 prevented monitor creation (102 for
+at least 25 seconds). The driver logged monitor-arrival status
+`-1073741637` (`0xC00000BB`, not supported). Setup used to
+append the two 8K sizes twice (they already belong to `stream_modes`),
+producing 102 entries from the PC's existing 84 instead of 98. The wanted
+sizes now come from that deduplicated list alone. The full cross-product
+also prevented monitor creation. This is why setup
 seeds high refresh at the two gaming sizes instead of every combination.
 More modes can be supplied in the driver's XML; Latch enumerates them
 without a refresh whitelist. Advertising every possible size/rate at once,
 and adding arbitrary requested modes on demand, remain unresolved with this
-driver. Setup rolls back a rejected mode list when the active MTT monitor
-disappears after restart.
+driver. Setup allows at least 15 seconds for the active MTT monitor to return
+after restart. If the driver rejects the list or the settings update fails,
+setup warns, restores the previous XML and `VDDPATH`, restarts the driver,
+and continues with the power, gamepad and wake steps. A successful setup
+with that warning exits zero and ends with "virtual display modes unchanged";
+a failed restore is reported as a setup failure, after the remaining steps.
+An unused relocated settings folder and its uninstall record are removed
+on rollback.
 
 If the driver's settings folder is writable by ordinary users, setup leaves
 it untouched and writes the preserved XML under `%ProgramFiles%\Latch\Display`,

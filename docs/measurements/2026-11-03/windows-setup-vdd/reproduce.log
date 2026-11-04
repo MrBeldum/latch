@@ -1,0 +1,64 @@
+TEST 102 computed=102
+Microsoft PnP Utility
+
+Restarting device:         ROOT\DISPLAY\0000
+Device restarted successfully.
+
+relocated 102 elapsed=2.6 monitors=Unknown
+relocated 102 elapsed=4.7 monitors=Unknown
+relocated 102 elapsed=6.8 monitors=Unknown
+relocated 102 elapsed=8.9 monitors=Unknown
+relocated 102 elapsed=11 monitors=Unknown
+relocated 102 elapsed=13 monitors=Unknown
+relocated 102 elapsed=15.1 monitors=Unknown
+relocated 102 elapsed=17.2 monitors=Unknown
+relocated 102 elapsed=19.3 monitors=Unknown
+relocated 102 elapsed=21.4 monitors=Unknown
+relocated 102 elapsed=23.5 monitors=Unknown
+relocated 102 elapsed=25.5 monitors=Unknown
+Microsoft PnP Utility
+
+Restarting device:         ROOT\DISPLAY\0000
+Device restarted successfully.
+
+restored between tests elapsed=28.7 monitors=OK
+TEST 98 computed=98
+Microsoft PnP Utility
+
+Restarting device:         ROOT\DISPLAY\0000
+Device restarted successfully.
+
+relocated 98 elapsed=2.2 monitors=OK
+relocated 98 elapsed=4.3 monitors=OK
+relocated 98 elapsed=6.4 monitors=OK
+relocated 98 elapsed=8.5 monitors=OK
+relocated 98 elapsed=10.6 monitors=OK
+relocated 98 elapsed=12.7 monitors=OK
+relocated 98 elapsed=14.8 monitors=OK
+relocated 98 elapsed=16.8 monitors=OK
+relocated 98 elapsed=18.9 monitors=OK
+relocated 98 elapsed=21 monitors=OK
+relocated 98 elapsed=23.1 monitors=OK
+relocated 98 elapsed=25.2 monitors=OK
+Microsoft PnP Utility
+
+Restarting device:         ROOT\DISPLAY\0000
+Device restarted successfully.
+
+restored between tests elapsed=28.4 monitors=OK
+Microsoft PnP Utility
+
+Restarting device:         ROOT\DISPLAY\0000
+Device restarted successfully.
+
+FINAL restored elapsed=32.7 monitors=OK
+
+Status  Class   FriendlyName                 InstanceId
+------  -----   ------------                 ----------
+OK      Display Virtual Display Driver       ROOT\DISPLAY\0000
+OK      Monitor Generic Monitor (VDD by MTT) DISPLAY\MTT1337\1&28A6823A&0&UID256
+Unknown Monitor Generic Monitor (27E1QA)     DISPLAY\HKC2775\7&3616118&1&UID256
+Unknown Monitor Generic Monitor (27E1QA)     DISPLAY\HKC2775\7&3616118&1&UID264
+OK      Display AMD Radeon RX 6600           PCI\VEN_1002&DEV_73FF&SUBSYS_2413148C&REV_C7\6&34C...
+Unknown Monitor Generic Monitor (27E1QA)     DISPLAY\HKC2775\7&3616118&0&UID264
+Unknown Monitor Generic Monitor (27E1QA)     DISPLAY\HKC2775\1&8713BCA&0&UID0

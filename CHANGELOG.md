@@ -22,6 +22,12 @@
 - Decoders get the negotiated colour: a ten-bit stream decodes to P010 on
   VideoToolbox and Media Foundation (a hardware MFT starts on NV12 until the
   sequence header), and a decoder giving another depth renegotiates the codec.
+## Unreleased — Windows setup
+
+- Windows setup: avoid duplicate 8K virtual-display entries that pushed an
+  existing 84-mode list to 102 and prevented monitor creation. A rejected
+  update now restores settings, removes an unused relocation, warns that
+  virtual display modes are unchanged, and completes the remaining steps.
 
 ## Unreleased — transport workstream
 
