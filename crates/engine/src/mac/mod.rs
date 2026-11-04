@@ -173,6 +173,13 @@ impl Video {
     /// A hardware session that failed is replaced in software; a software
     /// failure ends the stream.
     fn recover(&mut self, error: anyhow::Error) -> Result<()> {
+        if self.encoder.low_latency() {
+            tracing::warn!(%error, "VideoToolbox low-latency encode failed; continuing in the ordinary mode");
+            self.encoder.reopen_ordinary()?;
+            self.wake();
+            self.encoder.request_keyframe();
+            return Ok(());
+        }
         if !self.encoder.hardware {
             return Err(error);
         }
@@ -247,9 +254,10 @@ impl VideoPipeline for Video {
                     "VideoToolbox gave no frame back in {:?}; reopening the encoder",
                     encoder::STALL
                 );
-                if self.encoder.hardware {
-                    self.encoder.reopen_ordinary()?;
-                } else {
+                // Even a software session that stopped tries the media
+                // engine again first; software is the last resort.
+                if let Err(error) = self.encoder.reopen_ordinary() {
+                    tracing::warn!(%error, "ordinary VideoToolbox session failed; continuing in software");
                     self.encoder.software()?;
                 }
                 self.wake();

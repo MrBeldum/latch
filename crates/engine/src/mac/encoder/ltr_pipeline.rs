@@ -480,12 +480,14 @@ fn a_low_latency_session_that_misses_its_pace_reopens_ordinary() {
     assert!(next.keyframe && next.picture > first.picture);
 }
 
-/// EnableLowLatencyRateControl stops giving frames back at 3024×1964@120
-/// H.264 on an M3 Pro (frames stay in flight, no callbacks, idle CPU). The
-/// watchdog sees it within [`STALL`] and an ordinary session takes over.
+/// At 3024×1964@120 H.264 on an M3 Pro a low-latency session fails its
+/// first encode. The fallback used to be a software session, which at that
+/// size gives nothing back (frames stay in flight, no callbacks, idle CPU:
+/// realtime_benchmark hung). Now an ordinary hardware session takes over at
+/// once, and the watchdog catches any session that still stops.
 #[test]
-#[ignore = "hardware stall reproduction; seconds of full-load encoding"]
-fn a_stalled_low_latency_session_is_replaced() {
+#[ignore = "hardware reproduction; seconds of full-load encoding"]
+fn h264_3024x1964_low_latency_failure_stays_in_hardware() {
     let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let (width, height) = (3024, 1964);
     let config = VideoConfig {
@@ -518,40 +520,85 @@ fn a_stalled_low_latency_session_is_replaced() {
         })
         .collect();
     let mut pacer = crate::video::Pacer::new(config.fps);
+    // realtime_benchmark warms the session up with synchronous encodes.
+    for image in images.iter().take(4) {
+        let _ = encoder.encode(image.0, Instant::now(), false).unwrap();
+    }
     let start = Instant::now();
-    let (mut stalls, mut after, mut n) = (0, 0, 0);
-    let mut first_after = None;
+    let (mut stalls, mut frames, mut n) = (0, 0, 0);
     while start.elapsed() < Duration::from_secs(8) {
         if encoder.stalled() {
             stalls += 1;
-            eprintln!(
-                "stall {stalls} at {:?} (low latency {})",
-                start.elapsed(),
-                encoder.low_latency()
-            );
+            eprintln!("stall {stalls} at {:?}", start.elapsed());
             encoder.reopen_ordinary().unwrap();
         }
         while let Some((_, _, frame)) = encoder.collect(Duration::ZERO) {
-            if stalls > 0 {
-                let frame = frame.unwrap().unwrap();
-                first_after.get_or_insert(frame.keyframe);
-                after += 1;
-            }
+            frame.unwrap().unwrap();
+            frames += 1;
         }
         let due = pacer.due().is_none_or(|at| Instant::now() >= at);
         if due && encoder.in_flight() < super::super::super::IN_FLIGHT {
             pacer.taken(Instant::now());
+            // An IDR every second, as realtime_benchmark forces.
+            let idr = n % config.fps as usize == 0;
             encoder
-                .submit(images[n % images.len()].0, Instant::now(), n == 0)
+                .submit(images[n % images.len()].0, Instant::now(), idr)
                 .unwrap();
             n += 1;
         } else {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
-    eprintln!("{n} submitted, {stalls} stalls, {after} frames after the first");
-    if stalls > 0 {
-        assert_eq!(first_after, Some(true), "the replacement starts at an IDR");
-        assert!(after > 100, "the ordinary session keeps going");
+    eprintln!(
+        "{n} submitted, {frames} out, {stalls} stalls; hardware {} low latency {}",
+        encoder.hardware,
+        encoder.low_latency()
+    );
+    assert!(encoder.hardware, "never software at this size");
+    assert!(frames > 300, "the stream keeps going");
+}
+
+/// A session holding a frame with nothing out for [`STALL`] is stalled, and
+/// is replaced without waiting for it.
+#[test]
+fn a_session_that_gives_nothing_back_is_replaced_without_waiting() {
+    let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    let config = VideoConfig {
+        width: 320,
+        height: 192,
+        fps: 60,
+        bitrate_kbps: 3000,
+        codec: Codec::Hevc,
+        color: Default::default(),
+    };
+    let mut encoder = Encoder::open(&config, true, Depth::Eight, true).unwrap();
+    let pool = pool();
+    let first = encoder
+        .encode(pool[0].0, Instant::now(), true)
+        .unwrap()
+        .unwrap();
+    assert!(!encoder.stalled());
+    // A frame the encoder will never return, submitted 600 ms ago.
+    let index = encoder.index;
+    encoder.index += 1;
+    let long_ago = Instant::now() - Duration::from_millis(600);
+    encoder
+        .output
+        .output
+        .lock()
+        .pending
+        .push_back((index, long_ago, long_ago));
+    assert!(encoder.stalled() == encoder.hardware);
+    if !encoder.hardware {
+        return;
     }
+    let start = Instant::now();
+    encoder.reopen_ordinary().unwrap();
+    assert!(start.elapsed() < STALL);
+    assert!(!encoder.low_latency() && encoder.in_flight() == 0);
+    let next = encoder
+        .encode(pool[1].0, Instant::now(), false)
+        .unwrap()
+        .unwrap();
+    assert!(next.keyframe && next.picture > first.picture + 1);
 }

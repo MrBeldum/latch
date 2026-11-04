@@ -487,6 +487,13 @@ impl Encoder {
         keyframe: bool,
     ) -> Result<Option<EncodedVideo>> {
         match self.encode_once(image, captured, keyframe) {
+            Err(error) if self.low_latency => {
+                // H.264 3024×1964@120 fails here; software at that size
+                // gives nothing back at all.
+                tracing::warn!(%error, "VideoToolbox low-latency encode failed; retrying in the ordinary mode");
+                self.reopen_ordinary()?;
+                self.encode_once(image, captured, true)
+            }
             Err(error) if self.hardware => {
                 tracing::warn!(%error, "VideoToolbox hardware encode failed; retrying in software");
                 self.software()?;
