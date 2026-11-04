@@ -1358,6 +1358,66 @@ mod tests {
 }
 
 #[cfg(test)]
+mod hdr_desktop_tests {
+    use super::*;
+    /// Live Advanced Color desktop → SDR stream capture: the HDR10 viewer
+    /// test's 203/400/600/1000-nit patches (latch-client
+    /// `hdr10_child_window_keeps_hdr_under_overlays` with
+    /// LATCH_HDR_PATCH_DIR) come out of the SDR capture path brighter in
+    /// order, never black and never all clipped to one white.
+    #[test]
+    #[ignore = "interactive HDR desktop with the client's HDR10 patch window up"]
+    fn hdr_desktop_patches_reach_sdr_capture_apart() -> Result<()> {
+        let dir = std::path::PathBuf::from(std::env::var("LATCH_HDR_PATCH_DIR")?);
+        let start = Instant::now();
+        while !dir.join("patches-ready").exists() {
+            anyhow::ensure!(start.elapsed() < Duration::from_secs(90), "no patch window");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let points: Vec<(i32, i32)> = std::fs::read_to_string(dir.join("patches-ready"))?
+            .split(';')
+            .map(|p| {
+                let (x, y) = p.split_once(',').unwrap();
+                (x.parse().unwrap(), y.parse().unwrap())
+            })
+            .collect();
+        let result = (|| -> Result<Vec<[u8; 3]>> {
+            let _runtime = super::super::Runtime::new(false)?;
+            let mut capture = Capture::new()?;
+            anyhow::ensure!(!capture.hdr_output, "an SDR stream must get SDR capture");
+            let start = Instant::now();
+            while !capture.grab(Duration::from_millis(200))? || !capture.has_frame {
+                anyhow::ensure!(start.elapsed() < Duration::from_secs(5), "no desktop frame");
+            }
+            let display = capture.display;
+            let frame = capture.frame.clone();
+            capture.read(&frame, display.height as usize, |bytes, pitch| {
+                points
+                    .iter()
+                    .map(|&(x, y)| {
+                        let at = (y - display.y) as usize * pitch + (x - display.x) as usize * 4;
+                        [bytes[at + 2], bytes[at + 1], bytes[at]]
+                    })
+                    .collect()
+            })
+        })();
+        std::fs::write(dir.join("patches-done"), "done")?;
+        let codes = result?;
+        eprintln!(
+            "SDR white {} nits; 203/400/600/1000-nit patches → {codes:?}",
+            display::sdr_white_level(&display::select()?.desc.DeviceName) * 80.0
+        );
+        assert!(codes.iter().all(|c| c[0] > 0), "black capture: {codes:?}");
+        assert!(codes.windows(2).all(|w| w[0][0] <= w[1][0]), "{codes:?}");
+        assert!(
+            codes[0][0] < codes[3][0],
+            "highlights clipped together: {codes:?}"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod timing_tests {
     use super::*;
     /// Capture updates without conversion, encoding, or a pacer. Run with

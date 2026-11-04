@@ -624,6 +624,7 @@ mod tests {
             let centred = shade((w, h), &luma, &chroma, [hdr, 0, 0, 0])?;
             let flat = |c| shade((2, 2), &[500; 4], &[c], [hdr, left, 0, 0]).map(|p| p[0]);
             let (pa, pb, mid) = (flat(a)?, flat(b)?, flat([525, 525])?);
+            assert!(pb[..3].iter().any(|&v| v > 0.1), "the shader drew: {pb:?}");
             let near =
                 |p: [f32; 4], q: [f32; 4], tol: f32| (0..3).all(|i| (p[i] - q[i]).abs() <= tol);
             let row = w as usize;
@@ -649,5 +650,228 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    /// Desktop scRGB at `points` (desktop pixels) through DXGI duplication.
+    fn grab_scrgb(points: &[(i32, i32)]) -> Result<Vec<[f32; 4]>> {
+        let half = |h: u16| {
+            let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+            let e = i32::from((h >> 10) & 31);
+            let m = f32::from(h & 1023) / 1024.0;
+            sign * if e == 0 {
+                m * 2f32.powi(-14)
+            } else {
+                (1.0 + m) * 2f32.powi(e - 15)
+            }
+        };
+        unsafe {
+            let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
+            let mut a = 0;
+            while let Ok(adapter) = factory.EnumAdapters1(a) {
+                a += 1;
+                let mut o = 0;
+                while let Ok(output) = adapter.EnumOutputs(o) {
+                    o += 1;
+                    let r = output.GetDesc()?.DesktopCoordinates;
+                    let (x, y) = points[0];
+                    if x < r.left || x >= r.right || y < r.top || y >= r.bottom {
+                        continue;
+                    }
+                    let (mut device, mut context) = (None, None);
+                    D3D11CreateDevice(
+                        &adapter,
+                        D3D_DRIVER_TYPE_UNKNOWN,
+                        HMODULE::default(),
+                        D3D11_CREATE_DEVICE_FLAG(0),
+                        None,
+                        D3D11_SDK_VERSION,
+                        Some(&mut device),
+                        None,
+                        Some(&mut context),
+                    )?;
+                    let device: ID3D11Device = device.context("device")?;
+                    let context: ID3D11DeviceContext = context.context("context")?;
+                    let dup = output.cast::<IDXGIOutput5>()?.DuplicateOutput1(
+                        &device,
+                        0,
+                        &[DXGI_FORMAT_R16G16B16A16_FLOAT],
+                    )?;
+                    let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+                    let mut resource = None;
+                    dup.AcquireNextFrame(2000, &mut info, &mut resource)?;
+                    let frame: ID3D11Texture2D = resource.context("no desktop frame")?.cast()?;
+                    let mut desc = D3D11_TEXTURE2D_DESC::default();
+                    frame.GetDesc(&mut desc);
+                    anyhow::ensure!(
+                        desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT,
+                        "desktop is not FP16 ({:?}): HDR is off",
+                        desc.Format
+                    );
+                    desc.Usage = D3D11_USAGE_STAGING;
+                    desc.BindFlags = 0;
+                    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+                    desc.MiscFlags = 0;
+                    let mut staging = None;
+                    device.CreateTexture2D(&desc, None, Some(&mut staging))?;
+                    let staging = staging.context("staging")?;
+                    context.CopyResource(&staging, &frame);
+                    dup.ReleaseFrame()?;
+                    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                    context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+                    let out = points
+                        .iter()
+                        .map(|&(x, y)| {
+                            let at = mapped.pData.cast::<u8>().add(
+                                (y - r.top) as usize * mapped.RowPitch as usize
+                                    + (x - r.left) as usize * 8,
+                            );
+                            let p = std::slice::from_raw_parts(at.cast::<u16>(), 4);
+                            [half(p[0]), half(p[1]), half(p[2]), half(p[3])]
+                        })
+                        .collect();
+                    context.Unmap(&staging, 0);
+                    return Ok(out);
+                }
+            }
+            anyhow::bail!("no output contains {:?}", points[0])
+        }
+    }
+
+    /// On a real HDR (Advanced Color) desktop: 203/400/600/1000-nit patches
+    /// in the HDR10 child window reach the compositor as HDR, and cutting a
+    /// hole for an overlay over one of them leaves every other pixel's
+    /// luminance unchanged while the parent (the controls) shows in the hole.
+    /// With LATCH_HDR_PATCH_DIR set, holds the window for the engine's live
+    /// HDR-desktop → SDR capture test (`patches-ready` / `patches-done`).
+    #[test]
+    #[ignore = "interactive HDR desktop; run while hold_hdr_display_for_live_test holds HDR"]
+    fn hdr10_child_window_keeps_hdr_under_overlays() -> Result<()> {
+        #[link(name = "user32")]
+        extern "system" {
+            fn SetThreadDpiAwarenessContext(context: isize) -> isize;
+        }
+        const W: i32 = 480;
+        const H: i32 = 120;
+        const AT: (i32, i32) = (200, 200);
+        let pump = |ms: u64| unsafe {
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < end {
+                let mut msg = MSG::default();
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        unsafe {
+            SetThreadDpiAwarenessContext(-4);
+        }
+        let parent = unsafe {
+            CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                None,
+                WS_POPUP | WS_VISIBLE,
+                AT.0,
+                AT.1,
+                W,
+                H,
+                None,
+                None,
+                None,
+                None,
+            )?
+        };
+        let result = (|| -> Result<()> {
+            let mut hdr = Hdr10::new(parent)?;
+            anyhow::ensure!(peak_nits() > 0, "the display is not in HDR mode");
+            let nits = [203.0, 400.0, 600.0, 1000.0];
+            let code = |n: f64| (64.0 + 876.0 * latch_proto::color::pq_oetf(n)).round() as u16;
+            let y: Vec<u8> = (0..H * W)
+                .flat_map(|i| (code(nits[(i % W / 120) as usize]) << 6).to_le_bytes())
+                .collect();
+            let uv: Vec<u8> = (0..H / 2 * W)
+                .flat_map(|_| (512u16 << 6).to_le_bytes())
+                .collect();
+            let frame = Frame {
+                color: latch_proto::color::ColorDescription::negotiate(
+                    latch_proto::color::ColorCapabilities {
+                        hdr: true,
+                        ten_bit: true,
+                        peak_nits: 1000,
+                    },
+                    true,
+                    true,
+                ),
+                width: W as u32,
+                height: H as u32,
+                y,
+                y_stride: W as usize * 2,
+                uv,
+                uv_stride: W as usize * 2,
+                ..Default::default()
+            };
+            let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(W as f32, H as f32));
+            let points: Vec<(i32, i32)> = (0..4)
+                .map(|i| (AT.0 + 60 + 120 * i, AT.1 + 90))
+                .chain([(AT.0 + 420, AT.1 + 30)])
+                .collect();
+            let hole = [egui::Rect::from_min_max(
+                egui::pos2(360.0, 0.0),
+                egui::pos2(480.0, 60.0),
+            )];
+            let mut sample = |holes: &[egui::Rect]| -> Result<Vec<[f32; 4]>> {
+                hdr.draw(&frame, rect, 1.0)?;
+                hdr.clip(holes, rect, 1.0)?;
+                pump(400);
+                grab_scrgb(&points)
+            };
+            let plain = sample(&[])?;
+            let cut = sample(&hole)?;
+            let restored = sample(&[])?;
+            eprintln!("scRGB plain {plain:?}\ncut {cut:?}\nrestored {restored:?}");
+            for (i, n) in nits.iter().enumerate() {
+                let expected = (*n / 80.0) as f32;
+                assert!(
+                    (plain[i][1] - expected).abs() < expected * 0.05,
+                    "{n}-nit patch reached the desktop as {:?}",
+                    plain[i]
+                );
+                assert_eq!(plain[i], cut[i], "{n}-nit patch changed under an overlay");
+                assert_eq!(plain[i], restored[i]);
+            }
+            assert_eq!(
+                plain[4], plain[3],
+                "the hole point is in the 1000-nit patch"
+            );
+            assert!(
+                cut[4][1] > 0.05 && cut[4][1] < plain[3][1] * 0.5,
+                "the parent shows in the hole: {:?}",
+                cut[4]
+            );
+            assert_eq!(restored[4], plain[4]);
+            if let Ok(dir) = std::env::var("LATCH_HDR_PATCH_DIR") {
+                let dir = std::path::Path::new(&dir);
+                hdr.clip(&[], rect, 1.0)?;
+                let coords: Vec<String> = points[..4]
+                    .iter()
+                    .map(|(x, y)| format!("{x},{y}"))
+                    .collect();
+                std::fs::write(dir.join("patches-ready"), coords.join(";"))?;
+                let start = std::time::Instant::now();
+                while !dir.join("patches-done").exists()
+                    && start.elapsed() < std::time::Duration::from_secs(60)
+                {
+                    hdr.draw(&frame, rect, 1.0)?;
+                    pump(100);
+                }
+            }
+            Ok(())
+        })();
+        unsafe {
+            let _ = DestroyWindow(parent);
+        }
+        result
     }
 }
