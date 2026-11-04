@@ -1453,11 +1453,7 @@ fn ltr_recovery_matches_uninterrupted_decoding() {
                     .tokens
                     .iter()
                     .any(|&(p, _)| p > delivered && p <= n as u64);
-                assert_eq!(
-                    refreshed,
-                    codec == Codec::Hevc || !marked,
-                    "refresh at {n}"
-                );
+                assert_eq!(refreshed, codec == Codec::Hevc || !marked, "refresh at {n}");
                 refreshes += refreshed as usize;
             }
             fill(&image, &pattern(n));

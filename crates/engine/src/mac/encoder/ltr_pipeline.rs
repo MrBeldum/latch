@@ -48,7 +48,7 @@ fn pool() -> Vec<Owned> {
                     [(0, sim_height, sim_width), (1, sim_height / 2, sim_width)]
                 {
                     let stride = CVPixelBufferGetBytesPerRowOfPlane(image.0, plane);
-                    let base = CVPixelBufferGetBaseAddressOfPlane(image.0, plane) as *mut u8;
+                    let base = CVPixelBufferGetBaseAddressOfPlane(image.0, plane);
                     for y in 0..rows {
                         for x in 0..cols {
                             let (sx, sy) = (x + i * 21, y + i * 9);
@@ -370,7 +370,7 @@ fn env<T: std::str::FromStr>(name: &str, default: T) -> T {
 }
 
 /// `LATCH_VT_SIM_SEEDS`, `LATCH_VT_SIM_FRAMES` and `LATCH_VT_SIM_LOSS`
-/// scale it up; the measurements ran 32 seeds of 600 frames per codec.
+/// scale it up (the 2026-11-04 measurements: 8 seeds of 600 frames).
 #[test]
 fn ltr_pipeline_with_losses_matches_uninterrupted_decoding() {
     let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
