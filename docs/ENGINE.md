@@ -176,9 +176,31 @@ lets tests check audio bit for bit. Opus is gone.
   mask, PulseAudio channel map) and sends `lpcm-rice` version 2, 80
   samples a packet for 5.1 and 60 for 7.1 so the worst case always fits
   a datagram. Stereo is still version 1, byte for byte, so older viewers
-  are unaffected. The viewer mixes any stream layout onto its device
-  (5.1 into headphones, stereo onto the front of a 5.1 set). The encoder
-  budget keeps 1.2 Mbps more of the wire for each pair beyond stereo.
+  are unaffected. The encoder budget keeps 1.2 Mbps more of the wire for
+  each pair beyond stereo.
+* **Each channel to its own speaker.** Streams carry WAVE order (FL FR FC
+  LFE BL BR SL SR); output devices name theirs, and the orders differ
+  (CoreAudio's 7.1 is L R C LFE Ls Rs Rls Rrs, sides first; ALSA's 5.1 is
+  FL FR RL RR FC LFE). The viewer reads its device's layout (macOS:
+  `kAudioDevicePropertyPreferredChannelLayout`, expanded by AudioToolbox,
+  or the preferred stereo pair; Windows: the endpoint's mix-format channel
+  mask; Linux: the ALSA channel map that PulseAudio's and PipeWire's
+  plugins report, else ALSA's default order) and routes every channel to
+  the speaker of the same position (`latch_codec::audio::mix_onto`). A
+  speaker the device lacks is folded in: back and side surrounds stand in
+  for each other (−3 dB each when both land on one), the rest go to the
+  front pair at the usual downmix weights (centre −3 dB, LFE −6 dB), and
+  a mono device gets the stereo mix's mean. A device that names no
+  speakers is taken as Latch's layout of its channel count.
+* **Windows output at the engine's smallest period.** cpal's WASAPI
+  stream stays at the engine's default 10 ms period. The Windows viewer
+  opens the endpoint itself as an `IAudioClient3` shared stream at the
+  smallest period the driver offers (2.67–3 ms on drivers that support it;
+  others offer only their default), or the period another stream already
+  fixed, keeps two periods written ahead (`LATCH_AUDIO_PERIODS`) on an
+  MMCSS "Pro Audio" thread, reopens on a lost device or a new default, and
+  falls back to cpal on any failure (`LATCH_AUDIO_OUTPUT=cpal` forces
+  it).
 * **A jitter buffer that follows the path.** The viewer measures arrival
   jitter and capture bursts and steers the least audio left before each
   device pull to a 2 ms margin plus whatever part of a burst the jitter

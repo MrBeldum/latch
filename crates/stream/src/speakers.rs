@@ -509,7 +509,14 @@ mod devices {
                 continue;
             };
             let layout = super::of_device(&device, config.channels() as usize);
-            println!("{device}: {}", super::describe(&layout));
+            // And as it would be opened for 5.1 and 7.1.
+            let wide = [6, 8].map(|n| super::describe(&super::of_device(&device, n)));
+            println!(
+                "{device}: {} (as 5.1: {}; as 7.1: {})",
+                super::describe(&layout),
+                wide[0],
+                wide[1]
+            );
         }
     }
 }

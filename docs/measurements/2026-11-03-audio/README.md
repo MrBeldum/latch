@@ -33,6 +33,44 @@ period stays the engine's 10 ms whatever is asked for). The Mac viewer,
 where CoreAudio does take a 2.5 ms buffer, could not be measured: its lid
 was closed, which turns its speakers off (CoreAudio refused even `afplay`).
 
+## Windows output: IAudioClient3 against cpal (2026-11-04)
+
+The same viewer binary (`d3c5298`), interleaved three times: cpal's shared
+WASAPI stream (`LATCH_AUDIO_OUTPUT=cpal`, the path above) against the
+direct `IAudioClient3` stream keeping two engine periods written ahead (the
+default) and one (`LATCH_AUDIO_PERIODS=1`). Same setup as above: `serve`
+and `view` on the PC, 127.0.0.1:47886, `LATCH_TEST_AUDIO=clicks`,
+`LATCH_AUDIO_PROBE=1 view ... --seconds 30 --audio --mute`, from a
+scheduled task in the signed-in session (`RUST_LOG=latch_stream::audio=info`
+names the period). The PC's only output endpoint is **Steam Streaming
+Speakers**: the monitor's HDMI audio endpoint is not present, and there is
+no other device. Its driver offers a single engine period,
+`GetSharedModeEnginePeriod` → default = least = most = 480 frames (10 ms),
+so the low-latency stream runs at 10 ms here too; what changes is the
+buffering around it. Both paths stamp the device delay the same way
+(frames written but not yet played by `IAudioClock`, plus
+`GetStreamLatency`), so the click times compare.
+
+| `audio_click_ms` p50 (p95), run 1 / 2 / 3 | median "queued" | device |
+| --- | --- | --- |
+| cpal: 83.7 (87.1) / 92.2 (106.3) / 67.5 (74.2) | 37.5 / 40.9 / 17.9 ms | 42–43 ms |
+| IAudioClient3, 2 periods: **61.1 (63.2) / 65.9 (66.8) / 70.8 (73.6)** | 16.5 / 16.4 / 17.1 ms | 40–44 ms |
+| IAudioClient3, 1 period: 61.5 (64.6) / 56.2 (59.2) / 53.5 (71.3) | 16.6 / 16.5 / 18.4 ms | 30–41 ms |
+
+**About 18 ms off the median click (84 → 66 ms), and steadier:** the
+jitter buffer holds 16–17 ms in every run instead of 18–41. cpal hands the
+callback whatever of its ring is free, so the pulls come in uneven sizes
+and the buffer settles higher. One period ahead is not usable: in runs 2
+and 3 nearly every wake (3 030 of 3 030, 3 031 of 3 034) found the
+device's buffer empty, so the sound glitched every 10 ms. Two periods ran
+3 041 wakes with one empty, at start. (The closing count is logged only
+when the player is dropped before `view` exits, so not every run has it.)
+
+On a device whose driver offers a smaller period (the inbox HDA driver on
+most onboard and HDMI audio: 128–144 frames, 2.67–3 ms at 48 kHz) the
+stream runs at it and two periods ahead are 5.3–6 ms where cpal keeps
+20 ms or more; that could not be measured on this PC.
+
 ## Jitter buffer, simulated
 
 `crates/stream/src/audio.rs`'s long-session simulation: 30 minutes of

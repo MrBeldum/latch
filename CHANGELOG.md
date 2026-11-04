@@ -154,12 +154,24 @@ GitHub release notes, so each version gets a heading of the form
   asks for them, and the PC sends its own layout up to that, still
   lossless (`lpcm-rice` version 2; stereo is unchanged, so older viewers
   and hosts are unaffected). Any layout plays on any device: 5.1 is mixed
-  down for headphones, stereo goes to the front pair of a 5.1 set.
+  down for headphones, stereo goes to the front pair of a 5.1 set. Each
+  channel plays on the speaker of its own position, read from the
+  device's layout (CoreAudio's 7.1 puts the sides before the backs, ALSA's
+  5.1 puts centre and LFE last), so back sound no longer comes out of the
+  sides and the centre no longer out of a rear speaker.
 - **Send my microphone** (off by default): the viewer's microphone plays
   on the PC as a microphone. A Linux host makes a "Latch Microphone"
   input for the session; Windows needs VB-CABLE and a Mac host BlackHole
   (or `LATCH_MIC_DEVICE`), since sound becomes a microphone there only
   through a driver. macOS asks for the microphone the first time.
+- Windows viewers play sound through their own `IAudioClient3` stream at
+  the smallest engine period the driver offers (2.67–3 ms on most onboard
+  and HDMI audio) with two periods written ahead, instead of cpal's
+  stream at the default 10 ms with a larger ring; cpal remains the
+  fallback. On the test PC, whose only output (Steam Streaming Speakers)
+  offers only 10 ms, the host's click reached the speaker 66 ms after
+  it was made instead of 84 (median of three runs each), with the jitter
+  buffer steady at 16–17 ms. `docs/measurements/2026-11-03-audio/`.
 - Audio latency can be measured: `LATCH_TEST_AUDIO=clicks` on a test host
   and `LATCH_AUDIO_PROBE=1` on `view` report `audio_click_ms`, the time
   from the host's click to the viewer's speaker.

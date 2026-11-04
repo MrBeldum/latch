@@ -361,6 +361,12 @@ that layout (Sound settings > the device > Speaker setup), the stream
 carries every channel; otherwise it is stereo, and a stereo viewer gets a
 downmix of whatever the PC plays.
 
+As a viewer, the PC plays the stream on each speaker of its default
+output by position (the endpoint's channel mask) through a low-latency
+WASAPI stream at the smallest period the driver allows. Set
+`LATCH_AUDIO_OUTPUT=cpal` to go back to the older shared stream, for
+instance if a driver crackles with the small period.
+
 With **Send my microphone** on in the viewer's settings, the viewer's
 microphone plays on the PC where games and voice chat can record it.
 Windows has no way to make a microphone without a driver, so Latch plays
