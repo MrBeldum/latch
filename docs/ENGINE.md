@@ -400,10 +400,8 @@ media. Audio, input acknowledgements and pings bypass the video queue.
 
 Under pressure video uses a wire-byte token bucket at 2.5 times the wire budget,
 with a burst of two datagrams or 1 ms at that rate, whichever is larger. The
-same bucket paces idle and restart traffic (below). Once the path has shown a
-bottleneck (a measured capacity, pressure pacing or a restart), keyframes and
-recovery frames are paced at 1.5 times the encoder's share; a clean,
-unconstrained path still sends them at once. The encoder allowance reserves audio separately,
+same bucket paces idle and restart traffic (below); a clean, proven path
+still sends every frame, keyframes included, at once. The encoder allowance reserves audio separately,
 then compounds header overhead with rounded FEC rather than adding the two.
 For a loaded sender, cuts use the lower of budget and successful send rate,
 bounded by received throughput +7%. A sender is application-limited after
@@ -421,11 +419,14 @@ idle, so the first frames after a long idle cannot spend stale capacity. When
 the sender uses 60% of the trust, motion has resumed: the trust becomes the
 budget, held as a probe for one feedback horizon; then each validated horizon
 doubles what was actually carried (never past the retained target), and a step
-the encoder did not half use steps back. Restart steps use the ordinary queue
-threshold (they run on app-limited streams whose jitter was never learned); a
-queue or damage ends the restart through the usual probe cut. Idle again
-mid-restart restores the target as the budget and trusts only what was
-validated. Viewer reports carry the retained target as `wire_budget_kbps`.
+the encoder did not half use steps back. Restarting streams keep the idle
+3 ms jitter allowance and the ordinary queue threshold (their jitter was never
+learned), treat loss as an underfilled encoder does (a keyframe in a small
+restart window is not a loaded sender), and do not count waiting in their own
+pacer as sender pressure. A queue, or sustained severe loss, ends the restart
+through the usual cut. Idle again mid-restart restores the target as the
+budget and trusts only what was validated. Viewer reports carry the retained
+target as `wire_budget_kbps`.
 Each cut removes 20%, or 40% for queue delay above 20 ms or loss above 10%.
 Loss in a window that delivered more than is now sent predates the last cut
 and is ignored, as is a queue still falling within three horizons of a cut

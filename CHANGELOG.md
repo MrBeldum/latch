@@ -58,8 +58,7 @@
   target and application-limited state.
 - One parity policy and one parity layout for the server, the wire
   reservation (now including the keyframe/recovery floor) and the transport
-  simulations. Keyframes and recovery frames are paced at 1.5x the encoder's
-  share once the path has shown a bottleneck.
+  simulations. The pacer's burst is two datagrams or 1 ms of rate.
 - Add 1/3/5% random-loss/burst matrices at 20/50/100 Mbps, mixed-loss,
   short-FIFO and capacity-drop-during-idle scenarios, parity overhead,
   IDRs/min and idle-to-motion timing.

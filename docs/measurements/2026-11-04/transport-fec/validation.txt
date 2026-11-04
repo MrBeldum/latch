@@ -1,13 +1,15 @@
-Implementation: b809318 (measurement commit 0e5a4a0 adds no code).
+Code: 0152b7c (gfn/transport-fec after the review fixes, main #59 merged in).
 PASS cargo fmt --all -- --check
+PASS cargo test --locked --workspace --all-targets (Mac; 738 passed, 0 failed, 34 ignored)
 PASS cargo clippy --locked --workspace --all-targets -- -D warnings (Mac)
-PASS same clippy --target x86_64-pc-windows-msvc
-PASS same clippy --target aarch64-unknown-linux-gnu (ALSA sysroot)
-PASS cargo test --locked --workspace --all-targets (Mac)
-PASS cargo test --locked --release -p latch-engine --test impaired --test bottleneck --test steady_transport --test transport_scenarios
+PASS cargo clippy --locked --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+PASS cargo check --release --workspace --target x86_64-pc-windows-msvc
+PASS cargo clippy --locked --workspace --all-targets --target aarch64-unknown-linux-gnu -- -D warnings (ALSA sysroot)
 PASS bash scripts/audit-native.sh
-PASS Linux ARM64 serve cross-build and own-port 47901 -> Mac viewer with LATCH_TEST_VIDEO_LOSS=3:4
-CLEANUP Linux exact test PIDs stopped; ss shows no 47901 listener; ~/gfn-transport-fec removed.
-WINDOWS Native clippy passed at first implementation. Release linking hit MSVC link.exe LNK1000 / 0xc0000005. Bundled-linker retry then hit rustc STATUS_ACCESS_VIOLATION. Single-job bundled-linker release retry progressed to workspace crates, but SSH disconnected and later reconnects timed out.
-UNVERIFIED Windows native final release result and remote process state. Could not delete C:\Users\Daniel\gfn-transport-fec while unreachable. No interactive listeners, tasks or firewall rules were created on Windows. No reboot, deployed binary replacement, service stop or deployed-port viewer connection was issued.
-CI Draft PR #58 starts the full Linux/macOS/Windows validation, including Windows release. State was pending at handback; not claimed green.
+PASS cargo test -p latch-engine --test transport_scenarios --test steady_transport --test bottleneck --test impaired -- --nocapture
+PASS cargo test -p latch-proto --test keyframe_recovery -- --nocapture (3/3)
+PASS impaired.rs under 11 busy-loop processes: 10/10 (one recovered early budget dip)
+PASS Linux ARM64 serve cross-build, own port 47901 -> Mac viewer, LATCH_TEST_VIDEO_LOSS=3:4, three 25 s runs
+CLEANUP Linux: test serve stopped by PID, ~/gfn-transport-fec removed, no 47901 listener.
+NOT RUN Windows on-device build/tests: the PC was offline (not contacted). Windows coverage is the
+        Mac-side clippy and release check above plus CI.
