@@ -3,6 +3,74 @@
 M3 Pro MacBook Pro, synthetic NV12 IOSurfaces; RX 6600 Windows 11.
 No deployed host was connected to, stopped, replaced, or rebooted.
 
+## Review fixes (after the #60 review)
+
+The review of #60 found a freeze, a
+corruption and a hang; all on the M3 Pro, synthetic IOSurfaces. Raw logs
+are in [review-fixes/](review-fixes/). The sections after this one describe
+the first round, before these fixes; where a number changed it is restated
+here.
+
+| Case | Before (a6cfc33) | After |
+| --- | --- | --- |
+| Mac viewer decoding the review's recovery stream (`loss-seed6.bin`) | blocks forever in `VTDecompressionSessionDecodeFrame` (review, 3 of 3) | stall at picture 41 detected at the deadline, session replaced, the next IDR decodes ([log](review-fixes/viewer-watchdog.txt)) |
+| H.264 refresh after dropped pictures with long-term marks | sent: viewer references exceed `max_num_ref_frames` in 3/6 seeds at 320×192 and 4/8 at 960×540 (FFmpeg), Apple's decoder stalls in 2/8 | withheld, IDR instead: 0 of 16 H.264 runs ([unsafe 320×192](review-fixes/unsafe-refresh-320x192.txt), [unsafe 960×540](review-fixes/unsafe-refresh-960x540.txt)) |
+| Pipelined loss simulator, H.264 runs with a mismatching picture | 3 of 4 seeds (review's harness, 400 frames) | 0 of 16 (8 seeds × with/without IDR and bitrate events, 600 frames) |
+| Acknowledged tokens of pictures the viewer lacks | 8–14 per run (review) | 0 in 32 runs |
+| Losses recovered by a refresh (pipelined, 3% bursty) | H.264 ~100% (with the corruption above), HEVC ~100% | H.264 36–46%, the rest IDRs; HEVC 91–100% ([log](review-fixes/pipeline-sim.txt)) |
+| Network impairment simulator, IDRs/min with LTR (1% / 3%) | H.264 0 / 0, HEVC 0 / 0 | H.264 4 / 2, HEVC 0 / 0 ([log](review-fixes/simulator.txt)) |
+| `LATCH_MAC_LTR=1`, H.264 3024×1964@120 | stream froze (killed after 60 s) | first encode fails, ordinary hardware session at ~72 fps ([log](review-fixes/stall-watchdog.txt)) |
+
+What changed:
+
+- **Viewer.** VideoToolbox decode calls run on a worker thread of the
+  session and are waited for at most 1 s; a stalled session is abandoned
+  (invalidating it blocks too) and recreated, and the viewer asks for an
+  IDR. Fixture `crates/stream/tests/fixtures/vt-ltr-overflow.h264` (349 KB,
+  stalls on its 22nd picture every time).
+- **Root cause of the freeze.** VideoToolbox's H.264 SPS has
+  `gaps_in_frame_num_allowed_flag = 0` and `max_num_ref_frames = 10`. Lost
+  pictures that marked long-term slots (MMCO 6) leave those slots empty for
+  the viewer, whose `frame_num` gap fills the rest with "non-existing"
+  short-term pictures; when the encoder marks those slots again, as
+  replacements for it, they are additions for the viewer, up to 14 of 10.
+  VideoToolbox's refresh does not unmark them. The host now refuses such a
+  refresh (any dropped picture carried an LTR token) and sends an IDR.
+  HEVC lists its references in every slice and is unaffected.
+- **Acknowledgement.** Each recovery records everything after its base as
+  missing until the next IDR (lost pictures and frames discarded in flight
+  at the boundary); those tokens, and tokens from before a spontaneous IDR,
+  are never acknowledged.
+- **Low-latency mode.** Still opt-in. LTR only for 8-bit H.264 High/HEVC.
+  A failed low-latency encode reopens an ordinary hardware session (the old
+  software fallback was the "hang"); a 500 ms stall reopens one too; missing
+  the pace (over 1 in 20 frames slower than 2 intervals over 2 s, or one
+  over 250 ms) reopens ordinary for the rest of the stream.
+- **Media Foundation** (compile-checked only): periodic-content probe with
+  three losses (one refreshed from an older slot), slots on ~33 ms and
+  ~667 ms cadences, IDR when a slot's first picture is lost, buffering MFTs
+  demoted to IDR recovery, an IDR right after the probe.
+
+Commands:
+
+```
+cargo test --locked -p latch-stream --lib a_decode_that_never -- --nocapture
+LATCH_VT_SIM_SEEDS=8 LATCH_VT_SIM_FRAMES=600 \
+  cargo test --locked -p latch-engine --lib ltr_pipeline_with -- --nocapture
+LATCH_VT_SIM_SEEDS=6 LATCH_VT_SIM_FRAMES=400 \
+  cargo test --locked -p latch-engine --lib unsafe_h264_refresh -- --ignored --nocapture
+# add LATCH_VT_SIM_SIZE=960x540 LATCH_VT_SIM_KBPS=600 LATCH_VT_SIM_SEEDS=8 for the stalls
+LATCH_MAC_LTR=1 cargo test --locked -p latch-engine --test recovery \
+  videotoolbox_impairment_simulator -- --ignored --nocapture
+cargo test --locked -p latch-engine --lib h264_3024x1964_low_latency -- --ignored --nocapture
+```
+
+The unsafe-refresh runs predate the spontaneous-IDR token floor and show
+one lost-token acknowledgement in 2 of the 960×540 seeds (both with many
+IDRs). Tokens from before a VideoToolbox-initiated IDR are the likely
+cause, and the floor was added for it, but the unsafe runs were not
+repeated after it; the safe runs after it show none.
+
 ## Implementation and default behaviour
 
 VideoToolbox loads the four public LTR keys at runtime. It reads tokens from

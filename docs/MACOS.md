@@ -405,16 +405,20 @@ not validated). The cost belongs to the rate-control mode, not to LTR (the
 same with `EnableLTR` skipped): it serialises encode at roughly 210–280
 Mpx/s on an idle M3 Pro, so 1440p120, 3024×1964, 4K60 and 1080p120/240 miss
 their rate; it sends ⅕–½ of the requested bitrate; under CPU load even
-1080p60 falls to 40–58 fps; and at H.264 3024×1964@120 it stops returning
-frames altogether. HEVC 1080p240 drops from 242.2 to 101.6 fps. So the
+1080p60 falls to 40–58 fps; and at H.264 3024×1964@120 its first encode
+fails (the old fallback, a software session, then gave no frame back at
+all: the stream froze). HEVC 1080p240 drops from 242.2 to 101.6 fps. So the
 switch stays opt-in, with no size-based default
 ([full measurements](measurements/2026-11-04/rfi-vt-mf/README.md)), and an
 opted-in session protects itself:
 
-- **Stall watchdog.** A session that holds frames and gives none back for
+- **Failure fallback.** A low-latency session whose encode fails reopens
+  as an ordinary hardware session (IDR, no LTR), never in software.
+- **Stall watchdog.** Any session that holds frames and gives none back for
   500 ms (5 s in software) is replaced by an ordinary hardware session,
-  without LTR, which starts at an IDR. The stopped session is not waited
-  for: it is invalidated on a thread of its own.
+  without LTR, which starts at an IDR (software only if that fails). The
+  stopped session is not waited for: it is invalidated on a thread of its
+  own.
 - **Pace fallback.** Over 2-second windows, if more than one frame in
   twenty took longer than the two frames in flight overlap (2 frame
   intervals), or one took over 250 ms, the session reopens in the ordinary

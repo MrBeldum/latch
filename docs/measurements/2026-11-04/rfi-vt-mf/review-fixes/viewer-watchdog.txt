@@ -1,0 +1,15 @@
+$ cargo test -p latch-stream --lib a_decode_that_never -- --nocapture   # committed 349 KB fixture
+picture 21: VideoToolbox decode stalled; decoder session replaced
+stalled at Some(21) of 22
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out; finished in 0.65s
+
+$ LATCH_VT_STALL_FIXTURE=<review loss-seed6.bin from its last IDR, 1.1 MB> cargo test ... (same test)
+picture 41: VideoToolbox decode stalled; decoder session replaced
+stalled at Some(41) of 42
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out; finished in 0.65s
+
+$ ffmpeg -v warning -i crates/stream/tests/fixtures/vt-ltr-overflow.h264 -f null -
+[h264 @ 0x90702a300] number of reference frames (6+5) exceeds max (10; probably corrupt input), discarding one
+[h264 @ 0x90702a680] number of reference frames (7+4) exceeds max (10; probably corrupt input), discarding one
+[h264 @ 0x90702aa00] number of reference frames (8+3) exceeds max (10; probably corrupt input), discarding one
+[h264 @ 0x90702ad80] number of reference frames (9+2) exceeds max (10; probably corrupt input), discarding one
