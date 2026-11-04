@@ -57,14 +57,14 @@ KeyframeRequest on loss ──────────────────�
 
 | Host | Capture | Encode |
 | --- | --- | --- |
-| macOS | ScreenCaptureKit, NV12 IOSurface at the stream size and up to the display's refresh, cursor included | VideoToolbox (HEVC, H.264 High, or Constrained Baseline; HEVC Main10 from P010 plumbed), real time, no frame reordering, two frames in flight ([MACOS.md](MACOS.md#sharing-this-mac-the-video-pipeline)) |
-| Windows | DXGI Desktop Duplication, BGRA texture; cursor drawn in; Direct3D 11 video processor to NV12 at the stream size | AMF HEVC on AMD, or the GPU's Media Foundation HEVC/AV1/H.264 encoder (Microsoft's CPU encoder for H.264 if needed) ([WINDOWS.md](WINDOWS.md#the-video-pipeline)); `latch-codec` if neither works |
+| macOS | ScreenCaptureKit, NV12 IOSurface at the stream size and up to the display's refresh, cursor included | VideoToolbox (HEVC, H.264 High, or Constrained Baseline; negotiated HEVC Main10 from P010), real time, no frame reordering, two frames in flight ([MACOS.md](MACOS.md#sharing-this-mac-the-video-pipeline)) |
+| Windows | DXGI Output5 Desktop Duplication (BGRA or scRGB FP16); GPU cursor/colour pass and D3D11 video processor to NV12/P010 | AMF HEVC on AMD, or the GPU's Media Foundation HEVC/AV1/H.264 encoder (Microsoft's CPU encoder for H.264 if needed) ([WINDOWS.md](WINDOWS.md#the-video-pipeline)); `latch-codec` if neither works |
 | Linux (X11) | MIT-SHM `GetImage` through `x11rb` of only the rectangles X Damage reports, cursor from XFixes | NVENC or VA-API from NV12 the CPU converts, when a probe at start finds one ([below](#linux-hardware-encoding)); else `latch-codec`, threads by slice |
 
 | Viewer | Decode |
 | --- | --- |
 | macOS | VideoToolbox (HEVC or H.264) |
-| Windows | Media Foundation H.264 decoder (DXVA when present), with `latch-codec` behind it |
+| Windows | Media Foundation HEVC Main/Main10 or H.264 decoder (DXVA when present), with `latch-codec` behind Baseline |
 | Linux | `latch-codec` |
 
 The viewer lists what it decodes; the host picks the first it can encode,
@@ -358,3 +358,29 @@ requests with the same last-delivered frame are throttled for 250 ms. Requested
 IDRs are gated at max(50 ms, smoothed RTT), including requests that advance
 the last-delivered frame. See [transport measurements](measurements/2026-11-03/transport/README.md)
 for codec-free throughput, CPU, FEC and impairment results and remaining targets.
+
+## HDR and ten-bit colour
+
+Protocol 1 negotiates colour separately from codec. Missing capabilities keep
+8-bit limited-range BT.709. HEVC can select SDR Main10 or HDR10 (BT.2020 NCL,
+PQ, P010); the pipeline reports its actual colour before Accept. A colour
+change after Accept ends the session for renegotiation. Every HDR IDR has
+ST 2086 and content-light prefix SEI, independent of the encoder API.
+
+Windows retains scRGB from DuplicateOutput1 for Advanced Color desktops.
+The cursor/rotation shader converts linear scRGB (80 cd/m² per unit) to a
+1000-nit BT.2020 PQ RGB10 target for HDR, or sRGB RGB10 for ten-bit SDR;
+the video processor converts that to P010 with explicit DXGI colour spaces.
+Legacy viewers retain the GPU HDR-to-SDR path. A failed Output5 acquisition
+does not silently retry the legacy BGRA conversion that can produce black.
+
+Viewers retain P010 through decode and upload. macOS uses a native float
+Metal sublayer for ten-bit video because egui 0.31 fixes its main framebuffer
+to BGRA8. HDR is rendered in extended linear Display P3, with a smooth
+highlight shoulder at the display's current EDR headroom. Windows uses a
+10-bit child swapchain: G2084/P2020 for an HDR display and PQ stream, G22/709
+for SDR Main10. PQ falls back to a GPU SDR tone map when native HDR cannot
+be presented. Eight-bit SDR keeps the existing rendering path.
+
+See [colour measurements](measurements/2026-11-03/hdr/README.md) for tests,
+measurements and platform limitations.

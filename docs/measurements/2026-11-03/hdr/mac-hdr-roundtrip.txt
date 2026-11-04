@@ -1,0 +1,13 @@
+   Compiling latch-engine v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-0a0119b8/crates/engine)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.45s
+     Running unittests src/lib.rs (target/debug/deps/latch_engine-da9e2ce85e5607f9)
+
+running 1 test
+create Hevc Ten hardware=true: 0
+create Hevc Ten hardware=true: 0
+Main10: hardware=true, luma PSNR 64.52 dB
+HDR synthetic: bytes=19799, encode_ms=[25.0495, 2.660083, 2.524041, 2.541792, 2.558209, 2.50025, 2.5907500000000003, 2.5425, 2.560958, 2.517917], decode_ms=[47.010583000000004, 0.739916, 0.746417, 0.554917, 0.5846669999999999, 0.5454169999999999, 0.540833, 0.55475, 0.492541, 0.517875]
+test mac::encoder::tests::main10_iosurface_roundtrip ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 87 filtered out; finished in 0.34s
+

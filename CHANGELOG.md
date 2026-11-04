@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — HDR and ten-bit colour
+
+- Negotiate default-off ten-bit SDR and HDR10 colour, display peak luminance,
+  and mastering/content-light metadata within protocol 1. Legacy peers stay SDR8.
+- Preserve scRGB on Advanced Color Windows desktops; GPU conversion to
+  RGB10/P010 feeds AMF or MF Main10 with explicit colour tags and HDR SEI.
+- Preserve P010 in viewers. Mac uses a float EDR Metal layer; Windows uses
+  a ten-bit SDR/HDR10 swapchain, with SDR tone mapping when HDR is unavailable.
+- Configure canonical HDR capture and PQ-tagged Main10 on Mac hosts, and add
+  colour-math, hardware roundtrip, native EDR and banding measurements.
+
 ## Unreleased — transport workstream
 
 - Batch Linux video sends/receives and macOS receives without waiting to fill

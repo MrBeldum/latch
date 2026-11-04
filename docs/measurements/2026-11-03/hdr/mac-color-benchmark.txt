@@ -1,0 +1,15 @@
+   Compiling latch-engine v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-0a0119b8/crates/engine)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.37s
+     Running unittests src/lib.rs (target/debug/deps/latch_engine-da9e2ce85e5607f9)
+
+running 1 test
+create Hevc Eight hardware=true: 0
+COLOR sdr8 960x540@60: encode_p50=3.643 encode_p95=4.441 decode_p50=0.626 decode_p95=2.207 Mbps=0.121 decoded_gradient_levels=219
+create Hevc Ten hardware=true: 0
+COLOR sdr10 960x540@60: encode_p50=2.763 encode_p95=3.499 decode_p50=0.764 decode_p95=1.693 Mbps=0.251 decoded_gradient_levels=875
+create Hevc Ten hardware=true: 0
+COLOR hdr10 960x540@60: encode_p50=2.494 encode_p95=3.347 decode_p50=0.551 decode_p95=2.680 Mbps=0.251 decoded_gradient_levels=875
+test mac::encoder::tests::color_latency_benchmark ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 88 filtered out; finished in 2.01s
+
