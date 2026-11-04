@@ -48,9 +48,12 @@ Reading it:
   delivered, and refusals the host logged as "the encoder no longer holds
   it", where an IDR (asked for at startup by the decoder) came after the
   viewer's last frame and dropped every long-term reference. VideoToolbox
-  decoded every recovery frame without an error, and the decoded luma
-  samples at the end match the loss-free picture (`luma_sample` in the
-  JSON).
+  decoded every recovery frame without an error. The 16 decoded luma
+  samples at the end of each run (`luma_sample` in the JSON) are within
+  4 levels of a loss-free run of the same desktop (`win-no-loss.json`),
+  coding noise; a frame predicting from the wrong picture would be off by
+  far more. The "before" run is off by up to 15 there: its starved IDR
+  was still being refined.
 
 ## Simulated network (deterministic)
 
