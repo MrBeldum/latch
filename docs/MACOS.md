@@ -301,7 +301,9 @@ VideoToolbox encodes that surface; only compressed bytes reach Latch.
 - **10-bit.** HEVC Main10 from P010 (`x420`) surfaces works and is tested
   with synthetic surfaces. Viewers now negotiate ten-bit SDR or HDR10;
   ScreenCaptureKit selects P010 and canonical HDR capture with a PQ colour
-  space for HDR, and VideoToolbox writes matching BT.2020/PQ tags.
+  space for HDR, and VideoToolbox writes matching BT.2020/PQ tags. HDR
+  capture requires Apple Silicon and macOS 15; unavailable Main10 capture
+  or encoding retries SDR8 before Accept.
 
 A requested keyframe is the next picture returned to the server. Queued
 pre-request frames are discarded until the fresh IDR, so they cannot delay

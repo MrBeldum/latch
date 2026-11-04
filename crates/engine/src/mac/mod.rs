@@ -28,6 +28,21 @@ fn wanted_display() -> Option<u32> {
 
 pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
     capture::permission()?;
+    open_video_color(config).or_else(|error| {
+        if config.color.bit_depth != 10 {
+            return Err(error);
+        }
+        tracing::warn!("Main10 capture/encode unavailable; negotiating SDR8: {error:#}");
+        let mut fallback = config.clone();
+        fallback.color = Default::default();
+        open_video_color(&fallback)
+    })
+}
+fn open_video_color(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
+    anyhow::ensure!(
+        !config.color.is_hdr() || cfg!(target_arch = "aarch64"),
+        "ScreenCaptureKit HDR requires Apple Silicon"
+    );
     let depth = if config.color.bit_depth == 10 {
         Depth::Ten
     } else {
