@@ -298,19 +298,20 @@ impl Hdr10 {
         }
     }
     /// The output the window is on, as a number, and whether it is in HDR
-    /// mode: the presenter is chosen again when either changes. (0, false)
-    /// when DXGI cannot say.
-    pub fn display(&self) -> (u64, bool) {
+    /// mode: the presenter is chosen again when either changes. None when
+    /// DXGI cannot say (the window occluded, minimised or across outputs,
+    /// a mode switch), which the presenter takes as no change.
+    pub fn display(&self) -> Option<(u64, bool)> {
         // SAFETY: COM calls on this window's swapchain.
         unsafe {
-            let Ok(output) = self.swap.GetContainingOutput() else {
-                return (0, false);
-            };
-            let Ok(d) = output.cast::<IDXGIOutput6>().and_then(|o| o.GetDesc1()) else {
-                return (0, false);
-            };
+            let d = self
+                .swap
+                .GetContainingOutput()
+                .and_then(|o| o.cast::<IDXGIOutput6>())
+                .and_then(|o| o.GetDesc1())
+                .ok()?;
             let hdr = d.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
-            (d.Monitor.0 as u64 ^ u64::from(hdr) << 63, hdr)
+            Some((d.Monitor.0 as u64 ^ u64::from(hdr) << 63, hdr))
         }
     }
     pub fn draw(&mut self, frame: &Frame, rect: egui::Rect, scale: f32) -> Result<()> {

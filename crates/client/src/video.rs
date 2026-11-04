@@ -672,9 +672,10 @@ impl Resources {
         if let Some(hdr) = &mut self.hdr10 {
             // Ten-bit streams; PQ only while the window's display is HDR,
             // otherwise the wgpu path tone-maps it.
-            let (display, hdr_display) = hdr.display();
-            let native = self.presenter.pick(stream, display, || {
-                frame.color.bit_depth == 10 && (hdr_display || !frame.color.is_hdr())
+            let display = hdr.display();
+            let native = self.presenter.pick(stream, display.map(|d| d.0), || {
+                frame.color.bit_depth == 10
+                    && (display.is_some_and(|d| d.1) || !frame.color.is_hdr())
             });
             if native {
                 match hdr
