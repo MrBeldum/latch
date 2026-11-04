@@ -22,13 +22,11 @@ pub(crate) const REG_KEY: &str = r"HKLM:\SOFTWARE\MikeTheTech\VirtualDisplayDriv
 pub(crate) const RECORD_KEY: &str = r"HKLM:\SOFTWARE\Latch\Display";
 /// Common display timings; custom timings in the driver's file are preserved.
 pub const REFRESH_RATES: [u32; 7] = [60, 90, 120, 144, 165, 240, 360];
-const LARGE_MODES: &[(u32, u32)] = &[(7680, 4320), (7680, 2160)];
 
 /// Every size as a PowerShell array of `@(width,height)` pairs.
 pub fn modes_ps() -> String {
     stream_modes()
         .iter()
-        .chain(LARGE_MODES)
         .map(|(w, h)| format!("@({w},{h})"))
         .collect::<Vec<_>>()
         .join(", ")
@@ -271,6 +269,10 @@ mod tests {
         );
         for hz in [90, 144, 165, 240, 360] {
             assert!(REFRESH_RATES.contains(&hz));
+        }
+        let modes = modes_ps();
+        for (w, h) in stream_modes() {
+            assert_eq!(modes.matches(&format!("@({w},{h})")).count(), 1);
         }
         assert!(s.contains("@(7680,4320)"));
         assert!(s.contains("$hz -notin @($r.refresh_rate)"));

@@ -257,7 +257,11 @@ uses the lowest sufficient refresh, then the highest available. There is
 no fixed 240→120 mapping in the selector.
 
 The installed VDD 11.30.4.434 accepted 98 mode combinations on the test PC,
-but the full cross-product prevented monitor creation. This is why setup
+but 102 prevented monitor creation for at least 25 seconds. Setup used to
+append the two 8K sizes twice (they already belong to `stream_modes`),
+producing 102 entries from the PC's existing 84 instead of 98. The wanted
+sizes now come from that deduplicated list alone. The full cross-product
+also prevented monitor creation. This is why setup
 seeds high refresh at the two gaming sizes instead of every combination.
 More modes can be supplied in the driver's XML; Latch enumerates them
 without a refresh whitelist. Advertising every possible size/rate at once,
