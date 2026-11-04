@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased — native reference recovery
+
+- Add VideoToolbox LTR recovery behind runtime support (`LATCH_MAC_LTR=1`
+  opts into the supporting low-latency mode), with exact VT/FFmpeg loss tests.
+- Media Foundation H.264 LTR recovery on Windows hosts, opt-in with
+  `LATCH_MF_LTR=1` until it has run on hardware, and only after an
+  encoder-open decode self-test passes; failed probes reopen with IDR
+  recovery. AMF HEVC LTR is unchanged.
+- Mac viewer: bound every VideoToolbox decode call (1 s); a stalled session is
+  replaced and a keyframe requested instead of freezing the picture for good.
+  A codec may abandon three sessions per 10 minutes; past that only that
+  codec stops decoding until the window passes, and the stream renegotiates
+  without it.
+- Mac host: every session (not only opted-in ones) is replaced by an
+  ordinary hardware session when it holds frames for 500 ms.
+- VideoToolbox recovery acknowledges only pictures the viewer decoded, and an
+  H.264 loss of pictures with long-term marks takes an IDR (the refresh made
+  the viewer's references overflow, which froze Apple's decoder).
+- Opted-in VideoToolbox sessions reopen in the ordinary mode when they miss
+  their frame rate or their low-latency encode fails; LTR stays off for Main10, Baseline and
+  HDR.
+- Media Foundation LTR: periodic-content self-test with three losses, slots
+  covering ⅔ s, IDR when a slot's first picture is lost, a buffering MFT is
+  demoted instead of ending the pipeline, and the first picture after the
+  probe is an IDR (unverified on Windows hardware).
+
 ## Unreleased — HDR and ten-bit colour
 
 - Mac viewer: no flicker on ten-bit streams. The EDR layer found its window

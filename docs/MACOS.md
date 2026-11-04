@@ -373,15 +373,77 @@ P-frame capped too), and `BaseFrameQP` works only under the low-latency
 rate control above. So a lost frame is best answered without an IDR
 (reference invalidation), and the IDR that remains is paced on the wire.
 
-A Mac host still answers a loss with an IDR: its encoder refuses recovery
-requests. VideoToolbox does have public long-term references since macOS 12
-(`kVTCompressionPropertyKey_EnableLTR`, the per-sample
-`kVTSampleAttachmentKey_RequireLTRAcknowledgementToken`, and the frame
-options `kVTEncodeFrameOptionKey_AcknowledgedLTRTokens` and
-`kVTEncodeFrameOptionKey_ForceLTRRefresh`): acknowledging the tokens of
-frames up to the viewer's last delivered one and forcing a refresh should
-make a recovery frame. That is not built yet; it needs a test that decodes
-the refreshed stream after dropped frames.
+VideoToolbox recovery uses the public macOS 12 LTR API, loaded at runtime.
+`EnableLTR` must succeed before recovery is advertised. Only tokens of
+pictures the viewer decoded are acknowledged: at or before its delivered
+base, and none from pictures an earlier loss took or that were discarded
+in flight at an earlier refresh (each recovery records everything after its
+base as missing until the next IDR). `ForceLTRRefresh` then makes a P-frame.
+Queued pictures before that submission are discarded; a dropped refresh
+requests an IDR. Requests cannot cross an IDR, an already acknowledged newer
+base, or an encoder replacement.
+
+An H.264 loss whose dropped pictures (lost, or discarded in flight) carried
+an LTR token takes an IDR instead. Such a picture marked a long-term slot
+(MMCO 6) and VideoToolbox's refresh does not unmark it: later the encoder
+marks the slot again as a replacement, while for the viewer, whose
+`frame_num` gap (`gaps_in_frame_num_allowed_flag` is 0) filled its other
+reference slots with "non-existing" pictures, it is one picture more. Its
+references then exceed `max_num_ref_frames`; FFmpeg warns and decodes on,
+Apple's decoder blocks forever (the stream of the #60 review froze a viewer
+41 pictures after the refresh). The check runs at the request and again
+when the refresh comes out, once the frames that were in flight have called
+back. In the pipelined simulator at 3% bursty loss it refuses about half of
+H.264 recoveries; HEVC, which lists its references in every slice, is not
+affected. A precise rule (only slots the viewer has empty matter) would need
+the slice headers parsed.
+
+On M3 Pro the ordinary mode rejects LTR. `LATCH_MAC_LTR=1` opts into
+`EnableLowLatencyRateControl`, where H.264 High and HEVC Main accept it;
+Main10, Baseline and HDR sessions ignore the switch (their LTR streams are
+not validated). The cost belongs to the rate-control mode, not to LTR (the
+same with `EnableLTR` skipped): it serialises encode at roughly 210–280
+Mpx/s on an idle M3 Pro, so 1440p120, 3024×1964, 4K60 and 1080p120/240 miss
+their rate; it sends ⅕–½ of the requested bitrate; under CPU load even
+1080p60 falls to 40–58 fps; and at H.264 3024×1964@120 its first encode
+fails (the old fallback, a software session, then gave no frame back at
+all: the stream froze). HEVC 1080p240 drops from 242.2 to 101.6 fps. So the
+switch stays opt-in, with no size-based default
+([full measurements](measurements/2026-11-04/rfi-vt-mf/README.md)).
+
+Every Mac host session, opted in or not, has a **stall watchdog**: a
+session that holds frames and gives none back for 500 ms (5 s in software)
+is replaced by an ordinary hardware session, without LTR, which starts at
+an IDR (software only if that fails). The stopped session is not waited
+for: it is invalidated on a thread of its own. Under full GPU load plus
+twelve CPU hogs the slowest ordinary hardware encode measured was 60 ms
+(4K60 H.264), so the watchdog has about 8× headroom.
+
+An opted-in session also protects itself:
+
+- **Failure fallback.** A low-latency session whose encode fails reopens
+  as an ordinary hardware session (IDR, no LTR), never in software.
+- **Pace fallback.** Over 2-second windows, if more than one frame in
+  twenty took longer than the two frames in flight overlap (2 frame
+  intervals), or one took over 250 ms, the session reopens in the ordinary
+  mode for the rest of the stream; recovery requests then take IDRs.
+
+`ltr_pipeline_with_losses_matches_uninterrupted_decoding` runs the real
+submit/collect pipeline (two frames in flight, discards at each boundary)
+against a viewer that loses bursts, asks late, re-asks when a refresh is
+lost, and meets IDR requests and bitrate changes: every accepted picture
+must equal an uninterrupted decode of everything VideoToolbox produced,
+discarded frames included, in VideoToolbox and in FFmpeg, with FFmpeg
+silent. `ltr_recovery_matches_uninterrupted_decoding` is the older
+synchronous check. No Screen Recording permission is needed. Unsupported
+sessions retain IDR recovery.
+
+For a permission-free live host, add `LATCH_TEST_VIDEOTOOLBOX=1` to
+`LATCH_TEST_PATTERN=sweep` when running `serve`. It feeds synthetic NV12
+IOSurfaces to VideoToolbox through the existing CPU picture pipeline. This
+measures conversion plus encode, rather than ScreenCaptureKit or the
+asynchronous capture pipeline. `LATCH_TEST_VIDEO_LOSS=1:8` or `3:8` on
+`view` drops datagram bursts; always use a private test port.
 
 ## Permissions
 
@@ -501,6 +563,24 @@ AV1 sized OBUs are submitted with an `av1C` format description. All codecs
 retain the IOSurface → Metal path. HEVC Main10 callers can select P010
 output without losing ten-bit samples; normal sessions still request NV12
 and SDR. HDR transfer functions and display negotiation are future work.
+
+Decode calls run on a worker thread of the session and are waited for at
+most 1 s. Apple's H.264 decoder can block forever inside
+`VTDecompressionSessionDecodeFrame` on a stream whose references exceed
+`max_num_ref_frames` after a loss (FFmpeg decodes the same stream
+bit-exactly; the recorded stream is `tests/fixtures/vt-ltr-overflow.h264`).
+A session that misses the deadline is abandoned to its thread (invalidating
+it blocks too) and replaced from the same format; the error makes the
+viewer ask for a keyframe, so the picture freezes for a second, not for
+good. Nothing else calls into an abandoned session; its thread invalidates
+and releases it if the call ever returns. Each abandoned session keeps one
+thread and its pictures (about 0.4 MB at 960×540; at 4K perhaps a couple of
+hundred MB of IOSurfaces, not measured). So each codec (H.264 Baseline and
+High count as one) may abandon three sessions per 10 minutes: once it has,
+its decoders fail every access unit until the oldest stall is 10 minutes
+old, the session's three-error rule renegotiates without that codec alone
+(HEVC and AV1 keep decoding after H.264 stalls), and the next stream may use
+it again once the window has passed.
 
 Frame arrival wakes egui immediately. `AutoNoVsync` and a maximum frame
 latency of one avoid an application 60 Hz cap on ProMotion. The newest

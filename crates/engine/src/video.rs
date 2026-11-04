@@ -269,6 +269,10 @@ impl Unencodable {
 /// What this machine can encode, best first.
 pub fn encodable() -> Vec<Codec> {
     if crate::testmode::motion().is_some() {
+        #[cfg(target_os = "macos")]
+        if crate::testmode::native_encoder() {
+            return crate::mac::encodable();
+        }
         return vec![Codec::H264Baseline];
     }
     #[cfg(target_os = "macos")]

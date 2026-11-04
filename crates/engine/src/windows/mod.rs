@@ -8,6 +8,7 @@ mod elevated;
 mod encode;
 mod input;
 mod mf;
+mod mf_ltr;
 mod runtime;
 mod vigem;
 
@@ -97,6 +98,8 @@ struct MfPipeline {
     /// A recovery frame is owed: encode the next picture without waiting
     /// for the screen to change.
     prompt: bool,
+    picture_base: u64,
+    last_picture: u64,
 }
 impl MfPipeline {
     fn info(&self) -> VideoInfo {
@@ -137,6 +140,7 @@ impl MfPipeline {
         )?;
         self.samples = vec![None; capture::RING];
         self.ahead.clear();
+        self.picture_base = self.last_picture;
         self.encoder = VideoEncoder::new(&self.config, &self.capture.gpu)
             .context("reopen encoder after display change")?;
         Ok(())
@@ -199,6 +203,7 @@ impl MfPipeline {
                 let picture = self.converter.convert(&self.capture.frame)?;
                 if let VideoEncoder::Amf(encoder) = &mut self.encoder {
                     let (number, recovery) = encoder.submit(&picture.texture, force)?;
+                    self.last_picture = self.last_picture.max(self.picture_base + number);
                     self.ahead
                         .push_back((self.last_capture, force, number, recovery));
                     return self.collect(true);
@@ -212,13 +217,16 @@ impl MfPipeline {
                         bail!("Media Foundation encoder did not honour force-IDR");
                     }
                     self.last_sent = Instant::now();
+                    self.last_picture = self
+                        .last_picture
+                        .max(self.picture_base + encoder.last_picture().0);
                     return Ok(EncodedVideo {
                         generation: 0,
                         data,
                         keyframe: idr,
                         captured: self.last_capture,
-                        picture: 0,
-                        recovery: None,
+                        picture: self.picture_base + encoder.last_picture().0,
+                        recovery: encoder.last_picture().1.map(|p| self.picture_base + p),
                     });
                 }
                 // A synchronous MFT may initially buffer an input despite low latency.
@@ -261,8 +269,8 @@ impl MfPipeline {
                     data,
                     keyframe: idr,
                     captured,
-                    picture,
-                    recovery: recovery.filter(|_| !idr),
+                    picture: self.picture_base + picture,
+                    recovery: recovery.filter(|_| !idr).map(|p| self.picture_base + p),
                 });
             }
             if allow_ahead
@@ -283,6 +291,7 @@ impl MfPipeline {
                         self.last_capture = self.capture.captured;
                         let picture = self.converter.convert(&self.capture.frame)?;
                         let (number, recovery) = encoder.submit(&picture.texture, false)?;
+                        self.last_picture = self.last_picture.max(self.picture_base + number);
                         self.ahead
                             .push_back((self.last_capture, false, number, recovery));
                     }
@@ -340,6 +349,8 @@ impl Pipeline {
                         ahead: VecDeque::new(),
                         moved: false,
                         prompt: false,
+                        picture_base: 0,
+                        last_picture: 0,
                     })))
                 }
                 Err(e) if matches!(config.codec, Codec::Hevc | Codec::Av1) => {
@@ -380,6 +391,7 @@ impl Pipeline {
                     }
                     tracing::warn!("AMF pipeline failed; reopening Media Foundation: {error:#}");
                     p.ahead.clear();
+                    p.picture_base = p.last_picture;
                     p.encoder =
                         VideoEncoder::Mf(Box::new(MfEncoder::new(&p.config, &p.capture.gpu)?));
                     p.next(true, idle)
@@ -400,6 +412,7 @@ impl Pipeline {
                 if p.encoder.hardware() {
                     match MfEncoder::software(&p.config) {
                         Ok(encoder) => {
+                            p.picture_base = p.last_picture;
                             p.encoder = VideoEncoder::Mf(Box::new(encoder));
                             match p.next(true, idle) {
                                 Ok(frame) => return Ok(frame),
@@ -414,10 +427,14 @@ impl Pipeline {
         let info = self.info();
         if let Self::Mf(p) = std::mem::replace(self, Self::Failed(info)) {
             let MfPipeline {
-                capture, config, ..
+                capture,
+                config,
+                last_picture,
+                ..
             } = *p;
-            let software =
+            let mut software =
                 SoftwarePipeline::new(capture, &config).context("open Latch software fallback")?;
+            software.continue_pictures_after(last_picture);
             *self = Self::Software(Box::new(software));
         }
         match self {
@@ -427,7 +444,10 @@ impl Pipeline {
     }
     fn recovers(&self) -> bool {
         match self {
-            Self::Mf(p) => matches!(&p.encoder, VideoEncoder::Amf(e) if e.recovers()),
+            Self::Mf(p) => match &p.encoder {
+                VideoEncoder::Amf(e) => e.recovers(),
+                VideoEncoder::Mf(e) => e.recovers(),
+            },
             Self::Software(p) => p.recovers(),
             Self::Failed(_) => false,
         }
@@ -435,10 +455,14 @@ impl Pipeline {
     fn recover_from(&mut self, picture: u64) -> bool {
         match self {
             Self::Mf(p) => {
-                let VideoEncoder::Amf(encoder) = &mut p.encoder else {
+                if picture <= p.picture_base {
                     return false;
+                }
+                let picture = picture - p.picture_base;
+                let done = match &mut p.encoder {
+                    VideoEncoder::Amf(e) => e.recover_from(picture),
+                    VideoEncoder::Mf(e) => e.recover_from(picture),
                 };
-                let done = encoder.recover_from(picture);
                 p.prompt |= done;
                 done
             }

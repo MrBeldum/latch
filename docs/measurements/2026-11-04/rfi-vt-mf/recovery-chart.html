@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>
+:root{color:var(--foreground);font-family:var(--font-sans)}
+figure{margin:0}figcaption{margin-bottom:16px} .axis{display:flex;justify-content:space-between;margin-left:120px;margin-right:32px;color:var(--muted-foreground)}
+.row{display:grid;grid-template-columns:112px 1fr;gap:8px;margin:12px 0}.label{align-self:center}.bars{margin-right:32px;display:grid;gap:5px}.bar{height:18px;background:var(--chart-1);position:relative;min-width:1px}.value{position:absolute;left:calc(100% + 6px);color:var(--foreground)}.after{height:18px;color:var(--foreground)}.note{color:var(--muted-foreground);margin-top:12px}
+</style></head><body><figure aria-label="Native loss simulator: LTR recovery reduced recovery IDRs per minute to zero in all four cases."><figcaption>Native loss simulator · IDRs per minute</figcaption>
+<div class="axis"><span>0</span><span>40</span><span>80</span></div>
+<div class="row"><span class="label">H.264 · 1%</span><div class="bars"><div class="bar" style="width:67.5%"><span class="value">54</span></div><div class="after">LTR: 0</div></div></div>
+<div class="row"><span class="label">H.264 · 3%</span><div class="bars"><div class="bar" style="width:97.5%"><span class="value">78</span></div><div class="after">LTR: 0</div></div></div>
+<div class="row"><span class="label">HEVC · 1%</span><div class="bars"><div class="bar" style="width:50%"><span class="value">40</span></div><div class="after">LTR: 0</div></div></div>
+<div class="row"><span class="label">HEVC · 3%</span><div class="bars"><div class="bar" style="width:80%"><span class="value">64</span></div><div class="after">LTR: 0</div></div></div>
+<div class="note">Bars: IDR recovery. 30 seconds per case; startup IDR excluded.</div></figure></body></html>
