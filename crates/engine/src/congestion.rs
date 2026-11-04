@@ -470,7 +470,11 @@ impl Controller {
             self.clean_since = now;
         }
         let repeat = damaged && lossy.is_some_and(|kbps| self.budget > kbps * 9 / 10);
-        if self.pressure_windows >= 2 || collapsed || repeat || probe_queued {
+        // Damage over a whole coarse (legacy 1 s) window, with a standing
+        // queue or >10% loss, is not a blip: a second window doubles the
+        // overload (its lowest ping can predate a queue built at startup).
+        let coarse = window >= Duration::from_millis(500) && damaged && (queued || loss > 10.0);
+        if self.pressure_windows >= 2 || collapsed || repeat || probe_queued || coarse {
             self.pacing = true;
             self.clean_since = now;
             // A queue that persists after a cut needs another to drain. Loss
