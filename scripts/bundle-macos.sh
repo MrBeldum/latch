@@ -53,6 +53,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <string>Latch records this Mac's screen and sound to show them on your other machines while one is connected.</string>
   <key>NSLocalNetworkUsageDescription</key>
   <string>Latch sends the wake-up packet to your PC over the local network.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Latch sends this Mac's microphone to the computer you are watching, when you turn on "Send my microphone".</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>Latch asks System Events to restart or shut down this Mac when you choose that from another machine.</string>
 </dict>

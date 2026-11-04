@@ -1040,7 +1040,8 @@ mod tests {
 
     /// Every privacy prompt Latch causes has its reason in Info.plist:
     /// ScreenCaptureKit (screen and sound) wants
-    /// `NSScreenCaptureUsageDescription` (IN-12).
+    /// `NSScreenCaptureUsageDescription` (IN-12); sending the microphone,
+    /// `NSMicrophoneUsageDescription` (without it macOS ends the app).
     #[test]
     fn the_app_bundle_explains_each_permission_it_asks_for() {
         let bundle = std::fs::read_to_string(concat!(
@@ -1050,6 +1051,7 @@ mod tests {
         .unwrap();
         for key in [
             "NSScreenCaptureUsageDescription",
+            "NSMicrophoneUsageDescription",
             "NSLocalNetworkUsageDescription",
             "NSAppleEventsUsageDescription",
         ] {

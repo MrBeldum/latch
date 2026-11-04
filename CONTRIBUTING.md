@@ -117,8 +117,8 @@ distinguishes completed preparation from the unfinished engine replacement.
 The decoder component baseline needs no host, pairing or screen capture:
 
 ```bash
-cargo test --locked -p latch-stream --example decode_bench
-cargo build --locked --release -p latch-stream --example decode_bench
+cargo test --locked -p latch-stream --example stream_decode_bench
+cargo build --locked --release -p latch-stream --example stream_decode_bench
 target/release/examples/decode_bench --warmup 30 --iterations 300 > decode.json
 ```
 

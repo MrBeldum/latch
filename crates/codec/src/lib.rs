@@ -4,7 +4,8 @@
 //!   a decoder for the Constrained Baseline streams every Latch host sends
 //!   a viewer that asks for them;
 //! * [`color`]: BGRA to BT.709 limited-range YUV 4:2:0, and YUV to NV12;
-//! * [`audio`]: `lpcm-rice`, a lossless code for 10 ms of 48 kHz stereo.
+//! * [`audio`]: `lpcm-rice`, a lossless code for short frames of 48 kHz
+//!   sound, stereo to 7.1.
 //!
 //! No `unsafe` outside `std::arch` SIMD paths that have a portable twin
 //! the tests compare them against, apart from OS thread-priority calls.

@@ -222,6 +222,7 @@ impl Service {
                     crate::prep::prepare(&cfg, req)
                 })),
                 log: Box::new(move |line| push_log(&log, line)),
+                mic: mic_opener(),
             },
         )?);
         self.log(format!(
@@ -1358,6 +1359,31 @@ fn push_log(log: &Mutex<VecDeque<String>>, msg: String) {
     }
     log.push_back(msg);
 }
+/// Plays a viewer's microphone into a virtual cable on Windows and macOS
+/// (Linux makes its own microphone in the engine): `LATCH_MIC_DEVICE`
+/// names the output, else the first cable found.
+pub fn mic_opener() -> Option<latch_engine::mic::MicOpener> {
+    if cfg!(target_os = "linux") {
+        return None;
+    }
+    Some(Box::new(|format| {
+        let device = std::env::var("LATCH_MIC_DEVICE")
+            .ok()
+            .filter(|d| !d.is_empty())
+            .or_else(latch_stream::audio::virtual_mic_output)
+            .context(
+                "no virtual cable to play it into (install VB-CABLE on Windows or BlackHole on macOS, or name an output in LATCH_MIC_DEVICE)",
+            )?;
+        let (describe, push) = latch_stream::audio::mic_sink(
+            format.rate,
+            format.channels as usize,
+            format.frame_samples as usize,
+            &device,
+        )?;
+        Ok(latch_engine::mic::MicOut { describe, push })
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

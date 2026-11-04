@@ -50,6 +50,21 @@ const STATS_EVERY: Duration = Duration::from_millis(250);
 /// decoder can block inside the OS (VideoToolbox after a sleep or a GPU
 /// reset); the window must still be able to leave the stream.
 const DECODER_STOP: Duration = Duration::from_secs(1);
+/// Access units an AV1, HEVC or H.264 High decoder may take without a
+/// picture, or decode errors it may make since its last picture, before
+/// the session stops trusting it and asks the host again without that
+/// codec. These
+/// have no `latch-codec` decoder behind them as Baseline does (see
+/// [`video::Fallback`]); one that gave pictures and then fails is judged
+/// the same way. Ten access units is a sixth of a second at 60 fps.
+const HARDWARE_PROBATION: u32 = 10;
+const HARDWARE_ERRORS: u32 = 3;
+/// How long the end waits for the receive thread, which also plays sound.
+const RECEIVER_STOP: Duration = Duration::from_secs(2);
+/// A control message the host does not take within this breaks the
+/// session, rather than blocking whoever sent it (the UI, for a cursor
+/// change).
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -102,6 +117,8 @@ pub struct Settings {
     pub cursor: bool,
     /// Offer gamepads.
     pub gamepads: bool,
+    /// Send this machine's microphone, where the host can play it.
+    pub mic: bool,
 }
 
 /// Where a session sends the host's rumble and lights: slot and feedback.
@@ -145,6 +162,12 @@ pub struct Stats {
     /// Where sound goes ("audio → MacBook Pro Speakers"), or why it does
     /// not; empty until the first second of video.
     pub audio: String,
+    /// Where the delay between an audio packet arriving and its sound
+    /// leaving the speaker goes.
+    pub audio_latency: crate::audio::Latency,
+    /// Where this machine's microphone goes, or why it does not; empty
+    /// when it was not asked for.
+    pub mic: String,
     /// Persistent video diagnosis, even while the transport is connected.
     pub video_problem: Option<String>,
     pub applied_bitrate_kbps: u32,
@@ -376,6 +399,8 @@ impl Link {
 }
 
 struct Inner {
+    /// This machine's microphone, while it is being sent.
+    mic: Mutex<Option<crate::mic::Mic>>,
     events: Sender<Event>,
     wake: Box<dyn Fn() + Send + Sync>,
     frames: Arc<FrameSlot>,
@@ -403,7 +428,20 @@ struct Inner {
     /// Frames thrown away before decoding since the last stats window.
     dropped: AtomicU64,
     connected: AtomicBool,
+    /// The viewer has been told the stream is up; a renegotiated attempt
+    /// does not tell it again.
+    announced: AtomicBool,
+    /// The user's stop.
     stop: AtomicBool,
+    /// This attempt at the stream is over: stopped, or given up for
+    /// another codec.
+    attempt_over: AtomicBool,
+    /// Which attempt this is; a decode thread left behind in the OS ends
+    /// when it comes back to a later one.
+    attempt: AtomicU64,
+    /// A codec this machine failed to decode, and why: the session asks
+    /// the host again without it.
+    renegotiate: Mutex<Option<(Codec, String)>>,
     finished: AtomicBool,
     audio_gain: Arc<AtomicU32>,
     done: Mutex<bool>,
@@ -427,6 +465,50 @@ struct DecodeQueue {
 }
 
 impl Inner {
+    fn new(
+        events: Sender<Event>,
+        frames: Arc<FrameSlot>,
+        wake: Box<dyn Fn() + Send + Sync>,
+    ) -> Self {
+        Self {
+            events,
+            wake,
+            frames,
+            stats: Mutex::new(Stats::default()),
+            recovery: Mutex::default(),
+            host_audio_problem: Mutex::new(String::new()),
+            mic: Mutex::new(None),
+            video_health: Mutex::new(VideoHealth::default()),
+            decode: Mutex::new(DecodeWindow::default()),
+            link: Mutex::new(None),
+            queue: Mutex::new(DecodeQueue::default()),
+            queue_cv: Condvar::new(),
+            tcp: Mutex::new(None),
+            epoch: Instant::now(),
+            heard_us: AtomicU64::new(0),
+            feedback: Mutex::new(Report::default()),
+            published_us: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+            connected: AtomicBool::new(false),
+            announced: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+            attempt_over: AtomicBool::new(false),
+            attempt: AtomicU64::new(0),
+            renegotiate: Mutex::new(None),
+            finished: AtomicBool::new(false),
+            audio_gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            done: Mutex::new(false),
+            done_cv: Condvar::new(),
+            cursor_supported: AtomicBool::new(false),
+            cursor_state: Mutex::new(None),
+            control_writer: Mutex::new(None),
+            pad_slots: AtomicU32::new(0),
+            pad_problem: Mutex::new(String::new()),
+            pad_feedback: Mutex::new(None),
+            pending_pads: Mutex::new([None; latch_proto::gamepad::MAX_PADS]),
+        }
+    }
+
     fn emit(&self, e: Event) {
         let _ = self.events.send(e);
         (self.wake)();
@@ -441,7 +523,7 @@ impl Inner {
     }
 
     fn stopping(&self) -> bool {
-        self.stop.load(Ordering::Acquire)
+        self.stop.load(Ordering::Acquire) || self.attempt_over.load(Ordering::Acquire)
     }
 
     fn finish(&self) {
@@ -577,38 +659,7 @@ impl Session {
         events: Sender<Event>,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
-        let inner = Arc::new(Inner {
-            events,
-            wake: Box::new(wake),
-            frames,
-            stats: Mutex::new(Stats::default()),
-            recovery: Mutex::default(),
-            host_audio_problem: Mutex::new(String::new()),
-            video_health: Mutex::new(VideoHealth::default()),
-            decode: Mutex::new(DecodeWindow::default()),
-            link: Mutex::new(None),
-            queue: Mutex::new(DecodeQueue::default()),
-            queue_cv: Condvar::new(),
-            tcp: Mutex::new(None),
-            epoch: Instant::now(),
-            heard_us: AtomicU64::new(0),
-            feedback: Mutex::new(Report::default()),
-            published_us: AtomicU64::new(0),
-            dropped: AtomicU64::new(0),
-            connected: AtomicBool::new(false),
-            stop: AtomicBool::new(false),
-            finished: AtomicBool::new(false),
-            audio_gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
-            done: Mutex::new(false),
-            done_cv: Condvar::new(),
-            cursor_supported: AtomicBool::new(false),
-            cursor_state: Mutex::new(None),
-            control_writer: Mutex::new(None),
-            pad_slots: AtomicU32::new(0),
-            pad_problem: Mutex::new(String::new()),
-            pad_feedback: Mutex::new(None),
-            pending_pads: Mutex::new([None; latch_proto::gamepad::MAX_PADS]),
-        });
+        let inner = Arc::new(Inner::new(events, frames, Box::new(wake)));
         let worker = inner.clone();
         let spawned = std::thread::Builder::new()
             .name("stream".into())
@@ -739,7 +790,35 @@ fn refusal(status: u16, body: &str) -> String {
         .unwrap_or_else(|| format!("the host answered HTTP {status}"))
 }
 
+/// The stream, asked for again without a codec whose decoder failed here,
+/// down to H.264 Constrained Baseline, which `latch-codec` always decodes.
 fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
+    loop {
+        attempt(inner, server, settings);
+        let Some((codec, why)) = inner.renegotiate.lock().take() else {
+            return;
+        };
+        if inner.stop.load(Ordering::Acquire) {
+            return;
+        }
+        video::decoder_failed(codec);
+        let codec = match codec {
+            Codec::H264High => "H.264 High",
+            other => other.name(),
+        };
+        tracing::warn!("{codec} decoding failed ({why}); asking the host again without it");
+        inner.emit(Event::Notice(format!(
+            "This computer could not decode {codec} ({why}), so the stream starts again without it."
+        )));
+        inner.attempt.fetch_add(1, Ordering::AcqRel);
+        *inner.queue.lock() = DecodeQueue::default();
+        *inner.video_health.lock() = VideoHealth::default();
+        inner.attempt_over.store(false, Ordering::Release);
+    }
+}
+
+/// One request for the stream, and the stream until it ends.
+fn attempt(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     if inner.stopping() {
         return;
     }
@@ -785,6 +864,13 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         cursor: settings.cursor,
         gamepads: settings.gamepads,
         reference_invalidation: recovery_wanted(),
+        mic: settings.mic,
+        // 5.1 or 7.1 when this machine's speakers have them; stereo is the
+        // field's absence, which every host understands.
+        audio_channels: match settings.audio.then(crate::audio::output_channels) {
+            Some(n) if n > 2 => n,
+            _ => 0,
+        },
     };
     let body = serde_json::to_vec(&request).unwrap_or_default();
     let host = SocketAddr::new(server.address, server.port);
@@ -820,6 +906,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     };
     let _ = tcp.set_nodelay(true);
     let _ = tcp.set_read_timeout(Some(START_TIMEOUT));
+    let _ = tcp.set_write_timeout(Some(CONTROL_WRITE_TIMEOUT));
     *inner.tcp.lock() = tcp.try_clone().ok();
     *inner.control_writer.lock() = tcp.try_clone().ok();
     if inner.stopping() {
@@ -861,8 +948,13 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
             format!("the host chose {:?}, which was not offered", accept.codec),
         );
     }
-    let decoder = match video::new_decoder(accept.codec) {
+    let decoder = match video::new_decoder_for_stream(accept.codec, accept.width, accept.height) {
         Ok(d) => d,
+        Err(e) if accept.codec != Codec::H264Baseline => {
+            *inner.renegotiate.lock() = Some((accept.codec, format!("{e:#}")));
+            let _ = tcp.shutdown(Shutdown::Both);
+            return;
+        }
         Err(e) => return fail("decoding", format!("{e:#}")),
     };
     {
@@ -921,20 +1013,37 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         link.flush(Instant::now());
         *guard = Some(link);
     }
+    if settings.mic {
+        let started = match (&accept.mic, udp.try_clone()) {
+            (Some(format), Ok(udp)) => crate::mic::Mic::start(format, accept.session, udp, media)
+                .map_err(|e| format!("{e:#}")),
+            (Some(_), Err(e)) => Err(e.to_string()),
+            (None, _) if accept.mic_problem.is_empty() => {
+                Err("the host does not take a microphone".into())
+            }
+            (None, _) => Err(format!("the host cannot play it: {}", accept.mic_problem)),
+        };
+        match started {
+            Ok(mic) => *inner.mic.lock() = Some(mic),
+            Err(why) => inner.stats.lock().mic = format!("microphone not sent: {why}"),
+        }
+    }
     inner.heard();
     let receiver = {
         let inner = inner.clone();
         let accept = accept.clone();
-        std::thread::Builder::new()
-            .name("stream-receive".into())
-            .spawn(move || receive(&inner, udp, media, &accept, token, player))
+        Worker::spawn("stream-receive", move || {
+            receive(&inner, udp, media, &accept, token, player)
+        })
     };
     let decoding = {
         let inner = inner.clone();
-        Worker::spawn("stream-decode", move || decode(&inner, decoder))
+        let codec = accept.codec;
+        Worker::spawn("stream-decode", move || decode(&inner, decoder, codec))
     };
     let outcome = control_loop(inner, &mut tcp, &accept);
-    inner.stop.store(true, Ordering::Release);
+    inner.mic.lock().take();
+    inner.attempt_over.store(true, Ordering::Release);
     inner.connected.store(false, Ordering::Release);
     inner.queue_cv.notify_all();
     let _ = tcp.shutdown(Shutdown::Both);
@@ -944,7 +1053,11 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     inner.tcp.lock().take();
     drop(tcp);
     if let Ok(r) = receiver {
-        let _ = r.join();
+        if !r.join_within(RECEIVER_STOP) {
+            tracing::warn!(
+                "the receiver did not return within {RECEIVER_STOP:?}; leaving it behind"
+            );
+        }
     }
     if let Ok(d) = decoding {
         if !d.join_within(DECODER_STOP) {
@@ -1419,7 +1532,17 @@ fn receive(
                 s.fec_recovered = recovered;
                 s.rtt_ms = rtt.srtt().map_or(0, |d| d.as_millis() as u32);
                 s.rtt_var_ms = rtt.rttvar().as_millis() as u32;
+                if let Some(mic) = inner.mic.lock().as_ref() {
+                    s.mic = match mic.state() {
+                        crate::mic::MicState::Opening => "microphone: opening".into(),
+                        crate::mic::MicState::Sending { device } => {
+                            format!("microphone {device} → host")
+                        }
+                        crate::mic::MicState::Failed(why) => format!("microphone not sent: {why}"),
+                    };
+                }
                 if let Some(p) = &player {
+                    s.audio_latency = p.latency();
                     let problem = inner.host_audio_problem.lock();
                     s.audio = if problem.is_empty() {
                         p.describe()
@@ -1602,7 +1725,9 @@ fn handle(
                 health.connected_at = Some(now);
                 drop(health);
                 inner.connected.store(true, Ordering::Release);
-                inner.emit(Event::Connected);
+                if !inner.announced.swap(true, Ordering::AcqRel) {
+                    inner.emit(Event::Connected);
+                }
             }
             reassembler.push(shard, now);
         }
@@ -1649,16 +1774,21 @@ fn handle(
 }
 
 /// The decode thread: frames in order, newest picture out.
-fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
+fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>, codec: Codec) {
     crate::priority::media_thread();
+    let attempt = inner.attempt.load(Ordering::Acquire);
+    let over = || inner.stopping() || inner.attempt.load(Ordering::Acquire) != attempt;
     // A decoder knows whether it runs on hardware only once it has a
     // session, after the first keyframe; the stats follow it.
     let mut named = decoder.name();
+    // Since the last picture: access units decoded, and errors.
+    let mut tries = 0u32;
+    let mut errors = 0u32;
     loop {
         let (frame, ready) = {
             let mut q = inner.queue.lock();
             loop {
-                if inner.stopping() {
+                if over() {
                     return;
                 }
                 if q.frames
@@ -1687,13 +1817,36 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>) {
         let start = Instant::now();
         let spare = inner.frames.spare();
         let decoded = decoder.decode(&frame.data, frame.keyframe, spare);
-        if inner.stopping() {
+        if over() {
             // The session may have finished without waiting for this.
             return;
         }
+        match &decoded {
+            Ok(Some(_)) => (tries, errors) = (0, 0),
+            Ok(None) => tries += 1,
+            Err(_) => (tries, errors) = (tries + 1, errors + 1),
+        }
+        if codec != Codec::H264Baseline
+            && (tries >= HARDWARE_PROBATION || errors >= HARDWARE_ERRORS)
+        {
+            let why = match &decoded {
+                Err(e) if errors >= HARDWARE_ERRORS => {
+                    format!(
+                        "{} failed {errors} times without a picture: {e:#}",
+                        decoder.name()
+                    )
+                }
+                _ => format!("{} gave no picture for {tries} frames", decoder.name()),
+            };
+            *inner.renegotiate.lock() = Some((codec, why));
+            inner.attempt_over.store(true, Ordering::Release);
+            inner.queue_cv.notify_all();
+            return;
+        }
         match decoded {
-            Ok(Some(picture)) => {
+            Ok(Some(mut picture)) => {
                 let decoded = Instant::now();
+                picture.decoded_at = Some(decoded);
                 if decoder.name() != named {
                     named = decoder.name();
                     inner.stats.lock().decoder = named;
@@ -1928,6 +2081,7 @@ mod tests {
         let mut s = Settings {
             cursor: false,
             gamepads: false,
+            mic: false,
             width: 1920,
             height: 1080,
             fps: 60,
@@ -1958,6 +2112,7 @@ mod tests {
             Settings {
                 cursor: false,
                 gamepads: false,
+                mic: false,
                 width: 1920,
                 height: 1080,
                 fps: 60,
@@ -1998,44 +2153,18 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let (wake_tx, wake_rx) = mpsc::channel();
         let frames = Arc::new(FrameSlot::default());
-        let inner = Arc::new(Inner {
-            events: tx,
-            wake: Box::new(move || {
+        let inner = Arc::new(Inner::new(
+            tx,
+            frames,
+            Box::new(move || {
                 let _ = wake_tx.send(());
             }),
-            frames,
-            stats: Mutex::new(Stats {
-                width: 64,
-                height: 64,
-                ..Default::default()
-            }),
-            recovery: Mutex::default(),
-            host_audio_problem: Mutex::new(String::new()),
-            video_health: Mutex::new(VideoHealth::default()),
-            decode: Mutex::new(DecodeWindow::default()),
-            link: Mutex::new(None),
-            queue: Mutex::new(DecodeQueue::default()),
-            queue_cv: Condvar::new(),
-            tcp: Mutex::new(None),
-            epoch: Instant::now(),
-            heard_us: AtomicU64::new(0),
-            feedback: Mutex::new(Report::default()),
-            published_us: AtomicU64::new(0),
-            dropped: AtomicU64::new(0),
-            connected: AtomicBool::new(false),
-            stop: AtomicBool::new(false),
-            finished: AtomicBool::new(false),
-            audio_gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
-            cursor_supported: AtomicBool::new(false),
-            cursor_state: Mutex::new(None),
-            control_writer: Mutex::new(None),
-            pad_slots: AtomicU32::new(0),
-            pad_problem: Mutex::new(String::new()),
-            pad_feedback: Mutex::new(None),
-            pending_pads: Mutex::new([None; latch_proto::gamepad::MAX_PADS]),
-            done: Mutex::new(false),
-            done_cv: Condvar::new(),
-        });
+        ));
+        {
+            let mut stats = inner.stats.lock();
+            stats.width = 64;
+            stats.height = 64;
+        }
 
         struct FakeDecoder;
         impl video::Decoder for FakeDecoder {
@@ -2071,7 +2200,7 @@ mod tests {
 
         let inner_clone = inner.clone();
         let handle = std::thread::spawn(move || {
-            decode(&inner_clone, Box::new(FakeDecoder));
+            decode(&inner_clone, Box::new(FakeDecoder), Codec::H264Baseline);
         });
 
         let decoded = wake_rx.recv_timeout(Duration::from_secs(10));
@@ -2082,5 +2211,81 @@ mod tests {
         decoded.expect("decoder did not publish a frame");
         assert_eq!(inner.stats.lock().width, 128);
         assert_eq!(inner.stats.lock().height, 64);
+    }
+
+    /// Feeds `decoder` `frames` access units, every one a keyframe, as a
+    /// stream of `codec`, and returns what the session would renegotiate.
+    fn give_up_on(
+        codec: Codec,
+        decoder: Box<dyn video::Decoder>,
+        frames: u32,
+    ) -> Option<(Codec, String)> {
+        let (tx, _rx) = mpsc::channel();
+        let inner = Arc::new(Inner::new(
+            tx,
+            Arc::new(FrameSlot::default()),
+            Box::new(|| {}),
+        ));
+        for frame in 0..frames {
+            inner.queue.lock().frames.push_back((
+                InFrame {
+                    frame,
+                    data: vec![0, 0, 0, 1],
+                    keyframe: true,
+                    recovery: false,
+                    host_delay: 0,
+                    assembly: Duration::ZERO,
+                },
+                Instant::now(),
+            ));
+        }
+        let worker = {
+            let inner = inner.clone();
+            std::thread::spawn(move || decode(&inner, decoder, codec))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !inner.queue.lock().frames.is_empty()
+            && !inner.attempt_over.load(Ordering::Acquire)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        inner.stop.store(true, Ordering::Release);
+        inner.queue_cv.notify_all();
+        worker.join().unwrap();
+        let given_up = inner.renegotiate.lock().take();
+        given_up
+    }
+
+    struct Failing(bool);
+    impl video::Decoder for Failing {
+        fn decode(
+            &mut self,
+            _: &[u8],
+            _: bool,
+            _: Option<video::Frame>,
+        ) -> anyhow::Result<Option<video::Frame>> {
+            anyhow::ensure!(self.0, "the driver fell over");
+            Ok(None)
+        }
+        fn name(&self) -> &'static str {
+            "test hardware"
+        }
+    }
+
+    #[test]
+    fn a_failing_hardware_decoder_is_given_up_for_another_codec() {
+        let (codec, why) = give_up_on(Codec::Hevc, Box::new(Failing(false)), 3).expect("gave up");
+        assert_eq!(codec, Codec::Hevc);
+        assert!(why.contains("the driver fell over"), "{why}");
+        let (codec, why) = give_up_on(Codec::Av1, Box::new(Failing(true)), 10).expect("gave up");
+        assert_eq!(codec, Codec::Av1);
+        assert!(why.contains("no picture for 10"), "{why}");
+        // Short of the limits it is still trusted.
+        assert!(give_up_on(Codec::H264High, Box::new(Failing(false)), 2).is_none());
+        assert!(give_up_on(Codec::H264High, Box::new(Failing(true)), 9).is_none());
+        // Baseline has latch-codec behind it, not another codec.
+        assert!(give_up_on(Codec::H264Baseline, Box::new(Failing(false)), 12).is_none());
     }
 }

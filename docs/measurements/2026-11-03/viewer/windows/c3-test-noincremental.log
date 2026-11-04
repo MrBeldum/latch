@@ -1,0 +1,73 @@
+   Compiling latch-codec v5.1.0 (C:\Users\Daniel\dev\latch-gfn-c\crates\codec)
+   Compiling latch-proto v5.1.0 (C:\Users\Daniel\dev\latch-gfn-c\crates\proto)
+   Compiling latch-core v5.1.0 (C:\Users\Daniel\dev\latch-gfn-c\crates\core)
+   Compiling latch-host v5.1.0 (C:\Users\Daniel\dev\latch-gfn-c\crates\host)
+   Compiling latch-engine v5.1.0 (C:\Users\Daniel\dev\latch-gfn-c\crates\engine)
+   Compiling latch-stream v5.1.0 (C:\Users\Daniel\dev\latch-gfn-c\crates\stream)
+   Compiling latch-ui v5.1.0 (C:\Users\Daniel\dev\latch-gfn-c\crates\ui)
+   Compiling latch-client v5.1.0 (C:\Users\Daniel\dev\latch-gfn-c\crates\client)
+error: could not compile `latch-codec` (lib test)
+
+Caused by:
+  process didn't exit successfully: `C:\Users\Daniel\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name latch_codec --edition=2021 crates\codec\src\lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C opt-level=1 -C embed-bitcode=no -C debuginfo=2 -C debug-assertions=on --test --check-cfg cfg(docsrs,test) --check-cfg "cfg(feature, values())" -C metadata=500973441e618442 -C extra-filename=-040f9e82c25fb93b --out-dir C:\Users\Daniel\dev\latch-gfn-c\target\debug\deps -L dependency=C:\Users\Daniel\dev\latch-gfn-c\target\debug\deps -C target-feature=+crt-static` (exit code: 0xc0000005, STATUS_ACCESS_VIOLATION)
+warning: build failed, waiting for other jobs to finish...
+invalid type ref
+!3345 = !DILocalVariable(name: "ptr", scope: !3346, file: !3065, line: 286, type: !3334, align: 64)
+!3334 = !DILocalVariable(name: "inner", scope: !3335, file: !2885, line: 297, type: !1073, align: 64)
+invalid type ref
+!3345 = !DILocalVariable(name: "ptr", scope: !3346, file: !3065, line: 286, type: !3334, align: 64)
+!3334 = !DILocalVariable(name: "inner", scope: !3335, file: !2885, line: 297, type: !1073, align: 64)
+label %18
+ptr @_RINvMNtCsbVQc8km0Alf_6anyhow5errorNtB5_5Error9constructINtB3_12ContextErrorReNtNtNtCsbSQC797JefK_3std4sync4mpsc16RecvTimeoutErrorEECs2ufDIdYDEli_12latch_engine
+warning: ignoring invalid debug info in latch_engine.1cfa83cae5597a32-cgu.06
+invalid template params
+!10109 = distinct !DISubprogram(name: "new<anyhow::error::ErrorImpl<anyhow::error::ContextError<ref$<str$>,core::num::error::TryFromIntError> > >", linkageName: "_RNvMNtCsckSb6QcKe7J_5alloc5boxedINtB2_3BoxINtNtCsbVQc8km0Alf_6anyhow5error9ErrorImplINtBH_12ContextErrorReNtNtNtCs9OCfJ4KTcUD_4core3num5error15TryFromIntErrorEEE3newCs2ufDIdYDEli_12latch_engine", scope: !9752, file: !9751, line: 284, type: !10110, scopeLine: 284, flags: DIFlagPrototyped, spFlags: DISPFlagLocalToUnit | DISPFlagDefinition | DISPFlagOptimized, unit: !2398, templateParams: !9769, retainedNodes: !10112)
+!9769 = !DILocalVariable(name: "ptr", scope: !9770, file: !9751, line: 249, type: !5966, align: 64)
+invalid template params
+!10137 = distinct !DISubprogram(name: "drop_glue<anyhow::error::ErrorImpl<anyhow::error::ContextError<ref$<str$>,core::num::error::TryFromIntError> > >", linkageName: "_RINvNtCs9OCfJ4KTcUD_4core3ptr9drop_glueINtNtCsbVQc8km0Alf_6anyhow5error9ErrorImplINtBE_12ContextErrorReNtNtNtB4_3num5error15TryFromIntErrorEEECs2ufDIdYDEli_12latch_engine", scope: !44, file: !9262, line: 823, type: !10138, scopeLine: 823, flags: DIFlagPrototyped, spFlags: DISPFlagLocalToUnit | DISPFlagDefinition | DISPFlagOptimized, unit: !2398, templateParams: !9769, retainedNodes: !10141)
+!9769 = !DILocalVariable(name: "ptr", scope: !9770, file: !9751, line: 249, type: !5966, align: 64)
+invalid type ref
+!10217 = !DILocalVariable(name: "ptr", scope: !10218, file: !9751, line: 286, type: !10206, align: 64)
+!10206 = !DILocalVariable(name: "inner", scope: !10207, file: !9390, line: 297, type: !349, align: 64)
+invalid type ref
+!10217 = !DILocalVariable(name: "ptr", scope: !10218, file: !9751, line: 286, type: !10206, align: 64)
+!10206 = !DILocalVariable(name: "inner", scope: !10207, file: !9390, line: 297, type: !349, align: 64)
+label %18
+ptr @_RINvMNtCsbVQc8km0Alf_6anyhow5errorNtB5_5Error9constructINtB3_12ContextErrorReNtNtNtCsbSQC797JefK_3std4sync4mpsc16RecvTimeoutErrorEECs2ufDIdYDEli_12latch_engine
+invalid template params
+!13923 = distinct !DICompositeType(tag: DW_TAG_structure_type, name: "Ref<anyhow::error::ErrorImpl<anyhow::error::ContextError<ref$<str$>,core::num::error::TryFromIntError> > >", scope: !350, file: !2, size: 64, align: 64, flags: DIFlagPublic, elements: !13924, templateParams: !9769, identifier: "c518e9a38bc596e263b0a9bbc9b3cf13")
+!9769 = !DILocalVariable(name: "ptr", scope: !9770, file: !9751, line: 249, type: !5966, align: 64)
+invalid template params
+!13926 = distinct !DICompositeType(tag: DW_TAG_structure_type, name: "NonNull<anyhow::error::ErrorImpl<anyhow::error::ContextError<ref$<str$>,core::num::error::TryFromIntError> > >", scope: !49, file: !2, size: 64, align: 64, flags: DIFlagPublic, elements: !13927, templateParams: !9769, identifier: "66934bab4c7a4f53709763b0385544d9")
+!9769 = !DILocalVariable(name: "ptr", scope: !9770, file: !9751, line: 249, type: !5966, align: 64)
+invalid template params
+!14823 = distinct !DICompositeType(tag: DW_TAG_structure_type, name: "Own<anyhow::error::ErrorImpl<anyhow::error::ContextError<ref$<str$>,core::num::error::TryFromIntError> > >", scope: !350, file: !2, size: 64, align: 64, flags: DIFlagPublic, elements: !14824, templateParams: !9769, identifier: "b072c3c24976f95632fb5fb833592cd2")
+!9769 = !DILocalVariable(name: "ptr", scope: !9770, file: !9751, line: 249, type: !5966, align: 64)
+invalid template params
+!14834 = distinct !DICompositeType(tag: DW_TAG_structure_type, name: "Unique<anyhow::error::ErrorImpl<anyhow::error::ContextError<ref$<str$>,core::num::error::TryFromIntError> > >", scope: !43, file: !2, size: 64, align: 64, flags: DIFlagPublic, elements: !14835, templateParams: !9769, identifier: "afd06782c1341385e6ef878df6630960")
+!9769 = !DILocalVariable(name: "ptr", scope: !9770, file: !9751, line: 249, type: !5966, align: 64)
+invalid template params
+!14838 = distinct !DICompositeType(tag: DW_TAG_structure_type, name: "PhantomData<anyhow::error::ErrorImpl<anyhow::error::ContextError<ref$<str$>,core::num::error::TryFromIntError> > >", scope: !59, file: !2, align: 8, flags: DIFlagPublic, elements: !8, templateParams: !9769, identifier: "e69b7672447bacc6e2d374bf4096b0da")
+!9769 = !DILocalVariable(name: "ptr", scope: !9770, file: !9751, line: 249, type: !5966, align: 64)
+invalid template params
+!29504 = distinct !DISubprogram(name: "of<anyhow::error::ErrorImpl<anyhow::error::ContextError<ref$<str$>,core::num::error::TryFromIntError> > >", linkageName: "_RINvMs8_NtCs9OCfJ4KTcUD_4core3anyNtB6_6TypeId2ofINtNtCsbVQc8km0Alf_6anyhow5error9ErrorImplINtBN_12ContextErrorReNtNtNtB8_3num5error15TryFromIntErrorEEECs2ufDIdYDEli_12latch_engine", scope: !457, file: !15918, line: 767, type: !28919, scopeLine: 767, flags: DIFlagPrototyped, spFlags: DISPFlagLocalToUnit | DISPFlagDefinition | DISPFlagOptimized, unit: !2398, templateParams: !9769, declaration: !29505)
+!9769 = !DILocalVariable(name: "ptr", scope: !9770, file: !9751, line: 249, type: !5966, align: 64)
+invalid template params
+!29505 = !DISubprogram(name: "of<anyhow::error::ErrorImpl<anyhow::error::ContextError<ref$<str$>,core::num::error::TryFromIntError> > >", linkageName: "_RINvMs8_NtCs9OCfJ4KTcUD_4core3anyNtB6_6TypeId2ofINtNtCsbVQc8km0Alf_6anyhow5error9ErrorImplINtBN_12ContextErrorReNtNtNtB8_3num5error15TryFromIntErrorEEECs2ufDIdYDEli_12latch_engine", scope: !457, file: !15918, line: 767, type: !28919, scopeLine: 767, flags: DIFlagPrototyped, spFlags: DISPFlagLocalToUnit | DISPFlagOptimized, templateParams: !9769)
+!9769 = !DILocalVariable(name: "ptr", scope: !9770, file: !9751, line: 249, type: !5966, align: 64)
+warning: ignoring invalid debug info in latch_engine.1cfa83cae5597a32-cgu.06
+invalid template params
+!3494 = distinct !DISubprogram(name: "new<anyhow::error::ErrorImpl<anyhow::error::ContextError<ref$<str$>,core::num::error::TryFromIntError> > >", linkageName: "_RNvMNtCsckSb6QcKe7J_5alloc5boxedINtB2_3BoxINtNtCsbVQc8km0Alf_6anyhow5error9ErrorImplINtBH_12ContextErrorReNtNtNtCs9OCfJ4KTcUD_4core3num5error15TryFromIntErrorEEE3newCs2ufDIdYDEli_12latch_engine", scope: !3115, file: !3114, line: 284, type: !3495, scopeLine: 284, flags: DIFlagPrototyped, spFlags: DISPFlagLocalToUnit | DISPFlagDefinition | DISPFlagOptimized, unit: !155, templateParams: !3133, retainedNodes: !3497)
+!3133 = !DILocalVariable(name: "ptr", scope: !3134, file: !3114, line: 249, type: !2532, align: 64)
+invalid template params
+!3522 = distinct !DISubprogram(name: "drop_glue<anyhow::error::ErrorImpl<anyhow::error::ContextError<ref$<str$>,core::num::error::TryFromIntError> > >", linkageName: "_RINvNtCs9OCfJ4KTcUD_4core3ptr9drop_glueINtNtCsbVQc8km0Alf_6anyhow5error9ErrorImplINtBE_12ContextErrorReNtNtNtB4_3num5error15TryFromIntErrorEEECs2ufDIdYDEli_12latch_engine", scope: !205, file: !3523, line: 823, type: !3524, scopeLine: 823, flags: DIFlagPrototyped, spFlags: DISPFlagLocalToUnit | DISPFlagDefinition | DISPFlagOptimized, unit: !155, templateParams: !3133, retainedNodes: !3527)
+!3133 = !DILocalVariable(name: "ptr", scope: !3134, file: !3114, line: 249, type: !2532, align: 64)
+invalid type ref
+!3606 = !DILocalVariable(name: "ptr", scope: !3607, file: !3114, line: 286, type: !3595, align: 64)
+!3595 = !DILocalVariable(name: "inner", scope: !3596, file: !2830, line: 297, type: !1040, align: 64)
+invalid type ref
+!3606 = !DILocalVariable(name: "ptr", scope: !3607, file: !3114, line: 286, type: !3595, align: 64)
+!3595 = !DILocalVariable(name: "inner", scope: !3596, file: !2830, line: 297, type: !1040, align: 64)
+label %18
+ptr @_RINvMNtCsbVQc8km0Alf_6anyhow5errorNtB5_5Error9constructINtB3_12ContextErrorReNtNtNtCsbSQC797JefK_3std4sync4mpsc16RecvTimeoutErrorEECs2ufDIdYDEli_12latch_engine
+warning: ignoring invalid debug info in latch_engine.1cfa83cae5597a32-cgu.06

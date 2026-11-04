@@ -17,6 +17,12 @@
 //!                           microsecond, and so is every rumble the host
 //!                           sends back)
 //!          [--pad-kind xbox|playstation] [--pad-hz 250]
+//!          [--mute]        (play sound at zero volume)
+//!
+//! With `LATCH_AUDIO_PROBE=1` against a host run with
+//! `LATCH_TEST_AUDIO=clicks`, the summary's `audio_click_ms` is how long
+//! after the host made each click it reached this machine's speaker (both
+//! wall clocks; on two machines, their offset is in it).
 
 use latch_proto::gamepad::{button, PadKind, PadState};
 use latch_stream::{Event, Frame, FrameSlot, Session, Settings};
@@ -94,6 +100,15 @@ fn dump(frames: &FrameSlot, path: &str) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Warnings only, unless RUST_LOG asks (`latch_stream::audio=info`
+    // names the output device, its speakers and its period).
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
     let args: Vec<String> = std::env::args().collect();
     let host: IpAddr = args
         .get(1)
@@ -145,6 +160,7 @@ fn main() -> anyhow::Result<()> {
             name: "view example".into(),
             cursor: false,
             gamepads: pads > 0,
+            mic: flag("--mic"),
         },
         frames.clone(),
         tx,
@@ -229,6 +245,10 @@ fn main() -> anyhow::Result<()> {
             }
         })
     });
+    if flag("--mute") {
+        session.set_volume(0.0);
+    }
+    let mut clicks: Vec<f64> = Vec::new();
     let cpu0 = cpu_seconds();
     let t0 = Instant::now();
 
@@ -333,6 +353,19 @@ fn main() -> anyhow::Result<()> {
             eprintln!("elapsed_ms={} {e:?}", t0.elapsed().as_millis());
         }
         let s = session.stats();
+        let probe = latch_stream::audio::take_probe();
+        let a = s.audio_latency;
+        if !probe.is_empty() || a.queued_ms > 0.0 {
+            let mean = probe.iter().sum::<f32>() / probe.len().max(1) as f32;
+            eprintln!(
+                "        audio: queued {:.1} ms, device {:.1} ms, jitter {:.1} ms, {} underruns; {} clicks at {mean:.1} ms",
+                a.queued_ms, a.device_ms, a.jitter_ms, a.underruns, probe.len()
+            );
+        }
+        if !s.mic.is_empty() {
+            eprintln!("        {}", s.mic);
+        }
+        clicks.extend(probe.iter().map(|&ms| f64::from(ms)));
         eprintln!(
             "{second:>6.2}s {:5.1} fps {:6.2} Mbps rtt {:3} ms decode {:5.2} ms host {:5.2} ms assembly {:5.2} ms queue {:5.2} ms loss {:4.1}% fec {:3} {}x{} {} | {}",
             s.fps, s.mbps, s.rtt_ms, s.decode_ms, s.host_ms, s.assembly_ms, s.queue_ms, s.loss_pct,
@@ -396,12 +429,19 @@ fn main() -> anyhow::Result<()> {
             .get(((presses.len() as f64 - 1.0) * p).round() as usize)
             .copied()
     };
+    clicks.sort_by(f64::total_cmp);
+    let click = |p: f64| {
+        clicks
+            .get(((clicks.len() as f64 - 1.0) * p).round() as usize)
+            .copied()
+    };
     let summary = serde_json::json!({
         "host": host.to_string(), "asked": [width, height, fps, kbps],
         "sample_ms": sample_ms,
         "decoder": stats.decoder, "encoder": stats.encoder, "codec": stats.codec,
         "viewer_cpu_pct_one_core": cpu, "viewer_rss_mb": rss_mb(),
         "key_to_picture_ms": { "n": presses.len(), "min": presses.first(), "p50": pct(0.5), "p95": pct(0.95), "max": presses.last() },
+        "audio_click_ms": { "n": clicks.len(), "min": clicks.first(), "p50": click(0.5), "p95": click(0.95), "max": clicks.last() },
         "frame_interval_ms": { "n": gaps.len(), "fps": if span > 0.0 { gaps.len() as f64 / span } else { 0.0 }, "mean": mean_gap, "stdev": stdev_gap, "p50": gap(0.5), "p95": gap(0.95), "p99": gap(0.99), "max": gaps.last() },
         "seconds": lines,
         "pads": { "asked": pads, "host_slots": session.input().pad_slots(),

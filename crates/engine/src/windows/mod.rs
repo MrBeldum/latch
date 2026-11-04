@@ -598,8 +598,8 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
         worker: Some(worker),
     }))
 }
-pub fn open_audio() -> Result<Box<dyn AudioCapture>> {
-    audio::open()
+pub fn open_audio(layout: crate::audio::Layout) -> Result<Box<dyn AudioCapture>> {
+    audio::open(layout)
 }
 pub fn open_input() -> Result<Box<dyn InputSink>> {
     Ok(Box::new(input::Injector::new()))
@@ -684,8 +684,7 @@ fn unavailable(error: &anyhow::Error, facility: &str) -> bool {
 }
 
 #[cfg(test)]
-#[path = "../../../stream/src/video/mediafoundation.rs"]
-mod test_decoder;
+use latch_stream::video::mediafoundation as test_decoder;
 #[cfg(test)]
 mod tests {
     /// Run with a changing desktop to exercise the bounded AMF input queue.

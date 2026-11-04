@@ -1068,6 +1068,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             name: latch_core::config::machine_name(),
             cursor: true,
             gamepads: true,
+            mic: settings.mic,
         },
         frames.clone(),
         tx,

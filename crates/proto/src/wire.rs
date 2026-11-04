@@ -17,7 +17,6 @@ mod kind {
     pub const PAD_ACK: u8 = 10;
     pub const PAD_FEEDBACK: u8 = 11;
     pub const PAD_FEEDBACK_ACK: u8 = 12;
-    #[cfg(test)]
     pub const MIC: u8 = 13;
     pub const RECOVERY_REQUEST: u8 = 14;
     pub const RECOVERY_ACK: u8 = 15;
@@ -231,6 +230,11 @@ pub enum Datagram<'a> {
         session: u32,
         acks: Entries<'a, Ack>,
     },
+    /// The viewer's microphone: an [`AudioPacket`] going the other way.
+    Mic {
+        session: u32,
+        packet: AudioPacket<'a>,
+    },
 }
 
 impl Datagram<'_> {
@@ -249,7 +253,8 @@ impl Datagram<'_> {
             | Datagram::Pad { session, .. }
             | Datagram::PadAck { session, .. }
             | Datagram::PadFeedback { session, .. }
-            | Datagram::PadFeedbackAck { session, .. } => *session,
+            | Datagram::PadFeedbackAck { session, .. }
+            | Datagram::Mic { session, .. } => *session,
         }
     }
 }
@@ -342,18 +347,20 @@ pub fn parse(buf: &[u8]) -> Result<Datagram<'_>, WireError> {
                 },
             })
         }
-        kind::AUDIO => {
+        kind::AUDIO | kind::MIC => {
             if buf.len() < 16 {
                 return Err(WireError::Length);
             }
-            Ok(Datagram::Audio {
-                session,
-                packet: AudioPacket {
-                    parity: flags != 0,
-                    seq: u32at(8),
-                    pts: u32at(12),
-                    payload: &buf[16..],
-                },
+            let packet = AudioPacket {
+                parity: flags != 0,
+                seq: u32at(8),
+                pts: u32at(12),
+                payload: &buf[16..],
+            };
+            Ok(if kind == kind::AUDIO {
+                Datagram::Audio { session, packet }
+            } else {
+                Datagram::Mic { session, packet }
             })
         }
         kind::INPUT => {
@@ -559,7 +566,15 @@ pub fn write_video(out: &mut Vec<u8>, session: u32, shard: &VideoShard<'_>) {
 }
 
 pub fn write_audio(out: &mut Vec<u8>, session: u32, p: &AudioPacket<'_>) {
-    header(out, kind::AUDIO, p.parity as u8, 0, session);
+    write_audio_kind(out, kind::AUDIO, session, p);
+}
+
+pub fn write_mic(out: &mut Vec<u8>, session: u32, p: &AudioPacket<'_>) {
+    write_audio_kind(out, kind::MIC, session, p);
+}
+
+fn write_audio_kind(out: &mut Vec<u8>, kind: u8, session: u32, p: &AudioPacket<'_>) {
+    header(out, kind, p.parity as u8, 0, session);
     out.extend(p.seq.to_le_bytes());
     out.extend(p.pts.to_le_bytes());
     out.extend(p.payload);
@@ -671,7 +686,6 @@ mod tests {
             (kind::PAD_ACK, "PadAck"),
             (kind::PAD_FEEDBACK, "PadFeedback"),
             (kind::PAD_FEEDBACK_ACK, "PadFeedbackAck"),
-            // Reserved for gfn/audio even before its parser is merged.
             (kind::MIC, "Mic"),
             (kind::RECOVERY_REQUEST, "RecoveryRequest"),
             (kind::RECOVERY_ACK, "RecoveryAck"),

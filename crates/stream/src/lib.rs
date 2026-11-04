@@ -6,9 +6,11 @@
 pub mod audio;
 pub mod gamepad;
 pub mod input;
+pub mod mic;
 #[path = "../../engine/src/priority.rs"]
 mod priority;
 pub mod session;
+mod speakers;
 pub mod video;
 
 pub use latch_proto::control::Codec;

@@ -65,8 +65,8 @@ KeyframeRequest (fallback, older hosts) ────▶ next frame is IDR
 
 | Viewer | Decode |
 | --- | --- |
-| macOS | VideoToolbox (HEVC or H.264) |
-| Windows | Media Foundation H.264 decoder (DXVA when present), with `latch-codec` behind it |
+| macOS | VideoToolbox (hardware-probed AV1, HEVC or H.264), IOSurface → Metal; NV12 by default, selectable P010 |
+| Windows | Media Foundation + D3D11/DXVA for hardware-probed AV1, HEVC and H.264 High; Baseline with `latch-codec` fallback. Shared NV12 D3D11 texture → D3D12/wgpu; staging readback when unavailable |
 | Linux | `latch-codec` |
 
 The viewer lists what it decodes; the host picks the first it can encode,
@@ -82,10 +82,47 @@ whose hardware has some codecs, only the others are held, and the rate is
 in their `max_pixel_rate` rather than `max_fps`). Sizes are counted in coded 16-pixel blocks.
 `latch-codec` decodes Constrained Baseline only, so a host asked for
 `h264-baseline` configures its hardware encoder for that profile. A
-Windows viewer asks for Constrained Baseline only, so that when Media
-Foundation gives no picture (the first ten access units decide) the
-stream continues in `latch-codec` from the next keyframe; a Mac viewer
-does the same for Baseline streams.
+viewer probes platform codecs before offering AV1 > HEVC > H.264 High >
+Baseline. Windows probes actual pictures through the installed synchronous
+MFT and D3D11 manager, caching the result; missing codec extensions or drivers
+leave that codec out of negotiation. Mac checks `VTIsHardwareDecodeSupported` and requires a decoded hardware
+picture too; a capability query alone can succeed on an unusable decoder.
+Only Baseline streams have the ten-access-unit `latch-codec` safety net.
+High, HEVC and AV1 have the session's instead (`session::HARDWARE_PROBATION`):
+a decoder that cannot be created, gives no picture for ten access units, or
+fails three times without one ends that attempt, and the session asks the
+host again without the codec (down to Baseline), with a notice saying why;
+the codec is not offered again until the viewer restarts.
+`LATCH_TEST_BREAK_DECODER=hevc,h264-high` (or `all`; `hevc=silent` for a
+decoder that gives nothing) breaks decoders on purpose to test this.
+Unknown codec names in an offer are skipped by protocol-1 hosts.
+
+Main10 input is supported by the platform decoders. Mac callers can choose
+P010 with `new_decoder_with_format`; its two 16-bit Metal planes retain ten
+bits. The normal session still requests NV12/SDR. Windows accepts NV12 or
+P010 MFT output, reducing P010 to eight bits for the current SDR renderer.
+With a D3D12 renderer on the same adapter, NV12 pictures use a bounded pool
+of shared D3D11 textures opened as wgpu plane views. A D3D11 fence completes
+the GPU copy before publication; the renderer retains each surface through
+GPU completion before the decoder can reuse it. Headless tools, P010, odd
+picture sizes, pool exhaustion and unsupported sharing use staging readback.
+A failed import disables sharing for subsequent pictures.
+Neither path negotiates HDR, tone maps, or changes the display's colour mode.
+
+The client requests `AutoNoVsync` and maximum frame latency 1, wakes egui on
+every published picture, and samples the newest `FrameSlot` in the paint
+callback. There is no frame timer or 60 Hz cap. Mac native buffers are retained
+until previous GPU submissions complete, rather than for an arbitrary three
+frames. This retention is not a presentation queue. The compositor, VRR and
+scanout still determine physical display latency; immediate mode may tear.
+`cargo run --release -p latch-client --example present -- --port 47882`
+measures decode completion to renderer preparation on the viewer clock;
+it does not measure GPU completion, OS present or photons.
+
+Linux remains Baseline software decode. VA-API needs a Rust bitstream-to-VA
+picture/slice parameter path (loading libva alone is not a decoder), plus
+synchronized dma-buf import into wgpu. It is deferred; no native codec
+library or C/C++ build is added.
 
 The decoder's reconstruction kernels were adapted from the MIT-licensed
 `pith-h264` (see `crates/codec/src/h264/decode/SOURCE.md`); everything it
@@ -161,11 +198,73 @@ windows are seen.
 
 ### Audio
 
-48 kHz stereo 16-bit, 10 ms frames, coded losslessly with `lpcm-rice`
-(fixed linear prediction and Rice codes, like FLAC's fixed predictors).
-Silence costs a few bytes a frame and a desktop's sound about 0.5–1 Mbps;
-coding it costs microseconds. The decoded samples are exactly the
-captured ones, which lets tests check audio bit for bit. Opus is gone.
+48 kHz 16-bit, coded losslessly with `lpcm-rice` (fixed linear prediction
+and Rice codes, like FLAC's fixed predictors). Silence costs a few bytes a
+frame and a desktop's stereo sound about 0.5–1 Mbps; coding it costs
+microseconds. The decoded samples are exactly the captured ones, which
+lets tests check audio bit for bit. Opus is gone.
+
+* **5 ms frames, sent as soon as captured.** Captures hand over 5 ms
+  frames (240 samples); each is its own packet the moment the capture
+  period holds it. WASAPI loopback runs at the endpoint's engine period
+  (10 ms on most drivers, and low-latency `IAudioClient3` streams refuse
+  the loopback flag), so a Windows host sends two packets every 10 ms.
+* **Surround when both ends have it.** A viewer whose output device has
+  more than two channels asks for them (`StreamRequest.audio_channels`);
+  the host captures the device's own layout up to that (WASAPI channel
+  mask, PulseAudio channel map) and sends `lpcm-rice` version 2, 80
+  samples a packet for 5.1 and 60 for 7.1 so the worst case always fits
+  a datagram. Stereo is still version 1, byte for byte, so older viewers
+  are unaffected. The encoder budget keeps 1.2 Mbps more of the wire for
+  each pair beyond stereo.
+* **Each channel to its own speaker.** Streams carry WAVE order (FL FR FC
+  LFE BL BR SL SR); output devices name theirs, and the orders differ
+  (CoreAudio's 7.1 is L R C LFE Ls Rs Rls Rrs, sides first; ALSA's 5.1 is
+  FL FR RL RR FC LFE). The viewer reads its device's layout (macOS:
+  `kAudioDevicePropertyPreferredChannelLayout`, expanded by AudioToolbox,
+  or the preferred stereo pair; Windows: the endpoint's mix-format channel
+  mask; Linux: the ALSA channel map that PulseAudio's and PipeWire's
+  plugins report, else ALSA's default order) and routes every channel to
+  the speaker of the same position (`latch_codec::audio::mix_onto`). A
+  speaker the device lacks is folded in: back and side surrounds stand in
+  for each other (−3 dB each when both land on one), the rest go to the
+  front pair at the usual downmix weights (centre −3 dB, LFE −6 dB), and
+  a mono device gets the stereo mix's mean. A device that names no
+  speakers is taken as Latch's layout of its channel count.
+* **Windows output at the engine's smallest period.** cpal's WASAPI
+  stream stays at the engine's default 10 ms period. The Windows viewer
+  opens the endpoint itself as an `IAudioClient3` shared stream at the
+  smallest period the driver offers (2.67–3 ms on drivers that support it;
+  others offer only their default), or the period another stream already
+  fixed, keeps two periods written ahead (`LATCH_AUDIO_PERIODS`) on an
+  MMCSS "Pro Audio" thread, reopens on a lost device or a new default, and
+  falls back to cpal on any failure (`LATCH_AUDIO_OUTPUT=cpal` forces
+  it).
+* **A jitter buffer that follows the path.** The viewer measures arrival
+  jitter and capture bursts and steers the least audio left before each
+  device pull to a 2 ms margin plus whatever part of a burst the jitter
+  does not already spread, trimming playback speed by at most 0.2 % to
+  hold it. A real underrun (not the host going quiet: it sends nothing
+  for silence) widens the margin by 2 ms, which narrows again by 0.1 ms
+  a second. Devices that state their range get a 2.5 ms buffer
+  (`LATCH_AUDIO_BUFFER` overrides it, in frames or `default`).
+* **The viewer's microphone, opt-in.** With **Send my microphone** on and
+  a host that answers with `Accept.mic`, the default input is mixed to
+  mono, resampled to 48 kHz and sent as `lpcm-rice` 5 ms frames with the
+  same parity as host audio (datagram kind 13). A Linux host makes a
+  "Latch Microphone" source itself (a null sink and a source over its
+  monitor, through PulseAudio's native protocol or PipeWire's pulse
+  server) and removes it after the session. Windows and macOS cannot turn
+  sound into a microphone without a driver, so the host plays it into a
+  virtual cable's output (VB-CABLE, BlackHole, or the output named by
+  `LATCH_MIC_DEVICE`) and programs record the cable's input.
+* **Measured glass to glass.** `LATCH_TEST_AUDIO=clicks[:period_ms]` on a
+  host replaces its sound with a click on every wall-clock quarter second,
+  delivered a device period at a time; `LATCH_AUDIO_PROBE=1` on the viewer
+  notes when each click reaches the speaker (callback time plus the
+  device's own playback delay) and `view` reports them as
+  `audio_click_ms`. `LATCH_AUDIO_TRACE` on a Windows host logs loopback
+  packet sizes and QPC ages.
 
 ### Gamepads
 
@@ -239,10 +338,12 @@ through `libc`.
 * **Media threads at high priority** (user-interactive QoS on macOS,
   highest priority on Windows) and media sockets with 8 MB buffers, so a
   keyframe's burst is not dropped by the sender or the receiver.
-* **Sound stays bounded.** #32's viewer keeps its 40 ms preroll and existing
-  smoothed ±0.2% clock steering, with a 120 ms hard cap trimmed to 50 ms.
-  A 30-minute ±300 ppm simulation verifies no gaps or trims and 25–45 ms
-  mean queue depth. This already bounds latency; no second controller is added.
+* **Sound stays bounded, and short.** The fixed 40 ms preroll is gone:
+  the jitter buffer above holds what the measured path needs, with the
+  same ±0.2 % clock steering and a 120 ms hard cap trimmed back to the
+  current target. The 30-minute ±300 ppm simulation still has no gaps and
+  no trims, at about 27 ms buffered on its old jittery path and 11–15 ms
+  on a quiet LAN-like one. No second controller is added.
 * **A Mac viewer never copies a picture**: VideoToolbox decodes into an
   IOSurface that the renderer samples as Metal textures.
 * **One viewer at a time.** A new authorized viewer takes the host over;

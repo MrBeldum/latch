@@ -774,6 +774,8 @@ fn test_6_control_messages_roundtrip_and_errors() {
                 codec: "opus".into(),
             }),
             audio_problem: "".into(),
+            mic: None,
+            mic_problem: String::new(),
             cursor: true,
             gamepads: 4,
             gamepad_kinds: vec![latch_proto::gamepad::PadKind::Xbox],
@@ -1054,6 +1056,64 @@ fn startup_grace_bounds_silence_and_allows_a_healthy_idr_to_finish() {
 }
 
 #[test]
+fn microphone_packets_are_kind_13_and_older_fields_stay_off_the_wire() {
+    use latch_proto::audio::{AudioOut, AudioPacketizer, AudioReceiver};
+    use latch_proto::control::StreamRequest;
+    use latch_proto::wire::{self, Datagram};
+    // Same layout and parity as host audio, under its own kind.
+    let mut packets = Vec::new();
+    let mut mic = AudioPacketizer::mic(42);
+    for seq in 0..4u32 {
+        assert!(mic.packetize(seq * 5000, &[seq as u8; 30], |d| packets.push(d.to_vec())));
+    }
+    assert_eq!(packets.len(), 5, "four frames and their parity");
+    assert!(packets.iter().all(|p| p[0] == 13));
+    let mut receiver = AudioReceiver::with_format(42, 240, 48_000);
+    let now = std::time::Instant::now();
+    // The second frame is lost; parity rebuilds it.
+    for (i, p) in packets.iter().enumerate() {
+        if i == 1 {
+            continue;
+        }
+        match wire::parse(p).unwrap() {
+            Datagram::Mic { session, packet } => {
+                assert_eq!(session, 42);
+                receiver.push(&packet, now);
+            }
+            _ => panic!("not a microphone datagram"),
+        }
+    }
+    for seq in 0..4u32 {
+        assert_eq!(
+            receiver.pop(now),
+            Some(AudioOut::Frame {
+                seq,
+                pts: seq * 5000,
+                payload: vec![seq as u8; 30]
+            })
+        );
+    }
+    // A request from 5.1.0 still parses; a stereo, micless request
+    // serializes exactly as 5.1.0's did.
+    let old = r#"{"protocol":1,"width":1280,"height":720,"fps":60,"bitrate_kbps":10000,
+        "codecs":["h264-high"],"udp_port":5000,"audio":true,"name":"x","cursor":true}"#;
+    let request: StreamRequest = serde_json::from_str(old).unwrap();
+    assert_eq!((request.audio_channels, request.mic), (0, false));
+    let json = serde_json::to_string(&request).unwrap();
+    assert!(
+        !json.contains("audio_channels") && !json.contains("mic"),
+        "{json}"
+    );
+    let surround = StreamRequest {
+        audio_channels: 6,
+        mic: true,
+        ..request
+    };
+    let json = serde_json::to_string(&surround).unwrap();
+    assert!(json.contains(r#""audio_channels":6"#) && json.contains(r#""mic":true"#));
+}
+
+#[test]
 fn av1_offer_is_additive_and_unknown_codecs_still_fall_through() {
     use latch_proto::control::StreamRequest;
     let mut request: serde_json::Value = serde_json::to_value(StreamRequest {
@@ -1069,6 +1129,8 @@ fn av1_offer_is_additive_and_unknown_codecs_still_fall_through() {
         cursor: false,
         gamepads: false,
         reference_invalidation: false,
+        audio_channels: 0,
+        mic: false,
     })
     .unwrap();
     assert_eq!(request["codecs"][0], "av1");

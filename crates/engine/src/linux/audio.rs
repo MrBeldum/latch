@@ -3,7 +3,7 @@
 //! exact format, so this also works with PipeWire's PulseAudio server and
 //! needs neither libpulse nor a `parec` subprocess.
 
-use crate::audio::{AudioCapture, CHANNELS, FRAME, RATE};
+use crate::audio::{AudioCapture, Layout, CHANNELS, FRAME, RATE};
 use anyhow::{ensure, Context};
 use futures::executor::block_on;
 use pulseaudio::{protocol, Client, ClientError, RecordStream};
@@ -12,8 +12,6 @@ use std::pin::Pin;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::task::Poll;
 use std::time::{Duration, Instant};
-
-const BYTES: usize = FRAME * CHANNELS * 2;
 
 /// How often a recording that sends nothing is asked whether it still exists.
 const PROBE_EVERY: Duration = Duration::from_secs(1);
@@ -51,23 +49,35 @@ impl Health {
     }
 }
 
+/// Whole frames out of the server's byte batches.
 struct Frames {
-    bytes: [u8; BYTES],
+    bytes: Vec<u8>,
     filled: usize,
-    sender: SyncSender<[i16; FRAME * CHANNELS]>,
+    sender: SyncSender<Vec<i16>>,
 }
 impl Frames {
+    fn new(channels: usize, sender: SyncSender<Vec<i16>>) -> Self {
+        Self {
+            bytes: vec![0; FRAME * channels * 2],
+            filled: 0,
+            sender,
+        }
+    }
     fn push(&mut self, mut bytes: &[u8]) {
+        let size = self.bytes.len();
         while !bytes.is_empty() {
-            let count = bytes.len().min(BYTES - self.filled);
+            let count = bytes.len().min(size - self.filled);
             self.bytes[self.filled..self.filled + count].copy_from_slice(&bytes[..count]);
             self.filled += count;
             bytes = &bytes[count..];
-            if self.filled == BYTES {
-                let mut samples = [0; FRAME * CHANNELS];
-                for (sample, pair) in samples.iter_mut().zip(self.bytes.as_chunks::<2>().0) {
-                    *sample = i16::from_le_bytes([pair[0], pair[1]]);
-                }
+            if self.filled == size {
+                let samples: Vec<i16> = self
+                    .bytes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| i16::from_le_bytes(*pair))
+                    .collect();
                 // A bounded queue absorbs native-protocol batches without blocking.
                 // The reactor must never block behind the video thread.
                 let _ = self.sender.try_send(samples);
@@ -78,14 +88,15 @@ impl Frames {
 }
 
 pub(super) struct PulseCapture {
-    receiver: Receiver<[i16; FRAME * CHANNELS]>,
+    receiver: Receiver<Vec<i16>>,
+    channels: usize,
     stream: RecordStream,
     _client: Client,
     description: String,
     health: Health,
 }
 impl PulseCapture {
-    pub(super) fn new() -> anyhow::Result<Self> {
+    pub(super) fn new(layout: Layout) -> anyhow::Result<Self> {
         let client =
             Client::from_env(c"Latch desktop monitor").context("connect to PulseAudio/PipeWire")?;
         let server = block_on(client.server_info())?;
@@ -96,8 +107,9 @@ impl PulseCapture {
         let monitor = sink
             .monitor_source_index
             .context("default sink has no monitor source")?;
+        let channels = layout.pick(usize::from(sink.sample_spec.channels));
         let description = format!(
-            "PulseAudio monitor ({})",
+            "PulseAudio monitor ({}, {channels} channels)",
             sink.monitor_source_name
                 .as_ref()
                 .map_or_else(|| monitor.to_string(), |n| n.to_string_lossy().into_owned())
@@ -106,13 +118,13 @@ impl PulseCapture {
             source_index: Some(monitor),
             sample_spec: protocol::SampleSpec {
                 format: protocol::SampleFormat::S16Le,
-                channels: CHANNELS as u8,
+                channels: channels as u8,
                 sample_rate: RATE,
             },
-            channel_map: protocol::ChannelMap::stereo(),
+            channel_map: channel_map(channels),
             buffer_attr: protocol::stream::BufferAttr {
-                max_length: (BYTES * 8) as u32,
-                fragment_size: BYTES as u32,
+                max_length: (FRAME * channels * 2 * 8) as u32,
+                fragment_size: (FRAME * channels * 2) as u32,
                 ..Default::default()
             },
             flags: protocol::stream::StreamFlags {
@@ -122,22 +134,19 @@ impl PulseCapture {
             ..Default::default()
         };
         let (sender, receiver) = mpsc::sync_channel(64);
-        let mut frames = Frames {
-            bytes: [0; BYTES],
-            filled: 0,
-            sender,
-        };
+        let mut frames = Frames::new(channels, sender);
         let stream =
             block_on(client.create_record_stream(params, move |bytes: &[u8]| frames.push(bytes)))?;
         let spec = stream.sample_spec();
         ensure!(
             spec.format == protocol::SampleFormat::S16Le
                 && spec.sample_rate == RATE
-                && spec.channels == CHANNELS as u8,
+                && spec.channels == channels as u8,
             "PulseAudio changed the requested recording format"
         );
         Ok(Self {
             receiver,
+            channels,
             stream,
             _client: client,
             description,
@@ -145,12 +154,51 @@ impl PulseCapture {
         })
     }
 }
+/// Latch's channel order (WAVE) in PulseAudio's names.
+fn channel_map(channels: usize) -> protocol::ChannelMap {
+    use protocol::ChannelPosition::*;
+    match channels {
+        6 => protocol::ChannelMap::new([
+            FrontLeft,
+            FrontRight,
+            FrontCenter,
+            Lfe,
+            RearLeft,
+            RearRight,
+        ]),
+        8 => protocol::ChannelMap::new([
+            FrontLeft,
+            FrontRight,
+            FrontCenter,
+            Lfe,
+            RearLeft,
+            RearRight,
+            SideLeft,
+            SideRight,
+        ]),
+        1 => protocol::ChannelMap::mono(),
+        _ => protocol::ChannelMap::stereo(),
+    }
+}
+
 impl AudioCapture for PulseCapture {
     fn read(
         &mut self,
         out: &mut [i16; FRAME * CHANNELS],
         timeout: Duration,
     ) -> anyhow::Result<bool> {
+        let mut frame = Vec::new();
+        let got = self.read_frame(&mut frame, timeout)?;
+        if got {
+            anyhow::ensure!(frame.len() == out.len(), "this recording is not stereo");
+            out.copy_from_slice(&frame);
+        }
+        Ok(got)
+    }
+    fn channels(&self) -> usize {
+        self.channels
+    }
+    fn read_frame(&mut self, out: &mut Vec<i16>, timeout: Duration) -> anyhow::Result<bool> {
         match self.receiver.recv_timeout(timeout) {
             Ok(samples) => {
                 *out = samples;
@@ -185,11 +233,7 @@ mod tests {
     #[test]
     fn assembles_partial_little_endian_frames_without_blocking() {
         let (sender, receiver) = mpsc::sync_channel(1);
-        let mut frames = Frames {
-            bytes: [0; BYTES],
-            filled: 0,
-            sender,
-        };
+        let mut frames = Frames::new(CHANNELS, sender);
         let mut bytes = Vec::new();
         for sample in 0..FRAME * CHANNELS {
             bytes.extend_from_slice(&(sample as i16 - 400).to_le_bytes());
@@ -199,7 +243,10 @@ mod tests {
         frames.push(&bytes[3..]);
         let samples = receiver.recv().unwrap();
         assert_eq!(samples[0], -400);
-        assert_eq!(samples[959], 559);
+        assert_eq!(
+            samples[FRAME * CHANNELS - 1],
+            (FRAME * CHANNELS) as i16 - 401
+        );
         frames.push(&bytes);
         frames.push(&bytes);
         assert!(receiver.try_recv().is_ok());

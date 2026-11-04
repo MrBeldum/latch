@@ -1,0 +1,5 @@
+    Checking latch-stream v5.1.0 (C:\Users\Daniel\dev\latch-gfn-c\crates\stream)
+    Checking latch-engine v5.1.0 (C:\Users\Daniel\dev\latch-gfn-c\crates\engine)
+    Checking latch-client v5.1.0 (C:\Users\Daniel\dev\latch-gfn-c\crates\client)
+    Checking latch-host v5.1.0 (C:\Users\Daniel\dev\latch-gfn-c\crates\host)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 5.58s

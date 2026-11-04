@@ -5,6 +5,12 @@ on:
     branches: [main, master]
   pull_request:
 
+# A newer push to the same pull request replaces its older run; main keeps
+# every run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -12,6 +18,8 @@ env:
 jobs:
   test-windows:
     runs-on: windows-latest
+    # A hung test fails the job instead of holding a runner for hours.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -132,6 +140,8 @@ jobs:
 
   test-macos:
     runs-on: macos-15
+    # A hung test fails the job instead of holding a runner for hours.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -164,6 +174,8 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
+    # A hung test fails the job instead of holding a runner for hours.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -186,18 +198,21 @@ jobs:
 
   deploy-selftest:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: node kit selftest
         run: bash deploy/node/selftest.sh
   native-display-selftest:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y xauth
       - run: bash deploy/native/selftest.sh
   relay-selftest:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: relay installer selftest
@@ -206,6 +221,7 @@ jobs:
   # Nothing Latch builds may compile C, C++ or assembler (docs/ENGINE.md).
   native-audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -216,6 +232,7 @@ jobs:
   # every picture must equal the reference decoder's output byte for byte.
   codec-conformance:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

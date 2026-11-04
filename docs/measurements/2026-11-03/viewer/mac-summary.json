@@ -1,0 +1,32 @@
+{
+  "mac-replay-1080-120-final": {
+    "sample_mean_decode_ms": null,
+    "sample_mean_fps": null,
+    "summary": "render_summary decoded=1802 rendered=1792 decode_to_render_ms_p50=0.183 p95=0.342 p99=1.562"
+  },
+  "mac-after-native-120-final": {
+    "sample_mean_decode_ms": 1.7853748214285714,
+    "sample_mean_fps": 73.33041964285714,
+    "summary": "render_summary decoded=1094 rendered=1094 decode_to_render_ms_p50=0.229 p95=0.286 p99=0.577"
+  },
+  "mac-after-1080-120-final": {
+    "sample_mean_decode_ms": 0.8877665057142857,
+    "sample_mean_fps": 120.01446250000001,
+    "summary": "render_summary decoded=1793 rendered=1788 decode_to_render_ms_p50=0.143 p95=0.216 p99=0.720"
+  },
+  "mac-replay-native-120-final": {
+    "sample_mean_decode_ms": null,
+    "sample_mean_fps": null,
+    "summary": "render_summary decoded=1802 rendered=1774 decode_to_render_ms_p50=0.232 p95=0.547 p99=4.184"
+  },
+  "mac-before-native-120-final": {
+    "sample_mean_decode_ms": 1.5976373714285714,
+    "sample_mean_fps": 102.85918628571429,
+    "summary": "render_summary decoded=1538 rendered=1537 decode_to_render_ms_p50=0.177 p95=0.255 p99=0.486"
+  },
+  "mac-before-1080-120-final": {
+    "sample_mean_decode_ms": 0.9579092171428572,
+    "sample_mean_fps": 119.86582607142857,
+    "summary": "render_summary decoded=1789 rendered=1785 decode_to_render_ms_p50=0.141 p95=0.235 p99=2.001"
+  }
+}

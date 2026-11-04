@@ -215,6 +215,9 @@ pub struct StreamSettings {
     /// that release's profiles; see [`StreamSettings::migrate`].
     #[serde(default)]
     pub version: u32,
+    /// Send this machine's microphone to the host. Off until asked for.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mic: bool,
 }
 
 impl Default for StreamSettings {
@@ -230,6 +233,7 @@ impl Default for StreamSettings {
             custom_fps: None,
             custom_bitrate_kbps: None,
             version: SETTINGS_VERSION,
+            mic: false,
         }
     }
 }

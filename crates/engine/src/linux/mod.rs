@@ -6,6 +6,7 @@ mod capture;
 mod display;
 mod hardware;
 mod input;
+mod mic;
 mod nv12;
 mod nvenc;
 mod uinput;
@@ -104,8 +105,11 @@ pub fn open_video(config: &VideoConfig) -> anyhow::Result<Box<dyn VideoPipeline>
         Box::new(open),
     )?))
 }
-pub fn open_audio() -> anyhow::Result<Box<dyn AudioCapture>> {
-    Ok(Box::new(audio::PulseCapture::new()?))
+pub fn open_audio(layout: crate::audio::Layout) -> anyhow::Result<Box<dyn AudioCapture>> {
+    Ok(Box::new(audio::PulseCapture::new(layout)?))
+}
+pub fn open_mic(format: &latch_proto::control::AudioFormat) -> anyhow::Result<crate::mic::MicOut> {
+    mic::open(format)
 }
 pub fn open_input() -> anyhow::Result<Box<dyn InputSink>> {
     Ok(Box::new(input::X11Input::new()?))

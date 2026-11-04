@@ -7,8 +7,9 @@
 //! frame the decoder held back, so the output callback has always run, on
 //! this thread, before `decode` returns.
 
-use super::{nal_units, Decoder, Frame};
+use super::{nal_units, Decoder, Frame, PixelFormat};
 use anyhow::{anyhow, bail, Result};
+use latch_proto::control::Codec;
 use std::ffi::c_void;
 use std::ptr;
 
@@ -44,6 +45,8 @@ struct VTDecompressionOutputCallbackRecord {
 
 const K_CF_NUMBER_SINT32: isize = 3;
 const K_CV_PIXEL_FORMAT_420V: u32 = 0x3432_3076; // '420v', video range
+const K_CV_PIXEL_FORMAT_X420: u32 = u32::from_be_bytes(*b"x420");
+const K_CV_PIXEL_FORMAT_XF20: u32 = u32::from_be_bytes(*b"xf20");
 const K_CV_PIXEL_FORMAT_420F: u32 = 0x3432_3066; // '420f', full range
 pub(crate) const K_CV_LOCK_READ_ONLY: u64 = 1;
 
@@ -64,6 +67,22 @@ extern "C" {
     static kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: CFStringRef;
     static kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder: CFStringRef;
     static kVTDecompressionPropertyKey_RealTime: CFStringRef;
+    fn VTIsHardwareDecodeSupported(codec: u32) -> u8;
+    fn CMVideoFormatDescriptionCreate(
+        allocator: CFAllocatorRef,
+        codec: u32,
+        width: i32,
+        height: i32,
+        extensions: CFDictionaryRef,
+        out: *mut CMFormatDescriptionRef,
+    ) -> OSStatus;
+    static kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: CFStringRef;
+    fn CFStringCreateWithCString(
+        allocator: CFAllocatorRef,
+        string: *const u8,
+        encoding: u32,
+    ) -> CFStringRef;
+    fn CFDataCreate(allocator: CFAllocatorRef, bytes: *const u8, len: isize) -> CFTypeRef;
     fn CFBooleanGetValue(value: CFTypeRef) -> u8;
     fn VTSessionSetProperty(session: CFTypeRef, key: CFStringRef, value: CFTypeRef) -> OSStatus;
     fn VTSessionCopyProperty(
@@ -204,7 +223,8 @@ pub(crate) unsafe fn cv_pixel_buffer_get_base_address_of_plane(
 }
 
 pub struct VideoToolbox {
-    hevc: bool,
+    codec: Codec,
+    output: PixelFormat,
     hardware: bool,
     format: CMFormatDescriptionRef,
     session: VTDecompressionSessionRef,
@@ -215,10 +235,63 @@ pub struct VideoToolbox {
 
 unsafe impl Send for VideoToolbox {}
 
+pub fn supported(codec: Codec) -> bool {
+    static CODECS: std::sync::OnceLock<Vec<Codec>> = std::sync::OnceLock::new();
+    CODECS
+        .get_or_init(|| {
+            [
+                (
+                    Codec::Av1,
+                    *b"av01",
+                    include_bytes!("../../tests/fixtures/gray-bars.av1").as_slice(),
+                ),
+                (
+                    Codec::Hevc,
+                    *b"hvc1",
+                    include_bytes!("../../tests/fixtures/gray-bars.hevc").as_slice(),
+                ),
+                (
+                    Codec::H264High,
+                    *b"avc1",
+                    include_bytes!("../../tests/fixtures/decode-probe.h264").as_slice(),
+                ),
+            ]
+            .into_iter()
+            .filter_map(|(codec, fourcc, bytes)| {
+                if unsafe { VTIsHardwareDecodeSupported(u32::from_be_bytes(fourcc)) } == 0 {
+                    return None;
+                }
+                // The capability query can succeed even when no usable decoder
+                // session is available (for example on virtualized CI Macs).
+                let result = (|| {
+                    let mut decoder = VideoToolbox::with_format(codec, PixelFormat::Nv12)?;
+                    let picture = decoder.decode(bytes, true, None)?;
+                    anyhow::ensure!(picture.is_some() && decoder.hardware, "no hardware picture");
+                    Ok::<_, anyhow::Error>(())
+                })();
+                match result {
+                    Ok(()) => Some(codec),
+                    Err(error) => {
+                        tracing::info!(?codec, "hardware decode unavailable: {error:#}");
+                        None
+                    }
+                }
+            })
+            .collect()
+        })
+        .contains(&codec)
+}
+
 impl VideoToolbox {
-    pub fn new(hevc: bool) -> Result<Self> {
+    #[cfg(test)]
+    pub fn new(codec: Codec) -> Result<Self> {
+        Self::with_format(codec, PixelFormat::Nv12)
+    }
+
+    pub fn with_format(codec: Codec, output: PixelFormat) -> Result<Self> {
         Ok(Self {
-            hevc,
+            codec,
+            output,
             hardware: false,
             format: ptr::null(),
             session: ptr::null(),
@@ -228,7 +301,7 @@ impl VideoToolbox {
     }
 
     fn nal_type(&self, nal: &[u8]) -> u8 {
-        if self.hevc {
+        if self.codec == Codec::Hevc {
             (nal[0] >> 1) & 0x3f
         } else {
             nal[0] & 0x1f
@@ -236,7 +309,7 @@ impl VideoToolbox {
     }
 
     fn is_parameter_set(&self, t: u8) -> bool {
-        if self.hevc {
+        if self.codec == Codec::Hevc {
             (32..=34).contains(&t)
         } else {
             t == 7 || t == 8
@@ -259,7 +332,7 @@ impl VideoToolbox {
         let sizes: Vec<usize> = sets.iter().map(|s| s.len()).collect();
         let mut fmt: CMFormatDescriptionRef = ptr::null();
         let status = unsafe {
-            if self.hevc {
+            if self.codec == Codec::Hevc {
                 CMVideoFormatDescriptionCreateFromHEVCParameterSets(
                     ptr::null(),
                     sets.len(),
@@ -283,6 +356,11 @@ impl VideoToolbox {
         if status != 0 || fmt.is_null() {
             bail!("format description failed ({status})");
         }
+        self.params = sets;
+        self.set_format(fmt)
+    }
+
+    fn set_format(&mut self, fmt: CMFormatDescriptionRef) -> Result<()> {
         unsafe {
             if !self.session.is_null()
                 && VTDecompressionSessionCanAcceptFormatDescription(self.session, fmt) == 0
@@ -296,17 +374,72 @@ impl VideoToolbox {
             }
         }
         self.format = fmt;
-        self.params = sets;
         if self.session.is_null() {
             self.create_session()?;
         }
         Ok(())
     }
 
+    fn set_av1(&mut self, data: &[u8]) -> Result<()> {
+        let Some(sequence) = super::av1::sequence(data)? else {
+            return Ok(());
+        };
+        if self.params.first() == Some(&sequence.config) && !self.format.is_null() {
+            if self.session.is_null() {
+                self.create_session()?;
+            }
+            return Ok(());
+        }
+        unsafe {
+            let key = CFStringCreateWithCString(ptr::null(), c"av1C".as_ptr().cast(), 0x08000100);
+            let bytes = CFDataCreate(
+                ptr::null(),
+                sequence.config.as_ptr(),
+                sequence.config.len() as isize,
+            );
+            let atoms = CFDictionaryCreate(
+                ptr::null(),
+                [key].as_ptr(),
+                [bytes].as_ptr(),
+                1,
+                &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks,
+            );
+            let extensions = CFDictionaryCreate(
+                ptr::null(),
+                [kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms].as_ptr(),
+                [atoms].as_ptr(),
+                1,
+                &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks,
+            );
+            let mut fmt = ptr::null();
+            let status = CMVideoFormatDescriptionCreate(
+                ptr::null(),
+                u32::from_be_bytes(*b"av01"),
+                sequence.width,
+                sequence.height,
+                extensions,
+                &mut fmt,
+            );
+            for value in [extensions, atoms, bytes, key] {
+                CFRelease(value);
+            }
+            if status != 0 || fmt.is_null() {
+                bail!("AV1 format description failed ({status})");
+            }
+            self.params = vec![sequence.config];
+            self.set_format(fmt)
+        }
+    }
+
     fn create_session(&mut self) -> Result<()> {
         unsafe {
             // The stream is limited range (`COLOR_RANGE_LIMITED`).
-            let pixel_format = K_CV_PIXEL_FORMAT_420V as i32;
+            let pixel_format = match self.output {
+                PixelFormat::Nv12 => K_CV_PIXEL_FORMAT_420V,
+                PixelFormat::P010 => K_CV_PIXEL_FORMAT_X420,
+            } as i32;
             let number = CFNumberCreate(
                 ptr::null(),
                 K_CF_NUMBER_SINT32,
@@ -441,9 +574,15 @@ unsafe extern "C" fn output(
     }
     let format = CVPixelBufferGetPixelFormatType(image);
     if CVPixelBufferGetPlaneCount(image) != 2
-        || !matches!(format, K_CV_PIXEL_FORMAT_420V | K_CV_PIXEL_FORMAT_420F)
+        || !matches!(
+            format,
+            K_CV_PIXEL_FORMAT_420V
+                | K_CV_PIXEL_FORMAT_420F
+                | K_CV_PIXEL_FORMAT_X420
+                | K_CV_PIXEL_FORMAT_XF20
+        )
     {
-        out.error = Some("VideoToolbox returned a non-NV12 picture");
+        out.error = Some("VideoToolbox returned an unsupported pixel format");
         return;
     }
     let w = CVPixelBufferGetWidthOfPlane(image, 0);
@@ -455,7 +594,12 @@ unsafe extern "C" fn output(
     frame.height = h as u32;
     frame.y_stride = ys;
     frame.uv_stride = uvs;
-    frame.full_range = format == K_CV_PIXEL_FORMAT_420F;
+    frame.full_range = matches!(format, K_CV_PIXEL_FORMAT_420F | K_CV_PIXEL_FORMAT_XF20);
+    frame.format = if matches!(format, K_CV_PIXEL_FORMAT_X420 | K_CV_PIXEL_FORMAT_XF20) {
+        PixelFormat::P010
+    } else {
+        PixelFormat::Nv12
+    };
     frame.y.clear();
     frame.uv.clear();
     CFRetain(image);
@@ -465,21 +609,25 @@ unsafe extern "C" fn output(
 
 impl Decoder for VideoToolbox {
     fn decode(&mut self, annexb: &[u8], _idr: bool, spare: Option<Frame>) -> Result<Option<Frame>> {
-        let nals = nal_units(annexb);
-        let mut sets = Vec::new();
         self.avcc.clear();
-        for nal in nals {
-            let t = self.nal_type(nal);
-            if self.is_parameter_set(t) {
-                sets.push(nal.to_vec());
-            } else {
-                self.avcc
-                    .extend_from_slice(&(nal.len() as u32).to_be_bytes());
-                self.avcc.extend_from_slice(nal);
+        if self.codec == Codec::Av1 {
+            self.set_av1(annexb)?;
+            self.avcc.extend_from_slice(annexb);
+        } else {
+            let mut sets = Vec::new();
+            for nal in nal_units(annexb) {
+                let t = self.nal_type(nal);
+                if self.is_parameter_set(t) {
+                    sets.push(nal.to_vec());
+                } else {
+                    self.avcc
+                        .extend_from_slice(&(nal.len() as u32).to_be_bytes());
+                    self.avcc.extend_from_slice(nal);
+                }
             }
-        }
-        if !sets.is_empty() {
-            self.set_parameters(sets)?;
+            if !sets.is_empty() {
+                self.set_parameters(sets)?;
+            }
         }
         if self.session.is_null() {
             bail!("no parameter sets yet");
@@ -564,11 +712,13 @@ impl Decoder for VideoToolbox {
     }
 
     fn name(&self) -> &'static str {
-        match (self.hevc, self.hardware) {
-            (true, true) => "HEVC · hardware",
-            (false, true) => "H.264 · hardware",
-            (true, false) => "HEVC · software",
-            (false, false) => "H.264 · software",
+        match (self.codec, self.hardware) {
+            (Codec::Av1, true) => "AV1 · hardware",
+            (Codec::Av1, false) => "AV1 · software",
+            (Codec::Hevc, true) => "HEVC · hardware",
+            (Codec::Hevc, false) => "HEVC · software",
+            (_, true) => "H.264 · hardware",
+            (_, false) => "H.264 · software",
         }
     }
 }
@@ -581,7 +731,7 @@ mod tests {
     fn decodes_visible_pixels_from_h264() {
         // 64x64, white top half and black bottom half, generated with OpenH264.
         let encoded = include_bytes!("../../tests/fixtures/gray-bars.h264");
-        let mut decoder = VideoToolbox::new(false).unwrap();
+        let mut decoder = VideoToolbox::new(Codec::H264High).unwrap();
         let frame = decoder
             .decode(encoded, true, None)
             .unwrap()
@@ -603,6 +753,61 @@ mod tests {
         );
         again.with_planes(|y, ys, _, _| {
             assert!(y[16 * ys + 32] >= 230);
+        });
+    }
+
+    #[test]
+    fn decodes_av1_and_hevc_on_supported_hardware() {
+        for (codec, bytes) in [
+            (
+                Codec::Av1,
+                include_bytes!("../../tests/fixtures/gray-bars.av1").as_slice(),
+            ),
+            (
+                Codec::Hevc,
+                include_bytes!("../../tests/fixtures/gray-bars.hevc").as_slice(),
+            ),
+        ] {
+            if !supported(codec) {
+                continue;
+            }
+            let mut decoder = VideoToolbox::new(codec).unwrap();
+            let frame = decoder
+                .decode(bytes, true, None)
+                .unwrap()
+                .expect("hardware picture");
+            assert_eq!((frame.width, frame.height), (64, 64));
+            assert!(decoder.hardware);
+            assert!(frame.native.is_some());
+            frame.with_planes(|y, ys, _, _| {
+                assert!(y[16 * ys + 32] >= 230);
+                assert!(y[48 * ys + 32] <= 20);
+            });
+        }
+    }
+
+    #[test]
+    fn main10_retains_ten_bit_samples_in_an_iosurface() {
+        if !supported(Codec::Hevc) {
+            return;
+        }
+        let mut decoder = VideoToolbox::with_format(Codec::Hevc, PixelFormat::P010).unwrap();
+        let frame = decoder
+            .decode(
+                include_bytes!("../../tests/fixtures/gray-bars-main10.hevc"),
+                true,
+                None,
+            )
+            .unwrap()
+            .expect("Main10 picture");
+        assert_eq!(frame.format, PixelFormat::P010);
+        assert!(!frame.is_black());
+        assert!(frame.native.is_some());
+        frame.with_planes(|y, stride, _, _| {
+            let white = u16::from_le_bytes([y[16 * stride + 64], y[16 * stride + 65]]) >> 6;
+            let black = u16::from_le_bytes([y[48 * stride + 64], y[48 * stride + 65]]) >> 6;
+            assert!(white >= 920, "{white}");
+            assert!(black <= 80, "{black}");
         });
     }
 
