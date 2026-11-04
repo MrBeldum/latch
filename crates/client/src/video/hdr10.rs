@@ -813,10 +813,26 @@ mod tests {
                 ..Default::default()
             };
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(W as f32, H as f32));
+            hdr.draw(&frame, rect, 1.0)?;
+            pump(200);
+            let (mut outer, mut inner) = (RECT::default(), RECT::default());
+            unsafe {
+                GetWindowRect(parent, &mut outer)?;
+                GetWindowRect(hdr.window, &mut inner)?;
+            }
+            eprintln!("parent {outer:?}, video {inner:?}");
+            let at = (inner.left, inner.top);
             let points: Vec<(i32, i32)> = (0..4)
-                .map(|i| (AT.0 + 60 + 120 * i, AT.1 + 90))
-                .chain([(AT.0 + 420, AT.1 + 30)])
+                .map(|i| (at.0 + 60 + 120 * i, at.1 + 90))
+                .chain([(at.0 + 420, at.1 + 30)])
                 .collect();
+            let row: Vec<(i32, i32)> = (0..W / 20)
+                .map(|i| (at.0 + 20 * i + 10, at.1 + 90))
+                .collect();
+            eprintln!(
+                "row {:?}",
+                grab_scrgb(&row)?.iter().map(|p| p[1]).collect::<Vec<_>>()
+            );
             let hole = [egui::Rect::from_min_max(
                 egui::pos2(360.0, 0.0),
                 egui::pos2(480.0, 60.0),
