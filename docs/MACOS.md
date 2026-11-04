@@ -368,6 +368,16 @@ P-frame capped too), and `BaseFrameQP` works only under the low-latency
 rate control above. So a lost frame is best answered without an IDR
 (reference invalidation), and the IDR that remains is paced on the wire.
 
+A Mac host still answers a loss with an IDR: its encoder refuses recovery
+requests. VideoToolbox does have public long-term references since macOS 12
+(`kVTCompressionPropertyKey_EnableLTR`, the per-sample
+`kVTSampleAttachmentKey_RequireLTRAcknowledgementToken`, and the frame
+options `kVTEncodeFrameOptionKey_AcknowledgedLTRTokens` and
+`kVTEncodeFrameOptionKey_ForceLTRRefresh`): acknowledging the tokens of
+frames up to the viewer's last delivered one and forcing a refresh should
+make a recovery frame. That is not built yet; it needs a test that decodes
+the refreshed stream after dropped frames.
+
 ## Permissions
 
 - **Local network**: macOS 15 may ask; allow it so the wake broadcast can

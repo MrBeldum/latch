@@ -39,6 +39,17 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- A lost frame costs a small recovery frame instead of a keyframe, as on
+  GeForce NOW. Viewer and host negotiate `reference_invalidation`; after a
+  loss the viewer asks for a frame that predicts from the last one it
+  decoded (new datagrams 13 and 14), falling back to a keyframe when the
+  host cannot. The software H.264 encoder rolls back to that picture
+  (bit-exact) and AMD's AMF HEVC encoder uses long-term references; Media
+  Foundation, VideoToolbox, VA-API and NVENC still send an IDR. Linux host
+  → Mac at 1–3% induced burst loss: 34–51 IDRs a minute become 2–3 (the
+  startup ones), resume p50 113 → 41 ms, freeze p95 256–452 → 97–120 ms;
+  recovery frames are 3.3 kB where an IDR was 10–20 kB. Older viewers and
+  hosts keep `KeyframeRequest`.
 - No Latch-imposed ceilings on a stream. The viewer allowed 30–240 fps and
   2–150 Mbps and the host clamped every request to 240 fps, 500 Mbps and
   8192 pixels; the software H.264 encoder refused anything over 240 fps.
