@@ -657,6 +657,13 @@ impl Server {
         let mut sent_mark = (Instant::now(), session.bytes.load(Ordering::Relaxed));
         let reason = loop {
             if let Some(e) = session.ended.lock().clone() {
+                // A notice queued just before the end still goes first.
+                if let Some(message) = session.audio_notice.lock().take() {
+                    let _ = session.send_control(&Message::Notice(Notice {
+                        kind: "audio".into(),
+                        message,
+                    }));
+                }
                 let _ = session.send_control(&Message::End(e.clone()));
                 break e.message;
             }
