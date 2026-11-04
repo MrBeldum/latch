@@ -26,6 +26,7 @@ fn request(name: &str) -> StreamRequest {
         reference_invalidation: false,
         audio_channels: 0,
         mic: false,
+        probe_trains: false,
     }
 }
 

@@ -130,6 +130,10 @@ pub struct StreamRequest {
     /// answers with an `Accept.mic` format.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mic: bool,
+    /// The viewer measures `Probe` trains (datagram kind 16) and reports
+    /// their rate in `Report.probe_kbps`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub probe_trains: bool,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -237,6 +241,9 @@ pub struct Report {
     /// Longest observed run of erased video data shards in this window.
     #[serde(default)]
     pub loss_burst_packets: u8,
+    /// Fastest `Probe` train received in this window (wire kbps), 0 if none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub probe_kbps: u32,
     #[serde(default)]
     pub wire_budget_kbps: u32,
     #[serde(default)]

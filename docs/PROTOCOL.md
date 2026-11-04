@@ -52,6 +52,7 @@ Content-Length: <n>
 | `reference_invalidation` | bool | optional, default false; after a loss the viewer asks for a recovery frame (see [RecoveryRequest](#recoveryrequest-14-and-recoveryack-15)) |
 | `audio_channels` | u32 | optional; most channels the viewer plays (6 for 5.1, 8 for 7.1). Absent, or below 3, means stereo |
 | `mic` | bool | optional, default false; the viewer offers its microphone (datagram kind 13) |
+| `probe_trains` | bool | optional, default false; the viewer times probe trains (datagram kind 16) and reports their rate |
 
 A request is taken within 64 to 16384 pixels a side, 1 to 500 fps and
 500 kbps to 1 Gbps (`latch_proto::control::MAX_*`). The host then meets
@@ -152,6 +153,7 @@ not match its kind is dropped without an answer.
 | 13 | `Mic` | viewer → host |
 | 14 | `RecoveryRequest` | viewer → host |
 | 15 | `RecoveryAck` | host → viewer |
+| 16 | `Probe` | host → viewer |
 
 ### Hello (1)
 
@@ -406,6 +408,22 @@ The viewer's microphone, laid out exactly as `Audio` (3) with its own
 format (5 ms of 48 kHz mono). The host takes it only from the address the
 session's `Hello` came from. A host that does not know kind 13 drops it.
 
+### Probe (16)
+
+Only to a viewer whose `StreamRequest` has `probe_trains`; an older viewer
+never sees it (and would drop it as unknown). `aux` is the train number;
+`u8 index` at offset 8 and `u8 count` at offset 9 place the datagram in
+its train, and zero padding follows (the host sends 1 200-byte datagrams,
+at least 10 bytes parse). The host sends a train back to back while video
+is idle: after 500 ms of it, two trains 200 ms apart, then one a second,
+each 6 to 16 datagrams (about 3 ms of the wire budget). The bottleneck
+spreads a train to its own rate, so the viewer times it: wire bytes
+(datagram length + 80) after the first datagram, over the time from the
+first to the last arrival, for a train of which at least four (or all)
+arrived. The fastest train since the last `Report` goes in its
+`probe_kbps`. Probes carry no video and are not counted in
+`received_kbps`.
+
 ## Versioning
 
 `protocol` in `StreamRequest` and the upgrade token's `/1` name the
@@ -452,12 +470,15 @@ the frame rate comes down first, to 30, then the picture in proportion.
 
 Report retains its four original required fields. New JSON fields all have
 serde defaults, so older endpoints ignore them and new hosts accept the
-original four-field report. No datagram layout or protocol number changes.
+original four-field report. No datagram layout or protocol number changes;
+the one new datagram kind, `Probe` (16), goes only to a viewer that asked
+for it.
 
 Viewer reports add `received_kbps` (received media rate), `frames_lost`
 (unrecovered frames in the last measurement window), `unrecovered_loss_pct`
 (optional; absence means legacy raw loss), `queue_ms` (decode queue age),
 `loss_burst_packets` (longest data-shard erasure run, bounded to 32),
+`probe_kbps` (fastest probe train, see [Probe](#probe-16); absent when none)
 and `window_ms` (measurement duration). New measurements and reports use 50 ms
 windows (older peers retain their 250 ms or one-second windows). Raw `loss_pct` includes FEC-recovered shards; recovery alone is
 not congestion. RTT is milliseconds on the reporter's clock.
@@ -466,8 +487,8 @@ Hosts may reply using the existing Report type, adding
 `requested_bitrate_kbps`, `applied_bitrate_kbps`, `pacing_queue_ms`,
 `send_errors`, `send_retries`, `socket_send_bytes`, `socket_receive_bytes`,
 `wire_budget_kbps` and `application_limited`. All have serde defaults.
-`wire_budget_kbps` is the controller's target, kept through idle and restarts;
-the encoder's actual share shows in `applied_bitrate_kbps`.
+`wire_budget_kbps` is the controller's wire budget, kept through idle;
+the encoder's share of it shows in `applied_bitrate_kbps`.
 Applied bitrate is the encoder target after wire overhead reservation;
 requested bitrate is the session ceiling. Error/retry counts are cumulative.
 Legacy viewers ignore host Reports as an unhandled existing message type.
@@ -510,10 +531,15 @@ two-second-decay raw loss with a base-RTT floor (15% at 40 ms, 20% at 100 ms),
 capped at 30% before the per-frame packet floors above. The sender reserves
 rounded parity, padding and headers inside its wire budget, including the
 protected-frame floor while a keyframe or recovery frame is owed. Four reports
-below 80% of the encoder's allowance mark it application-limited. Idle keeps
-the target, but after a 1 s grace the rate trusted for resumed frames halves
-every 500 ms (down to 1/32 of the target); motion restarts from that trust and
-doubles the carried rate per validated feedback horizon back to the target. Data shards precede parity computation and transmission; a
+below 80% of the encoder's allowance mark it application-limited; under half
+of it is idle. Idle keeps the budget and the encoder's target: motion resumes
+at once, unpaced on a clean path. While idle the host sends probe trains to a
+viewer that times them; two recent trains both under 3/4 of the budget lower
+it to 90% of the faster one (with pacing) before motion resumes, and later
+faster trains restore it. An underfilled stream cut by a standing delay that
+still delivered everything gets back what it delivered once the delay has
+been gone for a second. While pacing, the pacer's own local queue is not
+sender pressure. Data shards precede parity computation and transmission; a
 completed frame is handed to decode immediately, including mid-receive-batch.
 Protocol 1 datagrams remain at most 1200 bytes. No MTU or socket-offload
 capability is advertised by this change.

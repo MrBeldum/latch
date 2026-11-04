@@ -1133,6 +1133,7 @@ fn av1_offer_is_additive_and_unknown_codecs_still_fall_through() {
         reference_invalidation: false,
         audio_channels: 0,
         mic: false,
+        probe_trains: false,
     })
     .unwrap();
     assert_eq!(request["codecs"][0], "av1");
