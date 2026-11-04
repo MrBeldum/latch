@@ -330,6 +330,7 @@ impl Server {
         }
         let pipeline = opened
             .map_err(|e| Refusal::new(500, format!("could not capture the screen: {e:#}")))?;
+        config.color = pipeline.info().color;
         prepared.info = Some(pipeline.info());
         prepared.pipeline = Some((pipeline, config));
         if prepared.req.audio {
@@ -1196,6 +1197,13 @@ fn encode_video(
             }));
         }
         let next_info = pipeline.info();
+        if next_info.color != info.color {
+            session.end(
+                end::ENCODER_FAILED,
+                "Host colour format changed; reconnect to negotiate it",
+            );
+            return;
+        }
         if next_info != info {
             {
                 let mut input = session.input.lock();

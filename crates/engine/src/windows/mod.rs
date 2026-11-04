@@ -332,7 +332,9 @@ impl Pipeline {
                     // Latch's own encoder makes H.264 only, and the viewer
                     // has been told HEVC: fail this session, and offer H.264
                     // to the next one.
-                    encode::codec_failed(config.codec, &e);
+                    if config.color.bit_depth == 8 {
+                        encode::codec_failed(config.codec, &e);
+                    }
                     return Err(e.context("open hardware codec"));
                 }
                 Err(e) => {

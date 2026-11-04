@@ -193,7 +193,8 @@ float4 ps(float4 p : SV_Position) : SV_Target {
         float3 cursor = pq(wide(linearize(float3(rgb)/255.0)*white*80.0));
         if(kind == 2) return float4(cursor*(a/255.0)+bg.rgb*(1-a/255.0),1);
         if(kind == 4) return a == 255 ? float4(abs(bg.rgb-cursor),1) : float4(cursor,1);
-        return float4(cursor,1);
+        uint3 screen = uint3(round(saturate(bg.rgb)*255));
+        return float4(float3((screen & a) ^ rgb)/255.0,1);
     }
     if(kind == 2) return float4(float3(rgb)*(a/65025.0) + bg.rgb*(1-a/255.0), 1);
     uint3 screen = uint3(round(saturate(bg.rgb)*255));
@@ -501,28 +502,25 @@ fn desktop_rect(desc: &DXGI_OUTDUPL_DESC, coordinates: RECT) -> DisplayRect {
     }
 }
 fn duplicate(output: &display::Output, gpu: &Gpu) -> Result<IDXGIOutputDuplication> {
-    // SAFETY: the device belongs to the selected output's adapter.
+    // SAFETY: the device belongs to this output. Once Output5 is available,
+    // never fall back on a failed acquisition to legacy BGRA conversion: that
+    // can silently turn an Advanced Color desktop black.
     unsafe {
-        output
-            .output
-            .cast::<IDXGIOutput5>()
-            .and_then(|o| {
-                o.DuplicateOutput1(
-                    &gpu.device,
-                    0,
-                    &[
-                        DXGI_FORMAT_B8G8R8A8_UNORM,
-                        DXGI_FORMAT_R16G16B16A16_FLOAT,
-                        DXGI_FORMAT_R8G8B8A8_UNORM,
-                    ],
-                )
-            })
-            .or_else(|_| {
-                output
-                    .output
-                    .cast::<IDXGIOutput1>()?
-                    .DuplicateOutput(&gpu.device)
-            })
+        match output.output.cast::<IDXGIOutput5>() {
+            Ok(output) => output.DuplicateOutput1(
+                &gpu.device,
+                0,
+                &[
+                    DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    DXGI_FORMAT_R8G8B8A8_UNORM,
+                ],
+            ),
+            Err(_) => output
+                .output
+                .cast::<IDXGIOutput1>()?
+                .DuplicateOutput(&gpu.device),
+        }
     }
     .context("duplicate desktop output")
 }
