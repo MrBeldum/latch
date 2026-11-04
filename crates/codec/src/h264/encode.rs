@@ -74,6 +74,25 @@ pub struct EncodedInfo {
     pub skipped_mbs: u32,
     pub total_mbs: u32,
     pub bytes: usize,
+    /// This frame's number, +1 per access unit from 1; what
+    /// [`Encoder::recover_from`] names it by.
+    pub picture: u64,
+    /// The picture this frame predicts from when it is the first after
+    /// [`Encoder::recover_from`]: decodable by a decoder that holds that
+    /// picture and nothing after it.
+    pub recovery: Option<u64>,
+}
+
+/// A decoder's state after one picture: what the encoder rolls back to
+/// when the frames after it are lost.
+struct Snapshot {
+    picture: u64,
+    reconstruction: Arc<Yuv420>,
+    source: Arc<Yuv420>,
+    quality: Arc<Vec<u8>>,
+    /// `frame_num` and `idr_pic_id` for the frame that follows.
+    frame_num: u32,
+    idr_id: u32,
 }
 
 enum Task {
@@ -112,6 +131,9 @@ pub struct Encoder {
     /// Pictures no frame refers to any more, reused rather than allocated.
     spare_reconstruction: Option<Yuv420>,
     spare_source: Option<Yuv420>,
+    /// `spare_source` is the picture before the last one given, so only
+    /// what the last two changed needs copying into it.
+    spare_source_recent: bool,
     /// `spare_reconstruction` is the frame before `reconstruction`, and
     /// `kept` says where the two are the same.
     spare_is_previous: bool,
@@ -129,6 +151,12 @@ pub struct Encoder {
     subpixel: bool,
     refresh_start: usize,
     window: VecDeque<usize>,
+    /// The last `depth` pictures, oldest first, while recovery is on.
+    history: VecDeque<Snapshot>,
+    depth: usize,
+    picture: u64,
+    /// The next frame is the first after a roll back to this picture.
+    recovering: Option<u64>,
 }
 
 impl Encoder {
@@ -219,6 +247,7 @@ impl Encoder {
             source: None,
             spare_reconstruction: None,
             spare_source: None,
+            spare_source_recent: false,
             spare_is_previous: false,
             kept: None,
             last_dirty: None,
@@ -231,7 +260,90 @@ impl Encoder {
             subpixel: true,
             refresh_start: 0,
             window: VecDeque::new(),
+            history: VecDeque::new(),
+            depth: 0,
+            picture: 0,
+            recovering: None,
         })
+    }
+
+    /// Keeps the last `depth` pictures (0, the default, keeps none) so
+    /// that [`Encoder::recover_from`] can make the next frame predict
+    /// from any of them. Each costs a reconstruction and a source
+    /// picture of memory while it is held.
+    pub fn set_recovery_depth(&mut self, depth: usize) {
+        self.depth = depth;
+        while self.history.len() > depth {
+            self.forget_oldest();
+        }
+    }
+
+    /// After a loss: the next frame predicts from `picture` (an
+    /// [`EncodedInfo::picture`]) as if no frame after it had been sent,
+    /// so a decoder that stopped at `picture` decodes it exactly. False,
+    /// and nothing changes, when `picture` is no longer held.
+    ///
+    /// Every frame is a reference and only the last is ever used, so the
+    /// recovery frame takes the `frame_num` after `picture`'s: to the
+    /// decoder the frames it never decoded never existed, and the stream
+    /// it sees is an ordinary one.
+    pub fn recover_from(&mut self, picture: u64) -> bool {
+        let Some(at) = self.history.iter().position(|s| s.picture == picture) else {
+            return false;
+        };
+        // What came after it is a branch no decoder will hold.
+        self.history.truncate(at + 1);
+        let s = &self.history[at];
+        self.reconstruction = s.reconstruction.clone();
+        self.source = Some(s.source.clone());
+        self.quality = s.quality.clone();
+        self.frame_num = s.frame_num;
+        self.idr_id = s.idr_id;
+        // The hints and the kept macroblocks describe the abandoned frames.
+        self.kept = None;
+        self.spare_is_previous = false;
+        self.spare_source_recent = false;
+        self.last_dirty = None;
+        self.hints_hold = false;
+        self.recovering = Some(picture);
+        true
+    }
+
+    /// Records the decoder's state after the frame just made.
+    fn remember(&mut self) -> (u64, Option<u64>) {
+        self.picture += 1;
+        let recovery = self.recovering.take();
+        if self.depth > 0 {
+            if let Some(source) = self.source.clone() {
+                if self.history.len() >= self.depth {
+                    self.forget_oldest();
+                }
+                self.history.push_back(Snapshot {
+                    picture: self.picture,
+                    reconstruction: self.reconstruction.clone(),
+                    source,
+                    quality: self.quality.clone(),
+                    frame_num: self.frame_num,
+                    idr_id: self.idr_id,
+                });
+            }
+        }
+        (self.picture, recovery)
+    }
+
+    /// Drops the oldest picture held, keeping its planes as spares.
+    fn forget_oldest(&mut self) {
+        let Some(old) = self.history.pop_front() else {
+            return;
+        };
+        if self.spare_reconstruction.is_none() {
+            self.spare_reconstruction = Arc::try_unwrap(old.reconstruction).ok();
+            self.spare_is_previous = false;
+        }
+        if self.spare_source.is_none() {
+            self.spare_source = Arc::try_unwrap(old.source).ok();
+            self.spare_source_recent = false;
+        }
     }
 
     /// Encodes `picture` (the configured visible size, padded) as one
@@ -293,7 +405,9 @@ impl Encoder {
         let source = Arc::new(match self.spare_source.take() {
             Some(mut spare) => {
                 match (&dirty, &self.last_dirty) {
-                    (Some(now), Some(before)) if same_layout(&spare, picture) => {
+                    (Some(now), Some(before))
+                        if self.spare_source_recent && same_layout(&spare, picture) =>
+                    {
                         copy_macroblocks(&mut spare, picture, |i| now[i] || before[i])
                     }
                     _ => spare.copy_from(picture),
@@ -459,6 +573,7 @@ impl Encoder {
         self.last_dirty = dirty;
         if let Some(old) = self.source.replace(source) {
             self.spare_source = Arc::try_unwrap(old).ok();
+            self.spare_source_recent = self.spare_source.is_some();
         }
         self.quality = Arc::new(mbs.iter().map(|m| m.quality).collect());
         self.frame_num = (frame_num + 1) & 65535;
@@ -482,6 +597,7 @@ impl Encoder {
         }
         let bytes = data.len();
         out.extend_from_slice(&data);
+        let (picture, recovery) = self.remember();
         self.finish_timing(started);
         Ok(EncodedInfo {
             keyframe: idr,
@@ -489,6 +605,8 @@ impl Encoder {
             skipped_mbs: skipped,
             total_mbs: mbs.len() as u32,
             bytes,
+            picture,
+            recovery: recovery.filter(|_| !idr),
         })
     }
 
@@ -584,12 +702,15 @@ impl Encoder {
         let bytes = data.len();
         out.extend_from_slice(&data);
         let total_mbs = (width * rows) as u32;
+        let (picture, recovery) = self.remember();
         Ok(EncodedInfo {
             keyframe: false,
             qp: self.qp,
             skipped_mbs: total_mbs,
             total_mbs,
             bytes,
+            picture,
+            recovery,
         })
     }
 
@@ -961,6 +1082,106 @@ mod tests {
             settled > 10,
             "the picture settles: {settled} all-skip frames"
         );
+    }
+
+    /// Frames lost on the way: the encoder rolls back to the last picture
+    /// the decoder has, and from the recovery frame on the decoder holds
+    /// exactly the encoder's reconstruction again, without an IDR.
+    #[test]
+    fn recovery_frames_decode_exactly_after_a_loss() {
+        for (threads, hinted) in [(1, false), (3, true), (2, false)] {
+            let config = EncoderConfig {
+                width: 96,
+                height: 64,
+                fps: 60,
+                bitrate_kbps: 900,
+                threads,
+            };
+            let mut encoder = Encoder::new(config.with_frame_budget(0)).unwrap();
+            encoder.set_recovery_depth(8);
+            let mut decoder = crate::h264::Decoder::new();
+            let mut picture = Yuv420::new(96, 64);
+            let mut seed = 99u32;
+            let mut next = move || {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed
+            };
+            // Frames 10..13 and 30 are lost, 20 is an IDR that is lost
+            // too, and 40..41 are lost while the screen stands still.
+            let lost =
+                |f: u32| (10..13).contains(&f) || f == 20 || f == 30 || (40..42).contains(&f);
+            let mut delivered = None;
+            let mut recover = false;
+            let mut recoveries = 0;
+            for frame in 0..60u32 {
+                let mut rects = Vec::new();
+                if !(38..46).contains(&frame) {
+                    // A moving bar and some noise: motion, skips and intra.
+                    let x = (frame * 5 % 80) as usize;
+                    for row in 0..64 {
+                        for col in 0..96 {
+                            let at = row * picture.y_stride + col;
+                            picture.y[at] = if (x..x + 12).contains(&col) {
+                                200
+                            } else {
+                                (col + row * 2) as u8
+                            };
+                        }
+                    }
+                    let r = Rect {
+                        x: next() % 80,
+                        y: next() % 48,
+                        width: 16,
+                        height: 16,
+                    };
+                    for row in r.y..r.y + 16 {
+                        let at = row as usize * picture.y_stride + r.x as usize;
+                        picture.y[at..at + 16].fill(next() as u8);
+                    }
+                    picture.pad_edges();
+                    rects.push(Rect {
+                        x: 0,
+                        y: 0,
+                        width: 96,
+                        height: 64,
+                    });
+                }
+                if recover {
+                    assert!(encoder.recover_from(delivered.unwrap()), "frame {frame}");
+                    recover = false;
+                }
+                let mut bits = Vec::new();
+                let info = encoder
+                    .encode_changed(
+                        &picture,
+                        hinted.then_some(&rects[..]),
+                        frame == 0 || frame == 20,
+                        &mut bits,
+                    )
+                    .unwrap();
+                if lost(frame) {
+                    // The request arrives before the next frame is made.
+                    recover = !lost(frame + 1);
+                    continue;
+                }
+                if let Some(base) = info.recovery {
+                    assert_eq!(Some(base), delivered, "frame {frame}");
+                    assert!(!info.keyframe);
+                    recoveries += 1;
+                }
+                let decoded = decoder.decode(&bits).unwrap().unwrap();
+                assert_eq!(
+                    decoded,
+                    encoder.reconstruction(),
+                    "{threads}: frame {frame}"
+                );
+                delivered = Some(info.picture);
+            }
+            assert!(recoveries >= 3, "{recoveries} recoveries");
+            assert!(!encoder.recover_from(1), "the first picture was forgotten");
+        }
     }
 
     #[test]
