@@ -388,6 +388,13 @@ impl View {
         });
     }
 
+    /// Put the toolbar and stats overlay up or away, for the test
+    /// exerciser (`LATCH_TEST_EXERCISE`).
+    pub(crate) fn set_overlays(&mut self, bar: bool, stats: bool) {
+        self.bar_shown = bar;
+        self.stats = stats;
+    }
+
     /// Release everything and let the cursor go; called when the stream
     /// ends or the window loses focus.
     pub fn reset(&mut self, ctx: &egui::Context, live: Option<&Live>) {
@@ -1619,6 +1626,10 @@ impl View {
         if let Some(tap) = self.tap.clone() {
             let connected = tap.connected.get();
             return self.forward(ctx, live, cfg, video, bar, &*tap, connected);
+        }
+        // Whoever is at this Mac is not driving the test host's desktop.
+        if crate::session::test_serve().is_some() {
+            return;
         }
         self.forward(
             ctx,
