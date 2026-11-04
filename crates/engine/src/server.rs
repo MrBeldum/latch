@@ -38,9 +38,9 @@ const KEEPALIVE: Duration = Duration::from_secs(1);
 /// A viewer heard from neither over TCP nor UDP for this long is gone.
 const SILENT: Duration = Duration::from_secs(10);
 const HELLO_EVERY: Duration = Duration::from_millis(50);
-/// Often enough that each viewer report (once a second) has round trips
+/// Often enough that each viewer report has round trips
 /// to tell a filling queue from the path's base; a ping is 16 bytes.
-const PING_EVERY: Duration = Duration::from_millis(100);
+const PING_EVERY: Duration = Duration::from_millis(20);
 /// Keyframes for requests at most this often: a burst of requests for one
 /// loss must not turn into a burst of keyframes.
 const KEYFRAME_GAP: Duration = Duration::from_millis(50);
@@ -200,7 +200,22 @@ impl Server {
             ));
         }
         let encodable = video::encodable();
-        let Some(codec) = req.codecs.iter().copied().find(|c| encodable.contains(c)) else {
+        // Best first, of those this host encodes at the size it would send.
+        let candidates: Vec<Codec> = req
+            .codecs
+            .iter()
+            .copied()
+            .filter(|c| encodable.contains(c))
+            .filter(|&c| {
+                let (w, h, _) = video::limits(c).fit(
+                    even(req.width.clamp(64, control::MAX_SIDE)),
+                    even(req.height.clamp(64, control::MAX_SIDE)),
+                    1,
+                );
+                video::takes(c, w, h)
+            })
+            .collect();
+        let Some(&codec) = candidates.first() else {
             return Err(Refusal::new(
                 406,
                 format!(
@@ -219,7 +234,9 @@ impl Server {
         );
         // A host encoding in software, as it measured its CPU (or, until
         // then, conservatively): whatever the viewer fitted, or did not.
-        if let Some(ceiling) = crate::software::ceiling() {
+        if let Some(ceiling) =
+            crate::software::ceiling().filter(|_| !video::hardware_encodes(codec))
+        {
             (width, height, fps) = ceiling.fit(width, height, fps);
         }
         if (width, height, fps) != (req.width, req.height, req.fps) {
@@ -272,14 +289,36 @@ impl Server {
             peer,
             opening: Some(opening),
         };
-        let config = VideoConfig {
+        let mut config = VideoConfig {
             width: prepared.req.width,
             height: prepared.req.height,
             fps: prepared.req.fps,
             bitrate_kbps: prepared.req.bitrate_kbps,
             codec,
         };
-        let pipeline = video::open(&config)
+        let mut opened = video::open(&config);
+        // A codec whose only encoder will not open here gives way to the
+        // next the viewer takes, at the same size.
+        for &next in &candidates[1..] {
+            match &opened {
+                Err(e) if video::Unencodable::is(e) => {
+                    self.log(format!("{e:#}; trying {}", next.name()));
+                    config.codec = next;
+                    config.bitrate_kbps = config.bitrate_kbps.min(video::limits(next).max_kbps);
+                    if let Some(ceiling) =
+                        crate::software::ceiling().filter(|_| !video::hardware_encodes(next))
+                    {
+                        config.fps = ceiling.fit(config.width, config.height, config.fps).2;
+                    }
+                    prepared.req.fps = config.fps;
+                    prepared.req.bitrate_kbps = config.bitrate_kbps;
+                    prepared.codec = next;
+                    opened = video::open(&config);
+                }
+                _ => break,
+            }
+        }
+        let pipeline = opened
             .map_err(|e| Refusal::new(500, format!("could not capture the screen: {e:#}")))?;
         prepared.info = Some(pipeline.info());
         prepared.pipeline = Some((pipeline, config));
@@ -538,6 +577,7 @@ impl Server {
         let mut controller =
             crate::congestion::Controller::new(accept.bitrate_kbps, Instant::now());
         let requested_bitrate = accept.bitrate_kbps;
+        let mut fec_loss = 0.0;
         let mut last_keepalive = Instant::now();
         let mut last_hello = Instant::now() - HELLO_EVERY;
         let mut last_ping = Instant::now();
@@ -580,7 +620,7 @@ impl Server {
                     let now = Instant::now();
                     let (then, before) = std::mem::replace(&mut sent_mark, (now, bytes));
                     let secs = now.duration_since(then).as_secs_f64();
-                    if secs >= 0.1 {
+                    if secs >= 0.025 {
                         controller.observe_sent(
                             (bytes.saturating_sub(before) as f64 * 8.0 / 1000.0 / secs) as u32,
                         );
@@ -603,14 +643,16 @@ impl Server {
                         );
                     }
                     session.pace_kbps.store(
-                        if controller.pacing() || r.loss_pct >= 1.5 {
+                        if controller.pacing() {
                             controller.budget()
                         } else {
                             0
                         },
                         Ordering::Relaxed,
                     );
-                    let fec = fec_percent_for(r.loss_pct, controller.base_rtt()).min(30);
+                    fec_loss =
+                        latch_proto::video::fec_loss_sample(fec_loss, r.loss_pct, now - then);
+                    let fec = fec_percent_for(fec_loss, controller.base_rtt()).min(30);
                     session.fec.store(fec, Ordering::Relaxed);
                     let status = self.status();
                     let report = control::Report {
@@ -673,6 +715,17 @@ impl Server {
         session.stop.store(true, Ordering::Release);
         if let Some(mut w) = session.control_writer.lock().take() {
             let _ = w.flush();
+        }
+        // Close our side first and read until the viewer closes too, for at
+        // most two report intervals: a report arriving at a fully closed
+        // socket draws a reset, which can discard the End before the viewer
+        // has read it (Windows does), and 50 ms reports are often in flight.
+        let _ = tcp.shutdown(Shutdown::Write);
+        let linger = Instant::now() + Duration::from_millis(100);
+        while let Some(left) = linger.checked_duration_since(Instant::now()) {
+            if let Err(mpsc::RecvTimeoutError::Disconnected) = inbox.recv_timeout(left) {
+                break;
+            }
         }
         let _ = tcp.shutdown(Shutdown::Both);
         if let Some(v) = video {
@@ -1031,6 +1084,11 @@ fn send_video(
     });
 }
 
+fn recovery_due(last: Option<Instant>, now: Instant, rtt: Option<Duration>) -> bool {
+    let gap = rtt.unwrap_or_default().max(KEYFRAME_GAP);
+    last.is_none_or(|at| now.saturating_duration_since(at) >= gap)
+}
+
 fn encode_video(
     server: &Server,
     session: &Session,
@@ -1058,7 +1116,7 @@ fn encode_video(
             session.transport.applied.store(target, Ordering::Relaxed);
         }
         pipeline.set_cursor_drawn(session.draw_cursor.load(Ordering::Relaxed));
-        let due = last_keyframe.is_none_or(|t| t.elapsed() >= KEYFRAME_GAP);
+        let due = recovery_due(last_keyframe, Instant::now(), session.rtt.lock().srtt());
         let keyframe = due && session.keyframe.swap(false, Ordering::AcqRel);
         // Short idle repeats bound how long a request arriving inside next
         // waits. Send every returned frame: discarding an encoded repeat
@@ -1067,6 +1125,11 @@ fn encode_video(
             Ok(f) => f,
             Err(e) => {
                 if session.stopping() {
+                    return;
+                }
+                if video::Unencodable::is(&e) {
+                    server.log(format!("video stopped: {e:#}"));
+                    session.end(end::ENCODER_FAILED, &unencodable(config.codec, &e));
                     return;
                 }
                 server.log(format!("video stopped: {e:#}; starting it again"));
@@ -1091,6 +1154,11 @@ fn encode_video(
                         Ok(p) => {
                             pipeline = p;
                             break;
+                        }
+                        Err(e) if video::Unencodable::is(&e) => {
+                            server.log(format!("video reopen failed: {e:#}"));
+                            session.end(end::ENCODER_FAILED, &unencodable(config.codec, &e));
+                            return;
                         }
                         Err(e) => {
                             server.log(format!("video reopen failed: {e:#}"));
@@ -1149,6 +1217,7 @@ fn paced_video(
 ) {
     crate::priority::media_thread();
     let mut packetizer = Packetizer::new(session.id);
+    let mut sender = latch_proto::transport::SendBatch::default();
     let mut pacer = crate::pacing::Pacer::new(Instant::now());
     while !session.stopping() {
         let (frame, queued) = match rx.recv_timeout(Duration::from_millis(20)) {
@@ -1167,22 +1236,34 @@ fn paced_video(
             host_delay: delay,
         };
         let pace = session.pace_kbps.load(Ordering::Relaxed);
-        packetizer.packetize(&out, |datagram| {
-            loop {
-                if session.stopping() {
-                    return;
+        packetizer.packetize_batches(&out, |batch| {
+            if pace == 0 {
+                if !session.stopping() {
+                    session
+                        .transport
+                        .queue_us
+                        .fetch_max(queued.elapsed().as_micros() as u64, Ordering::Relaxed);
+                    send_batch(&mut sender, &server.udp, session, batch, addr);
                 }
-                session
-                    .transport
-                    .queue_us
-                    .fetch_max(queued.elapsed().as_micros() as u64, Ordering::Relaxed);
-                let wait = pacer.delay(Instant::now(), datagram.len(), pace);
-                if wait.is_zero() {
-                    break;
-                }
-                std::thread::sleep(wait.min(Duration::from_millis(5)));
+                return;
             }
-            send(&server.udp, session, datagram, addr);
+            for datagram in batch {
+                loop {
+                    if session.stopping() {
+                        return;
+                    }
+                    session
+                        .transport
+                        .queue_us
+                        .fetch_max(queued.elapsed().as_micros() as u64, Ordering::Relaxed);
+                    let wait = pacer.delay(Instant::now(), datagram.len(), pace);
+                    if wait.is_zero() {
+                        break;
+                    }
+                    std::thread::sleep(wait.min(Duration::from_millis(5)));
+                }
+                send(&server.udp, session, datagram, addr);
+            }
         });
         session.frames.fetch_add(1, Ordering::Relaxed);
     }
@@ -1273,6 +1354,41 @@ fn audio_problem(server: &Server, session: &Session, message: String) {
     *session.audio_notice.lock() = Some(message);
 }
 
+/// Retry only an unsent suffix: batch syscalls can succeed partially.
+fn send_batch(
+    sender: &mut latch_proto::transport::SendBatch,
+    udp: &UdpSocket,
+    session: &Session,
+    batch: &[Vec<u8>],
+    to: SocketAddr,
+) {
+    let mut sent = 0;
+    let mut failures = 0;
+    while sent < batch.len() && !session.stopping() {
+        match sender.send(udp, &batch[sent..], to) {
+            Ok(n) if n > 0 => {
+                let bytes: usize = batch[sent..sent + n].iter().map(Vec::len).sum();
+                session.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+                sent += n;
+                failures = 0;
+            }
+            result => {
+                session.transport.errors.fetch_add(1, Ordering::Relaxed);
+                failures += 1;
+                let retry = result
+                    .err()
+                    .is_some_and(|e| latch_proto::transport::send_buffer_full(&e));
+                if !retry || failures >= 3 {
+                    session.keyframe.store(true, Ordering::Release);
+                    return;
+                }
+                session.transport.retries.fetch_add(1, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_micros(200));
+            }
+        }
+    }
+}
+
 /// One datagram, retried briefly when the socket's buffer is full (macOS
 /// says ENOBUFS when a keyframe outruns the interface).
 fn send(udp: &UdpSocket, session: &Session, datagram: &[u8], to: SocketAddr) {
@@ -1297,6 +1413,15 @@ fn send(udp: &UdpSocket, session: &Session, datagram: &[u8], to: SocketAddr) {
 
 fn even(v: u32) -> u32 {
     v & !1
+}
+
+/// Why a session ended for its codec: the viewer reconnects, and the host
+/// negotiates another.
+fn unencodable(codec: Codec, error: &anyhow::Error) -> String {
+    format!(
+        "The host's {} encoder cannot go on ({error:#}); reconnecting picks another codec.",
+        codec.name()
+    )
 }
 
 fn names(codecs: &[Codec]) -> String {

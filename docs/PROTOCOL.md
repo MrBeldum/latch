@@ -77,10 +77,10 @@ type byte and the payload and is at most 65 536. Payloads are JSON objects.
 | Type | Name | Direction | Payload |
 | --- | --- | --- | --- |
 | 1 | `Accept` | host → viewer | see below; always the first message |
-| 2 | `End` | either | `{"code": u32, "message": string}`; the sender closes after it |
+| 2 | `End` | either | `{"code": u32, "message": string}`; the sender closes after it (a host half-closes and reads for up to 100 ms first, so a report in flight cannot reset the connection before the viewer reads the End) |
 | 3 | `Keepalive` | either | `{}` |
 | 4 | `Notice` | host → viewer | `{"kind": "audio" \| "video" \| "input", "message": string}`; `message` empty clears it |
-| 5 | `Report` | either | `{"fps", "loss_pct", "decode_ms", "rtt_ms"}`, every 250 ms (legacy viewers: once a second), for bitrate and FEC feedback |
+| 5 | `Report` | either | `{"fps", "loss_pct", "decode_ms", "rtt_ms"}`, every 50 ms (older viewers: 250 ms or once a second), for bitrate and FEC feedback |
 | 6 | `Cursor` | host → viewer | `{"visible": bool, "shape": null \| {"serial": u32, "width": u32, "height": u32, "hot_x": u32, "hot_y": u32, "rgba": "<base64>"}}`; only after an `Accept` with `cursor` true; sent when visibility or shape changes (`shape` null: unchanged); straight-alpha RGBA, at most 96×96 |
 | 7 | `DrawCursor` | viewer → host | `{"draw": bool}`; tells host whether to composite pointer into video |
 
@@ -248,11 +248,11 @@ once for every `Input` datagram.
 
 ### KeyframeRequest (6)
 
-`u32 last` at offset 8: the last frame the viewer decoded. The viewer sends
+`u32 last` at offset 8: the last frame the reassembler delivered to decode. The viewer sends
 it when a frame is lost, and again every 100 ms (or the measured round
 trip, if longer) until a keyframe newer than `last` arrives. The host
-answers with an IDR frame; it encodes at most one keyframe per 50 ms for
-requests.
+answers with an IDR frame; it encodes at most one requested keyframe per max(50 ms, smoothed RTT).
+Duplicate requests with the same `last` are additionally throttled for 250 ms.
 
 At session start the viewer waits for the host's first keyframe without
 requesting another one, unless a frame is declared lost.
@@ -261,7 +261,7 @@ requesting another one, unless a frame is declared lost.
 
 `Ping` carries `u64 time` at offset 8, the sender's clock. The receiver
 answers at once with a `Pong` carrying the same `time`. The viewer pings
-twice a second, the host ten times a second (the lowest round trip between
+twice a second, the host fifty times a second (the lowest round trip between
 two viewer reports tells a filling queue from the path's base), and each
 keeps a smoothed round trip and its variance. No clocks are compared
 across machines.
@@ -344,7 +344,8 @@ The values start from the codec's top level (H.264 6.2, HEVC Main 6.2
 High tier, AV1 6.3 High tier: 8192 × 4352 pixels a picture, 4.28 billion
 a second, 800 Mbps, H.264 High 1 Gbps) and are lowered where the
 platform's encoder has a smaller limit it can be seen to have (macOS:
-VideoToolbox is tried at a ladder of sizes until one encodes in hardware).
+VideoToolbox is tried at a ladder of sizes until one encodes in hardware;
+Linux: NVENC and VA-API say theirs).
 A picture is counted as coded, in whole 16-pixel blocks
 (`latch_proto::control::fit`, which host and viewer both use): an M3 Pro's
 H.264 takes 4096 × 2160 and fails 3776 × 2352, fewer pixels but more
@@ -352,6 +353,8 @@ blocks.
 `streamer.max_fps`, when not 0, is the software encoder's frame rate on
 that CPU at `capture_size` (or 1920 × 1080), measured by the host rather
 than guessed; a viewer asking for fewer pixels scales it up in proportion.
+A Linux host whose hardware encodes some codecs reports 0 here and puts
+the software rate in the other codecs' `max_pixel_rate` instead.
 Until the measurement (taken when the host starts, about 1.5 s) ends, a
 host encoding in software reports 30 fps at 1080p, and it holds every
 request to what it reports, pixels a second, whatever the viewer asked:
@@ -366,8 +369,8 @@ original four-field report. No datagram layout or protocol number changes.
 Viewer reports add `received_kbps` (received media rate), `frames_lost`
 (unrecovered frames in the last measurement window), `unrecovered_loss_pct`
 (optional; absence means legacy raw loss), `queue_ms` (decode queue age),
-and `window_ms` (measurement duration). Measurements and reports use 250 ms
-windows. Raw `loss_pct` includes FEC-recovered shards; recovery alone is
+and `window_ms` (measurement duration). New measurements and reports use 50 ms
+windows (older peers retain their 250 ms or one-second windows). Raw `loss_pct` includes FEC-recovered shards; recovery alone is
 not congestion. RTT is milliseconds on the reporter's clock.
 
 Hosts may reply using the existing Report type, adding
@@ -389,15 +392,26 @@ Protocol 1 and every UDP layout remain unchanged. Cursor support is opt-in:
 5.0.1 peers keep their host-drawn cursor. Unknown control message types remain
 ignored. Added report fields default on read; old JSON readers ignore them.
 
-`engine::congestion` is the only bitrate controller. Report windows are 250 ms
-(new viewers) or one second (legacy). Host ping samples at 10 Hz supply each
-window's lowest RTT; a standing rise above max(10 ms, base RTT / 4) is pressure.
-Budget cuts account for actual wire throughput. Parity uses raw loss with a
-base-RTT floor (15% at 40 ms, 20% at 100 ms), capped at 30%. Data shards for the
-whole frame precede parity computation and transmission. Clean paths bypass
-send pacing; loss/queue pressure enables the bounded wire-byte token bucket.
-See [ENGINE.md](ENGINE.md#decisions) for the retained consumer controller,
-transport telemetry, audio latency bounds and platform pipeline choices.
+`engine::congestion` is the only bitrate controller. New report windows are
+50 ms; old 250 ms / one-second reports remain valid. Host pings at 50 Hz supply
+each window's lowest RTT. A smoothed increasing delay gradient or standing rise
+above max(6 ms, base RTT / 10, 3× ping jitter) is pressure, as are uncorrected
+loss and lost frames at any raw loss. Two windows trigger a budget cut; one
+does when `received_kbps` is under half the host's send rate while loss is
+above 10% or delay above 20 ms (reports without `received_kbps` never do).
+Clean recovery doubles the budget per 400 ms of actual time between reports
+(up to 2 s apart) back to just under the last sustainable rate, then probes
+above it in bounded, RTT-aware steps; it is capped below a policer's rate for
+three seconds after loss without queueing. The wire floor is 1 Mbps. Legacy
+reports without `unrecovered_loss_pct` count raw loss above 10% (or any lost
+frame) as damage.
+The session starts at its ceiling, and clean paths bypass pacing. Recovered
+random loss alone enables neither cuts nor pacing. Parity uses fast-attack,
+two-second-decay raw loss with a base-RTT floor (15% at 40 ms, 20% at 100 ms),
+capped at 30%. Data shards precede parity computation and transmission; a
+completed frame is handed to decode immediately, including mid-receive-batch.
+Protocol 1 datagrams remain at most 1200 bytes. No MTU or socket-offload
+capability is advertised by this change.
 
 ## AV1 and decoder precision
 
@@ -410,3 +424,28 @@ include the sequence header; the existing keyframe flag and recovery rules
 apply; no UDP header or control message changes. The viewer supports Main
 4:2:0, eight or ten bits. HEVC still negotiates SDR; P010 decoder output is a
 local API choice for future HDR work, not an HDR capability on the wire.
+
+## Proposal: reference-frame invalidation (not implemented)
+
+Negotiate `reference_invalidation: true` in both StreamRequest and Accept,
+with serde default false. Only send the proposed message when both endpoints
+advertise it; protocol 1 peers without the capability keep KeyframeRequest.
+Reserve a future UDP kind after checking the then-current registry. Its payload
+should contain `u32 last_delivered`, `u32 first_invalid`, `u32 last_invalid`
+(inclusive wrapping frame numbers), and `u32 request_id`. Numbers are those
+already used by Video shards; `last_delivered` has exactly KeyframeRequest's
+semantics, never "the missing frame" or "last received shard".
+
+On loss, the viewer stops reference-dependent delivery and repeats the same
+request_id at max(100 ms, RTT). The host invalidates the indicated references
+only when its encoder can retain a known-good reference at/before last_delivered;
+it acknowledges request_id and the first safe recovery frame. The viewer resumes
+only at that frame, after complete FEC reassembly, and discards obsolete replies
+using wrapping sequence comparisons. Duplicate requests are idempotent. If no
+safe reference remains, either endpoint falls back to the existing IDR request,
+with the same max(50 ms, RTT) host gate. Never send an unnegotiated new kind.
+
+This needs encoder reference bookkeeping, recovery-frame marking, and a loss
+matrix test with an actual supporting encoder. No message plumbing is shipped
+without those semantics: an acknowledgment must not promise a recoverable frame
+that the encoder cannot produce.

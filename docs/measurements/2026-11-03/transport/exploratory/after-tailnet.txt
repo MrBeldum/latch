@@ -1,0 +1,42 @@
+
+mac-linux target=100
+buffers SocketBuffers { send: 8388608, receive: 8388608 }
+buffers SocketBuffers { send: 16777216, receive: 16777216 }
+{"receive":false,"seconds":5.001,"media_mbps":99.987,"pps":11879,"cpu_percent":27.56,"cpu_us_per_Mbit":2756.19,"frames":600,"packets":59400,"errors":0}
+reassembly ReassemblyStats { frames_delivered: 599, frames_lost: 1, frames_skipped: 0, shards_received: 53396, shards_recovered: 0, shards_late: 5992, shards_missing: 6 }
+{"receive":true,"seconds":5.000,"media_mbps":99.823,"pps":11876,"cpu_percent":4.98,"cpu_us_per_Mbit":499.17,"frames":599,"packets":59388,"errors":0}
+
+mac-linux target=300
+buffers SocketBuffers { send: 8388608, receive: 8388608 }
+buffers SocketBuffers { send: 16777216, receive: 16777216 }
+{"receive":false,"seconds":5.036,"media_mbps":294.408,"pps":34976,"cpu_percent":47.57,"cpu_us_per_Mbit":1615.90,"frames":593,"packets":176121,"errors":0}
+{"receive":true,"seconds":2.707,"media_mbps":94.210,"pps":18140,"cpu_percent":7.45,"cpu_us_per_Mbit":790.86,"frames":102,"packets":49100,"errors":0}
+reassembly ReassemblyStats { frames_delivered: 102, frames_lost: 208, frames_skipped: 0, shards_received: 45793, shards_recovered: 78, shards_late: 3307, shards_missing: 33734 }
+
+mac-linux target=0
+buffers SocketBuffers { send: 8388608, receive: 8388608 }
+buffers SocketBuffers { send: 16777216, receive: 16777216 }
+{"receive":false,"seconds":5.005,"media_mbps":342.174,"pps":40650,"cpu_percent":54.04,"cpu_us_per_Mbit":1579.18,"frames":685,"packets":203445,"errors":0}
+reassembly ReassemblyStats { frames_delivered: 55, frames_lost: 239, frames_skipped: 0, shards_received: 33888, shards_recovered: 56, shards_late: 1983, shards_missing: 37433 }
+{"receive":true,"seconds":2.169,"media_mbps":63.394,"pps":16538,"cpu_percent":7.39,"cpu_us_per_Mbit":1165.66,"frames":55,"packets":35871,"errors":0}
+
+linux-mac target=100
+buffers SocketBuffers { send: 8388608, receive: 8388608 }
+buffers SocketBuffers { send: 16777216, receive: 16777216 }
+{"receive":false,"seconds":5.000,"media_mbps":99.998,"pps":11880,"cpu_percent":5.49,"cpu_us_per_Mbit":549.25,"frames":600,"packets":59400,"errors":0}
+reassembly ReassemblyStats { frames_delivered: 449, frames_lost: 151, frames_skipped: 0, shards_received: 42429, shards_recovered: 29, shards_late: 4519, shards_missing: 3069 }
+{"receive":true,"seconds":5.008,"media_mbps":74.710,"pps":9374,"cpu_percent":7.52,"cpu_us_per_Mbit":1006.76,"frames":449,"packets":46948,"errors":0}
+
+linux-mac target=300
+buffers SocketBuffers { send: 8388608, receive: 8388608 }
+buffers SocketBuffers { send: 16777216, receive: 16777216 }
+{"receive":false,"seconds":5.000,"media_mbps":299.990,"pps":35639,"cpu_percent":13.81,"cpu_us_per_Mbit":460.29,"frames":600,"packets":178200,"errors":0}
+reassembly ReassemblyStats { frames_delivered: 41, frames_lost: 558, frames_skipped: 0, shards_received: 57049, shards_recovered: 151, shards_late: 2184, shards_missing: 57683 }
+{"receive":true,"seconds":5.086,"media_mbps":20.152,"pps":11646,"cpu_percent":8.66,"cpu_us_per_Mbit":4297.84,"frames":41,"packets":59233,"errors":0}
+
+linux-mac target=0
+buffers SocketBuffers { send: 8388608, receive: 8388608 }
+buffers SocketBuffers { send: 16777216, receive: 16777216 }
+{"receive":false,"seconds":5.001,"media_mbps":2734.161,"pps":324818,"cpu_percent":97.24,"cpu_us_per_Mbit":355.63,"frames":5469,"packets":1624293,"errors":0}
+reassembly ReassemblyStats { frames_delivered: 5, frames_lost: 5425, frames_skipped: 0, shards_received: 70767, shards_recovered: 16, shards_late: 299, shards_missing: 759393 }
+{"receive":true,"seconds":5.083,"media_mbps":2.459,"pps":13982,"cpu_percent":10.17,"cpu_us_per_Mbit":41369.20,"frames":5,"packets":71066,"errors":0}

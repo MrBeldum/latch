@@ -1,0 +1,147 @@
+    Finished `release` profile [optimized] target(s) in 0.28s
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling windows-link v0.2.1
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling serde_core v1.0.229
+   Compiling zmij v1.0.23
+   Compiling windows-sys v0.61.2
+   Compiling socket2 v0.6.5
+   Compiling syn v3.0.4
+   Compiling serde_json v1.0.151
+   Compiling serde_derive v1.0.229
+   Compiling serde v1.0.229
+   Compiling latch-proto v5.1.0 (C:\Users\Daniel\dev\latch-gfn-b2\crates\proto)
+    Finished `test` profile [optimized + debuginfo] target(s) in 22.15s
+     Running unittests src\lib.rs (target\debug\deps\latch_proto-213b95d7572c3215.exe)
+
+running 25 tests
+test base64::tests::base64_rfc_vectors ... ok
+test base64::tests::base64_roundtrip_binary ... ok
+test base64::tests::preserves_dimensions_within_96 ... ok
+test fec::tests::benchmark_fec ... ignored
+test base64::tests::downscales_when_exceeding_96 ... ok
+test control::tests::accept_backward_compatible ... ok
+test control::tests::draw_cursor_message_wire_roundtrip ... ok
+test control::tests::stream_request_backward_compatible ... ok
+test control::tests::unknown_message_type_ignored ... ok
+test control::tests::cursor_messages_wire_roundtrip ... ok
+test control::tests::cursor_json_format_matches_spec ... ok
+test control::tests::cursor_max_shape_fits_max_message ... ok
+test fec::tests::mismatched_lengths ... ok
+test fec::tests::parity_only_reconstruction ... ok
+test fec::tests::too_few_shards ... ok
+test input::fallible_tests::an_event_that_never_injects_is_dropped_and_the_rest_go_on ... ok
+test input::fallible_tests::failed_release_is_retried_before_acknowledging ... ok
+test fec::tests::exhaustive_small ... ok
+test video::tests::every_data_shard_goes_out_before_any_parity ... ok
+test transport::tests::segmented_runs_arrive_as_separate_datagrams ... ok
+test fec::tests::test_encode_matches_scalar ... segmented batches 2, coalesced datagrams 0
+ok
+test transport::tests::batches_preserve_boundaries_and_never_wait_for_more ... ok
+test fec::tests::random_patterns_large ... ok
+test fec::tests::multiply_accumulate_matches_scalar_for_all_coefficients ... ok
+test fec::tests::test_simd_addmul_matches_scalar ... ok
+
+test result: ok. 24 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\protocol.rs (target\debug\deps\protocol-08943adb0bad2bbf.exe)
+
+running 12 tests
+test bottleneck_serializes_bounds_and_removes_queue ... ok
+test legacy_report_is_additive_and_socket_errors_are_portable ... ok
+test test_7_performance_video_and_fec ... ignored
+test recovered_audio_pts_follows_negotiated_five_ms_packets ... ok
+test lost_startup_idr_requests_recovery_and_accepts_next_idr ... ok
+test startup_grace_bounds_silence_and_allows_a_healthy_idr_to_finish ... ok
+test test_6_control_messages_roundtrip_and_errors ... ok
+Test 4 (Audio) Results: 1000 outputs (985 delivered, 15 missing). Stats: received 862, rebuilt 126, given up 15
+test test_4_audio_5_pct_loss ... ok
+Test 2 (Burst) Results: Delivered 32/40 (80.0%)
+test test_2_burst_loss_and_no_impairment ... ok
+test test_3_input_10k_events_lossy_link ... ok
+Test 1 Results: Delivered 60/60 (100.0%), Lost: 0, Skipped: 0, Missing shards: 0, Recovered shards: 1760
+test test_1_random_video_frames_lossy_link ... ok
+test test_5_wire_fuzz_random_and_mutations ... ok
+
+test result: ok. 11 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests\regressions.rs (target\debug\deps\regressions-ab8eb8b7efda046f.exe)
+
+running 18 tests
+test audio_given_up_at_the_end_of_a_sound_leaves_no_deadline_behind ... ok
+test audio_after_a_lost_packet_is_released_when_the_host_goes_quiet ... ok
+test audio_packetizer_limits_data_and_parity_without_consuming_rejected_sequence ... ok
+test audio_resynchronizes_across_sequence_wrap ... ok
+test another_frames_timeout_leaves_an_assembling_frame_alone ... ok
+test input_backlog_waits_for_ack_or_resend_without_spinning ... ok
+test input_continuous_motion_retransmits_oldest_after_loss ... ok
+test audio_recovers_after_long_blackout_with_data_or_parity_first ... ok
+test reordered_audio_parity_does_not_discard_data_that_arrives_after_it ... ok
+test wire_rejects_oversized_datagrams_of_every_kind ... ok
+test input_full_queue_never_changes_sent_payload_or_moves_across_keys ... ok
+test video_timeout_advances_past_head_with_no_shards ... ok
+test video_initial_keyframe_requests_start_only_after_loss ... ok
+test input_full_queue_preserves_relative_motion_without_saturation ... ok
+test input_overflow_preserves_oldest_and_critical_events ... ok
+test input_backlog_never_discards_critical_events_or_creates_sequence_gaps ... ok
+test input_receiver_buffers_the_hard_cap_window ... ok
+test input_lost_ack_does_not_mutate_already_applied_motion ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+   Doc-tests latch_proto
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Checking windows-sys v0.61.2
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+    Checking tracing-core v0.1.36
+    Checking bitflags v2.13.1
+    Checking smallvec v1.16.0
+    Checking bytemuck v1.25.2
+    Checking latch-codec v5.1.0 (C:\Users\Daniel\dev\latch-gfn-b2\crates\codec)
+    Checking log v0.4.34
+    Checking parking_lot_core v0.9.12
+    Checking png v0.18.1
+    Checking parking_lot v0.12.5
+    Checking image v0.25.10
+    Checking socket2 v0.6.5
+    Checking if-addrs v0.15.0
+    Checking mio v1.2.4
+   Compiling serde_derive v1.0.229
+   Compiling windows-interface v0.59.3
+   Compiling windows-implement v0.60.2
+   Compiling tracing-attributes v0.1.31
+   Compiling windows-implement v0.58.0
+   Compiling windows-interface v0.58.0
+    Checking serde v1.0.229
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking toml_edit v0.22.27
+    Checking latch-proto v5.1.0 (C:\Users\Daniel\dev\latch-gfn-b2\crates\proto)
+    Checking toml v0.8.23
+    Checking windows-core v0.58.0
+    Checking windows-core v0.62.2
+    Checking windows v0.58.0
+    Checking windows-numerics v0.3.1
+    Checking windows-collections v0.3.2
+    Checking windows-future v0.3.2
+    Checking windows v0.62.2
+    Checking tracing v0.1.44
+    Checking latch-core v5.1.0 (C:\Users\Daniel\dev\latch-gfn-b2\crates\core)
+    Checking cpal v0.18.2
+    Checking latch-stream v5.1.0 (C:\Users\Daniel\dev\latch-gfn-b2\crates\stream)
+    Checking latch-engine v5.1.0 (C:\Users\Daniel\dev\latch-gfn-b2\crates\engine)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 53.13s
+
+
+ExecutablePath : C:\Users\Daniel\AppData\Local\Latch\latch-host.exe
+CommandLine    : "C:\Users\Daniel\AppData\Local\Latch\latch-host.exe" --background
+
+
+

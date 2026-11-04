@@ -959,46 +959,53 @@ mod tests {
     #[test]
     #[ignore]
     fn benchmark_fec() {
-        let (d, p, shard_len) = (64, 7, 1172);
-        let coder = ReedSolomon::new(d, p).unwrap();
-        let data: Vec<Vec<u8>> = (0..d).map(|_| vec![0xaa; shard_len]).collect();
-        let refs: Vec<_> = data.iter().map(Vec::as_slice).collect();
-        let mut parity = vec![vec![0; shard_len]; p];
-        let mut out: Vec<_> = parity.iter_mut().map(Vec::as_mut_slice).collect();
+        for (d, p, shard_len) in [
+            (64, 7, 1172),
+            (64, 20, 1172),
+            (128, 14, 1172),
+            (200, 55, 1172),
+        ] {
+            let coder = ReedSolomon::new(d, p).unwrap();
+            let data: Vec<Vec<u8>> = (0..d).map(|_| vec![0xaa; shard_len]).collect();
+            let refs: Vec<_> = data.iter().map(Vec::as_slice).collect();
+            let mut parity = vec![vec![0; shard_len]; p];
+            let mut out: Vec<_> = parity.iter_mut().map(Vec::as_mut_slice).collect();
 
-        let iterations = 1000;
-        let start = Instant::now();
-        for _ in 0..iterations {
-            coder.encode(&refs, &mut out).unwrap();
-        }
-        let encode_time = start.elapsed();
-        let total_bytes = iterations as f64 * (d * shard_len) as f64;
-        let mb_per_sec = (total_bytes / (1024.0 * 1024.0)) / encode_time.as_secs_f64();
+            let iterations = 1000;
+            let start = Instant::now();
+            for _ in 0..iterations {
+                coder.encode(&refs, &mut out).unwrap();
+            }
+            let encode_time = start.elapsed();
+            let total_bytes = iterations as f64 * (d * shard_len) as f64;
+            let mb_per_sec = (total_bytes / (1024.0 * 1024.0)) / encode_time.as_secs_f64();
 
-        let all: Vec<_> = data.iter().chain(&parity).cloned().collect();
-        let mut shards: Vec<Option<Vec<u8>>> = all.into_iter().map(Some).collect();
-        for s in shards.iter_mut().take(p) {
-            *s = None;
-        }
+            let all: Vec<_> = data.iter().chain(&parity).cloned().collect();
+            let mut shards: Vec<Option<Vec<u8>>> = all.into_iter().map(Some).collect();
+            for s in shards.iter_mut().take(p) {
+                *s = None;
+            }
 
-        let mut single_shards = shards.clone();
-        let start = Instant::now();
-        coder.reconstruct(&mut single_shards).unwrap();
-        let recon_single_time = start.elapsed();
+            let mut single_shards = shards.clone();
+            let start = Instant::now();
+            coder.reconstruct(&mut single_shards).unwrap();
+            let recon_single_time = start.elapsed();
 
-        let recon_iterations = 1000;
-        let start = Instant::now();
-        for _ in 0..recon_iterations {
-            let mut s = shards.clone();
-            coder.reconstruct(&mut s).unwrap();
-        }
-        let recon_time = start.elapsed();
-        let recon_total_bytes = recon_iterations as f64 * (d * shard_len) as f64;
-        let recon_mb_per_sec = (recon_total_bytes / (1024.0 * 1024.0)) / recon_time.as_secs_f64();
+            let recon_iterations = 1000;
+            let start = Instant::now();
+            for _ in 0..recon_iterations {
+                let mut s = shards.clone();
+                coder.reconstruct(&mut s).unwrap();
+            }
+            let recon_time = start.elapsed();
+            let recon_total_bytes = recon_iterations as f64 * (d * shard_len) as f64;
+            let recon_mb_per_sec =
+                (recon_total_bytes / (1024.0 * 1024.0)) / recon_time.as_secs_f64();
 
-        println!(
-            "FEC 64+7 x 1172: encode {:.1} MB/s ({:?} for {} iter), reconstruct {:.1} MB/s ({:?} for 1 iter, {:?} for {} iter)",
+            println!(
+            "FEC {d}+{p} x {shard_len}: encode {:.1} MB/s ({:?} for {} iter), reconstruct {:.1} MB/s ({:?} for 1 iter, {:?} for {} iter)",
             mb_per_sec, encode_time, iterations, recon_mb_per_sec, recon_single_time, recon_time, recon_iterations
         );
+        }
     }
 }

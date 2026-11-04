@@ -2071,6 +2071,7 @@ dependencies = [
  "latch-proto",
  "latch-stream",
  "libc",
+ "libloading",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-core-media",
@@ -2126,6 +2127,7 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

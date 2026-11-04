@@ -1,0 +1,16 @@
+STEADY steady20 mean=16340.8 sd=3562.8 queue_p95=16.952 lost=19 skipped=1 min=10000 final=16984
+STEADY steady50 mean=41715.5 sd=8287.5 queue_p95=11.998 lost=22 skipped=0 min=19248 final=32768
+STEADY steady100 mean=91955.1 sd=11912.6 queue_p95=10.538 lost=22 skipped=2 min=38497 final=91120
+STEADY cap20rtt150 mean=15899.7 sd=5206.2 queue_p95=36.576 lost=154 skipped=687 min=10000 final=11576
+STEADY cap20rtt250 mean=16763.4 sd=6343.7 queue_p95=37.752 lost=422 skipped=843 min=10000 final=19994
+STEADY cap100rtt150 mean=80104.3 sd=30160.3 queue_p95=34.909 lost=235 skipped=798 min=37600 final=66205
+STEADY cap100rtt250 mean=90075.3 sd=36263.7 queue_p95=37.910 lost=572 skipped=861 min=37600 final=55443
+STEADY rtt150 mean=42605.7 sd=15474.8 queue_p95=36.806 lost=393 skipped=786 min=19168 final=33621
+STEADY rtt250 mean=45108.9 sd=17430.5 queue_p95=37.366 lost=565 skipped=929 min=19168 final=46615
+STEADY slow250 mean=45290.5 sd=13056.2 queue_p95=38.838 lost=621 skipped=168 min=31450 final=38181
+STEADY legacy1000 mean=45776.1 sd=13691.2 queue_p95=38.944 lost=718 skipped=0 min=19260 final=32100
+STEADY legacy_radio mean=12751.8 sd=6789.4 queue_p95=1.024 lost=13 skipped=40 min=10000 final=10000
+STEADY cap2 mean=10000.0 sd=0.0 queue_p95=38.440 lost=4184 skipped=0 min=10000 final=10000
+STEADY cap5 mean=10000.0 sd=0.0 queue_p95=39.152 lost=4184 skipped=0 min=10000 final=10000
+STEADY route mean=10477.0 sd=5903.6 queue_p95=0.922 lost=0 skipped=0 min=10000 final=10000
+STEADY lan1g mean=1000000.0 sd=0.0 queue_p95=7.997 lost=0 skipped=0 min=1000000 final=1000000

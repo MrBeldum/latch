@@ -1,13 +1,12 @@
-//! Latch's stream protocol, version 1 (`docs/PROTOCOL.md`), without I/O:
+//! Latch's stream protocol, version 1 (`docs/PROTOCOL.md`):
 //! datagram layouts ([`wire`]), Reed–Solomon erasure coding ([`fec`]),
 //! cutting frames into shards and putting them back together ([`video`]),
 //! audio packets and their parity ([`audio`]), reliable input ([`input`]),
 //! gamepad snapshots, rumble and lights ([`gamepad`]),
 //! the TCP control messages ([`control`]), round-trip estimation ([`rtt`]),
-//! adaptive bitrate ([`rate`])
 //! and a network impairment simulator for tests ([`sim`]).
 //!
-//! Except for socket configuration in `transport`, nothing here does I/O or reads a clock: every function that needs the time takes
+//! Except for socket I/O in `transport`, nothing here does I/O or reads a clock: every function that needs the time takes
 //! `now`, so tests run on simulated time.
 
 pub mod audio;

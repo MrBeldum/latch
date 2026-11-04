@@ -445,3 +445,13 @@ cached staging readback and CPU upload. A failed import disables sharing.
 The renderer requests `AutoNoVsync`, latency 1 and repaints on decoded frames.
 See [viewer measurements](measurements/2026-11-03/viewer/README.md) for
 interactive-session tests, throughput limits and timing definitions.
+
+### Transport feedback (2026-11-03)
+
+The shared controller uses 50 ms feedback while viewer display statistics retain
+250 ms windows, and requested recovery IDRs are gated at max(50 ms, RTT).
+See [transport measurements](measurements/2026-11-03/transport/README.md).
+
+Transport segments video runs through WSASendMsg USO and receives through
+WSARecvMsg URO when supported, falling back to ordinary UDP. Set
+`LATCH_UDP_OFFLOAD=0` to disable both. See the [transport measurements](measurements/2026-11-03/transport/README.md): USO was exercised on the RX 6600 PC; URO coalescing was not observed.

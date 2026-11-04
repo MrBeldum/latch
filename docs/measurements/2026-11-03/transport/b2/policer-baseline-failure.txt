@@ -1,0 +1,36 @@
+    Updating crates.io index
+     Locking 16 packages to highest compatible versions
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling serde_core v1.0.229
+   Compiling libc v0.2.191
+   Compiling zmij v1.0.23
+   Compiling serde_json v1.0.154
+   Compiling serde v1.0.229
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling syn v3.0.9
+   Compiling socket2 v0.6.5
+   Compiling serde_derive v1.0.229
+   Compiling latch-proto v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-34d55af7/crates/proto)
+   Compiling baseline-regression v0.0.0 (/tmp/latch-gfn/b2/baseline-regression)
+warning: method `pacing` is never used
+  --> /tmp/latch-gfn/b2/baseline-regression/congestion.rs:46:19
+   |
+20 | impl Controller {
+   | --------------- method in this implementation
+...
+46 |     pub(crate) fn pacing(&self) -> bool {
+   |                   ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `baseline-regression` (bin "baseline-regression") generated 1 warning
+    Finished `release` profile [optimized] target(s) in 44.34s
+     Running `/tmp/latch-gfn/b2/baseline-regression/target/release/baseline-regression`
+policer20: low_phase_cuts=0 ceiling_ms=0 cut_ms=-1 queue_p95_ms=0.00 lost=667 skipped=170 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=21 lost_windows=167 raw_loss_median_when_lost=2.1
+
+thread 'main' (43230539) panicked at src/main.rs:225:17:
+policer20: must cut without queue growth
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

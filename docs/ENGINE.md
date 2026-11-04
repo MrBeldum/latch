@@ -48,7 +48,7 @@ KeyframeRequest on loss ──────────────────�
 
 | Crate | What | Platform code |
 | --- | --- | --- |
-| `latch-proto` | wire format, Reed–Solomon FEC, packetizer and reassembler, input reliability, control framing, an impairment simulator for tests | none |
+| `latch-proto` | wire format, Reed–Solomon FEC, packetizer and reassembler, input reliability, control framing, an impairment simulator for tests | socket helpers in `transport` |
 | `latch-codec` | H.264 Constrained Baseline encoder and decoder, BGRA→YUV conversion, the `lpcm-rice` audio codec | none |
 | `latch-engine` | the host side: capture, encode, audio capture, input injection, display sizing, and the session server | `mac/`, `windows/`, `linux/` |
 | `latch-stream` | the viewer side: session, decoders (VideoToolbox, Media Foundation, `latch-codec`), audio playback | `video/` |
@@ -59,7 +59,7 @@ KeyframeRequest on loss ──────────────────�
 | --- | --- | --- |
 | macOS | ScreenCaptureKit, NV12 IOSurface at the stream size and up to the display's refresh, cursor included | VideoToolbox (HEVC, H.264 High, or Constrained Baseline; HEVC Main10 from P010 plumbed), real time, no frame reordering, two frames in flight ([MACOS.md](MACOS.md#sharing-this-mac-the-video-pipeline)) |
 | Windows | DXGI Desktop Duplication, BGRA texture; cursor drawn in; Direct3D 11 video processor to NV12 at the stream size | AMF HEVC on AMD, or the GPU's Media Foundation HEVC/AV1/H.264 encoder (Microsoft's CPU encoder for H.264 if needed) ([WINDOWS.md](WINDOWS.md#the-video-pipeline)); `latch-codec` if neither works |
-| Linux (X11) | MIT-SHM `GetImage` through `x11rb`, cursor from XFixes | `latch-codec` software encoder, threads by slice |
+| Linux (X11) | MIT-SHM `GetImage` through `x11rb` of only the rectangles X Damage reports, cursor from XFixes | NVENC or VA-API from NV12 the CPU converts, when a probe at start finds one ([below](#linux-hardware-encoding)); else `latch-codec`, threads by slice |
 
 | Viewer | Decode |
 | --- | --- |
@@ -72,10 +72,12 @@ then fits the request to that encoder (`video::Limits`, reported to
 viewers as `streamer.codecs`; see `docs/PROTOCOL.md`, "Encoder limits").
 Latch adds no ceiling of its own beyond the request range (16384 pixels a
 side, 500 fps, 1 Gbps): the codec's top level, the encoder's own limit
-where it has one (VideoToolbox, found by trying), and on the software path
-the frame rate this CPU was measured to encode (`software::measure_fps`,
-held by the server through `software::ceiling`, 30 fps at 1080p until
-measured). Sizes are counted in coded 16-pixel blocks.
+where it has one (VideoToolbox, found by trying; NVENC and VA-API, as
+their drivers say), and on the software path the frame rate this CPU was
+measured to encode (`software::measure_fps`, held by the server through
+`software::ceiling`, 30 fps at 1080p until measured; on a Linux host
+whose hardware has some codecs, only the others are held, and the rate is
+in their `max_pixel_rate` rather than `max_fps`). Sizes are counted in coded 16-pixel blocks.
 `latch-codec` decodes Constrained Baseline only, so a host asked for
 `h264-baseline` configures its hardware encoder for that profile. A
 viewer probes platform codecs before offering AV1 > HEVC > H.264 High >
@@ -134,7 +136,63 @@ its interval on the wire. Its hot loops (colour conversion, SAD, residual
 reconstruction, deblocking) use NEON or SSE/AVX2 through `std::arch`, and
 a governor keeps each frame's encode under 65% of the frame interval by
 trading search effort, not frames, so a slow or busy host still sends
-every frame it was asked for.
+every frame it was asked for. The Linux host hands it what X Damage says
+changed: only those rectangles are read from the X server and converted
+(split across cores), and outside them macroblocks are skipped without
+being compared; the bitstream is the one a full comparison gives.
+
+### Linux hardware encoding
+
+`latch-engine/src/linux/{nvenc,vaapi,hardware}.rs`. Both are loaded with
+`libloading` when first needed; nothing is linked, and the structures
+mirror the vendors' headers (sizes, offsets, bit positions, GUIDs and
+version words checked against nvEncodeAPI.h 12.0 and libva 2.x).
+
+* **NVENC** (`libnvidia-encode.so.1`, `libcuda.so.1`): H.264 Baseline or
+  High, HEVC Main, AV1 Main; preset P1 with ultra-low-latency tuning, CBR
+  with a one-frame VBV, no B-frames, an infinite GOP with IDRs (and
+  parameter sets) on request, BT.709 VUI; bitrate changes by
+  reconfiguration.
+* **VA-API** (`libva.so.2`, `libva-drm.so.2`, for each codec the first
+  render node whose driver opens its encoder, so an Intel iGPU and an AMD
+  card each give what they have): H.264 Constrained Baseline or High and
+  HEVC Main, the low-power entry point first, driver-written headers, one
+  reference (marked `RPS_ST_CURR_BEFORE` for HEVC, as FFmpeg does), CBR
+  with a one-frame HRD, the level from size, rate and bitrate (HEVC's High
+  tier where Main's bitrate is too low). Without packed headers HEVC has
+  no conformance window, so it codes only sizes in whole minimum coding
+  blocks (8 pixels or the driver's): 1366 × 768 or 1600 × 900 are not
+  offered HEVC. AV1 is not offered: VA-API leaves its headers to the
+  application. The host's user must be able to open the node (the
+  `render` group on Ubuntu); the log says so when it cannot.
+
+Each backend and codec is probed once per process, on the host's
+capacity thread when its service starts (open, an IDR that must carry its
+parameter sets, a P-frame), and what it takes is asked of the driver then
+(NVENC's maximum width, height, macroblocks and macroblock rate; VA-API's
+maximum picture size and HEVC block sizes); anything missing or failing
+leaves `latch-codec`. `LATCH_LINUX_ENCODER=auto` (default) `| software |
+nvenc | vaapi` chooses; under `auto` a viewer that asks for Constrained
+Baseline keeps `latch-codec`, whose output that decoder is tested
+against, and hardware Baseline is not probed. A codec is given up for the
+process only when an open fails in a way that lasts (no such profile or
+entry point, a driver that does not initialize, a node the user may not
+open, NVENC's device and version errors); a GeForce card's session limit,
+memory or a size the encoder does not take fail only that open. H.264
+then encodes in `latch-codec`, for that session or that size; a codec
+that will not open when a session starts gives way to the next one the
+viewer takes, and one that cannot go on after the desktop is resized
+(`video::Unencodable`) ends the session as `ENCODER_FAILED`, which the
+viewer reconnects from to negotiate another. Neither backend has run on a
+GPU yet: the Linux host used for testing has libva and a virtio render
+node its user may not open, so only the fallback has run.
+
+**Wayland** is not captured. It takes the ScreenCast portal (D-Bus, which
+pure Rust can speak) and a PipeWire stream, whose Rust bindings are
+generated from and compiled against libpipewire's C headers, outside the
+boundary above; the portal also asks a person to approve each session,
+which an unattended host cannot. Under a Wayland session only Xwayland
+windows are seen.
 
 ### Audio
 
@@ -187,18 +245,24 @@ through `libc`.
   comes out of the interval instead of adding to it, a screen refreshing at
   the stream's rate gives up every refresh, and a late frame moves the
   grid rather than bursting.
-* **The bitrate follows the path** (`engine::congestion`). #32's wire-budget
-  controller owns adaptation, including the audio/FEC/header allowance.
-  Cuts use the lower of current budget and actual successful wire throughput;
-  a target above the encoder's output cannot relieve congestion. Host pings
-  run at 10 Hz; each report uses the lowest RTT in its window to distinguish
-  standing queues from transient jitter. Parity has a base-RTT floor of 15%
-  at 40 ms and 20% at 100 ms (30% cap).
+* **The bitrate follows the path** (`engine::congestion`). One controller
+  owns the wire budget, including audio, FEC and headers. It starts at the
+  requested ceiling. New viewers report every 50 ms; display statistics retain 250 ms windows.
+  Host pings run at 50 Hz.
+  Two pressure windows trigger cuts; one does when under half of what was
+  sent arrived and the rest is lost or queued (a capacity drop). Queue cuts
+  repeat no faster than max(50 ms, base RTT), loss cuts only after a base RTT
+  plus a report window. A smoothed positive delay gradient detects filling
+  queues; sustained delay above max(6 ms, 10% of base RTT, 3× measured ping
+  jitter) also counts, so 5–15 ms of Wi-Fi jitter is not a queue. Recovered
+  random loss alone does not cut bitrate; uncorrected loss or lost frames do,
+  at any raw loss (a policer). Parity has a base-RTT floor of 15% at 40 ms and 20%
+  at 100 ms (30% cap), with fast attack and a two-second decay after bursts.
 * **Send immediately on clean paths.** The bounded two-frame sender remains,
-  but its token bucket is disabled until loss or queue pressure arrives.
-  Congestion enables the existing 2.5×-budget, sixteen-datagram bucket; two
-  clean seconds release it. Raw loss of at least 1.5% also enables pacing,
-  including loss FEC repaired, without necessarily cutting bitrate.
+  with no token-bucket delay on a clean path. Queue or severe sustained loss
+  enables the 2.5×-budget, sixteen-datagram bucket. Radio loss repaired by FEC
+  does not enable pacing. Clean feedback releases pacing after at least
+  200 ms (two report intervals for slower peers).
 * **Data before parity.** A frame's data shards go out before any parity
   is computed, so a frame that loses nothing never waits for FEC.
 * **Media threads at high priority** (user-interactive QoS on macOS,
@@ -263,17 +327,52 @@ backpressure preserves encoded references. Cancellation may discard queued
 media. Audio, input acknowledgements and pings bypass the video queue.
 
 Under pressure video uses a wire-byte token bucket at 2.5 times the wire budget,
-with a sixteen-datagram burst. The encoder allowance subtracts audio and
-FEC/header overhead from that budget. A session controller cuts by 20% after
-two pressure reports, at most once per 500 ms, from the lower of actual wire
-throughput and budget, when unrecovered loss exceeds
-3%, a frame is lost, the lowest host RTT in the report window rises above its session minimum
-by max(10 ms, 25%),
-or sender age exceeds 50 ms. After two clean seconds it adds 5% of the
-requested ceiling per second, capped at that ceiling. The wire floor is
-max(1 Mbps, ceiling/10). Recovered random loss alone does not reduce rate;
-legacy viewers' raw loss is tolerated through 3%. Parity is capped at 30%.
-Rate setters run between frames when the target changes by at least 5%.
+with a sixteen-datagram burst. The encoder allowance reserves audio separately,
+then compounds header overhead with rounded FEC rather than adding the two.
+Cuts use the lower of current budget and actual successful send rate, bounded
+by received throughput +7% (a standing FIFO delivers its bottleneck rate; a
+viewer without `received_kbps` is credited the offered rate less its loss).
+Each cut removes 20%, or 40% for queue delay above 20 ms or loss above 10%.
+Loss in a window that delivered more than is now sent predates the last cut
+and is ignored, as is a queue still falling within three horizons of a cut
+(horizon: 2× base RTT plus one report window, two for windows ≥200 ms). Sender age above
+20 ms is also pressure. Uncorrected loss above 3% (raw loss for legacy
+reports) or lost frames in two windows running count at any raw loss. Loss
+without queue delay is treated as a policer: a smoothed received rate (+7%
+headers) caps the climb at 97% of it for three seconds, during which one
+damaged window near it cuts again. A 50 ms window holds only a few frames, so
+received/sent ratios are too coarse to be a signal on their own; they gate only
+the one-window collapse cut, together with loss above 10% or delay above 20 ms. The
+ping-jitter estimate starts at 3 ms and learns only from falling delay outside
+congestion. The wire floor is a fixed 1 Mbps, whatever the ceiling, so a
+high-quality session can still fit a 2–5 Mbps link.
+
+A cut remembers the sustainable rate (what got through, raised to whatever the
+smoothed received rate later shows). Clean feedback grows the budget at
+doubling per 400 ms of actual elapsed time between reports, but only to 97% of
+that rate (92% for coarse ≥200 ms windows). Above it, one probe is in flight at
+a time: first ~2.5 ms of queue per horizon (1–5%), doubling only while probes
+survive a horizon, and stepping up to the rate that last congested before
+accelerating past it. A probe whose own feedback shows over 3 ms of queue
+drops under the held rate by as much as it went over, so its excess drains as
+fast as it built. With no throughput or loss feedback at the cut, there is no
+estimate and recovery is purely time-based. Reports more than 2 s apart grant
+no growth: the controller waits for fresh feedback. A lossless RTT plateau
+that persists for 2 s through a fourfold budget reduction with no local queue
+is a route change: the RTT minima are rebased and the estimate dropped; loss or
+a falling RTT (a draining FIFO) cancels the evidence. Raw legacy loss under 10%
+without lost frames is treated as repaired radio loss. Rate setters run between
+frames at a 5% target change.
+This remains a heuristic controller; it is not a full GCC implementation.
+
+Linux sends up to 32 datagrams with `sendmmsg` and receives with `recvmmsg`.
+macOS receives up to 32 with `recvmsg_x`; sends retain `send_to`, since Darwin's
+batch-send API disallows destination addresses on the shared unconnected socket.
+Batch storage is reused, and data flushes before parity computation. Batches
+never wait to fill. Unsupported batch receive syscalls fall back to scalar I/O
+on the nonblocking media socket. Windows retains its existing scalar socket
+path; USO/URO and Linux UDP GSO/GRO are not implemented here. Protocol 1 retains
+the 1200-byte datagram limit; route MTU discovery/negotiation remains outstanding.
 
 Host and viewer UDP request 8 MiB in both directions through the one
 `latch_proto::transport::configure_socket` helper. Readback is logged once per session, including Linux sysctl caps;
@@ -282,12 +381,17 @@ Status and viewer stats expose requested/applied bitrate, sender queue age,
 send errors/retries and effective socket buffers. Bytes count successful
 media sends only. ENOBUFS uses the platform constant (10055 on Windows).
 
-Viewer receive uses mio readiness and bounded 64-datagram batches. Completed
-frames are handed to decode before waiting for more readiness: waiting at the
+Viewer receive uses mio readiness and bounded 32-datagram syscall batches on
+Linux/macOS (64 scalar receives on Windows). Completed
+frames on the batch path are handed to decode after each datagram, before
+processing the rest of the batch or waiting for readiness: waiting at the
 end of a receive batch held each complete picture until the next datagram. Video
 shard storage is reused with a 4096-buffer pool cap. Decode queues are
 bounded by eight frames and 50 ms of age; exceeding either restarts at an
 IDR rather than decoding an increasing backlog. A missing initial IDR
 triggers recovery on the first complete P-frame, or after 500 ms without
 a delivered keyframe. Requests retry at max(100 ms, RTT); host duplicate
-requests with the same last-delivered frame are throttled for 250 ms.
+requests with the same last-delivered frame are throttled for 250 ms. Requested
+IDRs are gated at max(50 ms, smoothed RTT), including requests that advance
+the last-delivered frame. See [transport measurements](measurements/2026-11-03/transport/README.md)
+for codec-free throughput, CPU, FEC and impairment results and remaining targets.

@@ -4,7 +4,7 @@
 
 use super::X11;
 use crate::input::DisplayRect;
-use crate::software::{Bgra, CpuCapture};
+use crate::software::{Bgra, CpuCapture, Rect};
 use anyhow::{ensure, Context};
 use std::os::fd::AsRawFd;
 use std::ptr::NonNull;
@@ -81,7 +81,16 @@ pub struct X11Capture {
     last_reported_serial: Option<u32>,
     last_reported_visible: Option<bool>,
     pending_cursor: Option<crate::video::CursorUpdate>,
+    /// The buffer the last picture went into, and where its cursor was
+    /// drawn: a caller handing the same buffer back gets only the changes.
+    filled: Option<(usize, usize)>,
+    drawn_cursor: Option<Rect>,
+    changed: Option<Vec<Rect>>,
 }
+
+/// More damage rectangles than this are read as their bounding box: each
+/// costs a round trip.
+const MAX_REGIONS: usize = 8;
 
 impl X11Capture {
     pub fn new() -> anyhow::Result<Self> {
@@ -169,6 +178,9 @@ impl X11Capture {
             last_reported_serial: None,
             last_reported_visible: None,
             pending_cursor: None,
+            filled: None,
+            drawn_cursor: None,
+            changed: None,
         };
         this.allocate();
         Ok(this)
@@ -214,9 +226,10 @@ impl X11Capture {
         Ok(true)
     }
 
-    /// Reads `area` into the saved desktop. False when every pixel was
-    /// already there: damage also follows repaints of identical content.
-    fn pixels(&mut self, area: xproto::Rectangle) -> anyhow::Result<bool> {
+    /// Reads `area` into the saved desktop. Returns the rows of it that
+    /// changed, or `None` when every pixel was already there: damage also
+    /// follows repaints of identical content.
+    fn pixels(&mut self, area: xproto::Rectangle) -> anyhow::Result<Option<Rect>> {
         let stride = area.width as usize * 4;
         let len = stride * area.height as usize;
         let owned;
@@ -276,17 +289,62 @@ impl X11Capture {
             &owned
         };
         ensure!(bytes.len() >= len, "short X11 image");
-        let mut changed = false;
+        let mut changed: Option<(usize, usize)> = None;
         for row in 0..area.height as usize {
             let dst = (area.y as usize + row) * self.desktop.stride + area.x as usize * 4;
             let dst = &mut self.desktop.data[dst..dst + stride];
             let src = &bytes[row * stride..(row + 1) * stride];
             if dst != src {
                 dst.copy_from_slice(src);
-                changed = true;
+                changed = Some((changed.map_or(row, |c| c.0), row + 1));
             }
         }
-        Ok(changed)
+        Ok(changed.map(|(first, end)| Rect {
+            x: area.x as u32,
+            y: (area.y as usize + first) as u32,
+            width: area.width.into(),
+            height: (end - first) as u32,
+        }))
+    }
+
+    /// Brings `frame` up to the saved desktop and draws the cursor in.
+    /// When `frame` is the buffer the last picture went into, only `changed`
+    /// and the cursor's old and new places are copied, and become what
+    /// [`CpuCapture::damage`] reports.
+    fn fill(&mut self, frame: &mut Bgra, changed: Vec<Rect>) {
+        let cursor = self
+            .cursor
+            .as_ref()
+            .filter(|_| self.cursor_drawn)
+            .and_then(|c| cursor_rect(c, self.desktop.width, self.desktop.height));
+        let same = !self.first
+            && self.filled == Some((frame.data.as_ptr() as usize, frame.data.len()))
+            && (frame.width, frame.height, frame.stride)
+                == (self.desktop.width, self.desktop.height, self.desktop.stride);
+        if same {
+            let mut damage = changed;
+            damage.extend(self.drawn_cursor);
+            for rect in &damage {
+                let (x, width) = (rect.x as usize * 4, rect.width as usize * 4);
+                for row in rect.y as usize..(rect.y + rect.height) as usize {
+                    let at = row * frame.stride + x;
+                    frame.data[at..at + width].copy_from_slice(&self.desktop.data[at..at + width]);
+                }
+            }
+            damage.extend(cursor);
+            self.changed = Some(damage);
+        } else {
+            frame.width = self.desktop.width;
+            frame.height = self.desktop.height;
+            frame.stride = self.desktop.stride;
+            frame.data.clone_from(&self.desktop.data);
+            self.changed = None;
+        }
+        if let (Some(c), true) = (&self.cursor, cursor.is_some()) {
+            composite(frame, c);
+        }
+        self.drawn_cursor = cursor;
+        self.filled = Some((frame.data.as_ptr() as usize, frame.data.len()));
     }
 }
 
@@ -308,12 +366,12 @@ impl CpuCapture for X11Capture {
     fn grab(&mut self, frame: &mut Bgra, timeout: Duration) -> anyhow::Result<bool> {
         let start = Instant::now();
         loop {
-            let mut dirty = None;
+            let mut dirty = Vec::new();
             let mut resized = false;
             while let Some(event) = self.conn.poll_for_event()? {
                 match event {
                     Event::DamageNotify(event) => {
-                        dirty = union(dirty, event.area, self.width, self.height);
+                        add_region(&mut dirty, event.area, self.width, self.height);
                     }
                     Event::RandrScreenChangeNotify(_)
                     | Event::RandrNotify(_)
@@ -326,12 +384,12 @@ impl CpuCapture for X11Capture {
                 self.resize()?;
             }
             if self.first || self.damage.is_none() {
-                dirty = Some(xproto::Rectangle {
+                dirty = vec![xproto::Rectangle {
                     x: 0,
                     y: 0,
                     width: self.width,
                     height: self.height,
-                });
+                }];
             }
             let cursor = if self.fixes {
                 Some(xfixes::get_cursor_image(&self.conn)?.reply()?)
@@ -406,31 +464,32 @@ impl CpuCapture for X11Capture {
                 (None, None) => false,
                 _ => true,
             };
-            let mut changed = false;
-            if let Some(area) = dirty {
+            let mut changed = Vec::new();
+            if !dirty.is_empty() {
                 if let Some(id) = self.damage {
                     damage::subtract(&self.conn, id, x11rb::NONE, x11rb::NONE)?.check()?;
                 }
-                match self.pixels(area) {
-                    Ok(pixels) => changed = pixels,
-                    // The root can shrink between the event poll and GetImage
-                    // (BadMatch). That is a new size to capture, not a failure.
-                    Err(_) if self.resize()? => continue,
-                    Err(error) => return Err(error),
+                let mut shrunk = false;
+                for &area in &dirty {
+                    match self.pixels(area) {
+                        Ok(rows) => changed.extend(rows),
+                        // The root can shrink between the event poll and GetImage
+                        // (BadMatch). That is a new size to capture, not a failure.
+                        Err(_) if self.resize()? => {
+                            shrunk = true;
+                            break;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                if shrunk {
+                    continue;
                 }
             }
             self.cursor = cursor;
             // An unchanged picture costs the caller no conversion or encode.
-            if changed || cursor_changed || self.first {
-                frame.width = self.desktop.width;
-                frame.height = self.desktop.height;
-                frame.stride = self.desktop.stride;
-                frame.data.clone_from(&self.desktop.data);
-                if self.cursor_drawn {
-                    if let Some(cursor) = &self.cursor {
-                        composite(frame, cursor);
-                    }
-                }
+            if !changed.is_empty() || cursor_changed || self.first {
+                self.fill(frame, changed);
                 self.first = false;
                 return Ok(true);
             }
@@ -445,6 +504,10 @@ impl CpuCapture for X11Capture {
                 remaining.min(Duration::from_millis(8)),
             )?;
         }
+    }
+
+    fn damage(&self) -> Option<Vec<Rect>> {
+        self.changed.clone()
     }
 
     fn set_cursor_drawn(&mut self, drawn: bool) -> bool {
@@ -493,30 +556,81 @@ fn xwayland(conn: &X11, root: u32, randr: bool) -> anyhow::Result<bool> {
     Ok(super::xwayland_outputs(names.iter().map(Vec::as_slice)))
 }
 
-fn union(
-    old: Option<xproto::Rectangle>,
+/// Adds damage `rect`, clipped to the root, to `regions`: merged into one
+/// it overlaps or touches, and everything merged into one bounding box past
+/// [`MAX_REGIONS`].
+fn add_region(
+    regions: &mut Vec<xproto::Rectangle>,
     rect: xproto::Rectangle,
     width: u16,
     height: u16,
-) -> Option<xproto::Rectangle> {
-    let mut left = i32::from(rect.x).max(0);
-    let mut top = i32::from(rect.y).max(0);
-    let mut right = (i32::from(rect.x) + i32::from(rect.width)).min(width.into());
-    let mut bottom = (i32::from(rect.y) + i32::from(rect.height)).min(height.into());
-    if right <= left || bottom <= top {
-        return old;
+) {
+    let Some(mut rect) = clip(rect, width, height) else {
+        return;
+    };
+    // Merging can make a box touch others it did not: repeat until stable.
+    while let Some(i) = regions.iter().position(|r| touch(r, &rect)) {
+        rect = bounds(&regions.swap_remove(i), &rect);
     }
-    if let Some(old) = old {
-        left = left.min(old.x.into());
-        top = top.min(old.y.into());
-        right = right.max(i32::from(old.x) + i32::from(old.width));
-        bottom = bottom.max(i32::from(old.y) + i32::from(old.height));
+    regions.push(rect);
+    if regions.len() > MAX_REGIONS {
+        let all = regions.iter().fold(regions[0], |a, b| bounds(&a, b));
+        *regions = vec![all];
     }
-    Some(xproto::Rectangle {
+}
+
+fn clip(rect: xproto::Rectangle, width: u16, height: u16) -> Option<xproto::Rectangle> {
+    let left = i32::from(rect.x).max(0);
+    let top = i32::from(rect.y).max(0);
+    let right = (i32::from(rect.x) + i32::from(rect.width)).min(width.into());
+    let bottom = (i32::from(rect.y) + i32::from(rect.height)).min(height.into());
+    (right > left && bottom > top).then(|| xproto::Rectangle {
         x: left as i16,
         y: top as i16,
         width: (right - left) as u16,
         height: (bottom - top) as u16,
+    })
+}
+
+fn touch(a: &xproto::Rectangle, b: &xproto::Rectangle) -> bool {
+    let (ax, ay, bx, by) = (
+        i32::from(a.x),
+        i32::from(a.y),
+        i32::from(b.x),
+        i32::from(b.y),
+    );
+    ax <= bx + i32::from(b.width)
+        && bx <= ax + i32::from(a.width)
+        && ay <= by + i32::from(b.height)
+        && by <= ay + i32::from(a.height)
+}
+
+fn bounds(a: &xproto::Rectangle, b: &xproto::Rectangle) -> xproto::Rectangle {
+    let left = a.x.min(b.x);
+    let top = a.y.min(b.y);
+    let right = (i32::from(a.x) + i32::from(a.width)).max(i32::from(b.x) + i32::from(b.width));
+    let bottom = (i32::from(a.y) + i32::from(a.height)).max(i32::from(b.y) + i32::from(b.height));
+    xproto::Rectangle {
+        x: left,
+        y: top,
+        width: (right - i32::from(left)) as u16,
+        height: (bottom - i32::from(top)) as u16,
+    }
+}
+
+/// Where `cursor` lands on a `width × height` picture, if anywhere.
+fn cursor_rect(cursor: &xfixes::GetCursorImageReply, width: u32, height: u32) -> Option<Rect> {
+    let x = i32::from(cursor.x) - i32::from(cursor.xhot);
+    let y = i32::from(cursor.y) - i32::from(cursor.yhot);
+    let left = x.max(0);
+    let top = y.max(0);
+    let right = (x + i32::from(cursor.width)).min(width as i32);
+    let bottom = (y + i32::from(cursor.height)).min(height as i32);
+    (right > left && bottom > top).then(|| Rect {
+        x: left as u32,
+        y: top as u32,
+        width: (right - left) as u32,
+        height: (bottom - top) as u32,
     })
 }
 
@@ -560,8 +674,32 @@ mod tests {
             width: 4,
             height: 3,
         };
-        let area = union(None, rect, 10, 10).unwrap();
+        let mut regions = Vec::new();
+        add_region(&mut regions, rect, 10, 10);
+        let area = regions[0];
         assert_eq!((area.x, area.y, area.width, area.height), (0, 0, 2, 2));
+        // Touching rectangles merge; separate ones stay apart until there
+        // are too many to read one by one.
+        let r = |x, y, width, height| xproto::Rectangle {
+            x,
+            y,
+            width,
+            height,
+        };
+        add_region(&mut regions, r(2, 0, 3, 1), 10, 10);
+        add_region(&mut regions, r(7, 7, 2, 2), 10, 10);
+        let tuples = |v: &[xproto::Rectangle]| {
+            let mut t: Vec<_> = v.iter().map(|r| (r.x, r.y, r.width, r.height)).collect();
+            t.sort();
+            t
+        };
+        assert_eq!(tuples(&regions), [(0, 0, 5, 2), (7, 7, 2, 2)]);
+        let mut many = Vec::new();
+        for i in 0..=MAX_REGIONS as i16 {
+            add_region(&mut many, r(i * 100, i * 50, 10, 10), 2000, 2000);
+        }
+        let n = MAX_REGIONS as u16;
+        assert_eq!(tuples(&many), [(0, 0, n * 100 + 10, n * 50 + 10)]);
         let mut frame = Bgra {
             width: 2,
             height: 2,
@@ -668,10 +806,77 @@ mod tests {
             last_reported_serial: None,
             last_reported_visible: None,
             pending_cursor: None,
+            filled: None,
+            drawn_cursor: None,
+            changed: None,
         };
         capture.allocate();
         assert!(!capture.uses_shm());
         capture
+    }
+
+    #[test]
+    fn a_frame_handed_back_gets_only_the_changes_and_the_cursor() {
+        let conn = fake_x(Duration::from_secs(10), |_, sequence| absent(sequence));
+        let mut capture = fake_capture(conn, 8, 6);
+        for (i, v) in capture.desktop.data.iter_mut().enumerate() {
+            *v = i as u8;
+        }
+        let expected = |capture: &X11Capture| {
+            let mut frame = capture.desktop.clone();
+            if let Some(cursor) = &capture.cursor {
+                composite(&mut frame, cursor);
+            }
+            frame.data
+        };
+        let mut frame = Bgra::default();
+        capture.fill(&mut frame, Vec::new());
+        capture.first = false;
+        assert_eq!(capture.damage(), None, "a new buffer is filled whole");
+        assert_eq!(frame.data, expected(&capture));
+
+        let rect = Rect {
+            x: 2,
+            y: 1,
+            width: 3,
+            height: 2,
+        };
+        for row in 1..3 {
+            capture.desktop.data[row * 32 + 8..row * 32 + 20].fill(200);
+        }
+        capture.cursor = Some(xfixes::GetCursorImageReply {
+            x: 6,
+            y: 4,
+            width: 3,
+            height: 3,
+            cursor_image: vec![0xff102030; 9],
+            ..Default::default()
+        });
+        capture.fill(&mut frame, vec![rect]);
+        let cursor = Rect {
+            x: 6,
+            y: 4,
+            width: 2,
+            height: 2,
+        };
+        assert_eq!(capture.damage(), Some(vec![rect, cursor]));
+        assert_eq!(frame.data, expected(&capture));
+
+        capture.cursor.as_mut().unwrap().x = 0;
+        capture.fill(&mut frame, Vec::new());
+        let moved = Rect {
+            x: 0,
+            y: 4,
+            width: 3,
+            height: 2,
+        };
+        assert_eq!(capture.damage(), Some(vec![cursor, moved]));
+        assert_eq!(frame.data, expected(&capture));
+
+        let mut other = frame.clone();
+        capture.fill(&mut other, Vec::new());
+        assert_eq!(capture.damage(), None, "another buffer is filled whole");
+        assert_eq!(other.data, expected(&capture));
     }
 
     #[test]

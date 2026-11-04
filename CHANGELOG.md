@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased — transport workstream
+
+- Batch Linux video sends/receives and macOS receives without waiting to fill
+  batches; reuse packetizer storage and hand complete frames to decode inline.
+- Faster delay-gradient bitrate feedback and recovery, persistent FEC protection
+  after radio bursts, and RTT-gated recovery IDRs. Protocol 1 stays compatible.
+- Add codec-free transport/FEC measurements and deterministic capacity-step,
+  240 fps, random/burst loss, long-RTT and jitter scenarios.
+- Cut for policers: uncorrected loss or lost frames cut at any raw loss, then
+  the climb holds just under the policed rate; 5–15 ms Wi-Fi ping
+  jitter no longer trips the queue threshold; a capacity collapse cuts on its
+  first report (100→20 Mbps at 10 ms RTT: 160→60 ms).
+- Hold steady caps: keep the last sustainable rate and probe above it in
+  bounded, RTT-aware steps instead of doubling to the ceiling after every
+  drain. Budget spread on a fixed 20/50/100 Mbps cap is 0.7/1.2/2.5 Mbps
+  (5.1: 1.6/3.5/7.1); 150–250 ms RTT paths no longer fill the queue.
+- Recovery counts the real time between reports, so 5.1's 250 ms and older
+  one-second viewers recover as fast as 50 ms ones; reports after more than
+  2 s of silence grant no growth.
+- A permanent lossless RTT increase (route change) is rebased instead of
+  pinning the budget at its floor.
+- The wire floor is 1 Mbps rather than a tenth of the requested rate, so a
+  100 Mbps request adapts to a 2–5 Mbps link.
+- Older viewers without repaired-loss reporting no longer lose their bitrate
+  to FEC-repaired radio loss.
+- A host that ends a stream half-closes and keeps reading briefly, and the
+  viewer closes its connection as soon as it has read the end: with 50 ms
+  reports in flight, a takeover could otherwise reset the connection before
+  the old viewer learned why it ended.
+- Windows viewers rearm Mio readiness after a batched receive, so packets
+  after an idle gap wake the receive loop instead of waiting for its 20 ms timer.
+
+
 The release workflow publishes the section that matches the tag as the
 GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
@@ -102,6 +135,29 @@ GitHub release notes, so each version gets a heading of the form
   after the viewer sends it. The stream toolbar shows the connected pads.
   Hosts and viewers from before this negotiate no gamepads and work as
   before.
+- Linux host: only what changed on screen is read, converted and encoded.
+  X Damage rectangles are kept apart instead of merged into one box, only
+  those are read from the X server and converted to YUV (split across
+  cores), and the encoder skips the rest without comparing it.
+  Measurements: `docs/measurements/2026-11-03-linux-host/`.
+- Linux host: NVENC and VA-API hardware encoding (H.264, HEVC, and AV1 on
+  NVENC), loaded at run time and probed when the host starts, with
+  `latch-codec` as the fallback; `LATCH_LINUX_ENCODER` chooses. Each
+  encoder's limits come from its driver and are reported in
+  `streamer.codecs`; VA-API uses, for each codec, the first render node
+  that encodes it. Only failures that last give a codec up for the
+  process (a session limit or a size it does not take fail one open);
+  HEVC is not offered at sizes VA-API cannot code (1366 × 768), and a
+  resize to one ends the session for the viewer to reconnect with H.264.
+  Not yet run on a GPU.
+- The software H.264 encoder writes its reconstruction in place, searches
+  for scrolls only when enough of a band changed, and runs its analysis on
+  the slice workers. Its output changes only where little of a band
+  changed: under 1/64 of its samples (was 1/256) the band is not searched
+  for a scroll, and under 1/16 not for a sideways one, which is most of
+  why a 1440p sweep went from 3.7 to 0.5 Mb/s. Colour conversion keeps
+  its threads instead of starting them each frame (a whole 1080p frame:
+  1.35 to 1.06 ms on four Neoverse N1 cores).
 - One pointer while the mouse is captured. The Mac's arrow was hidden only
   by egui's cursor, which macOS applies when the pointer moves over the
   window; a captured pointer is held still, so the Mac's arrow could stay

@@ -1,0 +1,12 @@
+run=1 offload=0 tx {"receive":false,"seconds":5.000,"media_mbps":299.980,"pps":35638,"cpu_percent":25.00,"cpu_us_per_Mbit":833.33,"frames":600,"packets":178200,"errors":0} segmented_batches=0
+run=1 offload=0 rx {"receive":true,"seconds":5.010,"media_mbps":299.390,"pps":35568,"cpu_percent":11.23,"cpu_us_per_Mbit":375.00,"frames":600,"packets":178200,"errors":0} coalesced_datagrams=0
+run=1 offload=1 tx {"receive":false,"seconds":5.000,"media_mbps":299.976,"pps":35637,"cpu_percent":16.87,"cpu_us_per_Mbit":562.50,"frames":600,"packets":178200,"errors":0} segmented_batches=6000
+run=1 offload=1 rx {"receive":true,"seconds":5.005,"media_mbps":299.704,"pps":35605,"cpu_percent":8.43,"cpu_us_per_Mbit":281.25,"frames":600,"packets":178200,"errors":0} coalesced_datagrams=0
+run=2 offload=0 tx {"receive":false,"seconds":5.000,"media_mbps":299.976,"pps":35637,"cpu_percent":20.00,"cpu_us_per_Mbit":666.67,"frames":600,"packets":178200,"errors":0} segmented_batches=0
+run=2 offload=0 rx {"receive":true,"seconds":5.010,"media_mbps":299.381,"pps":35566,"cpu_percent":12.47,"cpu_us_per_Mbit":416.67,"frames":600,"packets":178200,"errors":0} coalesced_datagrams=0
+run=2 offload=1 tx {"receive":false,"seconds":5.006,"media_mbps":299.631,"pps":35596,"cpu_percent":11.24,"cpu_us_per_Mbit":375.00,"frames":600,"packets":178200,"errors":0} segmented_batches=6000
+run=2 offload=1 rx {"receive":true,"seconds":5.020,"media_mbps":298.803,"pps":35498,"cpu_percent":3.74,"cpu_us_per_Mbit":125.00,"frames":600,"packets":178200,"errors":0} coalesced_datagrams=0
+run=3 offload=0 tx {"receive":false,"seconds":5.004,"media_mbps":299.754,"pps":35611,"cpu_percent":26.85,"cpu_us_per_Mbit":895.83,"frames":600,"packets":178200,"errors":0} segmented_batches=0
+run=3 offload=0 rx {"receive":true,"seconds":5.020,"media_mbps":298.832,"pps":35501,"cpu_percent":6.54,"cpu_us_per_Mbit":218.75,"frames":600,"packets":178200,"errors":0} coalesced_datagrams=0
+run=3 offload=1 tx {"receive":false,"seconds":5.009,"media_mbps":297.451,"pps":35337,"cpu_percent":14.35,"cpu_us_per_Mbit":482.38,"frames":596,"packets":177012,"errors":0} segmented_batches=5960
+run=3 offload=1 rx {"receive":true,"seconds":5.029,"media_mbps":296.295,"pps":35200,"cpu_percent":9.63,"cpu_us_per_Mbit":325.08,"frames":596,"packets":177012,"errors":0} coalesced_datagrams=0

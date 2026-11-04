@@ -485,3 +485,11 @@ picture is prepared for rendering without an extra frame queue; previous
 IOSurfaces live until their GPU submissions complete. Physical scanout and
 compositor delay remain display-dependent. See the [measurements and
 native viewer command](measurements/2026-11-03/viewer/README.md).
+
+### Transport measurement (2026-11-03)
+
+The viewer drains UDP in reusable 32-datagram `recvmsg_x` batches and hands
+completed video to decode within the batch. Unsupported batch receive falls
+back on the nonblocking socket. Host sends retain the shared unconnected UDP
+socket and scalar sends. See [transport measurements](measurements/2026-11-03/transport/README.md)
+for measured headroom and outstanding MTU/offload work.

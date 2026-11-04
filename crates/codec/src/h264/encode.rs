@@ -9,6 +9,7 @@ mod transform;
 mod worker;
 
 use super::CodecError;
+use crate::color::Rect;
 use crate::Yuv420;
 use bits::Bits;
 use std::collections::VecDeque;
@@ -76,9 +77,10 @@ pub struct EncodedInfo {
 }
 
 enum Task {
-    Scroll {
+    Prepare {
         source: Arc<Yuv420>,
-        previous: Arc<Yuv420>,
+        previous: Option<Arc<Yuv420>>,
+        scroll: bool,
         first: usize,
         end: usize,
     },
@@ -88,7 +90,7 @@ enum Task {
 struct Worker {
     tx: Option<mpsc::Sender<Task>>,
     rx: mpsc::Receiver<worker::Band>,
-    scroll_rx: mpsc::Receiver<(i32, i32)>,
+    prepared_rx: mpsc::Receiver<worker::Prepared>,
     handle: Option<JoinHandle<()>>,
 }
 impl Drop for Worker {
@@ -107,6 +109,18 @@ pub struct Encoder {
     workers: Vec<Worker>,
     reconstruction: Arc<Yuv420>,
     source: Option<Arc<Yuv420>>,
+    /// Pictures no frame refers to any more, reused rather than allocated.
+    spare_reconstruction: Option<Yuv420>,
+    spare_source: Option<Yuv420>,
+    /// `spare_reconstruction` is the frame before `reconstruction`, and
+    /// `kept` says where the two are the same.
+    spare_is_previous: bool,
+    kept: Option<Arc<Vec<bool>>>,
+    /// Macroblocks the last picture may have changed, when the caller said.
+    last_dirty: Option<Arc<Vec<bool>>>,
+    /// False after a picture that was given but refused: the next one's
+    /// changes are from it, not from the last picture encoded.
+    hints_hold: bool,
     quality: Arc<Vec<u8>>,
     frame_num: u32,
     idr_id: u32,
@@ -157,7 +171,7 @@ impl Encoder {
         for i in 0..threads {
             let (tx, rx) = mpsc::channel();
             let (out_tx, out_rx) = mpsc::channel();
-            let (scroll_tx, scroll_rx) = mpsc::channel();
+            let (prepared_tx, prepared_rx) = mpsc::channel();
             let handle = thread::Builder::new()
                 .name(format!("h264-{i}"))
                 .spawn(move || {
@@ -166,13 +180,20 @@ impl Encoder {
                     while let Ok(task) = rx.recv() {
                         let sent = match task {
                             Task::Encode(job) => out_tx.send(worker::encode(job)).is_ok(),
-                            Task::Scroll {
+                            Task::Prepare {
                                 source,
                                 previous,
+                                scroll,
                                 first,
                                 end,
-                            } => scroll_tx
-                                .send(worker::scroll(&source, &previous, first, end))
+                            } => prepared_tx
+                                .send(worker::prepare(
+                                    &source,
+                                    previous.as_deref(),
+                                    scroll,
+                                    first,
+                                    end,
+                                ))
                                 .is_ok(),
                         };
                         if !sent {
@@ -184,7 +205,7 @@ impl Encoder {
             workers.push(Worker {
                 tx: Some(tx),
                 rx: out_rx,
-                scroll_rx,
+                prepared_rx,
                 handle: Some(handle),
             });
         }
@@ -196,6 +217,12 @@ impl Encoder {
             workers,
             reconstruction,
             source: None,
+            spare_reconstruction: None,
+            spare_source: None,
+            spare_is_previous: false,
+            kept: None,
+            last_dirty: None,
+            hints_hold: true,
             quality: Arc::new(vec![45; total]),
             frame_num: 0,
             idr_id: 0,
@@ -216,7 +243,26 @@ impl Encoder {
         keyframe: bool,
         out: &mut Vec<u8>,
     ) -> Result<EncodedInfo, CodecError> {
+        self.encode_changed(picture, None, keyframe, out)
+    }
+
+    /// [`Encoder::encode`], told where `picture` may differ from the last
+    /// picture given: outside `changed` (pixel rectangles) the caller
+    /// promises it is the same. That spares comparing and copying what
+    /// did not change; the access unit is the one `encode` would make.
+    /// `None` promises nothing.
+    pub fn encode_changed(
+        &mut self,
+        picture: &Yuv420,
+        changed: Option<&[Rect]>,
+        keyframe: bool,
+        out: &mut Vec<u8>,
+    ) -> Result<EncodedInfo, CodecError> {
         self.validate(picture)?;
+        let dirty = changed
+            .filter(|_| self.hints_hold)
+            .map(|rects| Arc::new(dirty_map(picture, rects)));
+        self.hints_hold = true;
         let started = Instant::now();
         self.timing = EncodeTiming {
             effort: self.governor.level,
@@ -224,16 +270,56 @@ impl Encoder {
             ..EncodeTiming::default()
         };
         let idr = keyframe || self.source.is_none();
-        if !idr && self.quality.iter().all(|&q| q <= 18) && self.source.as_deref() == Some(picture)
-        {
+        // A hint can name a change that left the picture as it was (a
+        // cursor redrawn in place): what it names is compared, so a hint
+        // changes the work, never the access unit.
+        let unchanged = || match (&dirty, self.source.as_deref()) {
+            (Some(d), Some(source)) => {
+                !d.contains(&true)
+                    || (same_layout(source, picture)
+                        && macroblocks_equal(source, picture, |i| d[i]))
+            }
+            (Some(d), None) => !d.contains(&true),
+            (None, source) => source == Some(picture),
+        };
+        if !idr && self.quality.iter().all(|&q| q <= 18) && unchanged() {
             let result = self.encode_settled(out)?;
             self.finish_timing(started);
             return Ok(result);
         }
         let frame_num = if idr { 0 } else { self.frame_num };
-        let source = Arc::new(picture.clone());
+        // The spare is the picture before the last: only what either of
+        // the last two changed needs copying into it.
+        let source = Arc::new(match self.spare_source.take() {
+            Some(mut spare) => {
+                match (&dirty, &self.last_dirty) {
+                    (Some(now), Some(before)) if same_layout(&spare, picture) => {
+                        copy_macroblocks(&mut spare, picture, |i| now[i] || before[i])
+                    }
+                    _ => spare.copy_from(picture),
+                }
+                spare
+            }
+            None => picture.clone(),
+        });
         let budget = self.config.bitrate_kbps as f64 * 1000. / self.config.fps as f64;
-        let complexity = complexity(picture, self.source.as_deref());
+        // Scroll detection, the change count and the complexity estimate
+        // read every band of the picture: the slice workers do them.
+        let rows = picture.padded_height() / 16;
+        let bands = self.workers.len();
+        let prepared = self.round_trip(
+            |i| Task::Prepare {
+                source: source.clone(),
+                previous: self.source.clone(),
+                scroll: !idr,
+                first: i * rows / bands,
+                end: (i + 1) * rows / bands,
+            },
+            |worker| worker.prepared_rx.recv().ok(),
+        )?;
+        let complexity = prepared.iter().map(|p| p.complexity).sum::<u64>() as f64;
+        let changed_mbs = prepared.iter().map(|p| p.changed_mbs).sum::<usize>();
+        let globals: Vec<_> = prepared.iter().map(|p| p.global).collect();
         let debt =
             self.window.iter().sum::<usize>() as f64 * 8. - budget * self.window.len() as f64;
         let target = (budget - debt * 0.5).clamp(budget * 0.5, budget * 1.5);
@@ -260,56 +346,8 @@ impl Encoder {
         } else {
             0
         };
-        let changed_mbs = if let Some(old) = &self.source {
-            let pw = picture.padded_width();
-            let ph = picture.padded_height();
-            let mb_cols = pw / 16;
-            let mb_rows = ph / 16;
-            let mut changed_mbs = 0;
-            for my in 0..mb_rows {
-                let y = my * 16 + 8;
-                let s_row = y * picture.y_stride;
-                let o_row = y * old.y_stride;
-                for mx in 0..mb_cols {
-                    let x = mx * 16 + 8;
-                    if picture.y[s_row + x] != old.y[o_row + x] {
-                        changed_mbs += 1;
-                    }
-                }
-            }
-            changed_mbs
-        } else {
-            0
-        };
-        let rows = picture.padded_height() / 16;
         let total_mbs = rows * picture.padded_width() / 16;
         let is_motion = changed_mbs * 2 > total_mbs;
-        let globals = if idr {
-            vec![(0, 0); self.workers.len()]
-        } else {
-            for (i, worker) in self.workers.iter().enumerate() {
-                worker
-                    .tx
-                    .as_ref()
-                    .unwrap()
-                    .send(Task::Scroll {
-                        source: source.clone(),
-                        previous: self.source.as_ref().unwrap().clone(),
-                        first: i * rows / self.workers.len(),
-                        end: (i + 1) * rows / self.workers.len(),
-                    })
-                    .map_err(|_| CodecError::Config("encoder worker stopped"))?;
-            }
-            self.workers
-                .iter()
-                .map(|worker| {
-                    worker
-                        .scroll_rx
-                        .recv()
-                        .map_err(|_| CodecError::Config("encoder worker stopped"))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        };
         // At high QP fractional search costs more than its quality gain; also skip tiny updates and scrolls.
         let refine_motion = self.governor.level == 0
             && self.subpixel
@@ -327,20 +365,27 @@ impl Encoder {
             None
         };
         self.timing.preparation_ms = started.elapsed().as_secs_f64() * 1000.;
-        let (data, rec, mbs, skipped, qp_sum) = loop {
+        let kept = self.kept.take().filter(|_| self.spare_is_previous && !idr);
+        let mut next = self
+            .spare_reconstruction
+            .take()
+            .unwrap_or_else(|| Yuv420::new(self.config.width, self.config.height));
+        self.spare_is_previous = false;
+        let target_rows = worker::Target::new(&mut next);
+        let (data, mbs, skipped, qp_sum) = loop {
             self.timing.passes += 1;
-            let rows = picture.padded_height() / 16;
             let width = picture.padded_width() / 16;
             let refresh = (budget / 128.).max(1.) as usize;
-            for (i, worker) in self.workers.iter().enumerate() {
-                worker
-                    .tx
-                    .as_ref()
-                    .unwrap()
-                    .send(Task::Encode(worker::Job {
+            let bands = self.round_trip(
+                |i| {
+                    Task::Encode(worker::Job {
                         source: source.clone(),
                         previous: self.source.clone(),
                         reference: self.reconstruction.clone(),
+                        target: target_rows,
+                        dirty: dirty.clone(),
+                        // A retry rewrites what the first pass left.
+                        kept: kept.clone().filter(|_| self.timing.passes == 1),
                         half_pel: half_pel.clone(),
                         quality: self.quality.clone(),
                         first: i * rows / self.workers.len(),
@@ -356,56 +401,23 @@ impl Encoder {
                         idr_id: self.idr_id,
                         refresh,
                         refresh_start: self.refresh_start,
-                    }))
-                    .map_err(|_| CodecError::Config("encoder worker stopped"))?;
-            }
+                    })
+                },
+                |worker| worker.rx.recv().ok(),
+            )?;
             let mut data = Vec::new();
             if idr {
                 parameter_sets(&self.config, &mut data)?;
             }
-            let mut rec = Yuv420::new(self.config.width, self.config.height);
             let mut mbs = Vec::with_capacity(width * rows);
             let mut skipped = 0;
             let mut qp_sum = 0;
-            for (i, worker) in self.workers.iter().enumerate() {
-                let band = worker
-                    .rx
-                    .recv()
-                    .map_err(|_| CodecError::Config("encoder worker stopped"))?;
+            for (i, band) in bands.into_iter().enumerate() {
                 self.timing.band_ms[i] += band.elapsed_ms;
                 self.timing.deblock_ms += band.deblock_ms;
                 data.extend_from_slice(&band.nal);
                 skipped += band.skipped;
                 qp_sum += band.qp_sum;
-                let first = band.first * 16;
-                for (dp, sp, ds, ss, n) in [
-                    (
-                        &mut rec.y,
-                        &band.picture.y,
-                        rec.y_stride,
-                        band.picture.y_stride,
-                        1,
-                    ),
-                    (
-                        &mut rec.u,
-                        &band.picture.u,
-                        rec.c_stride,
-                        band.picture.c_stride,
-                        2,
-                    ),
-                    (
-                        &mut rec.v,
-                        &band.picture.v,
-                        rec.c_stride,
-                        band.picture.c_stride,
-                        2,
-                    ),
-                ] {
-                    for row in 0..band.picture.padded_height() / n {
-                        let d = (first / n + row) * ds;
-                        dp[d..d + ds].copy_from_slice(&sp[row * ss..row * ss + ds]);
-                    }
-                }
                 mbs.extend(band.mbs);
             }
             // Under pressure, spend the next frame's feedback correcting a soft
@@ -430,15 +442,24 @@ impl Encoder {
             }
             // Refusing an impossible access unit preserves the reference and the caller's output.
             if data.len() as f64 * 8. > budget * 8. {
+                self.spare_reconstruction = Some(next);
+                self.hints_hold = false;
+                self.last_dirty = None;
                 return Err(CodecError::Config(
                     "frame exceeds eight bitrate intervals at the allowed QP",
                 ));
             }
-            break (data, rec, mbs, skipped, qp_sum);
+            break (data, mbs, skipped, qp_sum);
         };
         // Filtering was completed independently by each slice worker.
-        self.reconstruction = Arc::new(rec);
-        self.source = Some(source);
+        let old = std::mem::replace(&mut self.reconstruction, Arc::new(next));
+        self.spare_reconstruction = Arc::try_unwrap(old).ok();
+        self.spare_is_previous = self.spare_reconstruction.is_some();
+        self.kept = Some(Arc::new(mbs.iter().map(|m| m.kept).collect()));
+        self.last_dirty = dirty;
+        if let Some(old) = self.source.replace(source) {
+            self.spare_source = Arc::try_unwrap(old).ok();
+        }
         self.quality = Arc::new(mbs.iter().map(|m| m.quality).collect());
         self.frame_num = (frame_num + 1) & 65535;
         if idr {
@@ -469,6 +490,37 @@ impl Encoder {
             total_mbs: mbs.len() as u32,
             bytes,
         })
+    }
+
+    /// Hands every worker its task and collects every answer, in band order.
+    /// Answers are awaited even after a failure: a band still running may be
+    /// writing into the picture being reconstructed.
+    fn round_trip<T>(
+        &self,
+        task: impl Fn(usize) -> Task,
+        answer: impl Fn(&Worker) -> Option<T>,
+    ) -> Result<Vec<T>, CodecError> {
+        let sent: Vec<bool> = self
+            .workers
+            .iter()
+            .enumerate()
+            .map(|(i, worker)| {
+                worker
+                    .tx
+                    .as_ref()
+                    .is_some_and(|tx| tx.send(task(i)).is_ok())
+            })
+            .collect();
+        let answers: Vec<_> = self
+            .workers
+            .iter()
+            .zip(&sent)
+            .map(|(worker, &sent)| if sent { answer(worker) } else { None })
+            .collect();
+        answers
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or(CodecError::Config("encoder worker stopped"))
     }
 
     /// Timings and effort actually used, before the next feedback adjustment.
@@ -562,20 +614,93 @@ impl Encoder {
     }
 }
 
-fn complexity(p: &Yuv420, old: Option<&Yuv420>) -> f64 {
-    let mut sum = 0u64;
-    for y in (0..p.height as usize).step_by(4) {
-        for x in (0..p.width as usize).step_by(4) {
-            let v = p.y[y * p.y_stride + x];
-            sum += if let Some(o) = old {
-                v.abs_diff(o.y[y * o.y_stride + x]) as u64
-            } else {
-                v.abs_diff(128) as u64
-            } + 1;
+/// Which macroblocks of `p` the pixel rectangles touch.
+fn dirty_map(p: &Yuv420, rects: &[Rect]) -> Vec<bool> {
+    let (w, h) = (p.padded_width() / 16, p.padded_height() / 16);
+    let mut map = vec![false; w * h];
+    for r in rects.iter().filter(|r| r.width > 0 && r.height > 0) {
+        let (x0, y0) = ((r.x as usize / 16).min(w), (r.y as usize / 16).min(h));
+        let x1 = ((r.x as usize + r.width as usize).div_ceil(16)).min(w);
+        let y1 = ((r.y as usize + r.height as usize).div_ceil(16)).min(h);
+        for row in map.chunks_mut(w).take(y1).skip(y0) {
+            row[x0..x1].fill(true);
         }
     }
-    sum as f64
+    map
 }
+
+fn same_layout(a: &Yuv420, b: &Yuv420) -> bool {
+    (
+        a.width,
+        a.height,
+        a.y_stride,
+        a.c_stride,
+        a.y.len(),
+        a.u.len(),
+        a.v.len(),
+    ) == (
+        b.width,
+        b.height,
+        b.y_stride,
+        b.c_stride,
+        b.y.len(),
+        b.u.len(),
+        b.v.len(),
+    )
+}
+
+/// Copies the macroblocks `copy` picks (by index) from `src` into `dst`,
+/// padding included: runs of neighbours in a row as one copy per line.
+/// Whether `a` and `b` hold the same samples in every macroblock `which`
+/// names (raster order).
+fn macroblocks_equal(a: &Yuv420, b: &Yuv420, which: impl Fn(usize) -> bool) -> bool {
+    let (w, h) = (b.padded_width() / 16, b.padded_height() / 16);
+    (0..h).all(|my| {
+        (0..w).filter(|&mx| which(my * w + mx)).all(|mx| {
+            [
+                (&a.y, &b.y, b.y_stride, 16),
+                (&a.u, &b.u, b.c_stride, 8),
+                (&a.v, &b.v, b.c_stride, 8),
+            ]
+            .into_iter()
+            .all(|(ap, bp, stride, n)| {
+                (my * n..(my + 1) * n).all(|row| {
+                    let at = row * stride + mx * n;
+                    ap[at..at + n] == bp[at..at + n]
+                })
+            })
+        })
+    })
+}
+
+fn copy_macroblocks(dst: &mut Yuv420, src: &Yuv420, copy: impl Fn(usize) -> bool) {
+    let (w, h) = (src.padded_width() / 16, src.padded_height() / 16);
+    for my in 0..h {
+        let mut mx = 0;
+        while mx < w {
+            if !copy(my * w + mx) {
+                mx += 1;
+                continue;
+            }
+            let first = mx;
+            while mx < w && copy(my * w + mx) {
+                mx += 1;
+            }
+            for (dp, sp, stride, n) in [
+                (&mut dst.y, &src.y, src.y_stride, 16),
+                (&mut dst.u, &src.u, src.c_stride, 8),
+                (&mut dst.v, &src.v, src.c_stride, 8),
+            ] {
+                for row in my * n..(my + 1) * n {
+                    let at = row * stride;
+                    dp[at + first * n..at + mx * n]
+                        .copy_from_slice(&sp[at + first * n..at + mx * n]);
+                }
+            }
+        }
+    }
+}
+
 fn level(c: &EncoderConfig) -> Result<u8, CodecError> {
     let fs = (c.width as u64).div_ceil(16) * (c.height as u64).div_ceil(16);
     for (id, mbps, maxfs, kbps) in [
@@ -679,6 +804,164 @@ fn parameter_sets(c: &EncoderConfig, out: &mut Vec<u8>) -> Result<(), CodecError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn damage_hints_change_nothing_but_the_work() {
+        // Noise, and smooth pictures at a low rate, where the deblocking
+        // filter reaches into macroblocks that did not change.
+        for (width, height, kbps, smooth) in [
+            (200, 120, 3000, false),
+            (64, 48, 60_000, false),
+            (200, 120, 150, true),
+            (320, 192, 400, true),
+        ] {
+            let config = EncoderConfig {
+                width,
+                height,
+                fps: 60,
+                bitrate_kbps: kbps,
+                threads: 3,
+            };
+            let mut hinted = Encoder::new(config.clone().with_frame_budget(0)).unwrap();
+            let mut plain = Encoder::new(config.with_frame_budget(0)).unwrap();
+            let mut decoder = crate::h264::Decoder::new();
+            let mut seed = 5u32;
+            let mut next = move || {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed
+            };
+            let mut picture = Yuv420::new(width, height);
+            let stride = picture.y_stride;
+            for (i, v) in picture.y.iter_mut().enumerate() {
+                *v = if smooth {
+                    (i % stride / 3 + i / stride / 2) as u8
+                } else {
+                    next() as u8
+                };
+            }
+            for v in picture.u.iter_mut().chain(&mut picture.v) {
+                *v = if smooth { 128 } else { next() as u8 };
+            }
+            picture.pad_edges();
+            for frame in 0..40 {
+                // Some frames change nothing; others a few rectangles, some
+                // at the picture's edges.
+                let mut rects = Vec::new();
+                for _ in 0..(if frame % 5 == 3 { 0 } else { 1 + next() % 3 }) {
+                    let r = Rect {
+                        x: next() % width,
+                        y: next() % height,
+                        width: 1 + next() % 40,
+                        height: 1 + next() % 30,
+                    };
+                    let fill = next() as u8;
+                    for y in r.y..(r.y + r.height).min(height) {
+                        for x in r.x..(r.x + r.width).min(width) {
+                            let at = y as usize * picture.y_stride + x as usize;
+                            picture.y[at] = if smooth {
+                                picture.y[at].wrapping_add(fill % 24)
+                            } else {
+                                next() as u8
+                            };
+                            let c = (y / 2) as usize * picture.c_stride + (x / 2) as usize;
+                            picture.u[c] = if smooth { 128 + fill % 8 } else { next() as u8 };
+                        }
+                    }
+                    rects.push(r);
+                }
+                picture.pad_edges();
+                let keyframe = frame == 20;
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                let ra = hinted.encode_changed(&picture, Some(&rects), keyframe, &mut a);
+                let rb = plain.encode(&picture, keyframe, &mut b);
+                assert_eq!(ra, rb, "frame {frame}");
+                assert_eq!(
+                    a, b,
+                    "{width}x{height} frame {frame}: the bitstream changed"
+                );
+                assert_eq!(
+                    hinted.reconstruction(),
+                    plain.reconstruction(),
+                    "frame {frame}"
+                );
+                let decoded = decoder.decode(&a).unwrap().unwrap();
+                let r = hinted.reconstruction();
+                let (w, h) = (width as usize, height as usize);
+                for row in 0..h {
+                    let (d, e) = (row * decoded.y_stride, row * r.y_stride);
+                    assert_eq!(
+                        decoded.y[d..d + w],
+                        r.y[e..e + w],
+                        "frame {frame} row {row}"
+                    );
+                }
+                for row in 0..h / 2 {
+                    let (d, e) = (row * decoded.c_stride, row * r.c_stride);
+                    assert_eq!(decoded.u[d..d + w / 2], r.u[e..e + w / 2], "frame {frame}");
+                    assert_eq!(decoded.v[d..d + w / 2], r.v[e..e + w / 2], "frame {frame}");
+                }
+            }
+        }
+    }
+
+    /// A capture can report damage where nothing changed (an X cursor
+    /// whose serial moved on, redrawn as it was): a settled picture still
+    /// takes the all-skip shortcut, as it would without the report.
+    #[test]
+    fn damage_over_an_unchanged_picture_changes_nothing() {
+        let config = EncoderConfig {
+            width: 32,
+            height: 32,
+            fps: 60,
+            bitrate_kbps: 60,
+            threads: 1,
+        };
+        let mut hinted = Encoder::new(config.clone().with_frame_budget(0)).unwrap();
+        let mut plain = Encoder::new(config.with_frame_budget(0)).unwrap();
+        let mut picture = Yuv420::new(32, 32);
+        for (i, v) in picture.y.iter_mut().enumerate() {
+            *v = (i * 7 % 251) as u8;
+        }
+        picture.pad_edges();
+        let cursor = [Rect {
+            x: 3,
+            y: 3,
+            width: 12,
+            height: 12,
+        }];
+        let mut settled = 0;
+        for frame in 0..120 {
+            // Now and then a real change, then the cursor's report again.
+            let changed = [Rect {
+                x: 16,
+                y: 16,
+                width: 16,
+                height: 16,
+            }];
+            let hint: &[Rect] = if frame % 30 == 29 {
+                for row in 16..32 {
+                    let at = row * picture.y_stride + 16;
+                    picture.y[at..at + 16].fill((frame * 37 % 251) as u8);
+                }
+                picture.pad_edges();
+                &changed
+            } else {
+                &cursor
+            };
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            let ra = hinted.encode_changed(&picture, Some(hint), false, &mut a);
+            let rb = plain.encode(&picture, false, &mut b);
+            assert_eq!(ra, rb, "frame {frame}");
+            assert_eq!(a, b, "frame {frame}: the bitstream changed");
+            settled += usize::from(a.len() < 12);
+        }
+        assert!(
+            settled > 10,
+            "the picture settles: {settled} all-skip frames"
+        );
+    }
 
     #[test]
     fn effort_transitions_preserve_decoder_reference() {

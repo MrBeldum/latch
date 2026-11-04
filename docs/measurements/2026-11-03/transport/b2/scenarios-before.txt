@@ -1,0 +1,15 @@
+step: ceiling_ms=960 cut_ms=160 queue_p95_ms=11.23 lost=19 skipped=1 peak_kbps=100000 min_kbps=10000 low_raw_damage_windows=0 lost_windows=3 raw_loss_median_when_lost=77.0
+240fps: ceiling_ms=0 cut_ms=-1 queue_p95_ms=4.22 lost=0 skipped=0 peak_kbps=200000 min_kbps=200000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+random2: ceiling_ms=0 cut_ms=-1 queue_p95_ms=7.99 lost=0 skipped=0 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+wifi: ceiling_ms=0 cut_ms=-1 queue_p95_ms=8.19 lost=15 skipped=42 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=3 lost_windows=15 raw_loss_median_when_lost=2.7
+rtt100: ceiling_ms=0 cut_ms=-1 queue_p95_ms=8.38 lost=0 skipped=0 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+jitter: ceiling_ms=0 cut_ms=-1 queue_p95_ms=8.38 lost=0 skipped=0 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+wifi_jitter: ceiling_ms=0 cut_ms=-1 queue_p95_ms=0.00 lost=0 skipped=0 peak_kbps=100000 min_kbps=78643 low_raw_damage_windows=0 lost_windows=0 raw_loss_median_when_lost=0.0
+SOFT-FAIL minimum == ceiling
+policer5: ceiling_ms=0 cut_ms=-1 queue_p95_ms=0.00 lost=1 skipped=3 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=1 raw_loss_median_when_lost=14.6
+policer10: ceiling_ms=0 cut_ms=-1 queue_p95_ms=0.00 lost=158 skipped=89 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=0 lost_windows=66 raw_loss_median_when_lost=0.5
+SOFT-FAIL f64::from(minimum) < f64::from(ceiling) * share
+SOFT-FAIL rx.stats().frames_lost < 30
+policer20: ceiling_ms=0 cut_ms=-1 queue_p95_ms=0.00 lost=667 skipped=170 peak_kbps=100000 min_kbps=100000 low_raw_damage_windows=21 lost_windows=167 raw_loss_median_when_lost=2.1
+SOFT-FAIL f64::from(minimum) < f64::from(ceiling) * share
+SOFT-FAIL rx.stats().frames_lost < 30
