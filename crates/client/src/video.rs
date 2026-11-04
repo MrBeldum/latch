@@ -515,7 +515,7 @@ impl Resources {
         let Some(frame) = slot.take() else { return };
         #[cfg(windows)]
         if let Some(hdr) = &mut self.hdr10 {
-            if frame.color.is_hdr() {
+            if frame.color.bit_depth == 10 {
                 match hdr.draw(&frame, rect, pixels_per_point) {
                     Ok(()) => {
                         self.hdr10_active = true;

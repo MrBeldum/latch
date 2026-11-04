@@ -376,10 +376,6 @@ impl State {
             "Media Foundation (software)"
         }
     }
-    #[cfg(test)]
-    fn new(dxva: bool) -> Result<Self> {
-        Self::new_codec(dxva, false, 8)
-    }
     fn new_codec(dxva: bool, hevc: bool, depth: u8) -> Result<Self> {
         // SAFETY: This runs only in the initialized decoder MTA.
         unsafe {

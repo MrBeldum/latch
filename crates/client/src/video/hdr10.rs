@@ -19,12 +19,14 @@ pub fn peak_nits() -> u32 {
     PEAK.load(Ordering::Relaxed)
 }
 const SHADER: &str = r#"
+cbuffer C:register(b0) { uint hdr; uint3 pad; };
 Texture2D<float> y:register(t0); Texture2D<float2> uv:register(t1); SamplerState samp:register(s0);
 struct V { float4 p:SV_Position; float2 uv:TEXCOORD0; };
 V vs(uint id:SV_VertexID) { V v; float2 p=float2(int(id&1)*4-1,int(id>>1)*4-1); v.p=float4(p,0,1); v.uv=float2((p.x+1)*0.5,1-(p.y+1)*0.5); return v; }
 float4 ps(V v):SV_Target {
     float yy=(y.Sample(samp,v.uv)*65535.0/64.0-64.0)/876.0;
     float2 c=(uv.Sample(samp,v.uv)*65535.0/64.0-512.0)/896.0;
+    if(hdr == 0) return float4(saturate(float3(yy+1.5748*c.y,yy-0.1873*c.x-0.4681*c.y,yy+1.8556*c.x)),1);
     return float4(saturate(float3(yy+1.4746*c.y,yy-0.164553*c.x-0.571353*c.y,yy+1.8814*c.x)),1);
 }
 "#;
@@ -55,6 +57,7 @@ pub(super) struct Hdr10 {
     vertex: ID3D11VertexShader,
     pixel: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
+    constants: ID3D11Buffer,
     planes: Option<(
         u32,
         u32,
@@ -139,14 +142,18 @@ impl Hdr10 {
                     },
                     Ordering::Relaxed,
                 );
-                anyhow::ensure!(hdr, "viewer display is in SDR mode");
+                let space = if hdr {
+                    DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+                } else {
+                    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
+                };
                 anyhow::ensure!(
-                    swap.CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)?
+                    swap.CheckColorSpaceSupport(space)?
                         & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT.0 as u32
                         != 0,
                     "HDR10 swapchain unsupported"
                 );
-                swap.SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)?;
+                swap.SetColorSpace1(space)?;
                 let mut vertex = None;
                 let mut pixel = None;
                 let mut sampler = None;
@@ -173,7 +180,19 @@ impl Hdr10 {
                     },
                     Some(&mut sampler),
                 )?;
+                let mut constants = None;
+                device.CreateBuffer(
+                    &D3D11_BUFFER_DESC {
+                        ByteWidth: 16,
+                        Usage: D3D11_USAGE_DEFAULT,
+                        BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+                        ..Default::default()
+                    },
+                    None,
+                    Some(&mut constants),
+                )?;
                 Ok(Self {
+                    constants: constants.context("no HDR constants")?,
                     device,
                     context,
                     swap,
@@ -250,7 +269,15 @@ impl Hdr10 {
                 },
                 Ordering::Relaxed,
             );
-            anyhow::ensure!(hdr, "viewer display switched to SDR");
+            anyhow::ensure!(
+                hdr || !frame.color.is_hdr(),
+                "viewer display switched to SDR"
+            );
+            let space = if frame.color.is_hdr() {
+                DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+            } else {
+                DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
+            };
             let size = (
                 (rect.width() * scale).round().max(1.0) as u32,
                 (rect.height() * scale).round().max(1.0) as u32,
@@ -273,8 +300,7 @@ impl Hdr10 {
                     DXGI_FORMAT_R10G10B10A2_UNORM,
                     DXGI_SWAP_CHAIN_FLAG(0),
                 )?;
-                self.swap
-                    .SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)?;
+                self.swap.SetColorSpace1(space)?;
                 self.size = size;
             }
             if self
@@ -316,6 +342,18 @@ impl Hdr10 {
                     )),
                 )?;
             }
+            self.swap.SetColorSpace1(space)?;
+            let constants = [u32::from(frame.color.is_hdr()), 0, 0, 0];
+            self.context.UpdateSubresource(
+                &self.constants,
+                0,
+                None,
+                constants.as_ptr().cast(),
+                0,
+                0,
+            );
+            self.context
+                .PSSetConstantBuffers(0, Some(&[Some(self.constants.clone())]));
             let buffer: ID3D11Texture2D = self.swap.GetBuffer(0)?;
             let mut target = None;
             self.device
