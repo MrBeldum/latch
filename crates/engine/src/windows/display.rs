@@ -491,3 +491,110 @@ mod tests {
         assert!(!super::virtual_name("NVIDIA GeForce RTX 4070"));
     }
 }
+
+#[cfg(test)]
+mod hdr_live_test {
+    use super::*;
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Info {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
+        flags: u32,
+        encoding: u32,
+        bits: u32,
+        mode: u32,
+    }
+    #[repr(C)]
+    struct State {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
+        enabled: u32,
+    }
+    fn info(path: &DISPLAYCONFIG_PATH_INFO) -> Result<Info> {
+        let mut info = Info {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_TYPE(15),
+                size: std::mem::size_of::<Info>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            ..Default::default()
+        };
+        anyhow::ensure!(
+            unsafe { DisplayConfigGetDeviceInfo(&mut info.header) } == 0,
+            "GET_ADVANCED_COLOR_INFO_2 failed"
+        );
+        Ok(info)
+    }
+    fn set(path: &DISPLAYCONFIG_PATH_INFO, kind: i32, on: bool) -> Result<()> {
+        let state = State {
+            header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                r#type: DISPLAYCONFIG_DEVICE_INFO_TYPE(kind),
+                size: std::mem::size_of::<State>() as u32,
+                adapterId: path.targetInfo.adapterId,
+                id: path.targetInfo.id,
+            },
+            enabled: u32::from(on),
+        };
+        anyhow::ensure!(
+            unsafe { DisplayConfigSetDeviceInfo(&state.header) } == 0,
+            "set colour state failed"
+        );
+        Ok(())
+    }
+    struct Restore(DISPLAYCONFIG_PATH_INFO, Info);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            set(&self.0, 16, self.1.flags & (1 << 5) != 0).expect("restore HDR setting");
+            set(&self.0, 17, self.1.flags & (1 << 7) != 0).expect("restore WCG setting");
+            let after = info(&self.0).expect("verify restored display");
+            assert_eq!(
+                after.flags & ((1 << 5) | (1 << 7)),
+                self.1.flags & ((1 << 5) | (1 << 7)),
+                "display settings were not restored"
+            );
+            eprintln!("restored HDR/WCG flags={} mode={}", after.flags, after.mode);
+        }
+    }
+    #[test]
+    #[ignore = "interactive HDR display test; restores both HDR and WCG settings"]
+    fn hold_hdr_display_for_live_test() -> Result<()> {
+        let output = select()?;
+        let (paths, _) = topology()?;
+        let path = paths
+            .into_iter()
+            .find(|p| {
+                let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+                    header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+                        r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                        size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                        adapterId: p.sourceInfo.adapterId,
+                        id: p.sourceInfo.id,
+                    },
+                    ..Default::default()
+                };
+                unsafe {
+                    DisplayConfigGetDeviceInfo(&mut source.header) == 0
+                        && source.viewGdiDeviceName == output.desc.DeviceName
+                }
+            })
+            .context("selected display path")?;
+        let before = info(&path)?;
+        eprintln!(
+            "initial HDR/WCG flags={} mode={}",
+            before.flags, before.mode
+        );
+        let _restore = Restore(path, before);
+        set(&path, 16, true)?;
+        let after = info(&path)?;
+        eprintln!("enabled HDR flags={} mode={}", after.flags, after.mode);
+        anyhow::ensure!(after.mode == 2, "this display cannot enter HDR mode");
+        std::fs::write("hdr-toggle-ready", "HDR enabled")?;
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(120)
+            && !std::path::Path::new("hdr-toggle-stop").exists()
+        {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        Ok(())
+    }
+}

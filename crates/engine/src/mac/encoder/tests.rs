@@ -123,6 +123,7 @@ fn roundtrip(codec: Codec, allow_hardware: bool) {
         return;
     };
     let config = VideoConfig {
+        color: Default::default(),
         width: WIDTH as u32,
         height: HEIGHT as u32,
         fps: FPS,
@@ -246,6 +247,7 @@ fn dropped_callback_is_no_output_but_status_errors_propagate() {
 fn software_session_encodes_an_iosurface() {
     let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let config = VideoConfig {
+        color: Default::default(),
         width: WIDTH as u32,
         height: HEIGHT as u32,
         fps: FPS,
@@ -399,6 +401,7 @@ pub fn run_encoder_benchmark_case(
     }
 
     let config = VideoConfig {
+        color: Default::default(),
         width,
         height,
         fps,
@@ -631,6 +634,7 @@ fn sessions_are_real_time_without_reordering_and_tagged_bt709() {
         (Codec::H264Baseline, false),
     ] {
         let config = VideoConfig {
+            color: Default::default(),
             width: WIDTH as u32,
             height: HEIGHT as u32,
             fps: FPS,
@@ -784,6 +788,7 @@ fn realtime_case(
         .collect();
     let mut encoder = Encoder::create(
         &VideoConfig {
+            color: Default::default(),
             width,
             height,
             fps,
@@ -857,6 +862,7 @@ fn realtime_case(
 fn pipelined_frames_come_out_in_order_with_their_capture_times() {
     let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let config = VideoConfig {
+        color: Default::default(),
         width: WIDTH as u32,
         height: HEIGHT as u32,
         fps: FPS,
@@ -908,6 +914,15 @@ fn main10_iosurface_roundtrip() {
         return;
     };
     let config = VideoConfig {
+        color: latch_proto::color::ColorDescription::negotiate(
+            latch_proto::color::ColorCapabilities {
+                ten_bit: true,
+                hdr: true,
+                peak_nits: 1000,
+            },
+            true,
+            true,
+        ),
         width: WIDTH as u32,
         height: HEIGHT as u32,
         fps: FPS,
@@ -919,6 +934,7 @@ fn main10_iosurface_roundtrip() {
         .and_then(|()| {
             Encoder::open(
                 &VideoConfig {
+                    color: Default::default(),
                     codec: Codec::H264High,
                     ..config.clone()
                 },
@@ -942,6 +958,9 @@ fn main10_iosurface_roundtrip() {
     };
     let frames = 10;
     let mut sources = Vec::new();
+    let mut decode_ms = Vec::new();
+    let mut encode_ms = Vec::new();
+    let mut decoder = latch_stream::video::new_decoder_color(Codec::Hevc, config.color).unwrap();
     let mut stream = Vec::new();
     for f in 0..frames {
         // A 10-bit ramp: steps an 8-bit picture could not hold.
@@ -969,10 +988,35 @@ fn main10_iosurface_roundtrip() {
             }
             check(CVPixelBufferUnlockBaseAddress(image.0, 0), "unlock").unwrap();
         }
+        let submitted = Instant::now();
         let frame = encoder
             .encode(image.0, Instant::now(), f == 0)
             .unwrap()
             .expect("Main10 frame");
+        encode_ms.push(submitted.elapsed().as_secs_f64() * 1000.0);
+        let submitted = Instant::now();
+        let picture = decoder
+            .decode(&frame.data, frame.keyframe, None)
+            .unwrap()
+            .expect("P010 decode");
+        decode_ms.push(submitted.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(picture.color.bit_depth, 10);
+        picture.with_planes(|y, ys, _, _| {
+            let mut mse = 0.0;
+            for row in 0..HEIGHT {
+                for x in 0..WIDTH {
+                    let offset = row * ys + x * 2;
+                    let got = u16::from_le_bytes([y[offset], y[offset + 1]]) >> 6;
+                    mse += (f64::from(got) - f64::from(luma[row * WIDTH + x])).powi(2);
+                }
+            }
+            assert!(mse / ((WIDTH * HEIGHT) as f64) < 100.0, "VT P010 fidelity");
+        });
+        if f == 0 {
+            if let Ok(path) = std::env::var("LATCH_HDR_RENDER_STREAM") {
+                fs::write(path, &frame.data).unwrap();
+            }
+        }
         stream.extend_from_slice(&frame.data);
         sources.push(luma);
     }
@@ -987,9 +1031,35 @@ fn main10_iosurface_roundtrip() {
         .unwrap();
     let info = String::from_utf8_lossy(&probe.stderr);
     assert!(
+        info.contains("bt2020") && info.contains("smpte2084"),
+        "HDR VUI: {info}"
+    );
+    assert!(
         info.contains("Main 10") && info.contains("yuv420p10le"),
         "{info}"
     );
+    // Viewers sample chroma at the signalled siting; VideoToolbox must say
+    // left (H.273 type 0), what latch_proto's colour description carries.
+    let probe = Command::new(ffmpeg.with_file_name("ffprobe"))
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=chroma_location",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(&path)
+        .output();
+    if let Ok(probe) = probe {
+        let siting = String::from_utf8_lossy(&probe.stdout);
+        assert!(
+            matches!(siting.trim(), "left" | "unspecified" | ""),
+            "chroma location {siting}"
+        );
+        assert_eq!(config.color.chroma, latch_proto::color::ChromaSiting::Left);
+        eprintln!("Main10 chroma location: {}", siting.trim());
+    }
     let decoded = dir.join("decoded.yuv");
     let output = Command::new(&ffmpeg)
         .args(["-v", "error", "-y", "-i"])
@@ -1020,6 +1090,10 @@ fn main10_iosurface_roundtrip() {
         encoder.hardware
     );
     assert!(psnr > 40.0, "Main10 luma PSNR {psnr:.2}");
+    eprintln!(
+        "HDR synthetic: bytes={}, encode_ms={encode_ms:?}, decode_ms={decode_ms:?}",
+        stream.len()
+    );
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1029,6 +1103,7 @@ fn recovery_skips_queued_pictures_and_coalesces_retries() {
     for codec in [Codec::Hevc, Codec::H264High] {
         let mut encoder = Encoder::create(
             &VideoConfig {
+                color: Default::default(),
                 width: WIDTH as u32,
                 height: HEIGHT as u32,
                 fps: FPS,
@@ -1077,6 +1152,7 @@ fn a_dropped_recovery_idr_is_retried_before_any_p_frame_leaves() {
     let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let mut encoder = Encoder::create(
         &VideoConfig {
+            color: Default::default(),
             width: WIDTH as u32,
             height: HEIGHT as u32,
             fps: FPS,
@@ -1119,6 +1195,7 @@ fn a_bitrate_change_keeps_the_reference_chain_and_applies_to_the_next_picture() 
     for codec in [Codec::Hevc, Codec::H264High] {
         let mut encoder = Encoder::create(
             &VideoConfig {
+                color: Default::default(),
                 width: WIDTH as u32,
                 height: HEIGHT as u32,
                 fps: FPS,
@@ -1217,5 +1294,111 @@ fn a_fitted_picture_stays_in_hardware() {
                 codec.name()
             );
         }
+    }
+}
+
+#[test]
+#[ignore = "hardware colour/latency measurement"]
+fn color_latency_benchmark() {
+    let _serial = ENCODER_TEST.lock().unwrap_or_else(|e| e.into_inner());
+    for mode in ["sdr8", "sdr10", "hdr10"] {
+        let color = latch_proto::color::ColorDescription::negotiate(
+            latch_proto::color::ColorCapabilities {
+                ten_bit: mode != "sdr8",
+                hdr: mode == "hdr10",
+                peak_nits: 1000,
+            },
+            true,
+            mode == "hdr10",
+        );
+        let depth = if color.bit_depth == 10 {
+            Depth::Ten
+        } else {
+            Depth::Eight
+        };
+        let config = VideoConfig {
+            color,
+            width: WIDTH as u32,
+            height: HEIGHT as u32,
+            fps: 60,
+            bitrate_kbps: 20000,
+            codec: Codec::Hevc,
+        };
+        let mut encoder = Encoder::new(&config, depth).unwrap();
+        let mut decoder = latch_stream::video::new_decoder_color(Codec::Hevc, color).unwrap();
+        let image = unsafe {
+            let empty = dictionary(&[]);
+            let attrs = dictionary(&[(kCVPixelBufferIOSurfacePropertiesKey, empty.0)]);
+            let mut image = ptr::null();
+            check(
+                CVPixelBufferCreate(
+                    ptr::null(),
+                    WIDTH,
+                    HEIGHT,
+                    depth.pixel_format(),
+                    attrs.0,
+                    &mut image,
+                ),
+                "benchmark surface",
+            )
+            .unwrap();
+            Owned::new(image).unwrap()
+        };
+        let (mut enc, mut dec, mut bytes) = (Vec::new(), Vec::new(), 0usize);
+        let mut levels = std::collections::BTreeSet::new();
+        for f in 0..125 {
+            unsafe {
+                check(CVPixelBufferLockBaseAddress(image.0, 0), "lock").unwrap();
+                for plane in 0..2 {
+                    let stride = CVPixelBufferGetBytesPerRowOfPlane(image.0, plane);
+                    let base = CVPixelBufferGetBaseAddressOfPlane(image.0, plane);
+                    for row in 0..if plane == 0 { HEIGHT } else { HEIGHT / 2 } {
+                        for x in 0..WIDTH {
+                            let code = if plane == 0 {
+                                64 + ((x + f * 5 + row / 4) % 876) as u16
+                            } else {
+                                512
+                            };
+                            if depth == Depth::Ten {
+                                base.add(row * stride + x * 2)
+                                    .cast::<u16>()
+                                    .write_unaligned(code << 6);
+                            } else {
+                                base.add(row * stride + x).write((code / 4) as u8);
+                            }
+                        }
+                    }
+                }
+                check(CVPixelBufferUnlockBaseAddress(image.0, 0), "unlock").unwrap();
+            }
+            let at = Instant::now();
+            let frame = encoder.encode(image.0, at, f == 0).unwrap().unwrap();
+            let e = at.elapsed().as_secs_f64() * 1000.0;
+            let at = Instant::now();
+            let picture = decoder
+                .decode(&frame.data, frame.keyframe, None)
+                .unwrap()
+                .unwrap();
+            let d = at.elapsed().as_secs_f64() * 1000.0;
+            if f >= 5 {
+                enc.push(e);
+                dec.push(d);
+                bytes += frame.data.len();
+            }
+            if f == 124 {
+                picture.with_planes(|y, _, _, _| {
+                    for x in 0..WIDTH {
+                        levels.insert(if depth == Depth::Ten {
+                            u16::from_le_bytes([y[x * 2], y[x * 2 + 1]]) >> 6
+                        } else {
+                            u16::from(y[x])
+                        });
+                    }
+                });
+            }
+        }
+        enc.sort_by(f64::total_cmp);
+        dec.sort_by(f64::total_cmp);
+        eprintln!("COLOR {mode} 960x540@60: encode_p50={:.3} encode_p95={:.3} decode_p50={:.3} decode_p95={:.3} Mbps={:.3} decoded_gradient_levels={}",enc[60],enc[114],dec[60],dec[114],bytes as f64*8.0/2.0/1e6,levels.len());
     }
 }

@@ -1,0 +1,11 @@
+
+running 4 tests
+test video::mediafoundation::tests::crop_preserves_visible_planes_and_ignores_padding ... ok
+test video::mediafoundation::tests::p010_is_reduced_to_sdr_without_reading_padding ... ok
+Windows Main10 decoder: Media Foundation (DXVA), P010 luma verified
+test video::mediafoundation::hdr_tests::main10_decode_preserves_p010_luminance ... ok
+hardware decoders: [Av1, Hevc, H264High]
+test video::mediafoundation::tests::installed_hardware_decoders_produce_visible_pixels ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 38 filtered out; finished in 0.45s
+

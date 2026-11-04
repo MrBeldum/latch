@@ -90,8 +90,9 @@ pub fn render_on_d3d12(adapter: Option<windows::Win32::Foundation::LUID>) {
     *mediafoundation::RENDER_ADAPTER.lock() = adapter;
 }
 
-/// Decoder output precision. P010 retains Main10 samples for a future HDR
-/// compositor; choosing it does not negotiate HDR or change transfer functions.
+/// Decoder output precision. P010 retains Main10 samples; a negotiated
+/// ten-bit stream (see [`new_decoder_for_color`]) decodes to it. Choosing
+/// it alone does not negotiate HDR or change transfer functions.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PixelFormat {
     #[default]
@@ -109,6 +110,7 @@ impl PixelFormat {
 
 #[derive(Default)]
 pub struct Frame {
+    pub color: latch_proto::color::ColorDescription,
     pub width: u32,
     pub height: u32,
     pub y: Vec<u8>,
@@ -144,6 +146,7 @@ impl Frame {
         self.y_stride = y_stride;
         self.uv_stride = uv_stride;
         self.full_range = full_range;
+        self.color = Default::default();
         self.format = PixelFormat::Nv12;
         self.y.clear();
         self.y.extend_from_slice(y);
@@ -460,7 +463,32 @@ pub fn new_decoder(codec: Codec) -> Result<Box<dyn Decoder>> {
 
 /// Negotiated dimensions are hints for MFTs that need them before parsing SPS/OBUs.
 pub fn new_decoder_for_stream(codec: Codec, width: u32, height: u32) -> Result<Box<dyn Decoder>> {
-    let decoder = platform_decoder_for_stream(codec, width, height)?;
+    new_decoder_for_color(codec, width, height, Default::default())
+}
+
+/// A decoder for a negotiated colour description, without dimension hints.
+pub fn new_decoder_color(
+    codec: Codec,
+    color: latch_proto::color::ColorDescription,
+) -> Result<Box<dyn Decoder>> {
+    new_decoder_for_color(codec, 0, 0, color)
+}
+
+/// [`new_decoder_for_stream`] for a negotiated colour description: a
+/// ten-bit stream decodes to P010 and keeps its precision.
+pub fn new_decoder_for_color(
+    codec: Codec,
+    width: u32,
+    height: u32,
+    color: latch_proto::color::ColorDescription,
+) -> Result<Box<dyn Decoder>> {
+    anyhow::ensure!(
+        color.supported() && (color.bit_depth == 8 || codec == Codec::Hevc),
+        "unsupported stream colour"
+    );
+    #[cfg(not(any(target_os = "macos", windows)))]
+    anyhow::ensure!(color.bit_depth == 8, "10-bit decoding is unavailable");
+    let decoder = platform_decoder_for_stream(codec, width, height, color.bit_depth)?;
     Ok(match Broken::wanted(codec) {
         Some(silent) => Box::new(Broken { decoder, silent }),
         None => decoder,
@@ -471,9 +499,10 @@ fn platform_decoder_for_stream(
     codec: Codec,
     _width: u32,
     _height: u32,
+    depth: u8,
 ) -> Result<Box<dyn Decoder>> {
     #[cfg(windows)]
-    match mediafoundation::MfDecoder::with_size(codec, _width, _height) {
+    match mediafoundation::MfDecoder::with_stream(codec, _width, _height, depth) {
         Ok(d) if codec == Codec::H264Baseline => {
             Ok(Box::new(Fallback::new(Box::new(MediaFoundation(d)))))
         }
@@ -485,7 +514,14 @@ fn platform_decoder_for_stream(
         Err(e) => Err(e),
     }
     #[cfg(not(windows))]
-    new_decoder(codec)
+    new_decoder_with_format(
+        codec,
+        if depth == 10 {
+            PixelFormat::P010
+        } else {
+            PixelFormat::Nv12
+        },
+    )
 }
 
 pub fn new_decoder_with_format(codec: Codec, format: PixelFormat) -> Result<Box<dyn Decoder>> {
@@ -663,6 +699,10 @@ impl Decoder for MediaFoundation {
         _spare: Option<Frame>,
     ) -> Result<Option<Frame>> {
         Ok(self.0.decode(annexb)?.map(|d| Frame {
+            color: latch_proto::color::ColorDescription {
+                bit_depth: d.bit_depth,
+                ..Default::default()
+            },
             width: d.width,
             height: d.height,
             y: d.y,
@@ -671,7 +711,11 @@ impl Decoder for MediaFoundation {
             uv_stride: d.uv_stride,
             full_range: false,
             decoded_at: None,
-            format: PixelFormat::Nv12,
+            format: if d.bit_depth == 10 {
+                PixelFormat::P010
+            } else {
+                PixelFormat::Nv12
+            },
             native: d
                 .shared
                 .map(|(surface, black)| NativeFrame { surface, black }),
@@ -785,6 +829,7 @@ mod tests {
     #[allow(clippy::needless_update)]
     fn black_detection_checks_visible_pixels_and_both_ranges() {
         let mut frame = Frame {
+            color: Default::default(),
             width: 2,
             height: 2,
             y: vec![16, 16, 255, 16, 16, 255],
@@ -832,6 +877,7 @@ mod tests {
     fn slot_keeps_only_the_newest() {
         let slot = FrameSlot::default();
         let f = |w| Frame {
+            color: Default::default(),
             width: w,
             height: 1,
             y: vec![],

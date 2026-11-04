@@ -295,6 +295,7 @@ pub fn encodable() -> Vec<Codec> {
 fn probe(backend: Backend, codec: Codec) -> Result<Caps> {
     let (width, height) = (640, 360);
     let config = VideoConfig {
+        color: Default::default(),
         width,
         height,
         fps: 60,

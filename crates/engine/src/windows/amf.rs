@@ -160,7 +160,6 @@ const AMF_REPEAT: i32 = 24;
 /// AMF_SURFACE_NV12.
 const NV12: i32 = 1;
 /// AMF_SURFACE_P010.
-#[cfg(test)]
 const P010: i32 = 10;
 fn check(code: i32, action: &str) -> Result<()> {
     ensure!(code == 0, "AMF {action}: result {code}");
@@ -304,10 +303,15 @@ pub(super) struct Encoder {
 }
 impl Encoder {
     pub fn new(config: &VideoConfig, gpu: &Gpu) -> Result<Self> {
+        let format = if config.color.bit_depth == 10 {
+            P010
+        } else {
+            NV12
+        };
         match Self::open(
             config,
             gpu,
-            NV12,
+            format,
             &[("HevcMaxOfLTRFrames", Variant::int(LTR_SLOTS as i64))],
         ) {
             Ok(mut encoder) => {
@@ -316,7 +320,7 @@ impl Encoder {
             }
             Err(e) => {
                 tracing::info!("AMF HEVC without long-term references: {e:#}");
-                Self::open(config, gpu, NV12, &[])
+                Self::open(config, gpu, format, &[])
             }
         }
     }
@@ -331,6 +335,7 @@ impl Encoder {
     pub fn recover_from(&mut self, picture: u64) -> bool {
         self.ltr.as_mut().is_some_and(|l| l.recover_from(picture))
     }
+
     /// `extra` properties are set after Latch's own, before the encoder
     /// starts; `format` is the input surface format.
     fn open(
@@ -369,7 +374,29 @@ impl Encoder {
             // Usage first: it resets every other property to its defaults.
             component.set("HevcUsage", Variant::int(1))?; // ultra low latency
             component.set("HevcQualityPreset", Variant::int(10))?; // speed
-            component.set("HevcProfile", Variant::int(1))?; // Main
+            component.set(
+                "HevcProfile",
+                Variant::int(if config.color.bit_depth == 10 { 2 } else { 1 }),
+            )?;
+            component.set(
+                "HevcColorBitDepth",
+                Variant::int(i64::from(config.color.bit_depth)),
+            )?;
+            for prefix in ["HevcIn", "HevcOut"] {
+                // Older AMF drivers lack MatrixCoeff; ColorProfile sets the
+                // matrix and range together on those versions.
+                component.set(
+                    &format!("{prefix}ColorProfile"),
+                    Variant::int(if config.color.is_hdr() { 2 } else { 1 }),
+                )?;
+                for (suffix, value) in [
+                    ("ColorPrimaries", config.color.primaries),
+                    ("ColorTransferChar", config.color.transfer),
+                ] {
+                    component.set(&format!("{prefix}{suffix}"), Variant::int(i64::from(value)))?;
+                }
+            }
+            component.set("HevcNominalRange", Variant::int(0))?;
             component.set(
                 "HevcFrameSize",
                 Variant::pair(5, config.width, config.height),
@@ -637,6 +664,7 @@ mod tests {
             fps: 60,
             bitrate_kbps: 8000,
             codec: crate::video::Codec::Hevc,
+            color: Default::default(),
         };
         let mut encoder = Encoder::new(&config, &gpu)?;
         ensure!(encoder.recovers(), "AMF LTR initialization failed");
@@ -734,6 +762,7 @@ mod tests {
         let _runtime = super::super::Runtime::new(false)?;
         let gpu = Gpu::new(&display::select()?.adapter)?;
         let config = |width, height, bitrate_kbps| VideoConfig {
+            color: Default::default(),
             width,
             height,
             fps: 240,

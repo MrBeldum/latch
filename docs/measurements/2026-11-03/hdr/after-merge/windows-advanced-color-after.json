@@ -1,0 +1,1 @@
+{"displays": [{"active": false, "bits_per_color": 8, "color_encoding": 0, "display": "\\\\.\\DISPLAY63", "enabled": false, "force_disabled": false, "hdr_on": false, "hdr_supported": true, "limited_by_policy": false, "mode": "SDR", "sdr_white_level": 1000, "supported": true, "wide_color_enforced": false, "wide_color_on": false, "wide_color_supported": true}], "supported": true}

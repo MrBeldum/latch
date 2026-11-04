@@ -326,6 +326,7 @@ pub fn measure_fps(width: u32, height: u32, budget: Duration) -> u32 {
     let fps = latch_proto::control::MAX_FPS;
     let pattern = crate::pattern::Pattern::new(width, height, fps, crate::pattern::Motion::Sweep);
     let config = VideoConfig {
+        color: Default::default(),
         width,
         height,
         fps,
@@ -450,6 +451,7 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
         };
         let (name, hardware, codec, _) = &self.describe;
         VideoInfo {
+            color: Default::default(),
             encoder: format!("{name} ({})", self.capture.name()),
             hardware: *hardware,
             codec: *codec,
@@ -620,6 +622,7 @@ mod tests {
                 waits: Vec::new(),
             },
             &VideoConfig {
+                color: Default::default(),
                 width: 1920,
                 height: 1080,
                 fps: 100,

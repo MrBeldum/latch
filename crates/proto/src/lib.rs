@@ -11,6 +11,7 @@
 
 pub mod audio;
 pub mod base64;
+pub mod color;
 pub mod control;
 pub mod fec;
 pub mod gamepad;

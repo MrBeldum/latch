@@ -36,6 +36,7 @@ impl eframe::App for Viewer {
                 ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                     ui.max_rect(),
                     latch_client::video::Paint {
+                        rect: ui.max_rect(),
                         frames: self.frames.clone(),
                     },
                 ));
@@ -184,7 +185,7 @@ fn main() -> anyhow::Result<()> {
             let render_state = cc.wgpu_render_state.as_ref().unwrap();
             let adapter = render_state.adapter.get_info();
             eprintln!("renderer {:?} {}", adapter.backend, adapter.name);
-            latch_client::video::install(render_state);
+            latch_client::video::install(&cc.egui_ctx, render_state);
             // `--cpu`: copy every picture through the CPU, as before zero-copy.
             #[cfg(windows)]
             if args.iter().any(|a| a == "--cpu") {
@@ -261,6 +262,7 @@ fn main() -> anyhow::Result<()> {
                             cursor: false,
                             gamepads: false,
                             mic: false,
+                            color: Default::default(),
                         },
                         frames.clone(),
                         tx,

@@ -1,0 +1,42 @@
+[
+  {
+    "mode": "sdr8",
+    "fps": 11.611,
+    "decode_ms": 2.5543,
+    "host_ms": 3.17,
+    "mbps": 0.2718,
+    "video_problems": [
+      null
+    ]
+  },
+  {
+    "mode": "sdr10",
+    "fps": 14.3811,
+    "decode_ms": 2.7925,
+    "host_ms": 3.1811,
+    "mbps": 0.4653,
+    "video_problems": [
+      null
+    ]
+  },
+  {
+    "mode": "hdr10",
+    "fps": 11.9779,
+    "decode_ms": 2.9933,
+    "host_ms": 3.3063,
+    "mbps": 0.2104,
+    "video_problems": [
+      null
+    ]
+  },
+  {
+    "mode": "hdr-to-sdr8",
+    "fps": 16.7104,
+    "decode_ms": 2.9181,
+    "host_ms": 3.0484,
+    "mbps": 0.7038,
+    "video_problems": [
+      null
+    ]
+  }
+]

@@ -165,6 +165,7 @@ impl Encoder {
             output,
             hardware: required_hardware,
             config: VideoConfig {
+                color: Default::default(),
                 bitrate_kbps: 0,
                 ..config.clone()
             },
@@ -243,18 +244,33 @@ impl Encoder {
             for (key, value) in [
                 (
                     kVTCompressionPropertyKey_ColorPrimaries,
-                    kCVImageBufferColorPrimaries_ITU_R_709_2,
+                    if config.color.is_hdr() {
+                        kCVImageBufferColorPrimaries_ITU_R_2020
+                    } else {
+                        kCVImageBufferColorPrimaries_ITU_R_709_2
+                    },
                 ),
                 (
                     kVTCompressionPropertyKey_TransferFunction,
-                    kCVImageBufferTransferFunction_ITU_R_709_2,
+                    if config.color.is_hdr() {
+                        kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
+                    } else {
+                        kCVImageBufferTransferFunction_ITU_R_709_2
+                    },
                 ),
                 (
                     kVTCompressionPropertyKey_YCbCrMatrix,
-                    kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+                    if config.color.is_hdr() {
+                        kCVImageBufferYCbCrMatrix_ITU_R_2020
+                    } else {
+                        kCVImageBufferYCbCrMatrix_ITU_R_709_2
+                    },
                 ),
             ] {
                 if let Err(error) = encoder.set(key, value) {
+                    if config.color.is_hdr() {
+                        return Err(error);
+                    }
                     tracing::debug!(%error, "VideoToolbox encoder does not take colour tags");
                 }
             }
@@ -331,6 +347,7 @@ impl Encoder {
     /// and a media engine past its own limit says so only by failing over.
     pub fn hardware_encodes(codec: Codec, width: u32, height: u32) -> bool {
         let config = VideoConfig {
+            color: Default::default(),
             width,
             height,
             fps: 60,

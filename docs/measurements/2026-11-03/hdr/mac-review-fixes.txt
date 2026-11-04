@@ -1,0 +1,20 @@
+$ cargo test -p latch-client --lib video:: -- --ignored --skip hdr_encode_decode --skip bench_
+test video::edr::tests::native_edr_shader_preserves_hdr_headroom ... ok
+test video::tests::cpu_frame_reaches_the_render_target ... ok
+test video::edr::tests::native_edr_shader_honours_left_chroma_siting ... ok
+test video::tests::hdr_patches_keep_their_luminance_while_an_overlay_shows ... ok
+test video::tests::decoded_frame_reaches_the_render_target ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 212 filtered out; finished in 0.12s
+
+$ cargo test -p latch-client --lib controls_and_stats_are_reported_as_overlays_over_the_video
+test stream::tests::controls_and_stats_are_reported_as_overlays_over_the_video ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out; finished in 0.03s
+
+$ cargo test -p latch-proto --lib color
+test color::tests::pq_and_gamut_roundtrip ... ok
+test color::tests::negotiation_is_default_off ... ok
+test color::tests::hdr_highlights_stay_apart_in_sdr_and_keep_their_hue ... ok
+test color::tests::sei_is_escaped_and_has_both_payloads ... ok
+test color::tests::ten_bit_gradient_has_four_times_the_levels ... ok
+test color::tests::chroma_siting_is_optional_on_the_wire ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 35 filtered out; finished in 0.00s

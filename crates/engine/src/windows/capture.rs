@@ -156,20 +156,45 @@ struct CursorRenderer {
 const SHADER: &str = r#"
 Texture2D<float4> desktop : register(t0);
 Texture2D<uint> shape : register(t1);
-cbuffer C : register(b0) { int2 origin; uint2 size; uint kind; uint rotation; uint2 rawsize; uint hdr; float white; uint2 padding; };
+cbuffer C : register(b0) { int2 origin; uint2 size; uint kind; uint rotation; uint2 rawsize; uint hdr; float white; uint output_pq; uint padding; };
 float4 vs(uint id : SV_VertexID) : SV_Position {
     return float4(id == 2 ? 3 : -1, id == 1 ? 3 : -1, 0, 1);
 }
+float3 pq(float3 lin) {
+    float3 n = pow(clamp(lin,0,1000)/10000.0, 2610.0/16384.0);
+    return pow((3424.0/4096.0 + (2413.0/128.0)*n)/(1+(2392.0/128.0)*n),2523.0/32.0);
+}
+float3 wide(float3 rgb) {
+    return mul(float3x3(0.627404,0.329283,0.043313,0.069097,0.919540,0.011362,0.016391,0.088013,0.895595),rgb);
+}
+// latch_proto::color::hdr_to_sdr: BT.709 gamut toward the colour's own
+// luminance, then a highlight shoulder on max(R,G,B) up to `peak`.
+float3 hdr_to_sdr(float3 c, float peak) {
+    float y = dot(c, float3(0.2126,0.7152,0.0722));
+    if(y <= 0) return 0;
+    float lo = min(min(c.r,c.g),c.b);
+    if(lo < 0) c = y + (c - y)*(y/(y - lo));
+    float m = max(max(c.r,c.g),c.b);
+    if(m <= 0.75) return c;
+    float x = (m - 0.75)/0.25, top = max((peak - 0.75)/0.25, 1.0);
+    float g = min(x*(1 + x/(top*top))/(1 + x), 1.0);
+    return saturate(c*((0.75 + 0.25*g)/m));
+}
+float3 linearize(float3 c) { return float3(c.r <= 0.04045 ? c.r/12.92 : pow((c.r+0.055)/1.055,2.4),c.g <= 0.04045 ? c.g/12.92 : pow((c.g+0.055)/1.055,2.4),c.b <= 0.04045 ? c.b/12.92 : pow((c.b+0.055)/1.055,2.4)); }
 float4 ps(float4 p : SV_Position) : SV_Target {
     int2 pos = int2(p.xy); int2 src = pos;
     if(rotation == 2) src = int2(pos.y, rawsize.y - 1 - pos.x);
     if(rotation == 3) src = int2(rawsize.x - 1 - pos.x, rawsize.y - 1 - pos.y);
     if(rotation == 4) src = int2(rawsize.x - 1 - pos.y, pos.x);
     float4 bg = desktop.Load(int3(src,0));
-    if(hdr != 0) {
-        // scRGB is linear, with SDR white given by the display's white level.
-        // Clip highlights to SDR and apply the sRGB transfer before cursor blending.
-        float3 lin = saturate(bg.rgb / white);
+    if(output_pq != 0) {
+        bg.rgb = pq(wide(hdr != 0 ? bg.rgb*80.0 : linearize(bg.rgb)*white*80.0));
+    } else if(hdr != 0) {
+        // scRGB is linear BT.709, with SDR white given by the display's white
+        // level. Keep highlights up to the 1000-nit HDR ceiling apart and in
+        // hue rather than clipping each channel, then apply the sRGB transfer
+        // before cursor blending.
+        float3 lin = hdr_to_sdr(bg.rgb / white, 1000.0/80.0/white);
         bg.rgb = float3(lin.r <= 0.0031308 ? 12.92*lin.r : 1.055*pow(lin.r,1.0/2.4)-0.055,
                         lin.g <= 0.0031308 ? 12.92*lin.g : 1.055*pow(lin.g,1.0/2.4)-0.055,
                         lin.b <= 0.0031308 ? 12.92*lin.b : 1.055*pow(lin.b,1.0/2.4)-0.055);
@@ -179,6 +204,13 @@ float4 ps(float4 p : SV_Position) : SV_Target {
     uint v = shape.Load(int3(c,0));
     uint3 rgb = uint3((v >> 16) & 255, (v >> 8) & 255, v & 255);
     uint a = v >> 24;
+    if(output_pq != 0) {
+        float3 cursor = pq(wide(linearize(float3(rgb)/255.0)*white*80.0));
+        if(kind == 2) return float4(cursor*(a/255.0)+bg.rgb*(1-a/255.0),1);
+        if(kind == 4) return a == 255 ? float4(abs(bg.rgb-cursor),1) : float4(cursor,1);
+        uint3 screen = uint3(round(saturate(bg.rgb)*255));
+        return float4(float3((screen & a) ^ rgb)/255.0,1);
+    }
     if(kind == 2) return float4(float3(rgb)*(a/65025.0) + bg.rgb*(1-a/255.0), 1);
     uint3 screen = uint3(round(saturate(bg.rgb)*255));
     if(kind == 4) rgb = a == 255 ? screen ^ rgb : rgb;
@@ -337,9 +369,9 @@ impl CursorRenderer {
         target: &ID3D11Texture2D,
         cursor: &DXGI_OUTDUPL_POINTER_POSITION,
         shape: &DXGI_OUTDUPL_POINTER_SHAPE_INFO,
-        color: (DXGI_MODE_ROTATION, f32),
+        color: (DXGI_MODE_ROTATION, f32, bool),
     ) -> Result<()> {
-        let (rotation, white) = color;
+        let (rotation, white, output_pq) = color;
         let (mut raw, mut dst) = (
             D3D11_TEXTURE2D_DESC::default(),
             D3D11_TEXTURE2D_DESC::default(),
@@ -391,7 +423,7 @@ impl CursorRenderer {
                 raw.Height,
                 u32::from(raw.Format == DXGI_FORMAT_R16G16B16A16_FLOAT),
                 white.to_bits(),
-                0,
+                u32::from(output_pq),
                 0,
             ];
             gpu.context.UpdateSubresource(
@@ -426,6 +458,8 @@ impl CursorRenderer {
     }
 }
 pub(super) struct Capture {
+    pub hdr_output: bool,
+    ten_bit: bool,
     pub gpu: Gpu,
     duplication: Option<IDXGIOutputDuplication>,
     source: ID3D11Texture2D,
@@ -483,28 +517,25 @@ fn desktop_rect(desc: &DXGI_OUTDUPL_DESC, coordinates: RECT) -> DisplayRect {
     }
 }
 fn duplicate(output: &display::Output, gpu: &Gpu) -> Result<IDXGIOutputDuplication> {
-    // SAFETY: the device belongs to the selected output's adapter.
+    // SAFETY: the device belongs to this output. Once Output5 is available,
+    // never fall back on a failed acquisition to legacy BGRA conversion: that
+    // can silently turn an Advanced Color desktop black.
     unsafe {
-        output
-            .output
-            .cast::<IDXGIOutput5>()
-            .and_then(|o| {
-                o.DuplicateOutput1(
-                    &gpu.device,
-                    0,
-                    &[
-                        DXGI_FORMAT_B8G8R8A8_UNORM,
-                        DXGI_FORMAT_R16G16B16A16_FLOAT,
-                        DXGI_FORMAT_R8G8B8A8_UNORM,
-                    ],
-                )
-            })
-            .or_else(|_| {
-                output
-                    .output
-                    .cast::<IDXGIOutput1>()?
-                    .DuplicateOutput(&gpu.device)
-            })
+        match output.output.cast::<IDXGIOutput5>() {
+            Ok(output) => output.DuplicateOutput1(
+                &gpu.device,
+                0,
+                &[
+                    DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    DXGI_FORMAT_R8G8B8A8_UNORM,
+                ],
+            ),
+            Err(_) => output
+                .output
+                .cast::<IDXGIOutput1>()?
+                .DuplicateOutput(&gpu.device),
+        }
     }
     .context("duplicate desktop output")
 }
@@ -513,9 +544,22 @@ fn duplicate(output: &display::Output, gpu: &Gpu) -> Result<IDXGIOutputDuplicati
 // apartment-bound MF interfaces or COM initialization guard travel with it.
 unsafe impl Send for Capture {}
 impl Capture {
+    #[cfg(test)]
     pub fn new() -> Result<Self> {
+        Self::new_color(Default::default())
+    }
+    pub fn new_color(color: latch_proto::color::ColorDescription) -> Result<Self> {
         let _dpi = display::DpiAwareness::physical();
         let output = display::select()?;
+        let ten_bit = color.bit_depth == 10;
+        let hdr_output = color.is_hdr()
+            && unsafe {
+                output
+                    .output
+                    .cast::<IDXGIOutput6>()
+                    .and_then(|o| o.GetDesc1())
+                    .is_ok_and(|d| d.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
+            };
         let gpu = Gpu::new(&output.adapter)?;
         let duplication = duplicate(&output, &gpu)?;
         // SAFETY: The duplication owns its descriptor.
@@ -531,12 +575,18 @@ impl Capture {
         let frame = gpu.texture(
             display.width,
             display.height,
-            DXGI_FORMAT_B8G8R8A8_UNORM,
+            if ten_bit {
+                DXGI_FORMAT_R10G10B10A2_UNORM
+            } else {
+                DXGI_FORMAT_B8G8R8A8_UNORM
+            },
             D3D11_BIND_RENDER_TARGET.0 as u32,
             false,
         )?;
         let renderer = CursorRenderer::new(&gpu)?;
         Ok(Self {
+            hdr_output,
+            ten_bit,
             gpu,
             duplication: Some(duplication),
             source,
@@ -580,7 +630,16 @@ impl Capture {
             )
         };
         if old.HighPart != new.HighPart || old.LowPart != new.LowPart {
-            *self = Self::new()?;
+            let mut color = latch_proto::color::ColorDescription {
+                bit_depth: if self.ten_bit { 10 } else { 8 },
+                ..Default::default()
+            };
+            if self.hdr_output {
+                color.transfer = 16;
+            }
+            let hdr_output = self.hdr_output;
+            *self = Self::new_color(color)?;
+            self.hdr_output = hdr_output;
             return Ok(());
         }
         let duplication = duplicate(&output, &self.gpu)?;
@@ -597,7 +656,11 @@ impl Capture {
         let frame = self.gpu.texture(
             display.width,
             display.height,
-            DXGI_FORMAT_B8G8R8A8_UNORM,
+            if self.ten_bit {
+                DXGI_FORMAT_R10G10B10A2_UNORM
+            } else {
+                DXGI_FORMAT_B8G8R8A8_UNORM
+            },
             D3D11_BIND_RENDER_TARGET.0 as u32,
             false,
         )?;
@@ -692,7 +755,11 @@ impl Capture {
                 self.frame = self.gpu.texture(
                     width,
                     height,
-                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    if self.ten_bit {
+                        DXGI_FORMAT_R10G10B10A2_UNORM
+                    } else {
+                        DXGI_FORMAT_B8G8R8A8_UNORM
+                    },
                     D3D11_BIND_RENDER_TARGET.0 as u32,
                     false,
                 )?;
@@ -720,7 +787,8 @@ impl Capture {
                 .context("read DXGI pointer shape")?;
                 shape_bytes = Some(bytes);
             }
-            composite = self.pointer.Visible.as_bool()
+            composite = self.ten_bit
+                || self.pointer.Visible.as_bool()
                 || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM
                 || !matches!(
                     self.rotation,
@@ -759,7 +827,7 @@ impl Capture {
                 &self.frame,
                 &self.pointer,
                 &self.shape,
-                (self.rotation, self.white),
+                (self.rotation, self.white, self.hdr_output),
             )?;
         }
         self.has_frame = true;
@@ -837,7 +905,22 @@ pub(super) struct Converter {
     input: Option<(ID3D11Texture2D, ID3D11VideoProcessorInputView)>,
 }
 impl Converter {
+    #[cfg(test)]
     pub fn new(gpu: &Gpu, input: (u32, u32), output: (u32, u32), fps: u32) -> Result<Self> {
+        Self::with_color(gpu, input, output, fps, Default::default())
+    }
+    pub fn with_color(
+        gpu: &Gpu,
+        input: (u32, u32),
+        output: (u32, u32),
+        fps: u32,
+        color: latch_proto::color::ColorDescription,
+    ) -> Result<Self> {
+        let format = if color.bit_depth == 10 {
+            DXGI_FORMAT_P010
+        } else {
+            DXGI_FORMAT_NV12
+        };
         // SAFETY: D3D video interfaces refer to the same device/context.
         unsafe {
             let video: ID3D11VideoDevice = gpu.device.cast().context("D3D11 video device")?;
@@ -865,7 +948,7 @@ impl Converter {
                 "video processor cannot read BGRA"
             );
             anyhow::ensure!(
-                enumerator.CheckVideoProcessorFormat(DXGI_FORMAT_NV12)?
+                enumerator.CheckVideoProcessorFormat(format)?
                     & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT.0 as u32
                     != 0,
                 "video processor cannot produce NV12"
@@ -888,15 +971,28 @@ impl Converter {
                     _bitfield: (1 << 2) | (1 << 4),
                 },
             );
+            if color.is_hdr() {
+                context
+                    .cast::<ID3D11VideoContext1>()
+                    .context("HDR colour conversion requires D3D11.1")?;
+            }
             if let Ok(context1) = context.cast::<ID3D11VideoContext1>() {
                 context1.VideoProcessorSetStreamColorSpace1(
                     &processor,
                     0,
-                    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+                    if color.is_hdr() {
+                        DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+                    } else {
+                        DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
+                    },
                 );
                 context1.VideoProcessorSetOutputColorSpace1(
                     &processor,
-                    DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+                    if color.is_hdr() {
+                        DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020
+                    } else {
+                        DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709
+                    },
                 );
             }
             context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
@@ -939,7 +1035,7 @@ impl Converter {
                 let texture = gpu.texture(
                     output.0,
                     output.1,
-                    DXGI_FORMAT_NV12,
+                    format,
                     D3D11_BIND_RENDER_TARGET.0 as u32,
                     false,
                 )?;
@@ -1088,9 +1184,25 @@ mod tests {
         super::compile_shader(windows::core::s!("ps"), windows::core::s!("ps_4_0"))?;
         Ok(())
     }
+    /// IEEE half from f32 for the normal, finite values a test uses.
+    fn half(v: f32) -> u16 {
+        if v == 0.0 {
+            return 0;
+        }
+        let bits = v.to_bits();
+        let sign = ((bits >> 16) & 0x8000) as u16;
+        let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+        let mantissa = ((bits & 0x7f_ffff) + 0x1000) >> 13;
+        sign | (((exponent as u16) << 10) + mantissa as u16)
+    }
+    /// An HDR (Advanced Color) desktop captured for an SDR stream: neutral
+    /// 203/400/600/1000-nit patches stay apart, saturated and wide-gamut
+    /// colours keep their hue, SDR content below the knee is unchanged and
+    /// nothing goes black. Matches latch_proto's reference within a code.
     #[test]
-    fn fp16_sc_rgb_white_becomes_sdr_white() -> anyhow::Result<()> {
+    fn fp16_sc_rgb_hdr_desktop_keeps_highlights_in_sdr() -> anyhow::Result<()> {
         use super::*;
+        use latch_proto::color::{bt2020_to_bt709, hdr_to_sdr, srgb_oetf};
         // This tests shader output, not capture or video acceleration. WARP
         // runs the shader even on CI adapters without D3D11 video support.
         let (mut device, mut context) = (None, None);
@@ -1112,38 +1224,102 @@ mod tests {
             device: device.context("WARP returned no device")?,
             context: context.context("WARP returned no context")?,
         };
+        let white_nits = 203.0f64;
+        let nits = |n: f64| n / 80.0;
+        let mut patches: Vec<[f64; 3]> = [203.0, 400.0, 600.0, 1000.0, 100.0, 0.0]
+            .iter()
+            .map(|&n| [nits(n); 3])
+            .collect();
+        patches.extend([
+            [nits(1000.0), 0.0, 0.0],
+            [nits(1000.0), nits(500.0), 0.0],
+            [nits(40.0), nits(80.0), nits(600.0)],
+            bt2020_to_bt709([0.0, nits(1000.0), 0.0]),
+        ]);
+        let width = patches.len() as u32;
         let source = gpu.texture(
-            2,
+            width,
             1,
             DXGI_FORMAT_R16G16B16A16_FLOAT,
             D3D11_BIND_SHADER_RESOURCE.0 as u32,
             false,
         )?;
         let target = gpu.texture(
-            2,
+            width,
             1,
             DXGI_FORMAT_B8G8R8A8_UNORM,
             D3D11_BIND_RENDER_TARGET.0 as u32,
             false,
         )?;
-        // Half-float scRGB pixels: SDR white at 160 nits, then black.
-        let pixels: [u16; 8] = [0x4000, 0x4000, 0x4000, 0x3c00, 0, 0, 0, 0x3c00];
-        // SAFETY: Upload covers the complete two-pixel texture.
+        let pixels: Vec<u16> = patches
+            .iter()
+            .flat_map(|p| {
+                [
+                    half(p[0] as f32),
+                    half(p[1] as f32),
+                    half(p[2] as f32),
+                    0x3c00,
+                ]
+            })
+            .collect();
+        // Half floats round: compare against what the shader actually reads.
+        let read: Vec<[f64; 3]> = pixels
+            .chunks(4)
+            .map(|p| {
+                [0, 1, 2].map(|i| {
+                    let h = p[i];
+                    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+                    let e = i32::from((h >> 10) & 31);
+                    let m = f64::from(h & 1023) / 1024.0;
+                    if e == 0 {
+                        sign * m * 2f64.powi(-14)
+                    } else {
+                        sign * (1.0 + m) * 2f64.powi(e - 15)
+                    }
+                })
+            })
+            .collect();
+        // SAFETY: Upload covers the complete one-row texture.
         unsafe {
             gpu.context
-                .UpdateSubresource(&source, 0, None, pixels.as_ptr().cast(), 16, 0);
+                .UpdateSubresource(&source, 0, None, pixels.as_ptr().cast(), width * 8, 0);
         }
+        let white = (white_nits / 80.0) as f32;
         CursorRenderer::new(&gpu)?.draw(
             &gpu,
             &source,
             &target,
             &Default::default(),
             &Default::default(),
-            (DXGI_MODE_ROTATION_IDENTITY, 2.0),
+            (DXGI_MODE_ROTATION_IDENTITY, white, false),
         )?;
-        let pixels = gpu.read(&mut None, &target, 1, |bytes, _| bytes.to_vec())?;
-        assert_eq!(&pixels[..4], &[255, 255, 255, 255]);
-        assert_eq!(&pixels[4..8], &[0, 0, 0, 255]);
+        let out = gpu.read(&mut None, &target, 1, |bytes, _| bytes.to_vec())?;
+        let bgr: Vec<[i32; 3]> = out[..width as usize * 4]
+            .chunks(4)
+            .map(|p| [i32::from(p[2]), i32::from(p[1]), i32::from(p[0])])
+            .collect();
+        for (i, rgb) in read.iter().enumerate() {
+            let expected = hdr_to_sdr(rgb.map(|v| v / f64::from(white)), 1000.0 / white_nits)
+                .map(|v| (255.0 * srgb_oetf(v)).round() as i32);
+            assert!(
+                (0..3).all(|c| (bgr[i][c] - expected[c]).abs() <= 1),
+                "patch {i} {rgb:?}: shader {:?}, reference {expected:?}",
+                bgr[i]
+            );
+        }
+        eprintln!("HDR desktop → SDR codes: {bgr:?}");
+        let neutral: Vec<i32> = bgr[..4].iter().map(|p| p[0]).collect();
+        assert!(neutral.windows(2).all(|w| w[0] < w[1]), "{neutral:?}");
+        assert_eq!(bgr[5], [0, 0, 0], "black stays black");
+        assert!(
+            bgr[4][0] > 150,
+            "100-nit grey is not darkened: {:?}",
+            bgr[4]
+        );
+        assert!(
+            bgr[6..].iter().all(|p| p.iter().any(|&c| c > 128)),
+            "{bgr:?}"
+        );
         Ok(())
     }
     #[test]
@@ -1177,6 +1353,66 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hdr_desktop_tests {
+    use super::*;
+    /// Live Advanced Color desktop → SDR stream capture: the HDR10 viewer
+    /// test's 203/400/600/1000-nit patches (latch-client
+    /// `hdr10_child_window_keeps_hdr_under_overlays` with
+    /// LATCH_HDR_PATCH_DIR) come out of the SDR capture path brighter in
+    /// order, never black and never all clipped to one white.
+    #[test]
+    #[ignore = "interactive HDR desktop with the client's HDR10 patch window up"]
+    fn hdr_desktop_patches_reach_sdr_capture_apart() -> Result<()> {
+        let dir = std::path::PathBuf::from(std::env::var("LATCH_HDR_PATCH_DIR")?);
+        let start = Instant::now();
+        while !dir.join("patches-ready").exists() {
+            anyhow::ensure!(start.elapsed() < Duration::from_secs(90), "no patch window");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let points: Vec<(i32, i32)> = std::fs::read_to_string(dir.join("patches-ready"))?
+            .split(';')
+            .map(|p| {
+                let (x, y) = p.split_once(',').unwrap();
+                (x.parse().unwrap(), y.parse().unwrap())
+            })
+            .collect();
+        let result = (|| -> Result<Vec<[u8; 3]>> {
+            let _runtime = super::super::Runtime::new(false)?;
+            let mut capture = Capture::new()?;
+            anyhow::ensure!(!capture.hdr_output, "an SDR stream must get SDR capture");
+            let start = Instant::now();
+            while !capture.grab(Duration::from_millis(200))? || !capture.has_frame {
+                anyhow::ensure!(start.elapsed() < Duration::from_secs(5), "no desktop frame");
+            }
+            let display = capture.display;
+            let frame = capture.frame.clone();
+            capture.read(&frame, display.height as usize, |bytes, pitch| {
+                points
+                    .iter()
+                    .map(|&(x, y)| {
+                        let at = (y - display.y) as usize * pitch + (x - display.x) as usize * 4;
+                        [bytes[at + 2], bytes[at + 1], bytes[at]]
+                    })
+                    .collect()
+            })
+        })();
+        std::fs::write(dir.join("patches-done"), "done")?;
+        let codes = result?;
+        eprintln!(
+            "SDR white {} nits; 203/400/600/1000-nit patches → {codes:?}",
+            display::sdr_white_level(&display::select()?.desc.DeviceName) * 80.0
+        );
+        assert!(codes.iter().all(|c| c[0] > 0), "black capture: {codes:?}");
+        assert!(codes.windows(2).all(|w| w[0][0] <= w[1][0]), "{codes:?}");
+        assert!(
+            codes[0][0] < codes[3][0],
+            "highlights clipped together: {codes:?}"
+        );
         Ok(())
     }
 }
@@ -1295,6 +1531,160 @@ mod timing_tests {
                     times[times.len() / 2],
                     times[times.len() * 95 / 100]
                 );
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hdr_probe {
+    use super::*;
+    use crate::video::{Codec, VideoConfig};
+
+    #[test]
+    #[ignore = "requires a hardware HEVC Main10 encoder; writes HDR probe artifacts"]
+    fn scrgb_pq_p010_hardware_roundtrip() -> Result<()> {
+        let _runtime = super::super::runtime::Runtime::new(true)?;
+        let output = display::select()?;
+        let gpu = Gpu::new(&output.adapter)?;
+        let color = latch_proto::color::ColorDescription::negotiate(
+            latch_proto::color::ColorCapabilities {
+                hdr: true,
+                ten_bit: true,
+                peak_nits: 1000,
+            },
+            true,
+            true,
+        );
+        let config = VideoConfig {
+            color,
+            codec: Codec::Hevc,
+            width: 960,
+            height: 540,
+            fps: 60,
+            bitrate_kbps: 20000,
+        };
+        let source = gpu.texture(
+            960,
+            540,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            false,
+        )?;
+        let target = gpu.texture(
+            960,
+            540,
+            DXGI_FORMAT_R10G10B10A2_UNORM,
+            D3D11_BIND_RENDER_TARGET.0 as u32,
+            false,
+        )?;
+        let pixels: Vec<u16> = (0..960 * 540)
+            .flat_map(|i| {
+                let v = [0x3000, 0x3d00, 0x4a40][(i % 960) / 320]; // 10, 100, 1000 cd/m² in scRGB.
+                [v, v, v, 0x3c00]
+            })
+            .collect();
+        // SAFETY: tightly packed complete FP16 image; the system shader reads it.
+        unsafe {
+            gpu.context
+                .UpdateSubresource(&source, 0, None, pixels.as_ptr().cast(), 960 * 8, 0);
+        }
+        let mut renderer = CursorRenderer::new(&gpu)?;
+        renderer.draw(
+            &gpu,
+            &source,
+            &target,
+            &Default::default(),
+            &Default::default(),
+            (DXGI_MODE_ROTATION_IDENTITY, 1.0, true),
+        )?;
+        let mut converter = Converter::with_color(&gpu, (960, 540), (960, 540), 60, color)?;
+        let picture = converter.convert(&target)?;
+        gpu.read(&mut None, &picture.texture, 540 * 3 / 2, |bytes, stride| {
+            for (x, nits) in [(160, 10.0), (480, 100.0), (800, 1000.0)] {
+                let offset = 270 * stride + x * 2;
+                let code = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]) >> 6;
+                let expected = 64.0 + 876.0 * latch_proto::color::pq_oetf(nits);
+                assert!(
+                    (f64::from(code) - expected).abs() < 4.0,
+                    "FP16 -> PQ P010: {nits} nits -> {code}, expected {expected}"
+                );
+            }
+        })?;
+        let dir = std::env::var("LATCH_HDR_PROBE_DIR").unwrap_or_else(|_| ".".into());
+        for mode in ["sdr8", "sdr10", "hdr"] {
+            let color = latch_proto::color::ColorDescription::negotiate(
+                latch_proto::color::ColorCapabilities {
+                    ten_bit: mode != "sdr8",
+                    hdr: mode == "hdr",
+                    peak_nits: 1000,
+                },
+                true,
+                mode == "hdr",
+            );
+            let config = VideoConfig {
+                color,
+                ..config.clone()
+            };
+            let rgb = gpu.texture(
+                960,
+                540,
+                if color.bit_depth == 10 {
+                    DXGI_FORMAT_R10G10B10A2_UNORM
+                } else {
+                    DXGI_FORMAT_B8G8R8A8_UNORM
+                },
+                D3D11_BIND_RENDER_TARGET.0 as u32,
+                false,
+            )?;
+            renderer.draw(
+                &gpu,
+                &source,
+                &rgb,
+                &Default::default(),
+                &Default::default(),
+                (DXGI_MODE_ROTATION_IDENTITY, 1.0, color.is_hdr()),
+            )?;
+            let mut converter = Converter::with_color(&gpu, (960, 540), (960, 540), 60, color)?;
+            let picture = converter.convert(&rgb)?;
+            for mf in [false, true] {
+                let name = if mf { "mf" } else { "amf" };
+                let mut stream = color
+                    .hdr
+                    .map(latch_proto::color::hevc_hdr_sei)
+                    .unwrap_or_default();
+                let mut times = Vec::new();
+                if mf {
+                    let mut encoder = super::super::encode::Encoder::new(&config, &gpu)?;
+                    let sample = super::super::encode::Encoder::texture_sample(&picture.texture)?;
+                    for i in 0..60 {
+                        let at = Instant::now();
+                        if let Some((bytes, _)) = encoder.encode(&sample, i == 0)? {
+                            stream.extend(bytes);
+                        }
+                        times.push(at.elapsed().as_secs_f64() * 1000.0);
+                    }
+                } else {
+                    let mut encoder = super::super::amf::Encoder::new(&config, &gpu)?;
+                    for i in 0..60 {
+                        let at = Instant::now();
+                        let (bytes, _) = encoder.encode(&picture.texture, i == 0)?;
+                        times.push(at.elapsed().as_secs_f64() * 1000.0);
+                        stream.extend(bytes);
+                    }
+                }
+                times.sort_by(f64::total_cmp);
+                eprintln!(
+                "COLOR {mode} {name}: frames=60 bytes={} encode_p50_ms={:.3} encode_p95_ms={:.3}",
+                stream.len(),
+                times[30],
+                times[57]
+            );
+                std::fs::write(
+                    std::path::Path::new(&dir).join(format!("{mode}-{name}.hevc")),
+                    stream,
+                )?;
             }
         }
         Ok(())

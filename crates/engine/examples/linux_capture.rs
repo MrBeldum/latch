@@ -70,6 +70,7 @@ fn main() -> anyhow::Result<()> {
         let mut pipeline = SoftwarePipeline::new(
             capture,
             &VideoConfig {
+                color: Default::default(),
                 width,
                 height,
                 fps: 60,

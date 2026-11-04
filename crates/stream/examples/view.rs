@@ -64,9 +64,13 @@ fn square_is_white(f: &Frame) -> bool {
         let mut sum = 0u64;
         for y_pos in 16..48 {
             for x_pos in 16..48 {
-                let idx = y_pos * y_stride + x_pos;
+                let idx = y_pos * y_stride + x_pos * if f.color.bit_depth == 10 { 2 } else { 1 };
                 if idx < y.len() {
-                    sum += y[idx] as u64;
+                    sum += if f.color.bit_depth == 10 {
+                        u64::from(u16::from_le_bytes([y[idx], y[idx + 1]]) >> 8)
+                    } else {
+                        y[idx] as u64
+                    };
                 }
             }
         }
@@ -88,10 +92,18 @@ fn dump(frames: &FrameSlot, path: &str) -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(5));
     };
     let (w, h) = (frame.width as usize, frame.height as usize);
-    let mut out = format!("P5\n{w} {h}\n255\n").into_bytes();
+    let ten = frame.color.bit_depth == 10;
+    let max = if ten { 1023 } else { 255 };
+    let mut out = format!("P5\n{w} {h}\n{max}\n").into_bytes();
     frame.with_planes(|y, stride, _, _| {
         for row in 0..h {
-            out.extend_from_slice(&y[row * stride..row * stride + w]);
+            if ten {
+                for v in y[row * stride..row * stride + w * 2].as_chunks::<2>().0 {
+                    out.extend_from_slice(&(u16::from_le_bytes(*v) >> 6).to_be_bytes());
+                }
+            } else {
+                out.extend_from_slice(&y[row * stride..row * stride + w]);
+            }
         }
     });
     std::fs::write(path, out)?;
@@ -150,6 +162,11 @@ fn main() -> anyhow::Result<()> {
             port,
         },
         Settings {
+            color: latch_proto::color::ColorCapabilities {
+                ten_bit: flag("--ten-bit"),
+                hdr: flag("--hdr"),
+                peak_nits: if flag("--hdr") { 1000 } else { 0 },
+            },
             width,
             height,
             fps,
@@ -169,7 +186,10 @@ fn main() -> anyhow::Result<()> {
     let asked = Instant::now();
     loop {
         match rx.recv_timeout(Duration::from_secs(20)) {
-            Ok(Event::Connected) => break,
+            Ok(Event::Connected) => {
+                eprintln!("negotiated color: {:?}", session.stats().color);
+                break;
+            }
             Ok(Event::Failed { stage, message }) => anyhow::bail!("failed at {stage}: {message}"),
             Ok(other) => eprintln!("{other:?}"),
             Err(_) => anyhow::bail!("no stream after 20 s"),

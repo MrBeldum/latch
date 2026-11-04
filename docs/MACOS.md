@@ -300,7 +300,11 @@ VideoToolbox encodes that surface; only compressed bytes reach Latch.
   frame's encode time (240 fps at 1080p, 120 at 3024×1964) keeps its
   rate; a slower one sees no difference.
 - **10-bit.** HEVC Main10 from P010 (`x420`) surfaces works and is tested
-  with synthetic surfaces; nothing asks for it until HDR does.
+  with synthetic surfaces. Viewers now negotiate ten-bit SDR or HDR10;
+  ScreenCaptureKit selects P010 and canonical HDR capture with a PQ colour
+  space for HDR, and VideoToolbox writes matching BT.2020/PQ tags. HDR
+  capture requires Apple Silicon and macOS 15; unavailable Main10 capture
+  or encoding retries SDR8 before Accept.
 
 A requested keyframe is the next picture returned to the server. Queued
 pre-request frames are discarded until the fresh IDR, so they cannot delay
@@ -512,3 +516,28 @@ completed video to decode within the batch. Unsupported batch receive falls
 back on the nonblocking socket. Host sends retain the shared unconnected UDP
 socket and scalar sends. See [transport measurements](measurements/2026-11-03/transport/README.md)
 for measured headroom and outstanding MTU/offload work.
+
+### HDR viewing
+
+P010 decoder output remains ten-bit through the Metal texture cache. A
+separate RGBA16Float CAMetalLayer opts into extended dynamic range and uses
+extended linear Display P3. PQ is decoded to absolute luminance, converted
+from BT.2020 to P3, and mapped into NSScreen's current EDR headroom. The
+viewer advertises HDR only when the native path initializes on an EDR
+screen; moving to an SDR screen compresses highlights to that screen.
+Ten-bit SDR also uses the float layer, preserving gradations. The existing
+eight-bit SDR shader and surface path remain in use for legacy streams.
+
+The float layer is inserted *below* wgpu's Metal layer. While it shows,
+wgpu's layer is made non-opaque and the video callback writes transparent
+pixels over the picture, so CoreAnimation composites the toolbar, stats,
+settings and toasts over HDR video at SDR white; the picture's own values
+never change with the controls. Chroma is sampled at its signalled siting
+(left: a quarter chroma texel right of the centred position).
+
+The native shader has offscreen Metal numerical tests (headroom, left
+chroma siting), and an egui test toggles an overlay over HDR patches and
+checks the EDR values and egui's transparency stay put; the full HDR
+encode/decode/wgpu SDR tone-map test compares against source pixels. Live
+ScreenCaptureKit HDR capture still needs a Screen Recording authorized
+process. See [measurements](measurements/2026-11-03/hdr/README.md).

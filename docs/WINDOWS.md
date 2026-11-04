@@ -290,13 +290,14 @@ in the interactive desktop. MF HEVC exposes LTR buffer/mark/use values;
 H.264 accepts their setters but rejects their reads; neither result proves reference recovery. `IsModifiable` returns E_NOTIMPL, so it is not a
 reliable capability test on this AMD MFT. Gradual intra-refresh reads are
 rejected. Main10 output-type negotiation succeeds. These probes do not prove
-reference recovery or HDR encoding through MF. AMF's
+reference recovery or HDR fidelity through MF. AMF's
 RX 6600 probe marks an LTR and reports its later forced use on a P-frame
 (the loss recovery above is built on it);
 intra-refresh configuration emits non-IDRs, but actual CTB refresh and
 decoder recovery still need dedicated tests. P010 Main10 produces an IDR
 whose SPS identifies profile 2. HDR metadata and fidelity are unverified;
-the streaming path remains 8-bit SDR.
+those earlier probes alone did not enable HDR. The negotiated path described
+below now selects Main10 and carries colour and metadata.
 
 Measurements and reproduction commands: [Windows hardware measurements](measurements/2026-11-03/windows-host/README.md).
 
@@ -509,3 +510,39 @@ See [transport measurements](measurements/2026-11-03/transport/README.md).
 Transport segments video runs through WSASendMsg USO and receives through
 WSARecvMsg URO when supported, falling back to ordinary UDP. Set
 `LATCH_UDP_OFFLOAD=0` to disable both. See the [transport measurements](measurements/2026-11-03/transport/README.md): USO was exercised on the RX 6600 PC; URO coalescing was not observed.
+
+### Negotiated HDR10 and ten-bit SDR
+
+The viewer sends default-off colour capabilities. An HDR desktop plus an HDR
+viewer selects limited-range Main10 / BT.2020 NCL / PQ. An SDR desktop stays
+BT.709, with P010 if ten-bit was requested. AMF and MF set Main10 and the
+VUI colour description; the server inserts mastering-display and content-light
+SEI at each HDR IDR. Unsupported Main10 initialization retries SDR8 before
+Accept. It does not disable otherwise-working eight-bit HEVC.
+
+Capture keeps FP16 scRGB from DuplicateOutput1, converts on the GPU, and
+uses RGB10/P010 for ten-bit streams. Cursor and rotation remain on the GPU.
+Advanced Color viewed from an SDR peer is converted relative to the SDR
+white level, with colours outside BT.709 desaturated toward their own
+luminance and highlights up to 1000 nits compressed into the top quarter of
+the range (hue-preserving, on max(R,G,B)) rather than clipped per channel. Nothing in colour negotiation changes Windows HDR
+or ACM settings. Tests must snapshot and restore any display state they
+change; synthetic FP16 probes can test the HDR GPU path without toggling it.
+
+Windows viewing uses P010 from the MF HEVC decoder and an RGB10 swapchain.
+A ten-bit stream opens the decoder with P010 required: before its sequence
+header a hardware MFT offers only NV12, which stands in until the stream
+change after the header selects P010 (CPU readback; shared textures are NV12
+only). Eight-bit streams keep the shared NV12 texture path.
+An HDR display uses DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 for PQ and
+receives HDR10 metadata; SDR Main10 uses G22/709. A PQ stream on an SDR
+display uses the wgpu SDR tone map. Native video windows accept no input;
+input continues through the existing egui window. The child window is
+always above egui's surface, so it is cut (SetWindowRgn) around whatever
+egui draws above the picture — toolbar, stats, toasts, dialogs, menus, the
+host cursor — and egui shows its own (tone-mapped) copy of the frame
+under those controls only; the rest of the picture stays HDR. The shader
+samples chroma at its signalled siting (left, as the video processor's
+`*_LEFT_*` colour spaces produce it).
+
+[HDR measurements and remaining validation](measurements/2026-11-03/hdr/README.md).

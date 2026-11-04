@@ -1058,6 +1058,7 @@ fn run(c: &Connect, generation: u64) -> Result<()> {
             port: CONTROL_PORT,
         },
         Settings {
+            color: crate::video::color_capabilities(),
             width: w,
             height: h,
             fps,

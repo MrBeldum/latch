@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicUsize;
 
 fn config() -> VideoConfig {
     VideoConfig {
+        color: Default::default(),
         width: 64,
         height: 64,
         fps: 60,
@@ -15,6 +16,7 @@ fn config() -> VideoConfig {
 
 fn info() -> VideoInfo {
     VideoInfo {
+        color: Default::default(),
         encoder: "initial".into(),
         hardware: true,
         codec: Codec::H264Baseline,
@@ -131,6 +133,7 @@ fn a_viewer_that_does_not_read_cannot_block_the_control_writer() {
     }
     host.set_nonblocking(false).unwrap();
     let accept = Accept {
+        color: Default::default(),
         cursor: false,
         gamepads: 0,
         gamepad_kinds: Vec::new(),
@@ -459,6 +462,7 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
     };
     let (host, mut client) = sockets();
     let accept = Accept {
+        color: Default::default(),
         cursor: false,
         gamepads: 0,
         gamepad_kinds: Vec::new(),

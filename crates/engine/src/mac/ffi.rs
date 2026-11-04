@@ -301,3 +301,14 @@ extern "C" {
 extern "C" {
     pub fn CVPixelBufferGetIOSurface(image: Ref) -> Ref;
 }
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    pub static kCGColorSpaceITUR_2100_PQ: Ref;
+}
+#[link(name = "CoreVideo", kind = "framework")]
+unsafe extern "C" {
+    pub static kCVImageBufferColorPrimaries_ITU_R_2020: Ref;
+    pub static kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ: Ref;
+    pub static kCVImageBufferYCbCrMatrix_ITU_R_2020: Ref;
+}

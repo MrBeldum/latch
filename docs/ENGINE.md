@@ -59,14 +59,14 @@ KeyframeRequest (fallback, older hosts) ────▶ next frame is IDR
 
 | Host | Capture | Encode |
 | --- | --- | --- |
-| macOS | ScreenCaptureKit, NV12 IOSurface at the stream size and up to the display's refresh, cursor included | VideoToolbox (HEVC, H.264 High, or Constrained Baseline; HEVC Main10 from P010 plumbed), real time, no frame reordering, two frames in flight ([MACOS.md](MACOS.md#sharing-this-mac-the-video-pipeline)) |
-| Windows | DXGI Desktop Duplication, BGRA texture; cursor drawn in; Direct3D 11 video processor to NV12 at the stream size | AMF HEVC on AMD, or the GPU's Media Foundation HEVC/AV1/H.264 encoder (Microsoft's CPU encoder for H.264 if needed) ([WINDOWS.md](WINDOWS.md#the-video-pipeline)); `latch-codec` if neither works |
+| macOS | ScreenCaptureKit, NV12 IOSurface at the stream size and up to the display's refresh, cursor included | VideoToolbox (HEVC, H.264 High, or Constrained Baseline; negotiated HEVC Main10 from P010), real time, no frame reordering, two frames in flight ([MACOS.md](MACOS.md#sharing-this-mac-the-video-pipeline)) |
+| Windows | DXGI Output5 Desktop Duplication (BGRA or scRGB FP16); GPU cursor/colour pass and D3D11 video processor to NV12/P010 | AMF HEVC on AMD, or the GPU's Media Foundation HEVC/AV1/H.264 encoder (Microsoft's CPU encoder for H.264 if needed) ([WINDOWS.md](WINDOWS.md#the-video-pipeline)); `latch-codec` if neither works |
 | Linux (X11) | MIT-SHM `GetImage` through `x11rb` of only the rectangles X Damage reports, cursor from XFixes | NVENC or VA-API from NV12 the CPU converts, when a probe at start finds one ([below](#linux-hardware-encoding)); else `latch-codec`, threads by slice |
 
 | Viewer | Decode |
 | --- | --- |
-| macOS | VideoToolbox (hardware-probed AV1, HEVC or H.264), IOSurface → Metal; NV12 by default, selectable P010 |
-| Windows | Media Foundation + D3D11/DXVA for hardware-probed AV1, HEVC and H.264 High; Baseline with `latch-codec` fallback. Shared NV12 D3D11 texture → D3D12/wgpu; staging readback when unavailable |
+| macOS | VideoToolbox (hardware-probed AV1, HEVC Main/Main10 or H.264), IOSurface → Metal; NV12, or P010 for a negotiated ten-bit stream (drawn by the native EDR layer where available) |
+| Windows | Media Foundation + D3D11/DXVA for hardware-probed AV1, HEVC Main/Main10 and H.264 High; Baseline with `latch-codec` fallback. Shared NV12 D3D11 texture → D3D12/wgpu; staging readback when unavailable and for ten-bit P010 (drawn by the native HDR10 swapchain where available) |
 | Linux | `latch-codec` |
 
 The viewer lists what it decodes; the host picks the first it can encode,
@@ -472,3 +472,37 @@ round trip later instead of after a 250 ms hold. Requested
 IDRs are gated at max(50 ms, smoothed RTT), including requests that advance
 the last-delivered frame. See [transport measurements](measurements/2026-11-03/transport/README.md)
 for codec-free throughput, CPU, FEC and impairment results and remaining targets.
+
+## HDR and ten-bit colour
+
+Protocol 1 negotiates colour separately from codec. Missing capabilities keep
+8-bit limited-range BT.709. HEVC can select SDR Main10 or HDR10 (BT.2020 NCL,
+PQ, P010); the pipeline reports its actual colour before Accept. A colour
+change after Accept ends the session for renegotiation. Every HDR IDR has
+ST 2086 and content-light prefix SEI, independent of the encoder API.
+
+Windows retains scRGB from DuplicateOutput1 for Advanced Color desktops.
+The cursor/rotation shader converts linear scRGB (80 cd/m² per unit) to a
+1000-nit BT.2020 PQ RGB10 target for HDR, or sRGB RGB10 for ten-bit SDR;
+the video processor converts that to P010 with explicit DXGI colour spaces.
+For an SDR stream from an HDR desktop the same pass maps wide-gamut colours
+into BT.709 toward their own luminance and rolls highlights up to the
+1000-nit ceiling off above 75% of SDR white on max(R,G,B), keeping hue
+(`latch_proto::color::hdr_to_sdr`). A failed Output5 acquisition
+does not silently retry the legacy BGRA conversion that can produce black.
+
+Viewers retain P010 through decode and upload. macOS uses a native float
+Metal sublayer for ten-bit video because egui 0.31 fixes its main framebuffer
+to BGRA8. HDR is rendered in extended linear Display P3, with a smooth
+highlight shoulder at the display's current EDR headroom. Windows uses a
+10-bit child swapchain: G2084/P2020 for an HDR display and PQ stream, G22/709
+for SDR Main10. PQ falls back to a GPU SDR tone map only when native HDR
+cannot be presented, never because egui draws over the picture: the Mac
+layer sits below egui's, which is cleared to transparent over the video,
+and Windows cuts the child window around everything egui draws above the
+background layer. Native renderers sample chroma at the colour
+description's siting (`chroma`, left by default). Eight-bit SDR keeps the
+existing rendering path.
+
+See [colour measurements](measurements/2026-11-03/hdr/README.md) for tests,
+measurements and platform limitations.

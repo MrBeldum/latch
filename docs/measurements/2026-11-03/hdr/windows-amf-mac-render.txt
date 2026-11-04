@@ -1,0 +1,11 @@
+   Compiling latch-client v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-0a0119b8/crates/client)
+    Finished `test` profile [optimized + debuginfo] target(s) in 2.23s
+warning: the following packages contain code that will be rejected by a future version of Rust: block v0.1.6
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (target/debug/deps/latch_client-8108f7e23e912e79)
+
+running 1 test
+test video::tests::hdr_encode_decode_render_matches_source_numerically ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 213 filtered out; finished in 0.19s
+

@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased — HDR and ten-bit colour
+
+- Negotiate default-off ten-bit SDR and HDR10 colour, display peak luminance,
+  and mastering/content-light metadata within protocol 1. Legacy peers stay SDR8.
+- Preserve scRGB on Advanced Color Windows desktops; GPU conversion to
+  RGB10/P010 feeds AMF or MF Main10 with explicit colour tags and HDR SEI.
+- Preserve P010 in viewers. Mac uses a float EDR Metal layer; Windows uses
+  a ten-bit SDR/HDR10 swapchain, with SDR tone mapping when HDR is unavailable.
+- Controls, stats, settings, toasts and the hint no longer switch HDR video to
+  an SDR tone map: the Mac EDR layer sits under egui's (which turns
+  translucent over the picture), and Windows cuts its HDR10 window around
+  them. Both native renderers sample chroma at its signalled siting (left,
+  carried in the colour description) instead of centred.
+- An HDR desktop streamed to an SDR viewer keeps 203–1000-nit highlights
+  apart and in hue (gamut map plus a highlight shoulder) instead of clipping
+  each channel at SDR white. The Windows HDR10 presenter now draws (its
+  triangle was culled).
+- Configure canonical HDR capture and PQ-tagged Main10 on Mac hosts, and add
+  colour-math, hardware roundtrip, native EDR and banding measurements.
+- Decoders get the negotiated colour: a ten-bit stream decodes to P010 on
+  VideoToolbox and Media Foundation (a hardware MFT starts on NV12 until the
+  sequence header), and a decoder giving another depth renegotiates the codec.
 ## Unreleased — Windows setup
 
 - Windows setup: avoid duplicate 8K virtual-display entries that pushed an

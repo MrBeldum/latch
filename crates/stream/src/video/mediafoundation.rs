@@ -31,6 +31,8 @@ use windows::{
 };
 
 pub struct DecodedNv12 {
+    /// 10 when `y` and `uv` hold P010 samples (bits 15:6), else 8.
+    pub bit_depth: u8,
     pub width: u32,
     pub height: u32,
     pub y: Vec<u8>,
@@ -120,6 +122,12 @@ impl MfDecoder {
     }
 
     pub fn with_size(codec: Codec, width: u32, height: u32) -> Result<Self> {
+        Self::with_stream(codec, width, height, 8)
+    }
+
+    /// `depth` 10 keeps a Main10 stream's P010 samples (see
+    /// [`DecodedNv12::bit_depth`]); 8 reduces any P010 output to NV12.
+    pub fn with_stream(codec: Codec, width: u32, height: u32, depth: u8) -> Result<Self> {
         let (requests, receive) = mpsc::channel::<Request>();
         let (ready, startup) = mpsc::sync_channel(1);
         thread::Builder::new()
@@ -128,10 +136,11 @@ impl MfDecoder {
                 let adapter = *RENDER_ADAPTER.lock();
                 let initialized = (|| {
                     let runtime = Runtime::new()?;
-                    let decoder = State::new(codec, true, adapter, width, height).or_else(|e| {
-                        tracing::warn!("Media Foundation DXVA: {e:#}; trying without it");
-                        State::new(codec, false, None, width, height)
-                    })?;
+                    let decoder =
+                        State::new(codec, true, adapter, width, height, depth).or_else(|e| {
+                            tracing::warn!("Media Foundation DXVA: {e:#}; trying without it");
+                            State::new(codec, false, None, width, height, depth)
+                        })?;
                     Ok::<_, anyhow::Error>((runtime, decoder))
                 })();
                 let (_runtime, mut decoder) = match initialized {
@@ -209,7 +218,7 @@ pub fn supported() -> Vec<Codec> {
         .into_iter()
         .filter_map(|(codec, bytes)| {
             let result: Result<()> = (|| {
-                let mut state = State::new(codec, true, None, 256, 256)?;
+                let mut state = State::new(codec, true, None, 256, 256, 8)?;
                 for _ in 0..10 {
                     if state.decode(bytes)?.is_some() {
                         ensure!(state.dxva_used, "decoder returned CPU samples");
@@ -557,6 +566,7 @@ impl Gpu {
             "decoder copy did not finish"
         );
         Ok(Some(DecodedNv12 {
+            bit_depth: 8,
             width: layout.width,
             height: layout.height,
             y: Vec::new(),
@@ -649,9 +659,11 @@ struct Layout {
     height: u32,
     stride: usize,
     p010: bool,
+    /// Keep P010's ten bits instead of reducing them to NV12.
+    ten_bit: bool,
 }
 impl Layout {
-    fn from_type(ty: &IMFMediaType) -> Result<Self> {
+    fn from_type(ty: &IMFMediaType, depth: u8) -> Result<Self> {
         // SAFETY: Attribute reads are owned values; the aperture blob is read
         // unaligned into its Win32 value type only after checking its byte size.
         unsafe {
@@ -669,6 +681,7 @@ impl Layout {
             let p010 = ty.GetGUID(&MF_MT_SUBTYPE)? == MFVideoFormat_P010;
             let mut layout = Self {
                 p010,
+                ten_bit: p010 && depth == 10,
                 coded_width,
                 coded_height,
                 left: 0,
@@ -724,13 +737,16 @@ impl Layout {
         );
         let uv_width = width.div_ceil(2) * 2;
         let bytes_per_sample = if self.p010 { 2 } else { 1 };
+        // Ten-bit output keeps both P010 bytes; otherwise P010 is reduced to
+        // its high byte, the eight most significant bits.
+        let kept = if self.ten_bit { 2 } else { 1 };
         let left = left * bytes_per_sample;
         ensure!(
             stride >= left + uv_width * bytes_per_sample && surface_height >= top + height,
             "invalid NV12 pitch or height"
         );
-        let mut y = Vec::with_capacity(width * height);
-        let mut uv = Vec::with_capacity(uv_width * height.div_ceil(2));
+        let mut y = Vec::with_capacity(width * kept * height);
+        let mut uv = Vec::with_capacity(uv_width * kept * height.div_ceil(2));
         for row in top..top + height {
             let start = row
                 .checked_mul(stride)
@@ -739,7 +755,7 @@ impl Layout {
             let row = bytes
                 .get(start..start + width * bytes_per_sample)
                 .context("truncated decoded Y plane")?;
-            if self.p010 {
+            if self.p010 && !self.ten_bit {
                 y.extend(row.iter().skip(1).step_by(2));
             } else {
                 y.extend_from_slice(row);
@@ -753,24 +769,26 @@ impl Layout {
             let row = bytes
                 .get(start..start + uv_width * bytes_per_sample)
                 .context("truncated decoded UV plane")?;
-            if self.p010 {
+            if self.p010 && !self.ten_bit {
                 uv.extend(row.iter().skip(1).step_by(2));
             } else {
                 uv.extend_from_slice(row);
             }
         }
         Ok(DecodedNv12 {
+            bit_depth: if self.ten_bit { 10 } else { 8 },
             width: self.width,
             height: self.height,
             y,
-            y_stride: width,
+            y_stride: width * kept,
             uv,
-            uv_stride: uv_width,
+            uv_stride: uv_width * kept,
             shared: None,
         })
     }
 }
 struct State {
+    depth: u8,
     transform: IMFTransform,
     gpu: Option<Gpu>,
     output_type: Option<IMFMediaType>,
@@ -788,7 +806,14 @@ impl State {
     }
     /// `share`: the renderer's adapter, to decode on it and hand pictures
     /// over as [`SharedSurface`]s.
-    fn new(codec: Codec, dxva: bool, share: Option<LUID>, width: u32, height: u32) -> Result<Self> {
+    fn new(
+        codec: Codec,
+        dxva: bool,
+        share: Option<LUID>,
+        width: u32,
+        height: u32,
+        depth: u8,
+    ) -> Result<Self> {
         // SAFETY: This runs only in the initialized decoder MTA.
         unsafe {
             let subtype = match codec {
@@ -834,6 +859,7 @@ impl State {
                 .SetInputType(0, &input, 0)
                 .context("decoder compressed input type")?;
             let mut state = Self {
+                depth,
                 transform,
                 gpu,
                 output_type: None,
@@ -867,6 +893,12 @@ impl State {
     fn output_type(&mut self) -> Result<()> {
         // SAFETY: Type negotiation is serialized with ProcessInput/Output.
         unsafe {
+            // Eight bits take the first NV12 or P010 type. A ten-bit stream
+            // needs P010, which a decoder offers only once it has parsed the
+            // sequence header; until then NV12 stands in, and the stream
+            // change that follows the header picks P010.
+            let mut stand_in = None;
+            let mut chosen = None;
             for index in 0..256 {
                 let ty = match self.transform.GetOutputAvailableType(0, index) {
                     Ok(ty) => ty,
@@ -874,26 +906,35 @@ impl State {
                     Err(e) => return Err(e).context("enumerate decoder output types"),
                 };
                 let subtype = ty.GetGUID(&MF_MT_SUBTYPE)?;
-                if subtype == MFVideoFormat_NV12 || subtype == MFVideoFormat_P010 {
-                    match self.transform.SetOutputType(0, &ty, 0) {
-                        Err(e) if e.code() == MF_E_UNSUPPORTED_D3D_TYPE && self.gpu.is_some() => {
-                            self.transform
-                                .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, 0)
-                                .context("disable unsupported decoder DXVA mode")?;
-                            self.gpu = None;
-                            self.dxva_used = false;
-                            self.transform
-                                .SetOutputType(0, &ty, 0)
-                                .context("set software decoder NV12 type")?;
-                        }
-                        result => result.context("set decoder NV12 output type")?,
-                    }
-                    self.output_type = Some(ty);
-                    return Ok(());
+                if subtype == MFVideoFormat_P010
+                    || (subtype == MFVideoFormat_NV12 && self.depth != 10)
+                {
+                    chosen = Some(ty);
+                    break;
+                }
+                if subtype == MFVideoFormat_NV12 && stand_in.is_none() {
+                    stand_in = Some(ty);
                 }
             }
+            let ty = chosen
+                .or(stand_in)
+                .context("decoder offers no NV12 output")?;
+            match self.transform.SetOutputType(0, &ty, 0) {
+                Err(e) if e.code() == MF_E_UNSUPPORTED_D3D_TYPE && self.gpu.is_some() => {
+                    self.transform
+                        .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, 0)
+                        .context("disable unsupported decoder DXVA mode")?;
+                    self.gpu = None;
+                    self.dxva_used = false;
+                    self.transform
+                        .SetOutputType(0, &ty, 0)
+                        .context("set software decoder NV12 type")?;
+                }
+                result => result.context("set decoder NV12 output type")?,
+            }
+            self.output_type = Some(ty);
+            Ok(())
         }
-        bail!("decoder offers no NV12 output")
     }
     fn decode(&mut self, annexb: &[u8]) -> Result<Option<DecodedNv12>> {
         if self.output_type.is_some() {
@@ -980,6 +1021,7 @@ impl State {
                     self.output_type
                         .as_ref()
                         .context("decoder has no output type")?,
+                    self.depth,
                 )?;
                 let buffer = sample.GetBufferByIndex(0)?;
                 let picture = if let Ok(dxgi) = buffer.cast::<IMFDXGIBuffer>() {
@@ -1084,6 +1126,7 @@ mod tests {
             height: 2,
             stride: 8,
             p010: true,
+            ten_bit: false,
         };
         let mut bytes = vec![0; 24];
         for (offset, sample) in [
@@ -1111,6 +1154,7 @@ mod tests {
             height: 2,
             stride: 12,
             p010: false,
+            ten_bit: false,
         };
         let bytes: Vec<u8> = (0..108).collect();
         let frame = layout.copy(&bytes, 12, 6)?;
@@ -1276,5 +1320,32 @@ mod mf {
         );
         // SAFETY: Caller supplies the SDK output pointers and optional filters.
         unsafe { function(token, manager).ok() }
+    }
+}
+
+#[cfg(test)]
+mod hdr_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires HEVC decoder and LATCH_HDR_TEST_STREAM (one AMF HDR access unit)"]
+    fn main10_decode_preserves_p010_luminance() -> Result<()> {
+        let bytes = std::fs::read(std::env::var("LATCH_HDR_TEST_STREAM")?)?;
+        let mut decoder = MfDecoder::with_stream(Codec::Hevc, 960, 540, 10)?;
+        let frame = decoder.decode(&bytes)?.context("no Main10 picture")?;
+        assert_eq!(frame.bit_depth, 10);
+        assert_eq!((frame.width, frame.height), (960, 540));
+        for (x, expected) in [(160, 326i32), (480, 508), (800, 723)] {
+            let offset = 270 * frame.y_stride + x * 2;
+            let code = u16::from_le_bytes([frame.y[offset], frame.y[offset + 1]]) >> 6;
+            assert!(
+                (i32::from(code) - expected).abs() < 5,
+                "Main10 decoder luma {code}, expected {expected}"
+            );
+        }
+        eprintln!(
+            "Windows Main10 decoder: {}, P010 luma verified",
+            decoder.name()
+        );
+        Ok(())
     }
 }

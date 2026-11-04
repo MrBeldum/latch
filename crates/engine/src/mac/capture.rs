@@ -121,6 +121,7 @@ pub struct Request {
     pub display: Option<u32>,
     /// NV12 or P010 (see `encoder::Depth`).
     pub pixel_format: u32,
+    pub hdr: bool,
 }
 impl Capture {
     pub fn video(request: Request) -> Result<Self> {
@@ -134,6 +135,7 @@ impl Capture {
                 fps: 1,
                 display: None,
                 pixel_format: NV12,
+                hdr: false,
             },
             true,
         )
@@ -145,6 +147,7 @@ impl Capture {
             fps,
             display: wanted,
             pixel_format,
+            hdr,
         } = request;
         permission()?;
         let (tx, rx) = mpsc::sync_channel(1);
@@ -221,7 +224,7 @@ impl Capture {
             // refresh into without waiting. More surfaces add memory, not
             // delay: each picture is delivered as soon as it is drawn.
             config.setQueueDepth(5);
-            config.setPixelFormat(pixel_format);
+            configure_color(&config, pixel_format, hdr)?;
             config.setShowsCursor(true);
             config.setScalesToFit(true);
             config.setPreservesAspectRatio(true);
@@ -243,7 +246,11 @@ impl Capture {
                 ),
             ));
             config.setColorMatrix(
-                &*(kCVImageBufferYCbCrMatrix_ITU_R_709_2 as *const objc2_core_foundation::CFString),
+                &*((if hdr {
+                    kCVImageBufferYCbCrMatrix_ITU_R_2020
+                } else {
+                    kCVImageBufferYCbCrMatrix_ITU_R_709_2
+                }) as *const objc2_core_foundation::CFString),
             );
             config.setCapturesAudio(audio);
             config.setExcludesCurrentProcessAudio(true);
@@ -537,5 +544,43 @@ mod tests {
                 ..now
             }
         ));
+    }
+}
+
+fn configure_color(config: &SCStreamConfiguration, pixel_format: u32, hdr: bool) -> Result<()> {
+    // SAFETY: availability is checked before the macOS 15 selector; SCK takes
+    // the colour-space name, not a CGColorSpace object. Set format last because
+    // captureDynamicRange may reset both format and colour space.
+    unsafe {
+        if hdr {
+            anyhow::ensure!(
+                config.respondsToSelector(objc2::sel!(setCaptureDynamicRange:)),
+                "HDR capture requires macOS 15"
+            );
+            let _: () = msg_send![config,setCaptureDynamicRange: 2isize];
+            config.setColorSpaceName(
+                &*(kCGColorSpaceITUR_2100_PQ as *const objc2_core_foundation::CFString),
+            );
+        }
+        config.setPixelFormat(pixel_format);
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod hdr_tests {
+    use super::*;
+    #[test]
+    fn hdr_capture_configuration_uses_canonical_pq_and_p010() {
+        let config = unsafe { SCStreamConfiguration::new() };
+        configure_color(&config, P010, true).unwrap();
+        unsafe {
+            let range: isize = msg_send![&config, captureDynamicRange];
+            assert_eq!(range, 2);
+            assert_eq!(config.pixelFormat(), P010);
+            assert_eq!(
+                &*config.colorSpaceName(),
+                &*(kCGColorSpaceITUR_2100_PQ as *const objc2_core_foundation::CFString)
+            );
+        }
     }
 }

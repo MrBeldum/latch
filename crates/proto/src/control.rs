@@ -99,6 +99,8 @@ impl Codec {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StreamRequest {
+    #[serde(default)]
+    pub color: crate::color::ColorCapabilities,
     pub protocol: u32,
     pub width: u32,
     pub height: u32,
@@ -159,6 +161,8 @@ pub struct AudioFormat {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Accept {
+    #[serde(default)]
+    pub color: crate::color::ColorDescription,
     pub session: u32,
     /// 32 hex digits.
     pub token: String,

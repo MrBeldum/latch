@@ -171,6 +171,7 @@ fn a_bad_network_slows_the_picture_but_loses_no_key() {
             port,
         },
         Settings {
+            color: Default::default(),
             width: 640,
             height: 360,
             fps: 60,

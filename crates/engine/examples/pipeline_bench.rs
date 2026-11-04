@@ -65,6 +65,7 @@ fn main() -> anyhow::Result<()> {
     let software = args.iter().any(|a| a == "--software");
     let out = arg("--out", "");
     let config = VideoConfig {
+        color: Default::default(),
         width,
         height,
         fps,

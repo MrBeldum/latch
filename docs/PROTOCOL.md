@@ -507,8 +507,8 @@ encoder has produced a trial keyframe. One AV1 frame carries a low-overhead
 OBU temporal unit with sized OBUs (not length-prefixed Annex B). Keyframes
 include the sequence header; the existing keyframe flag and recovery rules
 apply; no UDP header or control message changes. The viewer supports Main
-4:2:0, eight or ten bits. HEVC still negotiates SDR; P010 decoder output is a
-local API choice for future HDR work, not an HDR capability on the wire.
+4:2:0, eight or ten bits, but AV1 streams negotiate 8-bit SDR only: Main10
+and HDR10 are HEVC (see [Colour negotiation](#colour-negotiation)).
 
 ## Reference invalidation (additive)
 
@@ -517,3 +517,21 @@ Measurements: [recovery frames against keyframes](measurements/2026-11-03/rfi/RE
 The viewer test knobs `LATCH_TEST_VIDEO_LOSS=<percent>[:<burst>]` (drop
 that share of video datagrams on arrival, in bursts) and
 `LATCH_TEST_NO_RECOVERY=1` (do not ask for recovery frames) reproduce them.
+
+## Colour negotiation
+
+`StreamRequest.color` defaults to `{hdr:false, peak_nits:0, ten_bit:false}`.
+HDR means the viewer can present HDR; peak_nits is display peak cd/m².
+`Accept.color` carries H.273 CICP primaries, transfer, matrix, full_range,
+bit_depth and optional ST 2086 / content-light metadata (`hdr`). Missing
+colour means limited-range BT.709, 8-bit. Only HEVC negotiates 10-bit.
+HDR requires ten_bit, hdr, a nonzero display peak and an HDR source.
+HDR10 is Main10, limited-range BT.2020 NCL / ST 2084 PQ (9/16/9).
+SDR Main10 keeps BT.709 (1/1/1). The P010 representation stores each
+10-bit sample in bits 15:6; it does not change the negotiated range.
+Mastering chromaticities are in 1/50000, luminance in 1/10000 cd/m²,
+and MaxCLL/MaxFALL in cd/m². `chroma` is the 4:2:0 chroma siting, `left`
+(H.273 type 0, also what a missing field means) or `center`; every current
+host produces left-sited chroma. Live desktop HDR uses a canonical 1000-nit
+BT.2020 container. Prefix SEI repeats the metadata at every HDR IDR.
+Old peers ignore the new fields; missing capabilities never enable HDR.

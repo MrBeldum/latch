@@ -102,6 +102,7 @@ pub struct Server {
 
 #[derive(Debug, Clone)]
 pub struct Settings {
+    pub color: latch_proto::color::ColorCapabilities,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -132,6 +133,7 @@ pub struct CursorState {
 
 #[derive(Debug, Clone, Default)]
 pub struct Stats {
+    pub color: latch_proto::color::ColorDescription,
     pub fps: f32,
     /// Encoded video in the frames that came together, in Mbps: what the
     /// bitrate setting caps. FEC parity, headers and audio are not in it.
@@ -852,6 +854,7 @@ fn attempt(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     let udp_port = udp.local_addr().map(|a| a.port()).unwrap_or(0);
     let codecs = offer(settings);
     let request = StreamRequest {
+        color: settings.color,
         protocol: latch_proto::PROTOCOL,
         width: settings.width,
         height: settings.height,
@@ -948,15 +951,23 @@ fn attempt(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
             format!("the host chose {:?}, which was not offered", accept.codec),
         );
     }
-    let decoder = match video::new_decoder_for_stream(accept.codec, accept.width, accept.height) {
-        Ok(d) => d,
-        Err(e) if accept.codec != Codec::H264Baseline => {
-            *inner.renegotiate.lock() = Some((accept.codec, format!("{e:#}")));
-            let _ = tcp.shutdown(Shutdown::Both);
-            return;
-        }
-        Err(e) => return fail("decoding", format!("{e:#}")),
-    };
+    if !accept.color.supported()
+        || (accept.color.bit_depth == 10 && !settings.color.ten_bit)
+        || (accept.color.is_hdr() && (!settings.color.hdr || settings.color.peak_nits == 0))
+    {
+        return fail("connecting", "host selected unoffered colour format".into());
+    }
+    let decoder =
+        match video::new_decoder_for_color(accept.codec, accept.width, accept.height, accept.color)
+        {
+            Ok(d) => d,
+            Err(e) if accept.codec != Codec::H264Baseline => {
+                *inner.renegotiate.lock() = Some((accept.codec, format!("{e:#}")));
+                let _ = tcp.shutdown(Shutdown::Both);
+                return;
+            }
+            Err(e) => return fail("decoding", format!("{e:#}")),
+        };
     {
         let mut stats = inner.stats.lock();
         stats.width = accept.width;
@@ -964,6 +975,7 @@ fn attempt(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         stats.decoder = decoder.name();
         stats.encoder = accept.encoder.clone();
         stats.codec = accept.codec.name();
+        stats.color = accept.color;
         if accept.audio.is_none() && settings.audio {
             stats.audio = if accept.audio_problem.is_empty() {
                 "no sound from the host".into()
@@ -1038,8 +1050,10 @@ fn attempt(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     };
     let decoding = {
         let inner = inner.clone();
-        let codec = accept.codec;
-        Worker::spawn("stream-decode", move || decode(&inner, decoder, codec))
+        let (codec, color) = (accept.codec, accept.color);
+        Worker::spawn("stream-decode", move || {
+            decode(&inner, decoder, codec, color)
+        })
     };
     let outcome = control_loop(inner, &mut tcp, &accept);
     inner.mic.lock().take();
@@ -1774,7 +1788,12 @@ fn handle(
 }
 
 /// The decode thread: frames in order, newest picture out.
-fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>, codec: Codec) {
+fn decode(
+    inner: &Arc<Inner>,
+    mut decoder: Box<dyn Decoder>,
+    codec: Codec,
+    color: latch_proto::color::ColorDescription,
+) {
     crate::priority::media_thread();
     let attempt = inner.attempt.load(Ordering::Acquire);
     let over = || inner.stopping() || inner.attempt.load(Ordering::Acquire) != attempt;
@@ -1845,6 +1864,23 @@ fn decode(inner: &Arc<Inner>, mut decoder: Box<dyn Decoder>, codec: Codec) {
         }
         match decoded {
             Ok(Some(mut picture)) => {
+                if picture.color.bit_depth != color.bit_depth {
+                    // Pictures at another depth would be drawn wrongly;
+                    // the stream starts again without this codec.
+                    *inner.renegotiate.lock() = Some((
+                        codec,
+                        format!(
+                            "{} gave {}-bit pictures for a {}-bit stream",
+                            decoder.name(),
+                            picture.color.bit_depth,
+                            color.bit_depth
+                        ),
+                    ));
+                    inner.attempt_over.store(true, Ordering::Release);
+                    inner.queue_cv.notify_all();
+                    return;
+                }
+                picture.color = color;
                 let decoded = Instant::now();
                 picture.decoded_at = Some(decoded);
                 if decoder.name() != named {
@@ -2079,6 +2115,7 @@ mod tests {
     #[test]
     fn hevc_is_offered_only_when_the_settings_allow_it() {
         let mut s = Settings {
+            color: Default::default(),
             cursor: false,
             gamepads: false,
             mic: false,
@@ -2110,6 +2147,7 @@ mod tests {
                 port,
             },
             Settings {
+                color: Default::default(),
                 cursor: false,
                 gamepads: false,
                 mic: false,
@@ -2200,7 +2238,12 @@ mod tests {
 
         let inner_clone = inner.clone();
         let handle = std::thread::spawn(move || {
-            decode(&inner_clone, Box::new(FakeDecoder), Codec::H264Baseline);
+            decode(
+                &inner_clone,
+                Box::new(FakeDecoder),
+                Codec::H264Baseline,
+                Default::default(),
+            );
         });
 
         let decoded = wake_rx.recv_timeout(Duration::from_secs(10));
@@ -2241,7 +2284,7 @@ mod tests {
         }
         let worker = {
             let inner = inner.clone();
-            std::thread::spawn(move || decode(&inner, decoder, codec))
+            std::thread::spawn(move || decode(&inner, decoder, codec, Default::default()))
         };
         let deadline = Instant::now() + Duration::from_secs(5);
         while !inner.queue.lock().frames.is_empty()

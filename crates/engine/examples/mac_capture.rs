@@ -34,6 +34,7 @@ fn main() -> anyhow::Result<()> {
     };
     // Open before creating output files, so an authorization error leaves no empty recording.
     let mut video = mac::open_video(&VideoConfig {
+        color: Default::default(),
         width: 1920,
         height: 1080,
         fps: 60,

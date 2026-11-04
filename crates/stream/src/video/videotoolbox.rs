@@ -600,6 +600,14 @@ unsafe extern "C" fn output(
     } else {
         PixelFormat::Nv12
     };
+    frame.color = latch_proto::color::ColorDescription {
+        bit_depth: if frame.format == PixelFormat::P010 {
+            10
+        } else {
+            8
+        },
+        ..Default::default()
+    };
     frame.y.clear();
     frame.uv.clear();
     CFRetain(image);

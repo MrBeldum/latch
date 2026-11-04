@@ -50,6 +50,7 @@ fn quality_benchmark() {
     }
     let mut enc = Encoder::create(
         &VideoConfig {
+            color: Default::default(),
             width: w as u32,
             height: h as u32,
             fps,

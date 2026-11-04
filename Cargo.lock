@@ -2020,6 +2020,7 @@ dependencies = [
  "objc2-foundation 0.2.2",
  "parking_lot",
  "rand",
+ "raw-window-handle",
  "semver",
  "serde",
  "serde_json",
@@ -2027,6 +2028,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wgpu",
+ "windows 0.58.0",
  "windows-sys 0.61.2",
  "x11rb",
 ]

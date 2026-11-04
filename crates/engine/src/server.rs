@@ -318,6 +318,11 @@ impl Server {
             opening: Some(opening),
         };
         let mut config = VideoConfig {
+            color: latch_proto::color::ColorDescription::negotiate(
+                prepared.req.color,
+                codec == video::Codec::Hevc,
+                cfg!(any(target_os = "macos", windows)),
+            ),
             width: prepared.req.width,
             height: prepared.req.height,
             fps: prepared.req.fps,
@@ -332,6 +337,11 @@ impl Server {
                 Err(e) if video::Unencodable::is(e) => {
                     self.log(format!("{e:#}; trying {}", next.name()));
                     config.codec = next;
+                    config.color = latch_proto::color::ColorDescription::negotiate(
+                        prepared.req.color,
+                        next == video::Codec::Hevc,
+                        cfg!(any(target_os = "macos", windows)),
+                    );
                     config.bitrate_kbps = config.bitrate_kbps.min(video::limits(next).max_kbps);
                     if let Some(ceiling) =
                         crate::software::ceiling().filter(|_| !video::hardware_encodes(next))
@@ -348,6 +358,7 @@ impl Server {
         }
         let pipeline = opened
             .map_err(|e| Refusal::new(500, format!("could not capture the screen: {e:#}")))?;
+        config.color = pipeline.info().color;
         prepared.info = Some(pipeline.info());
         prepared.pipeline = Some((pipeline, config));
         if prepared.req.audio {
@@ -469,6 +480,7 @@ impl Server {
         }
         let audio = prepared.audio.take();
         let accept = Accept {
+            color: info.color,
             session: id,
             token: control::token_hex(&token),
             codec: info.codec,
@@ -1424,6 +1436,13 @@ fn encode_video(
                 continue;
             }
         };
+        if frame.keyframe {
+            if let Some(meta) = pipeline.info().color.hdr {
+                let mut data = latch_proto::color::hevc_hdr_sei(meta);
+                data.extend_from_slice(&frame.data);
+                frame.data = data;
+            }
+        }
         frame.generation = generation;
         if let Some(update) = pipeline.take_cursor().filter(|_| session.cursor_supported) {
             session.send_control(&Message::Cursor(control::Cursor {
@@ -1432,6 +1451,13 @@ fn encode_video(
             }));
         }
         let next_info = pipeline.info();
+        if next_info.color != info.color {
+            session.end(
+                end::ENCODER_FAILED,
+                "Host colour format changed; reconnect to negotiate it",
+            );
+            return;
+        }
         if next_info != info {
             {
                 let mut input = session.input.lock();
