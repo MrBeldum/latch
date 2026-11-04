@@ -48,6 +48,12 @@ const STATS_EVERY: Duration = Duration::from_millis(250);
 /// decoder can block inside the OS (VideoToolbox after a sleep or a GPU
 /// reset); the window must still be able to leave the stream.
 const DECODER_STOP: Duration = Duration::from_secs(1);
+/// How long the end waits for the receive thread, which also plays sound.
+const RECEIVER_STOP: Duration = Duration::from_secs(2);
+/// A control message the host does not take within this breaks the
+/// session, rather than blocking whoever sent it (the UI, for a cursor
+/// change).
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -688,6 +694,7 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     };
     let _ = tcp.set_nodelay(true);
     let _ = tcp.set_read_timeout(Some(START_TIMEOUT));
+    let _ = tcp.set_write_timeout(Some(CONTROL_WRITE_TIMEOUT));
     *inner.tcp.lock() = tcp.try_clone().ok();
     *inner.control_writer.lock() = tcp.try_clone().ok();
     if inner.stopping() {
@@ -793,9 +800,9 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     let receiver = {
         let inner = inner.clone();
         let accept = accept.clone();
-        std::thread::Builder::new()
-            .name("stream-receive".into())
-            .spawn(move || receive(&inner, udp, media, &accept, token, player))
+        Worker::spawn("stream-receive", move || {
+            receive(&inner, udp, media, &accept, token, player)
+        })
     };
     let decoding = {
         let inner = inner.clone();
@@ -812,7 +819,11 @@ fn run(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
     inner.tcp.lock().take();
     drop(tcp);
     if let Ok(r) = receiver {
-        let _ = r.join();
+        if !r.join_within(RECEIVER_STOP) {
+            tracing::warn!(
+                "the receiver did not return within {RECEIVER_STOP:?}; leaving it behind"
+            );
+        }
     }
     if let Ok(d) = decoding {
         if !d.join_within(DECODER_STOP) {
