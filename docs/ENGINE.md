@@ -371,7 +371,10 @@ Windows retains scRGB from DuplicateOutput1 for Advanced Color desktops.
 The cursor/rotation shader converts linear scRGB (80 cd/m² per unit) to a
 1000-nit BT.2020 PQ RGB10 target for HDR, or sRGB RGB10 for ten-bit SDR;
 the video processor converts that to P010 with explicit DXGI colour spaces.
-Legacy viewers retain the GPU HDR-to-SDR path. A failed Output5 acquisition
+For an SDR stream from an HDR desktop the same pass maps wide-gamut colours
+into BT.709 toward their own luminance and rolls highlights up to the
+1000-nit ceiling off above 75% of SDR white on max(R,G,B), keeping hue
+(`latch_proto::color::hdr_to_sdr`). A failed Output5 acquisition
 does not silently retry the legacy BGRA conversion that can produce black.
 
 Viewers retain P010 through decode and upload. macOS uses a native float
@@ -379,8 +382,13 @@ Metal sublayer for ten-bit video because egui 0.31 fixes its main framebuffer
 to BGRA8. HDR is rendered in extended linear Display P3, with a smooth
 highlight shoulder at the display's current EDR headroom. Windows uses a
 10-bit child swapchain: G2084/P2020 for an HDR display and PQ stream, G22/709
-for SDR Main10. PQ falls back to a GPU SDR tone map when native HDR cannot
-be presented. Eight-bit SDR keeps the existing rendering path.
+for SDR Main10. PQ falls back to a GPU SDR tone map only when native HDR
+cannot be presented, never because egui draws over the picture: the Mac
+layer sits below egui's, which is cleared to transparent over the video,
+and Windows cuts the child window around everything egui draws above the
+background layer. Native renderers sample chroma at the colour
+description's siting (`chroma`, left by default). Eight-bit SDR keeps the
+existing rendering path.
 
 See [colour measurements](measurements/2026-11-03/hdr/README.md) for tests,
 measurements and platform limitations.

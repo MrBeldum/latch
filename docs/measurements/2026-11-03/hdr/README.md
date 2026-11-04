@@ -138,8 +138,7 @@ cargo test --locked -p latch-engine --lib hold_hdr_display_for_live_test -- --ig
   four-unit headroom shoulder in an RGBA16Float render target. The native
   HDR10 HLSL shaders compile through Windows' system compiler.
 - Existing SDR CPU and zero-copy GPU renderer tests still pass. Controls and
-  other overlays temporarily use wgpu presentation, so the native video
-  layer cannot hide the toolbar, stats or dialogs.
+  overlays are composited over native video (see *Review fixes* below).
 - Mac fmt, CI clippy command, workspace/all-target tests and native audit pass
   (675 passed in the final serial run).
   The timing-sensitive network impairment test failed twice with a temporary
@@ -170,3 +169,85 @@ API references used for the implementation: [DXGI Output5 capture](https://learn
 [AMF HEVC properties](https://github.com/GPUOpen-LibrariesAndSDKs/AMF/blob/master/amf/public/include/components/VideoEncoderHEVC.h),
 [Apple EDR headroom](https://developer.apple.com/documentation/appkit/nsscreen/maximumextendeddynamicrangecolorcomponentvalue),
 [extended linear Display P3](https://developer.apple.com/documentation/coregraphics/cgcolorspace/extendedlineardisplayp3).
+
+## Review fixes: overlays, HDR desktop → SDR, chroma siting
+
+Follow-up to the independent review of PR #55.
+
+**Controls over HDR video.** Before, any toolbar, stats, settings, toast or
+the initial hint switched native presentation off and the wgpu shader
+tone-mapped the whole picture to SDR: a 1000-nit patch went from 3.85 EDR
+units to about 1.0. Now the picture stays HDR whatever is shown.
+
+| Check | Before | After |
+| --- | --- | --- |
+| Mac: 1000 / 203-nit patch in the EDR layer, stats hidden → shown | 3.85 → ≈1.0 (SDR tone map) | 3.85 → 3.85, 1.00 → 1.00 (bit-identical) |
+| Mac: egui alpha over the picture outside / under the overlay | 1 / 1 (opaque SDR copy) | 0 / ≈200⁄255 (overlay composited over HDR) |
+| Windows HDR desktop: 203/400/600/1000-nit patches, overlay hole off → on → off | native window hidden, SDR tone map | scRGB 0.908 / 1.797 / 2.678 / 4.473 each time, bit-identical; hole shows the parent |
+
+The Windows numbers are DXGI duplication of a real Advanced Color desktop
+(the PC's virtual display, peak 1670 nits, SDR white 240 nits) with the
+HDR10 child window presenting a P010 frame. Patch ratios are 1 : 1.979 :
+2.949 : 4.926 against 1 : 1.970 : 2.956 : 4.926 expected; duplication on this
+virtual display reports every pixel, SDR content included, at 0.358 × nits/80,
+so absolute values carry that gain. The run also found that the HDR10
+presenter had never drawn: its full-screen triangle was counter-clockwise
+and D3D11's default rasterizer culled it (the viewer cannot select Main10 on
+this PC, which lacks the HEVC decoder extension, so no live session had used
+it). [Live transcript](windows-hdr10-overlay-live.txt),
+[what the compositor showed](windows-hdr10-overlay-window.png),
+[Mac tests](mac-review-fixes.txt).
+
+```
+# Mac (Metal):
+cargo test -p latch-client --lib video:: -- --ignored --skip hdr_encode_decode --skip bench_
+cargo test -p latch-client --lib controls_and_stats_are_reported_as_overlays_over_the_video
+# Interactive PC session, three processes: HDR held and restored by the first.
+latch_engine-*.exe --ignored hold_hdr_display_for_live_test
+latch_client-*.exe --ignored hdr10_child_window_keeps_hdr_under_overlays   # LATCH_HDR_PATCH_DIR=<dir>
+latch_engine-*.exe --ignored hdr_desktop_patches_reach_sdr_capture_apart   # same LATCH_HDR_PATCH_DIR
+```
+
+**HDR desktop → SDR stream.** The capture shader clipped each channel at SDR
+white. It now desaturates out-of-BT.709 colours toward their own luminance
+and compresses highlights above 75% of SDR white up to the 1000-nit ceiling
+on max(R,G,B); both scale about neutral, so hue is kept exactly. SDR content
+below the knee is unchanged. WARP shader output at SDR white 203 nits,
+matching `latch_proto::color::hdr_to_sdr` within one code:
+
+| scRGB patch (nits) | Before (sRGB8) | After (sRGB8) |
+| --- | --- | --- |
+| neutral 203 / 400 / 600 / 1000 | 255 / 255 / 255 / 255 | 240 / 251 / 253 / 255 |
+| neutral 100 | 186 | 186 |
+| orange (1000, 500, 0) | (255, 255, 0) — turns yellow | (255, 188, 0) |
+| blue (40, 80, 600) | (123, 168, 255) | (72, 101, 253) |
+| BT.2020 green, 1000 | (0, 255, 0) | (0, 255, 145) |
+| black | (0, 0, 0) | (0, 0, 0) |
+
+On the live Advanced Color desktop (SDR white 240 nits, the patches at the
+duplication gain above) the SDR capture path gave **149 / 203 / 236 / 248**
+for the four neutral patches: ordered, never black, not clipped together.
+The SDR-desktop path is unchanged.
+
+```
+cargo test -p latch-proto --lib hdr_highlights_stay_apart_in_sdr_and_keep_their_hue
+# Windows (WARP, works over SSH):
+cargo test -p latch-engine --lib fp16_sc_rgb_hdr_desktop_keeps_highlights_in_sdr -- --nocapture
+```
+
+**Chroma siting.** `ColorDescription` now carries `chroma` (`left` by
+default, H.273 type 0; optional on the wire). The Mac EDR and Windows HDR10
+shaders sample chroma a quarter chroma texel right of the centred position
+for left siting. A coloured edge in left-sited chroma (chroma sample k on
+luma column 2k) now renders exactly the new colour on column 2k and the
+midpoint on 2k−1, in both SDR and PQ modes, on Metal and WARP; centred
+sampling fails the same check. The legacy eight-bit shader is unchanged.
+VideoToolbox, AMF and MF Main10 streams all probe as `chroma_location=left`,
+matching the Windows video processor's `*_LEFT_*` output.
+[Probe](chroma-location.txt).
+
+Still unverified after these fixes: a physical EDR/HDR10 panel (CoreAnimation
+composition was checked through egui's alpha and the EDR layer's values, not
+by photographing a screen), the actual ScreenCaptureKit chroma siting of a
+live HDR capture, and the Windows viewer's full Main10 session (no HEVC
+decoder extension on this PC).

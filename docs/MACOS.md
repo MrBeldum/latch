@@ -492,7 +492,16 @@ screen; moving to an SDR screen compresses highlights to that screen.
 Ten-bit SDR also uses the float layer, preserving gradations. The existing
 eight-bit SDR shader and surface path remain in use for legacy streams.
 
-The native shader has an offscreen Metal numerical test; the full HDR
+The float layer is inserted *below* wgpu's Metal layer. While it shows,
+wgpu's layer is made non-opaque and the video callback writes transparent
+pixels over the picture, so CoreAnimation composites the toolbar, stats,
+settings and toasts over HDR video at SDR white; the picture's own values
+never change with the controls. Chroma is sampled at its signalled siting
+(left: a quarter chroma texel right of the centred position).
+
+The native shader has offscreen Metal numerical tests (headroom, left
+chroma siting), and an egui test toggles an overlay over HDR patches and
+checks the EDR values and egui's transparency stay put; the full HDR
 encode/decode/wgpu SDR tone-map test compares against source pixels. Live
 ScreenCaptureKit HDR capture still needs a Screen Recording authorized
 process. See [measurements](measurements/2026-11-03/hdr/README.md).

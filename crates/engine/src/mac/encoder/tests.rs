@@ -1038,6 +1038,28 @@ fn main10_iosurface_roundtrip() {
         info.contains("Main 10") && info.contains("yuv420p10le"),
         "{info}"
     );
+    // Viewers sample chroma at the signalled siting; VideoToolbox must say
+    // left (H.273 type 0), what latch_proto's colour description carries.
+    let probe = Command::new(ffmpeg.with_file_name("ffprobe"))
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=chroma_location",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(&path)
+        .output();
+    if let Ok(probe) = probe {
+        let siting = String::from_utf8_lossy(&probe.stdout);
+        assert!(
+            matches!(siting.trim(), "left" | "unspecified" | ""),
+            "chroma location {siting}"
+        );
+        assert_eq!(config.color.chroma, latch_proto::color::ChromaSiting::Left);
+        eprintln!("Main10 chroma location: {}", siting.trim());
+    }
     let decoded = dir.join("decoded.yuv");
     let output = Command::new(&ffmpeg)
         .args(["-v", "error", "-y", "-i"])

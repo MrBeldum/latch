@@ -457,6 +457,8 @@ HDR10 is Main10, limited-range BT.2020 NCL / ST 2084 PQ (9/16/9).
 SDR Main10 keeps BT.709 (1/1/1). The P010 representation stores each
 10-bit sample in bits 15:6; it does not change the negotiated range.
 Mastering chromaticities are in 1/50000, luminance in 1/10000 cd/m²,
-and MaxCLL/MaxFALL in cd/m². Live desktop HDR uses a canonical 1000-nit
+and MaxCLL/MaxFALL in cd/m². `chroma` is the 4:2:0 chroma siting, `left`
+(H.273 type 0, also what a missing field means) or `center`; every current
+host produces left-sited chroma. Live desktop HDR uses a canonical 1000-nit
 BT.2020 container. Prefix SEI repeats the metadata at every HDR IDR.
 Old peers ignore the new fields; missing capabilities never enable HDR.

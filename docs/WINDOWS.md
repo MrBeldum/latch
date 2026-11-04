@@ -441,8 +441,10 @@ Accept. It does not disable otherwise-working eight-bit HEVC.
 
 Capture keeps FP16 scRGB from DuplicateOutput1, converts on the GPU, and
 uses RGB10/P010 for ten-bit streams. Cursor and rotation remain on the GPU.
-Advanced Color viewed from an SDR peer is converted with the existing SDR
-white-level-aware path. Nothing in colour negotiation changes Windows HDR
+Advanced Color viewed from an SDR peer is converted relative to the SDR
+white level, with colours outside BT.709 desaturated toward their own
+luminance and highlights up to 1000 nits compressed into the top quarter of
+the range (hue-preserving, on max(R,G,B)) rather than clipped per channel. Nothing in colour negotiation changes Windows HDR
 or ACM settings. Tests must snapshot and restore any display state they
 change; synthetic FP16 probes can test the HDR GPU path without toggling it.
 
@@ -450,6 +452,12 @@ Windows viewing uses P010 from the MF HEVC decoder and an RGB10 swapchain.
 An HDR display uses DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 for PQ and
 receives HDR10 metadata; SDR Main10 uses G22/709. A PQ stream on an SDR
 display uses the wgpu SDR tone map. Native video windows accept no input;
-input continues through the existing egui window.
+input continues through the existing egui window. The child window is
+always above egui's surface, so it is cut (SetWindowRgn) around whatever
+egui draws above the picture — toolbar, stats, toasts, dialogs, menus, the
+host cursor — and egui shows its own (tone-mapped) copy of the frame
+under those controls only; the rest of the picture stays HDR. The shader
+samples chroma at its signalled siting (left, as the video processor's
+`*_LEFT_*` colour spaces produce it).
 
 [HDR measurements and remaining validation](measurements/2026-11-03/hdr/README.md).

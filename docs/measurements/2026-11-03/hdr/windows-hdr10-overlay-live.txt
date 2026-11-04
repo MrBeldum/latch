@@ -1,0 +1,31 @@
+== latch-client hdr10_child_window_keeps_hdr_under_overlays
+
+running 1 test
+test video::hdr10::tests::hdr10_child_window_keeps_hdr_under_overlays ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 211 filtered out; finished in 2.17s
+
+display peak 1670 nits
+parent RECT { left: 472, top: 8, right: 792, bottom: 48 }, video RECT { left: 472, top: 8, right: 792, bottom: 48 }
+scRGB plain [[0.9082031, 0.9082031, 0.9082031, 1.0], [1.796875, 1.796875, 1.796875, 1.0], [2.6777344, 2.6777344, 2.6777344, 1.0], [4.4726563, 4.4726563, 4.4726563, 1.0], [4.4726563, 4.4726563, 4.4726563, 1.0]]
+cut [[0.9082031, 0.9082031, 0.9082031, 1.0], [1.796875, 1.796875, 1.796875, 1.0], [2.6777344, 2.6777344, 2.6777344, 1.0], [4.4726563, 4.4726563, 4.4726563, 1.0], [0.93652344, 0.93652344, 0.93652344, 1.0]]
+restored [[0.9082031, 0.9082031, 0.9082031, 1.0], [1.796875, 1.796875, 1.796875, 1.0], [2.6777344, 2.6777344, 2.6777344, 1.0], [4.4726563, 4.4726563, 4.4726563, 1.0], [4.4726563, 4.4726563, 4.4726563, 1.0]]
+desktop gain over nits/80: 0.3579
+== latch-engine hdr_desktop_patches_reach_sdr_capture_apart
+
+running 1 test
+test windows::capture::hdr_desktop_tests::hdr_desktop_patches_reach_sdr_capture_apart ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 86 filtered out; finished in 2.18s
+
+SDR white 240 nits; 203/400/600/1000-nit patches -> [[149, 149, 149], [203, 203, 203], [236, 236, 236], [248, 248, 248]]
+== latch-engine hold_hdr_display_for_live_test
+
+running 1 test
+test windows::display::hdr_live_test::hold_hdr_display_for_live_test ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 86 filtered out; finished in 5.71s
+
+initial HDR/WCG flags=81 mode=0
+enabled HDR flags=115 mode=2
+restored HDR/WCG flags=81 mode=0

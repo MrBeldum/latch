@@ -1,0 +1,4 @@
+hdr-amf.hevc: Main 10,smpte2084,left
+hdr-mf.hevc: Main 10,smpte2084,left
+sdr10-amf.hevc: Main 10,bt709,left
+Main10 VideoToolbox (main10_iosurface_roundtrip): chroma_location=left
