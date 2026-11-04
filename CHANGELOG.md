@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased — native reference recovery
+
 - Add VideoToolbox LTR recovery behind runtime support (`LATCH_MAC_LTR=1`
   opts into the supporting low-latency mode), with exact VT/FFmpeg loss tests.
 - Gate Media Foundation H.264 LTR recovery on an encoder-open decode self-test;

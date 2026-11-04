@@ -306,6 +306,8 @@ pub(super) struct Encoder {
     ltr: Option<super::mf_ltr::Ltr>,
     picture: u64,
     last: (u64, Option<u64>),
+    #[cfg(test)]
+    pub(super) ignore_ltr_use: bool,
 }
 impl Encoder {
     pub fn new(config: &VideoConfig, gpu: &Gpu) -> Result<Self> {
@@ -591,6 +593,8 @@ impl Encoder {
                 ltr: ltr.then(|| super::mf_ltr::Ltr::new(config.fps)),
                 picture: 0,
                 last: (0, None),
+                #[cfg(test)]
+                ignore_ltr_use: false,
             })
         }
     }
@@ -688,6 +692,8 @@ impl Encoder {
                     .SetValue(&CODECAPI_AVEncVideoMarkLTRFrame, &VARIANT::from(slot))
                     .context("mark MFT LTR")?;
             }
+            #[cfg(test)]
+            let use_ltr = use_ltr.filter(|_| !self.ignore_ltr_use);
             if let Some(bits) = use_ltr {
                 self.api
                     .SetValue(&CODECAPI_AVEncVideoUseLTRFrame, &VARIANT::from(bits))

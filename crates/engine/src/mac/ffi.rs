@@ -189,7 +189,6 @@ extern "C" {
 extern "C" {
     pub static kCMSampleAttachmentKey_NotSync: Ref;
     pub fn CMSampleBufferGetImageBuffer(sample: Ref) -> Ref;
-    pub fn CMGetAttachment(target: Ref, key: Ref, mode: *mut u32) -> Ref;
     pub fn CMSampleBufferGetSampleAttachmentsArray(sample: Ref, create: bool) -> Ref;
     pub fn CMSampleBufferGetFormatDescription(sample: Ref) -> Ref;
     pub fn CMSampleBufferGetDataBuffer(sample: Ref) -> Ref;

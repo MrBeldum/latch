@@ -111,6 +111,8 @@ pub(super) fn prove(encoder: &mut Encoder, config: &VideoConfig, gpu: Option<&Gp
         .transpose()?;
     let mut delivered = 0;
     let mut checked = 0;
+    #[cfg(test)]
+    let (mut full_bytes, mut loss_bytes, mut kept) = (Vec::new(), Vec::new(), Vec::new());
     for n in 0..32u32 {
         let dropping = (6..9).contains(&n) || (18..21).contains(&n);
         if n == 9 || n == 21 {
@@ -143,6 +145,17 @@ pub(super) fn prove(encoder: &mut Encoder, config: &VideoConfig, gpu: Option<&Gp
             .encode(&sample, n == 0)?
             .context("MFT buffers frames; LTR association is unproven")?;
         ensure!(idr == (n == 0), "MFT used an IDR instead of an LTR refresh");
+        #[cfg(test)]
+        {
+            full_bytes.extend_from_slice(&bytes);
+            if !dropping {
+                loss_bytes.extend_from_slice(&bytes);
+                kept.push(n);
+            }
+            if n == 0 || n == 9 || n == 21 {
+                eprintln!("MFT probe frame {n}: {} B IDR={idr}", bytes.len());
+            }
+        }
         let expected = full
             .decode(&bytes)?
             .context("uninterrupted MFT decode produced no picture")?;
@@ -159,6 +172,17 @@ pub(super) fn prove(encoder: &mut Encoder, config: &VideoConfig, gpu: Option<&Gp
         }
     }
     ensure!(checked == 26, "incomplete MFT reference test");
+    #[cfg(test)]
+    if let Some(dir) = std::env::var_os("LATCH_MF_RECOVERY_DUMP") {
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("full.h264"), full_bytes)?;
+        std::fs::write(dir.join("loss.h264"), loss_bytes)?;
+        std::fs::write(
+            dir.join("kept.txt"),
+            kept.iter().map(|n| format!("{n}\n")).collect::<String>(),
+        )?;
+    }
     // Start the real stream at a fresh IDR, with no test-picture identities.
     encoder.reset_ltr(config.fps);
     Ok(())
@@ -237,6 +261,17 @@ mod hardware_tests {
             encoder.hardware,
             encoder.recovers()
         );
+        if encoder.recovers() {
+            let mut encoder = encoder;
+            encoder.ignore_ltr_use = true;
+            let error = prove(&mut encoder, &config, Some(&gpu))
+                .expect_err("ignored UseLTRFrame must fail the probe");
+            ensure!(
+                error.to_string().contains("ignored LTR control"),
+                "negative control failed for another reason: {error:#}"
+            );
+            eprintln!("negative control rejected: {error:#}");
+        }
         Ok(())
     }
 }

@@ -786,7 +786,7 @@ fn realtime_case(
             image
         })
         .collect();
-    let mut encoder = Encoder::create(
+    let mut encoder = Encoder::open(
         &VideoConfig {
             color: Default::default(),
             width,
@@ -796,6 +796,8 @@ fn realtime_case(
             codec,
         },
         true,
+        Depth::Eight,
+        std::env::var_os("LATCH_VT_BENCH_LTR").is_some_and(|v| v == "1"),
     )
     .expect("hardware encoder");
     let frames = (seconds * f64::from(fps)) as usize;
