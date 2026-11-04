@@ -494,7 +494,15 @@ pub fn open_video(config: &VideoConfig) -> Result<Box<dyn VideoPipeline>> {
                 let mf = Runtime::new(true)
                     .map_err(|e| tracing::warn!("Media Foundation startup: {e:#}"))
                     .ok();
-                let pipeline = Pipeline::new(&config, mf.is_some())?;
+                let pipeline = Pipeline::new(&config, mf.is_some()).or_else(|e| {
+                    if config.color.bit_depth != 10 {
+                        return Err(e);
+                    }
+                    tracing::warn!("Main10 unavailable; negotiating SDR8: {e:#}");
+                    let mut fallback = config.clone();
+                    fallback.color = Default::default();
+                    Pipeline::new(&fallback, mf.is_some())
+                })?;
                 Ok::<_, anyhow::Error>((runtime, mf, pipeline))
             })();
             let (_runtime, _mf, mut pipeline) = match initialized {
@@ -747,6 +755,7 @@ mod tests {
                     );
                 }
                 if let Some(decoded) = decoded {
+                    assert_eq!(decoded.bit_depth, 8);
                     assert_eq!((decoded.width, decoded.height), (160, 98));
                     let mut error = 0f64;
                     let mut count = 0;

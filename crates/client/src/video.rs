@@ -9,7 +9,11 @@ use egui_wgpu::wgpu;
 #[cfg(target_os = "macos")]
 use egui_wgpu::wgpu::hal;
 use latch_stream::{Frame, FrameSlot};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+static TEN_BIT: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "macos")]
 mod macos_zero_copy {
@@ -294,6 +298,12 @@ pub struct Resources {
 
 impl Resources {
     pub fn new(device: &wgpu::Device, target: wgpu::TextureFormat) -> Self {
+        TEN_BIT.store(
+            device
+                .features()
+                .contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM),
+            Ordering::Relaxed,
+        );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("latch video"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -904,7 +914,7 @@ pub fn color_capabilities() -> latch_proto::color::ColorCapabilities {
     #[cfg(not(any(target_os = "macos", windows)))]
     let peak = 0;
     latch_proto::color::ColorCapabilities {
-        ten_bit: cfg!(any(target_os = "macos", windows)),
+        ten_bit: TEN_BIT.load(Ordering::Relaxed),
         hdr: peak > 0,
         peak_nits: peak,
     }

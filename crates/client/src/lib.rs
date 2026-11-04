@@ -54,7 +54,7 @@ pub fn native_options() -> eframe::NativeOptions {
                     let mut descriptor =
                         (egui_wgpu::WgpuSetupCreateNew::default().device_descriptor)(adapter);
                     descriptor.required_features |=
-                        egui_wgpu::wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+                        egui_wgpu::wgpu::Features::TEXTURE_FORMAT_16BIT_NORM & adapter.features();
                     descriptor
                 }),
                 ..Default::default()

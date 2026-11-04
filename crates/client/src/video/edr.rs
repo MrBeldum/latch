@@ -263,3 +263,84 @@ impl Drop for Edr {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires Metal"]
+    fn native_edr_shader_preserves_hdr_headroom() {
+        let device = Device::system_default().unwrap();
+        let library = device
+            .new_library_with_source(SHADER, &CompileOptions::new())
+            .unwrap();
+        let desc = RenderPipelineDescriptor::new();
+        let vertex = library.get_function("vs", None).unwrap();
+        let fragment = library.get_function("fs", None).unwrap();
+        desc.set_vertex_function(Some(&vertex));
+        desc.set_fragment_function(Some(&fragment));
+        desc.color_attachments()
+            .object_at(0)
+            .unwrap()
+            .set_pixel_format(MTLPixelFormat::RGBA16Float);
+        let pipeline = device.new_render_pipeline_state(&desc).unwrap();
+        let texture = |format, w, h| {
+            let desc = TextureDescriptor::new();
+            desc.set_pixel_format(format);
+            desc.set_width(w);
+            desc.set_height(h);
+            desc.set_storage_mode(MTLStorageMode::Shared);
+            desc.set_usage(MTLTextureUsage::ShaderRead | MTLTextureUsage::RenderTarget);
+            device.new_texture(&desc)
+        };
+        let y = texture(MTLPixelFormat::R16Unorm, 2, 2);
+        let uv = texture(MTLPixelFormat::RG16Unorm, 1, 1);
+        let output = texture(MTLPixelFormat::RGBA16Float, 2, 2);
+        let code = ((64.0 + 876.0 * latch_proto::color::pq_oetf(1000.0)).round() as u16) << 6;
+        y.replace_region(
+            MTLRegion::new_2d(0, 0, 2, 2),
+            0,
+            [code; 4].as_ptr().cast(),
+            4,
+        );
+        uv.replace_region(
+            MTLRegion::new_2d(0, 0, 1, 1),
+            0,
+            [512u16 << 6; 2].as_ptr().cast(),
+            4,
+        );
+        let pass = RenderPassDescriptor::new();
+        let target = pass.color_attachments().object_at(0).unwrap();
+        target.set_texture(Some(&output));
+        target.set_load_action(MTLLoadAction::DontCare);
+        target.set_store_action(MTLStoreAction::Store);
+        let queue = device.new_command_queue();
+        let cmd = queue.new_command_buffer();
+        let enc = cmd.new_render_command_encoder(pass);
+        enc.set_render_pipeline_state(&pipeline);
+        enc.set_fragment_texture(0, Some(&y));
+        enc.set_fragment_texture(1, Some(&uv));
+        let params = [4.0f32, 1.0];
+        enc.set_fragment_bytes(0, 8, params.as_ptr().cast());
+        enc.draw_primitives(MTLPrimitiveType::Triangle, 0, 3);
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
+        let mut pixels = [0u16; 16];
+        output.get_bytes(
+            pixels.as_mut_ptr().cast(),
+            16,
+            MTLRegion::new_2d(0, 0, 2, 2),
+            0,
+        );
+        // 1000 nits through a four-times-SDR shoulder is 3.85 EDR units.
+        let half = pixels[0];
+        let value =
+            (1.0 + f32::from(half & 1023) / 1024.0) * 2f32.powi(i32::from((half >> 10) & 31) - 15);
+        assert!(
+            (value - 3.85).abs() < 0.05,
+            "native EDR output {value}, bits {pixels:?}"
+        );
+    }
+}
