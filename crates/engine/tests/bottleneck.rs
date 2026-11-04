@@ -229,7 +229,10 @@ fn noise_stream_adapts_to_sustained_queue_delay_and_recovers() {
         // whole settled run, not in every poll. 12 fps over a ~250 ms stats
         // window is 1–3 frames: one frame reads as 3.8 fps.
         if s.applied_bitrate_kbps > 0
-            && s.applied_bitrate_kbps < baseline.applied_bitrate_kbps / 4
+            // The budget follows what is actually sent, so this underfilled
+            // stream may already sit near the 1 Mbps wire floor (797 kbps of
+            // video) before the queue builds: at the floor counts as cut.
+            && s.applied_bitrate_kbps < (baseline.applied_bitrate_kbps / 4).max(1_000)
             && s.rtt_ms >= baseline.rtt_ms + 20
             && s.fps >= 3.0
             && s.loss_pct < 3.0
