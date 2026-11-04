@@ -109,6 +109,11 @@ fn transport_scenarios() {
         let mut budgets = Vec::new();
         let mut route_recovered = false;
         let mut restart_peak = 0.0f32;
+        // The server's probe trains while idle, and the viewer's meter.
+        let mut meter = latch_proto::probe::TrainMeter::default();
+        let mut train = 0u16;
+        let mut probe = Vec::new();
+        let mut first_frame_at = None;
         for ms in 0..35_000u64 {
             let now = start + Duration::from_millis(ms);
             let capacity = if (name == "step_loss" && ms < 5000)
@@ -127,7 +132,7 @@ fn transport_scenarios() {
                 let keyframe = idr_due.is_some_and(|at| at <= now)
                     && now - last_idr >= Duration::from_millis(base);
                 let size = (u64::from(congestion::video_budget(
-                    controller.encoder_wire_budget(),
+                    controller.budget(),
                     tx.fec_percent(),
                     tx.fec_burst(),
                     fps as u32,
@@ -169,6 +174,20 @@ fn transport_scenarios() {
                 pending_frames += 1;
                 next_frame = ms * fps / 1000 + 1;
             }
+            if let Some(count) = controller.probe_train(now) {
+                train = train.wrapping_add(1);
+                for index in 0..count {
+                    latch_proto::wire::write_probe(
+                        &mut probe,
+                        1,
+                        train,
+                        index,
+                        count,
+                        latch_proto::MAX_DATAGRAM,
+                    );
+                    link.send(now, &probe);
+                }
+            }
             // The server's pacer: off on a clean proven path.
             while let Some((dg, _)) = pending.front() {
                 if !pacer.delay(now, dg.len(), controller.pace_kbps()).is_zero() {
@@ -199,14 +218,27 @@ fn transport_scenarios() {
                 );
             }
             for dg in link.receive(now) {
-                wire_received += dg.len() + 80;
-                if let Ok(Datagram::Video { shard, .. }) = latch_proto::wire::parse(&dg) {
-                    rx.push(&shard, now);
+                match latch_proto::wire::parse(&dg) {
+                    Ok(Datagram::Video { shard, .. }) => {
+                        wire_received += dg.len() + 80;
+                        rx.push(&shard, now);
+                    }
+                    Ok(Datagram::Probe {
+                        train,
+                        index,
+                        count,
+                        len,
+                        ..
+                    }) => meter.push(train, index, count, len, now),
+                    _ => {}
                 }
                 while let Some(event) = rx.poll(now) {
                     if let Reassembled::Frame(ref frame) = event {
                         if name == "idle_motion" && ms >= 5000 && frame.data.len() > 30000 {
                             full_rate_at.get_or_insert(ms - 5000);
+                        }
+                        if idle && ms >= 5000 && frame.data.len() > 2000 {
+                            first_frame_at.get_or_insert(ms - 5000);
                         }
                     }
                     if matches!(event, Reassembled::Lost { .. }) && idr_due.is_none() {
@@ -239,6 +271,7 @@ fn transport_scenarios() {
                         Some(missing as f32 * 100.0 / denom)
                     },
                     loss_burst_packets: rx.take_loss_burst(),
+                    probe_kbps: meter.take_kbps(now),
                     window_ms: interval as u32,
                     ..Default::default()
                 };
@@ -256,16 +289,8 @@ fn transport_scenarios() {
             while feedback.front().is_some_and(|(at, ..)| *at <= now) {
                 let (_, report, rtt, sent) = feedback.pop_front().unwrap();
                 controller.observe_sent(sent);
-                controller.update(
-                    now,
-                    &report,
-                    rtt,
-                    if name == "idle_motion" && (1000..5000).contains(&ms) {
-                        25.0
-                    } else {
-                        0.0
-                    },
-                );
+                // An idle unpaced server's local queue is about zero.
+                controller.update(now, &report, rtt, 0.0);
                 // The server's exact parity policy (shared helper).
                 let (percent, burst) =
                     fec.update(&report, &controller, Duration::from_millis(interval));
@@ -299,7 +324,10 @@ fn transport_scenarios() {
             stats.frames_lost as f64 * 60.0 / 35.0, idrs as f64 * 60.0 / 35.0,
             full_rate_at.map_or(-1, |ms| ms as i64));
         let peak = queue_samples.last().copied().unwrap_or(0.0);
-        println!("RESTART {name} first_500ms_queue_peak={restart_peak:.3} queue_peak={peak:.3}");
+        println!(
+            "RESTART {name} first_500ms_queue_peak={restart_peak:.3} queue_peak={peak:.3} first_frame_ms={}",
+            first_frame_at.map_or(-1, |ms| ms as i64)
+        );
         if random && cap == ceiling {
             assert!(
                 minimum >= cap * 4 / 5,
@@ -308,15 +336,12 @@ fn transport_scenarios() {
         }
         if name == "idle_motion" {
             assert_eq!(idle_minimum, ceiling, "idle must retain the budget");
-            assert_eq!(
-                controller.encoder_wire_budget(),
-                ceiling,
-                "restart probes must climb back to the full target"
-            );
-            // Main decays to its floor while idle and needs ~3.2 s.
+            assert_eq!(controller.budget(), ceiling);
+            // A clean path resumes at once: the first motion frame is full
+            // size and lands one frame slot plus half the RTT later.
             assert!(
-                full_rate_at.is_some_and(|ms| ms <= 750),
-                "restart must reach full-rate frames within 750 ms: {full_rate_at:?}"
+                full_rate_at.is_some_and(|ms| ms <= 20),
+                "resumed frames must be full rate at once: {full_rate_at:?}"
             );
         }
         // Main's controller spreads 1.7/3.5/7.1 Mbps at these caps (10 ms,

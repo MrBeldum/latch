@@ -70,6 +70,7 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         surround_kbps: 0,
         mic: Mutex::new(None),
         cursor_supported: false,
+        probe_trains: false,
         draw_cursor: AtomicBool::new(true),
         control_writer: Mutex::new(None),
     })

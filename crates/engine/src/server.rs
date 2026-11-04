@@ -454,6 +454,7 @@ impl Server {
                 )
             })),
             cursor_supported,
+            probe_trains: prepared.req.probe_trains,
             draw_cursor: AtomicBool::new(!cursor_supported),
             control_writer: Mutex::new(None),
         });
@@ -652,6 +653,7 @@ impl Server {
         let mut last_keepalive = Instant::now();
         let mut last_hello = Instant::now() - HELLO_EVERY;
         let mut last_ping = Instant::now();
+        let mut train = 0u16;
         // Bytes the encoder had produced at the last viewer report.
         let mut sent_mark = (Instant::now(), session.bytes.load(Ordering::Relaxed));
         let reason = loop {
@@ -702,7 +704,7 @@ impl Server {
                     session
                         .transport
                         .budget
-                        .store(controller.encoder_wire_budget(), Ordering::Relaxed);
+                        .store(controller.budget(), Ordering::Relaxed);
                     if changed {
                         tracing::debug!(
                             requested_bitrate,
@@ -723,7 +725,7 @@ impl Server {
                     let status = self.status();
                     let report = control::Report {
                         requested_bitrate_kbps: requested_bitrate,
-                        wire_budget_kbps: controller.target(),
+                        wire_budget_kbps: controller.budget(),
                         application_limited: controller.application_limited(),
                         applied_bitrate_kbps: session.transport.applied.load(Ordering::Relaxed),
                         pacing_queue_ms: queue_ms,
@@ -767,6 +769,26 @@ impl Server {
                     last_ping = now;
                 }
                 _ => {}
+            }
+            // While idle, a train of padding back to back: the viewer times
+            // its spread, which shows whether the path still carries the
+            // budget before motion resumes into it.
+            if let (Some(addr), true) = (addr, session.probe_trains) {
+                if let Some(count) = controller.probe_train(now) {
+                    let mut buf = Vec::with_capacity(latch_proto::MAX_DATAGRAM);
+                    train = train.wrapping_add(1);
+                    for index in 0..count {
+                        wire::write_probe(
+                            &mut buf,
+                            session.id,
+                            train,
+                            index,
+                            count,
+                            latch_proto::MAX_DATAGRAM,
+                        );
+                        let _ = self.udp.send_to(&buf, addr);
+                    }
+                }
             }
             let silent = self
                 .now_us()
@@ -943,6 +965,8 @@ struct Session {
     /// The viewer's microphone: its packets put in order, and where they play.
     mic: Mutex<Option<(AudioReceiver, crate::mic::MicOut)>>,
     cursor_supported: bool,
+    /// The viewer measures probe trains (`docs/PROTOCOL.md`, "Probe").
+    probe_trains: bool,
     draw_cursor: AtomicBool,
     control_writer: Mutex<Option<TcpStream>>,
 }
@@ -1555,13 +1579,13 @@ fn paced_video(
                 },
             );
         }
-        session
-            .transport
-            .queue_us
-            .fetch_max(queued.elapsed().as_micros() as u64, Ordering::Relaxed);
         packetizer.packetize_batches(&out, |batch| {
             if pace == 0 {
                 if !session.stopping() {
+                    session
+                        .transport
+                        .queue_us
+                        .fetch_max(queued.elapsed().as_micros() as u64, Ordering::Relaxed);
                     send_batch(&mut sender, &server.udp, session, batch, addr);
                 }
                 return;

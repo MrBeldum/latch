@@ -98,7 +98,7 @@ fn transport_scenarios() {
                 let keyframe = idr_due.is_some_and(|at| at <= now)
                     && now - last_idr >= Duration::from_millis(base);
                 let size = (u64::from(congestion::video_budget(
-                    controller.encoder_wire_budget(),
+                    controller.budget(),
                     tx.fec_percent(),
                     tx.fec_burst(),
                     fps as u32,
