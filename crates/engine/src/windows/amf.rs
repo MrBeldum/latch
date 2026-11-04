@@ -619,6 +619,107 @@ mod tests {
         assert_eq!(std::mem::offset_of!(IoCapsTable, width), 3 * 8);
     }
 
+    /// Produces the same encoded stream with and without dropped pictures.
+    /// Run in the interactive desktop, then independently decode both dumps
+    /// and compare loss.hevc's pictures to full.hevc at the indices in kept.txt.
+    #[test]
+    #[ignore]
+    fn hardware_amf_recovery_across_slot_reuse() -> anyhow::Result<()> {
+        use super::super::{capture::Converter, display};
+        use super::*;
+        use windows::Win32::Graphics::{Direct3D11::*, Dxgi::Common::*};
+        let _runtime = super::super::Runtime::new(false)?;
+        let gpu = Gpu::new(&display::select()?.adapter)?;
+        let (width, height) = (640, 360);
+        let config = VideoConfig {
+            width,
+            height,
+            fps: 60,
+            bitrate_kbps: 8000,
+            codec: crate::video::Codec::Hevc,
+        };
+        let mut encoder = Encoder::new(&config, &gpu)?;
+        ensure!(encoder.recovers(), "AMF LTR initialization failed");
+        let texture = gpu.texture(
+            width,
+            height,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            D3D11_BIND_RENDER_TARGET.0 as u32,
+            false,
+        )?;
+        let mut converter = Converter::new(&gpu, (width, height), (width, height), 60)?;
+        let (mut full, mut loss, mut kept) = (Vec::new(), Vec::new(), String::new());
+        let (mut first, mut delivered, mut recoveries) = (0, 0, 0);
+        for n in 0..128u32 {
+            let dropped = [19..23, 43..47, 67..71, 91..95]
+                .iter()
+                .any(|r| r.contains(&n));
+            let recovering = [23, 47, 71, 95].contains(&n);
+            if n == 18 {
+                ensure!(!encoder.recover_from(first), "overwritten slot accepted");
+            }
+            if recovering {
+                ensure!(encoder.recover_from(delivered), "no retained slot at {n}");
+            }
+            let mut pixels = vec![0u8; (width * height * 4) as usize];
+            for y in 0..height {
+                for x in 0..width {
+                    let p = &mut pixels[((y * width + x) * 4) as usize..][..4];
+                    p.copy_from_slice(&[
+                        (x + n * 7) as u8,
+                        (y + n * 3) as u8,
+                        ((x ^ y) + n * 11) as u8,
+                        255,
+                    ]);
+                }
+            }
+            // SAFETY: pixels covers this BGRA texture at width * 4 pitch.
+            unsafe {
+                gpu.context.UpdateSubresource(
+                    &texture,
+                    0,
+                    None,
+                    pixels.as_ptr().cast(),
+                    width * 4,
+                    0,
+                );
+            }
+            let input = converter.convert(&texture)?;
+            let (picture, recovery) = encoder.submit(&input.texture, n == 0)?;
+            let (bytes, idr) = encoder
+                .receive(Duration::from_secs(3))?
+                .context("AMF timeout")?;
+            ensure!(idr == (n == 0), "unexpected IDR at {n}");
+            if n == 0 {
+                first = picture;
+            }
+            if recovering {
+                ensure!(recovery == Some(delivered), "missing recovery mark at {n}");
+                recoveries += 1;
+                eprintln!("AMF recovery at {n}: picture={picture}, base={delivered}");
+            }
+            full.extend_from_slice(&bytes);
+            if !dropped {
+                loss.extend_from_slice(&bytes);
+                kept += &format!("{n}\n");
+                delivered = picture;
+            }
+        }
+        ensure!(recoveries == 4, "missing recovery episodes");
+        let dir = std::env::var_os("LATCH_AMF_RECOVERY_DUMP")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("latch-amf-recovery"));
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("full.hevc"), full)?;
+        std::fs::write(dir.join("loss.hevc"), loss)?;
+        std::fs::write(dir.join("kept.txt"), kept)?;
+        eprintln!(
+            "AMF recovery dumps: {} (128 full, 112 delivered)",
+            dir.display()
+        );
+        Ok(())
+    }
+
     /// Run in the signed-in desktop on an AMD GPU: the encoder's own limits,
     /// one-at-a-time against pipelined throughput, and whether reference
     /// invalidation (LTR), intra refresh and Main10 work on this GPU.
