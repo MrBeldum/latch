@@ -5,6 +5,8 @@
 mod edr;
 #[cfg(windows)]
 mod hdr10;
+#[cfg(any(target_os = "macos", windows))]
+mod presenter;
 use egui_wgpu::wgpu;
 #[cfg(any(target_os = "macos", windows))]
 use egui_wgpu::wgpu::hal;
@@ -326,6 +328,10 @@ pub struct Resources {
     edr: Option<edr::Edr>,
     #[cfg(target_os = "macos")]
     edr_active: bool,
+    /// Whether the native presenter draws the current stream, chosen per
+    /// stream and display rather than per frame.
+    #[cfg(any(target_os = "macos", windows))]
+    presenter: presenter::Presenter,
     /// Clears the video rect to transparent while the EDR layer below shows.
     #[cfg(target_os = "macos")]
     hole: wgpu::RenderPipeline,
@@ -498,6 +504,10 @@ impl Resources {
             #[cfg(target_os = "macos")]
             edr_active: false,
             #[cfg(target_os = "macos")]
+            presenter: presenter::Presenter::new("EDR"),
+            #[cfg(windows)]
+            presenter: presenter::Presenter::new("HDR10"),
+            #[cfg(target_os = "macos")]
             hole,
             #[cfg(windows)]
             planes_current: false,
@@ -603,9 +613,11 @@ impl Resources {
         self.planes.as_ref().unwrap()
     }
 
-    /// Upload the newest frame, if there is one. HDR and ten-bit frames go
-    /// to the native presenter whatever egui draws over them: controls are
-    /// composited above the picture, never by tone-mapping it to SDR.
+    /// Upload the newest frame, if there is one. A stream the native
+    /// presenter draws (HDR on a Mac; ten-bit on Windows) goes there
+    /// whatever egui draws over it: controls are composited above the
+    /// picture, never by tone-mapping it to SDR. Which presenter draws is
+    /// decided per stream, never per frame (see `presenter`).
     fn upload(
         &mut self,
         device: &wgpu::Device,
@@ -654,9 +666,17 @@ impl Resources {
             None => return,
         };
         let decoded_at = frame.decoded_at;
+        #[cfg(any(target_os = "macos", windows))]
+        let stream = (slot as *const FrameSlot as usize, frame.color);
         #[cfg(windows)]
         if let Some(hdr) = &mut self.hdr10 {
-            if frame.color.bit_depth == 10 {
+            // Ten-bit streams; PQ only while the window's display is HDR,
+            // otherwise the wgpu path tone-maps it.
+            let (display, hdr_display) = hdr.display();
+            let native = self.presenter.pick(stream, display, || {
+                frame.color.bit_depth == 10 && (hdr_display || !frame.color.is_hdr())
+            });
+            if native {
                 match hdr
                     .draw(&frame, rect, pixels_per_point)
                     .and_then(|()| hdr.clip(&overlays, rect, pixels_per_point))
@@ -672,7 +692,7 @@ impl Resources {
                         slot.rendered(decoded_at);
                         return;
                     }
-                    Err(e) => tracing::warn!("HDR10 presentation: {e:#}"),
+                    Err(e) => self.presenter.fail(&format!("{e:#}")),
                 }
             }
             hdr.hide();
@@ -680,9 +700,14 @@ impl Resources {
         }
         #[cfg(not(target_os = "macos"))]
         let _ = (rect, pixels_per_point);
+        // HDR only: ten-bit SDR keeps its precision through the wgpu P010
+        // shader, in the same surface as everything else.
         #[cfg(target_os = "macos")]
         if let Some(edr) = &mut self.edr {
-            if frame.color.bit_depth == 10 && frame.native.is_some() {
+            let native = self.presenter.pick(stream, edr.display(), || {
+                frame.color.is_hdr() && frame.native.is_some()
+            });
+            if native {
                 match edr.draw(&frame, rect, pixels_per_point) {
                     Ok(()) => {
                         self.edr_active = true;
@@ -690,7 +715,7 @@ impl Resources {
                         slot.rendered(decoded_at);
                         return;
                     }
-                    Err(e) => tracing::warn!("EDR presentation failed: {e}"),
+                    Err(e) => self.presenter.fail(&e),
                 }
             }
             edr.hide();
@@ -1275,7 +1300,13 @@ pub fn begin_frame(frame: &eframe::Frame) {
             .get_mut::<Resources>()
         {
             #[cfg(target_os = "macos")]
-            if let Some(edr) = &r.edr {
+            if let Some(edr) = &mut r.edr {
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(handle) = frame.window_handle() {
+                    if let RawWindowHandle::AppKit(handle) = handle.as_raw() {
+                        edr.attach(handle.ns_view.as_ptr());
+                    }
+                }
                 edr.hide();
             }
             #[cfg(windows)]
@@ -1482,6 +1513,7 @@ mod tests {
                 y_stride: CVPixelBufferGetBytesPerRowOfPlane(pb, 0),
                 uv_stride: CVPixelBufferGetBytesPerRowOfPlane(pb, 1),
                 native: Some(latch_stream::video::NativeFrame::new(pb)),
+                format: PixelFormat::P010,
                 ..Default::default()
             }
         }
@@ -1617,6 +1649,73 @@ mod tests {
         let ui = overlaid.get_pixel(10, 10).0;
         assert!((195..=205).contains(&ui[3]), "overlay alpha {ui:?}");
         assert_eq!(image.get_pixel(10, 10).0[3], 0);
+    }
+
+    /// Ten-bit SDR is drawn by egui's own surface (the P010 shader), never
+    /// the EDR layer, even with an EDR presenter ready: only HDR needs it.
+    #[test]
+    #[ignore = "requires Metal"]
+    fn ten_bit_sdr_stays_on_the_wgpu_path() {
+        use parking_lot::Mutex;
+        const W: usize = 64;
+        const H: usize = 32;
+        struct TestApp(Arc<FrameSlot>, Arc<Mutex<Vec<bool>>>);
+        impl eframe::App for TestApp {
+            fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+                let state = frame.wgpu_render_state().unwrap();
+                if let Some(r) = state.renderer.read().callback_resources.get::<Resources>() {
+                    self.1.lock().push(r.edr_active);
+                }
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(egui::Color32::BLACK))
+                    .show(ctx, |ui| {
+                        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                            ui.max_rect(),
+                            Paint {
+                                rect: ui.max_rect(),
+                                frames: self.0.clone(),
+                            },
+                        ));
+                    });
+            }
+        }
+        let color = latch_proto::color::ColorDescription {
+            bit_depth: 10,
+            ..Default::default()
+        };
+        let frames = Arc::new(FrameSlot::default());
+        let active = Arc::new(Mutex::new(Vec::new()));
+        let app = TestApp(frames.clone(), active.clone());
+        let mut harness = egui_kittest::Harness::builder()
+            .wgpu_setup(crate::native_options().wgpu_options.wgpu_setup)
+            .with_size(egui::vec2(W as f32, H as f32))
+            .build_eframe(move |cc| {
+                let state = cc.wgpu_render_state.as_ref().unwrap();
+                install(&cc.egui_ctx, state);
+                state
+                    .renderer
+                    .write()
+                    .callback_resources
+                    .get_mut::<Resources>()
+                    .unwrap()
+                    .edr = Some(edr::Edr::offscreen(W as u64, H as u64, 4.0).unwrap());
+                app
+            });
+        // Mid-grey: luma code 502 of 64..940.
+        for _ in 0..4 {
+            frames.publish(p010_frame(W, H, |_| 502, color));
+            harness.run_steps(1);
+        }
+        let image = harness.render().unwrap();
+        harness.run_steps(1);
+        let active = active.lock();
+        assert!(active.iter().all(|a| !a), "EDR used for SDR: {active:?}");
+        let px = image.get_pixel(W as u32 / 2, H as u32 / 2).0;
+        assert_eq!(px[3], 255, "egui draws the picture opaque: {px:?}");
+        assert!(
+            px[..3].iter().all(|&c| (100..=200).contains(&c)),
+            "mid-grey picture: {px:?}"
+        );
     }
 
     #[test]

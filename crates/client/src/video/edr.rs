@@ -3,7 +3,6 @@ use super::macos_zero_copy::{CVMetalTextureWrapper, MetalTextureCache};
 use latch_stream::{video::NativeFrame, Frame};
 use metal::{foreign_types::ForeignType, *};
 use objc2::{msg_send, runtime::AnyObject};
-use objc2_app_kit::NSApplication;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use std::{
     collections::VecDeque,
@@ -71,9 +70,30 @@ pub(super) struct Edr {
     pipeline: RenderPipelineState,
     cache: MetalTextureCache,
     pending: VecDeque<Pending>,
+    /// The NSView egui's wgpu surface draws in, from the window's handle.
+    /// Never `NSApplication.mainWindow`: that is nil whenever another
+    /// window or app is key or a space is changing, and every frame drawn
+    /// then went to the other path instead (a flicker). An address, as
+    /// these resources must be `Send`; only the main thread uses it.
+    view: usize,
     /// Tests render into a texture at a given headroom instead of a window.
     #[cfg(test)]
     offscreen: Option<(Texture, f32)>,
+}
+
+/// Runs `f` without CoreAnimation's implicit animations, so the layer's
+/// frame follows egui's at once (a resize or full screen) and showing it
+/// never fades.
+fn without_animation<T>(f: impl FnOnce() -> T) -> T {
+    // SAFETY: CATransaction class methods, on the main thread.
+    unsafe {
+        let class = objc2::class!(CATransaction);
+        let _: () = msg_send![class, begin];
+        let _: () = msg_send![class, setDisableActions: true];
+        let out = f();
+        let _: () = msg_send![class, commit];
+        out
+    }
 }
 impl Edr {
     pub fn new() -> Result<Self, String> {
@@ -122,6 +142,7 @@ impl Edr {
             pipeline,
             cache,
             pending: VecDeque::new(),
+            view: 0,
             #[cfg(test)]
             offscreen: None,
         })
@@ -143,6 +164,7 @@ impl Edr {
             cache: MetalTextureCache::new(device.as_ptr().cast())
                 .map_err(|e| format!("Metal texture cache: {e}"))?,
             pending: VecDeque::new(),
+            view: 0,
             offscreen: Some((device.new_texture(&desc), headroom)),
         })
     }
@@ -165,10 +187,37 @@ impl Edr {
             .map(|p| [0, 1, 2, 3].map(|i| f16_to_f32(p[i])))
             .collect()
     }
+    /// The view egui's surface is in; the window owns it for as long as
+    /// these resources live.
+    pub fn attach(&mut self, view: *mut c_void) {
+        self.view = view as usize;
+    }
+    fn view(&self) -> *mut AnyObject {
+        self.view as *mut AnyObject
+    }
+    /// The view's window and screen, as one number: the presenter is
+    /// chosen again when either changes. A window between screens (a
+    /// space changing) keeps the screen it had.
+    pub fn display(&self) -> u64 {
+        let view = self.view();
+        if view.is_null() {
+            return 0;
+        }
+        // SAFETY: the view outlives these resources; AppKit getters on
+        // the main thread, which runs egui.
+        unsafe {
+            let window: *mut AnyObject = msg_send![view, window];
+            if window.is_null() {
+                return 0;
+            }
+            let screen: *mut AnyObject = msg_send![window, screen];
+            (window as u64) ^ (screen as u64).rotate_left(32)
+        }
+    }
     fn set_visible(&self, visible: bool) {
         // SAFETY: CALayer property changes on the window's main thread; the
         // root's sublayers are retained by the root while we look at them.
-        unsafe {
+        without_animation(|| unsafe {
             let object = &*(self.layer.as_ptr() as *const AnyObject);
             let _: () = msg_send![object,setHidden: !visible];
             let root: *mut AnyObject = msg_send![object, superlayer];
@@ -190,7 +239,7 @@ impl Edr {
                     let _: () = msg_send![layer,setOpaque: !visible];
                 }
             }
-        }
+        })
     }
     pub fn show(&self) {
         self.set_visible(true);
@@ -220,34 +269,38 @@ impl Edr {
             cmd.wait_until_completed();
             return Ok(());
         }
-        let mtm = MainThreadMarker::new().ok_or("EDR requires main thread")?;
-        let app = NSApplication::sharedApplication(mtm);
-        // SAFETY: borrowed AppKit objects remain owned by the main-thread window.
-        let (headroom, bounds) = unsafe {
-            let app = &*(&*app as *const NSApplication as *const AnyObject);
-            let window: *mut AnyObject = msg_send![app, mainWindow];
-            if window.is_null() {
-                return Err("no HDR window".into());
-            }
-            let view: *mut AnyObject = msg_send![window, contentView];
+        MainThreadMarker::new().ok_or("EDR requires main thread")?;
+        let view = self.view();
+        if view.is_null() {
+            return Err("no view for the video surface".into());
+        }
+        // SAFETY: the view and its window outlive these resources; AppKit
+        // and CALayer calls on the main thread.
+        let headroom = without_animation(|| unsafe {
+            let window: *mut AnyObject = msg_send![view, window];
             let root: *mut AnyObject = msg_send![view, layer];
-            let screen: *mut AnyObject = msg_send![window, screen];
-            if root.is_null() || screen.is_null() {
-                return Err("no window layer/screen".into());
+            if window.is_null() || root.is_null() {
+                return Err("the video surface has no window or layer");
             }
-            let potential: f64 = msg_send![
-                screen,
-                maximumPotentialExtendedDynamicRangeColorComponentValue
-            ];
-            let headroom: f64 = msg_send![screen, maximumExtendedDynamicRangeColorComponentValue];
-            PEAK.store(
-                if potential > 1.0 {
-                    (potential * 203.0) as u32
-                } else {
-                    0
-                },
-                Ordering::Relaxed,
-            );
+            // Off every screen for a moment (a space changing): draw at
+            // SDR headroom rather than not at all.
+            let screen: *mut AnyObject = msg_send![window, screen];
+            let mut headroom = 1.0f64;
+            if !screen.is_null() {
+                let potential: f64 = msg_send![
+                    screen,
+                    maximumPotentialExtendedDynamicRangeColorComponentValue
+                ];
+                headroom = msg_send![screen, maximumExtendedDynamicRangeColorComponentValue];
+                PEAK.store(
+                    if potential > 1.0 {
+                        (potential * 203.0) as u32
+                    } else {
+                        0
+                    },
+                    Ordering::Relaxed,
+                );
+            }
             let object = &*(self.layer.as_ptr() as *const AnyObject);
             let parent: *mut AnyObject = msg_send![object, superlayer];
             if parent != root {
@@ -266,22 +319,22 @@ impl Edr {
                 NSSize::new(f64::from(rect.width()), f64::from(rect.height())),
             );
             let _: () = msg_send![object,setFrame: area];
-            (headroom.max(1.0) as f32, area)
-        };
+            self.layer.set_contents_scale(f64::from(pixels_per_point));
+            let mut size = self.layer.drawable_size();
+            size.width = area.size.width * f64::from(pixels_per_point);
+            size.height = area.size.height * f64::from(pixels_per_point);
+            self.layer.set_drawable_size(size);
+            Ok(headroom.max(1.0) as f32)
+        })?;
         self.show();
-        self.layer.set_contents_scale(f64::from(pixels_per_point));
-        let mut size = self.layer.drawable_size();
-        size.width = bounds.size.width * f64::from(pixels_per_point);
-        size.height = bounds.size.height * f64::from(pixels_per_point);
-        self.layer.set_drawable_size(size);
+        // Two pictures already queued, or none free: this one is dropped
+        // and the last stays on screen, as a late frame would.
         if self.pending.len() >= 2 {
             return Ok(());
         }
-        let drawable = self
-            .layer
-            .next_drawable()
-            .ok_or("no EDR drawable")?
-            .to_owned();
+        let Some(drawable) = self.layer.next_drawable().map(|d| d.to_owned()) else {
+            return Ok(());
+        };
         let cmd = self.encode(frame, drawable.texture(), headroom)?;
         cmd.present_drawable(&drawable);
         cmd.commit();
