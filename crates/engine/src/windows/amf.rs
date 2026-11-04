@@ -10,7 +10,10 @@ use anyhow::{ensure, Context, Result};
 use std::{
     ffi::c_void,
     ptr::{null_mut, NonNull},
-    sync::OnceLock,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        OnceLock,
+    },
     time::{Duration, Instant},
 };
 use windows::{
@@ -215,6 +218,10 @@ fn max_fps(component: &Object, config: &VideoConfig) -> Option<u32> {
 /// Long-term reference slots kept for recovery frames.
 const LTR_SLOTS: usize = 4;
 
+/// Picture numbers, unique across encoders: a number from an encoder
+/// that was replaced never names a picture of its successor.
+static PICTURES: AtomicU64 = AtomicU64::new(0);
+
 /// Recovery frames from long-term references (`docs/PROTOCOL.md`,
 /// "RecoveryRequest"). Every few frames one is marked into the next slot,
 /// round robin; after a loss the next frame predicts from the newest
@@ -293,8 +300,6 @@ pub(super) struct Encoder {
     time: i64,
     /// Inputs submitted whose output has not been taken yet.
     pub pending: usize,
-    /// Pictures submitted so far; the last one's number.
-    picture: u64,
     ltr: Option<Ltr>,
 }
 impl Encoder {
@@ -421,7 +426,6 @@ impl Encoder {
                 fps,
                 time: 0,
                 pending: 0,
-                picture: 0,
                 ltr: None,
             };
             encoder.bitrate(config.bitrate_kbps)?;
@@ -480,8 +484,7 @@ impl Encoder {
                 surface.set("HevcForcePictureType", Variant::int(2))?; // IDR
                 surface.set("HevcInsertHeader", Variant::boolean(true))?;
             }
-            self.picture += 1;
-            let picture = self.picture;
+            let picture = PICTURES.fetch_add(1, Ordering::Relaxed) + 1;
             let (props, recovery) = self
                 .ltr
                 .as_mut()

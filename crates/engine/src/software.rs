@@ -210,6 +210,10 @@ pub struct SoftwarePipeline<C: CpuCapture> {
     /// A recovery frame is owed: make the next frame without waiting
     /// for the screen to change.
     recovering: bool,
+    /// Picture numbers go on across encoders: the present encoder's
+    /// numbers start after this, the last frame's number.
+    picture_base: u64,
+    last_picture: u64,
 }
 
 impl<C: CpuCapture> SoftwarePipeline<C> {
@@ -243,6 +247,8 @@ impl<C: CpuCapture> SoftwarePipeline<C> {
             timings: SoftwareTimings::default(),
             threads: std::thread::available_parallelism().map_or(1, |n| n.get().min(4)),
             recovering: false,
+            picture_base: 0,
+            last_picture: 0,
         })
     }
 
@@ -461,6 +467,8 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
         let size = (self.frame.width, self.frame.height);
         if self.encoder.is_none() || self.encoder_size != size {
             self.encoder = None;
+            // A new encoder holds none of the old one's pictures.
+            self.picture_base = self.last_picture;
             let encoder = (self.open)(size.0, size.1, &self.config)?;
             // At another size the encoder may be another (software where
             // hardware does not take it).
@@ -522,12 +530,17 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
             .encoder
             .as_ref()
             .map_or((0, None), |e| e.last_picture());
+        let base = self.picture_base;
+        let picture = (picture > 0).then(|| base + picture).unwrap_or(0);
+        self.last_picture = self.last_picture.max(picture);
         Ok(EncodedVideo {
             data,
             keyframe: sent_keyframe,
             captured: self.captured,
             picture,
-            recovery: recovery.filter(|_| !sent_keyframe),
+            recovery: recovery
+                .filter(|_| !sent_keyframe)
+                .map(|local| base + local),
         })
     }
 
@@ -536,10 +549,11 @@ impl<C: CpuCapture> VideoPipeline for SoftwarePipeline<C> {
     }
 
     fn recover_from(&mut self, picture: u64) -> bool {
-        let done = self
-            .encoder
-            .as_mut()
-            .is_some_and(|e| e.recover_from(picture));
+        let done = picture > self.picture_base
+            && self
+                .encoder
+                .as_mut()
+                .is_some_and(|e| e.recover_from(picture - self.picture_base));
         self.recovering |= done;
         done
     }
@@ -614,6 +628,30 @@ mod tests {
         )
         .unwrap()
     }
+    /// Pictures are numbered across encoders: after a resize the old
+    /// numbers name nothing, so a stale request cannot reach a picture
+    /// of the new encoder that happens to share its number.
+    #[test]
+    fn recovery_numbers_outlive_the_encoder() {
+        let mut p = pipeline();
+        assert!(p.recovers());
+        let first: Vec<_> = (0..4)
+            .map(|_| p.next(false, Duration::ZERO).unwrap().picture)
+            .collect();
+        assert_eq!(first, [1, 2, 3, 4]);
+        assert!(p.recover_from(2));
+        let frame = p.next(false, Duration::ZERO).unwrap();
+        assert_eq!((frame.picture, frame.recovery), (5, Some(2)));
+        p.capture.size = (32, 16);
+        p.capture.changed = true;
+        let frame = p.next(false, Duration::ZERO).unwrap();
+        assert!(frame.keyframe);
+        assert_eq!(frame.picture, 6);
+        assert!(!p.recover_from(1), "a picture of the old encoder");
+        assert!(p.recover_from(6));
+        assert_eq!(p.next(false, Duration::ZERO).unwrap().recovery, Some(6));
+    }
+
     #[test]
     fn capture_idle_keyframe_pacing_and_info() {
         let mut p = pipeline();

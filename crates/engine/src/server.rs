@@ -1277,6 +1277,9 @@ fn encode_video(
                     match reopen(&config) {
                         Ok(p) => {
                             pipeline = p;
+                            // The new pipeline numbers its pictures afresh.
+                            session.recovery.sent.lock().clear();
+                            session.recovery.asked.lock().take();
                             break;
                         }
                         Err(e) if video::Unencodable::is(&e) => {
