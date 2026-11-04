@@ -399,9 +399,10 @@ backpressure preserves encoded references. Cancellation may discard queued
 media. Audio, input acknowledgements and pings bypass the video queue.
 
 Under pressure video uses a wire-byte token bucket at 2.5 times the wire budget,
-with a burst of two datagrams or 1 ms at that rate, whichever is larger. The
-same bucket paces idle and restart traffic (below); a clean, proven path
-still sends every frame, keyframes included, at once. The encoder allowance reserves audio separately,
+with a burst of two datagrams or 1 ms at that rate, whichever is larger. While
+pacing, waiting in that bucket is not sender pressure (it would only slow the
+bucket further); a clean path still sends every frame, keyframes included,
+at once. The encoder allowance reserves audio separately,
 then compounds header overhead with rounded FEC rather than adding the two.
 For a loaded sender, cuts use the lower of budget and successful send rate,
 bounded by received throughput +7%. A sender is application-limited after
@@ -409,24 +410,23 @@ four reports below 80% of what the encoder may spend (including zero-byte
 windows); a delay cut while idle starts from that allowance, without
 mistaking sparse throughput or a CPU sender stall for network capacity.
 
-Idle keeps the budget but not its proof. Once the sender has stayed below
-half of it for a 1 s grace, the rate trusted for a resumed frame train halves
-every 500 ms, to no less than 1/32 of the retained target (five doublings),
-twice the idle trickle's peak and the 1 Mbps floor, and never rises within one
-idle run. Time, not the encoder's output, ages it, so a content-limited encoder
-cannot spiral its own target down. The encoder and pacer use the trust while
-idle, so the first frames after a long idle cannot spend stale capacity. When
-the sender uses 60% of the trust, motion has resumed: the trust becomes the
-budget, held as a probe for one feedback horizon; then each validated horizon
-doubles what was actually carried (never past the retained target), and a step
-the encoder did not half use steps back. Restarting streams keep the idle
-3 ms jitter allowance and the ordinary queue threshold (their jitter was never
-learned), treat loss as an underfilled encoder does (a keyframe in a small
-restart window is not a loaded sender), and do not count waiting in their own
-pacer as sender pressure. A queue, or sustained severe loss, ends the restart
-through the usual cut. Idle again mid-restart restores the target as the
-budget and trusts only what was validated. Viewer reports carry the retained
-target as `wire_budget_kbps`.
+Idle keeps the budget and the encoder's target. A pause proves nothing about
+the path, and a content-limited encoder must not spiral its own target down;
+motion after it resumes at once, unpaced on a clean path, as on any frame.
+Instead the idle sender (below half its budget, application-limited) measures
+the path: after 500 ms, two probe trains 200 ms apart and then one a second,
+each 6 to 16 full datagrams (about 3 ms of the budget) sent back to back by the
+control thread, to viewers that time them (`docs/PROTOCOL.md`, "Probe"). The
+bottleneck spreads a train to its own rate. Two trains within 2.5 s both under
+3/4 of the budget mean the path got slower while idle: the budget drops to 90%
+of the faster train (that is its capacity; pacing on) before motion resumes
+into it, and later trains above 5/4 of that restore up to the earlier budget.
+Trains a viewer cannot time (one receive batch) read as fast, which changes
+nothing; an older viewer gets none, and idle then works as on main. An
+underfilled stream that a standing delay cut while it still delivered
+everything (someone else's queue) gets back what it delivered once the delay
+has been gone for a second: it can never fill a probe to prove it. Viewer
+reports carry the budget as `wire_budget_kbps`.
 Each cut removes 20%, or 40% for queue delay above 20 ms or loss above 10%.
 Loss in a window that delivered more than is now sent predates the last cut
 and is ignored, as is a queue still falling within three horizons of a cut
@@ -479,7 +479,9 @@ simulations share one parity policy (`congestion::FecPolicy`). The allowance
 uses 108 bytes per packet for Latch/IP/tunnel overhead, with 4% headroom, and
 reserves the protected floor while a keyframe or recovery frame is owed (below
 five minimum datagrams per frame slot, that irreducible layout is the
-permitted burst); normal frames do not pay it. CPU time computing parity is excluded from
+permitted burst), but never more than half the ordinary encoder target: at
+1 Mbps and 240 fps the full floor would leave 3 kbps, so a protected frame
+there may be one frame's burst over its slot. Normal frames do not pay it. CPU time computing parity is excluded from
 unpaced sender queue age. See [FEC measurements](measurements/2026-11-04/transport-fec/README.md).
 This remains a heuristic controller; it is not a full GCC implementation.
 

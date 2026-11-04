@@ -51,11 +51,16 @@
   floor a confirmed test measured. Keep queue-gradient and severe-collapse cuts,
   also for an encoder that underfills its budget (sustained >10% loss with a
   delivery deficit), and cut on one damaged legacy one-second window.
-- Keep the budget through idle but age its proof: after 1 s the rate trusted
-  for resumed frames halves every 500 ms (to 1/32 of the target), and motion
-  restarts by doubling the carried rate per validated feedback horizon, so a
-  capacity drop during idle no longer meets a full-rate burst. Report the
-  target and application-limited state.
+- Keep the budget and the encoder's target through idle, so motion resumes
+  at full rate at once. While idle, send short probe trains (new datagram
+  kind 16, only to viewers that set `probe_trains`); the viewer times their
+  spread and reports `probe_kbps`, and two trains under 3/4 of the budget
+  lower it before motion resumes into a path that got slower. Report the
+  budget and application-limited state.
+- An underfilled stream cut by someone else's standing queue regains what it
+  delivered once the queue has been gone for a second; waiting in the pacer is
+  not sender pressure while pacing. A pending keyframe never takes the
+  encoder target under half the ordinary one.
 - One parity policy and one parity layout for the server, the wire
   reservation (now including the keyframe/recovery floor) and the transport
   simulations. The pacer's burst is two datagrams or 1 ms of rate.

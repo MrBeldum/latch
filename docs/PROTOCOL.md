@@ -530,7 +530,8 @@ random loss alone enables neither cuts nor pacing. Parity uses fast-attack,
 two-second-decay raw loss with a base-RTT floor (15% at 40 ms, 20% at 100 ms),
 capped at 30% before the per-frame packet floors above. The sender reserves
 rounded parity, padding and headers inside its wire budget, including the
-protected-frame floor while a keyframe or recovery frame is owed. Four reports
+protected-frame floor while a keyframe or recovery frame is owed (never more
+than half the ordinary target). Four reports
 below 80% of the encoder's allowance mark it application-limited; under half
 of it is idle. Idle keeps the budget and the encoder's target: motion resumes
 at once, unpaced on a clean path. While idle the host sends probe trains to a

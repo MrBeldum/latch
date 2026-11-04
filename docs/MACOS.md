@@ -570,9 +570,8 @@ process. See [measurements](measurements/2026-11-03/hdr/README.md).
 
 Radio loss raises parity before reducing the wire budget. Keyframes and
 reference-recovery frames carry at least 30% and four parity shards per block;
-normal frames adapt to erasure runs too. Idle encoders keep their target, but
-after a second of idle the first resumed frames use an aged, validated rate
-that doubles back to the target per feedback round trip (about half a second
-on a 10 ms path). Queue growth still cuts rate; moderate loss without queue
+normal frames adapt to erasure runs too. Idle encoders keep their target and
+resume at once; while idle, short probe trains measure the path, and only a
+measured slower path lowers the budget before motion resumes. Queue growth still cuts rate; moderate loss without queue
 growth requires a rate-correlation test.
 See [measurements and parity costs](measurements/2026-11-04/transport-fec/README.md).
