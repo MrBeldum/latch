@@ -43,12 +43,15 @@ Content-Length: <n>
 | `width`, `height` | u32 | picture size the viewer wants (even numbers) |
 | `fps` | u32 | frames per second wanted |
 | `bitrate_kbps` | u32 | video bitrate wanted (a ceiling: the host's rate control comes down from it) |
-| `codecs` | [string] | what the viewer decodes, best first: `"av1"`, `"hevc"`, `"h264-high"`, `"h264-baseline"`; a name the host does not know is skipped |
+| `codecs` | [string] | what the viewer decodes, best first: `"av1"`, `"hevc"`, `"h264-high"`, `"h264-baseline"`; only hardware-supported codecs are advertised above Baseline; a name the host does not know is skipped |
 | `udp_port` | u16 | the viewer's media socket port |
 | `audio` | bool | send desktop audio |
 | `name` | string | the viewer's machine name, for the host's log |
 | `cursor` | bool | optional, default false; viewer can draw pointer locally and handle shape updates |
 | `gamepads` | bool | optional, default false; the viewer sends gamepads (see [Gamepads](#gamepads-912)) |
+| `reference_invalidation` | bool | optional, default false; after a loss the viewer asks for a recovery frame (see [RecoveryRequest](#recoveryrequest-14-and-recoveryack-15)) |
+| `audio_channels` | u32 | optional; most channels the viewer plays (6 for 5.1, 8 for 7.1). Absent, or below 3, means stereo |
+| `mic` | bool | optional, default false; the viewer offers its microphone (datagram kind 13) |
 
 A request is taken within 64 to 16384 pixels a side, 1 to 500 fps and
 500 kbps to 1 Gbps (`latch_proto::control::MAX_*`). The host then meets
@@ -100,6 +103,9 @@ type byte and the payload and is at most 65 536. Payloads are JSON objects.
 | `gamepads` | u8 | optional, default 0; gamepad slots the host emulates (0: none, so the viewer sends none) |
 | `gamepad_kinds` | [string] | optional; the pad kinds the host emulates as themselves, of `"xbox"`, `"playstation"`, `"generic"`; unknown names are skipped |
 | `gamepad_problem` | string | optional; why the host takes no gamepads although the viewer offered them |
+| `reference_invalidation` | bool | optional, default false; true only when the viewer asked and the session's encoder makes recovery frames |
+| `mic` | object | optional; the format the viewer's microphone is to be sent in (`{"rate": 48000, "channels": 1, "frame_samples": 240, "codec": "lpcm-rice"}`), present only when the viewer offered it and the host has somewhere to play it |
+| `mic_problem` | string | optional; why an offered microphone is not wanted, when `mic` is absent |
 
 Either side sends `Keepalive` when it has sent nothing for one second. A
 connection that has been silent for ten seconds is dead. The session ends
@@ -143,6 +149,9 @@ not match its kind is dropped without an answer.
 | 10 | `PadAck` | host → viewer |
 | 11 | `PadFeedback` | host → viewer |
 | 12 | `PadFeedbackAck` | viewer → host |
+| 13 | `Mic` | viewer → host |
+| 14 | `RecoveryRequest` | viewer → host |
+| 15 | `RecoveryAck` | host → viewer |
 
 ### Hello (1)
 
@@ -162,7 +171,10 @@ as answers to its own.
 ### Video (2)
 
 `flags` bit 0: the frame is a keyframe (IDR); a viewer that lost a
-reference can start from it. `aux`: the host's capture-to-send time for this
+reference can start from it. Bit 1, only to a viewer whose `Accept` has
+`reference_invalidation`: a recovery frame, which predicts only from the
+frame `recovery` frames before it (offset 26). Other bits are 0, and bits 0
+and 1 are never both set. `aux`: the host's capture-to-send time for this
 frame in units of 0.1 ms (saturating).
 
 | Offset | Size | Field |
@@ -175,7 +187,7 @@ frame in units of 0.1 ms (saturating).
 | 20 | 2 | `data` — data shards in this block |
 | 22 | 2 | `parity` — parity shards in this block |
 | 24 | 2 | `shard_len` — bytes per shard in this frame |
-| 26 | 2 | reserved, 0 |
+| 26 | 2 | `recovery` — with flags bit 1: frame number minus the number of the frame it predicts from (≥ 1); otherwise 0 |
 | 28 | `shard_len` | shard bytes |
 
 The host cuts the frame into `D = ceil(frame_len / shard_len)` data shards,
@@ -193,7 +205,10 @@ every block has `data` shards. It is lost when a later frame completes
 while it is still incomplete, or 100 ms after its first shard arrived,
 whichever comes first. A later incomplete frame's 100 ms timeout also
 declares any entirely missing earlier frames lost. After a lost frame the
-viewer decodes nothing until a keyframe arrives, and asks for one.
+viewer decodes nothing until a keyframe arrives, and asks for one; with
+`reference_invalidation` it asks for a recovery frame first, and also
+resumes at a recovery frame whose reference is the last frame it delivered.
+A recovery frame that predicts from any other frame is treated as lost.
 
 ### Audio (3)
 
@@ -210,8 +225,13 @@ one lost packet of the four.
 
 Each coded audio frame is at most `MAX_DATAGRAM - 18` (1 182) bytes,
 leaving room for the 16-byte audio header and the parity packet's two-byte
-length. The host picks `frame_samples` and announces it in `Accept`;
-the default is 240 samples (5 ms at 48 kHz).
+length. The host picks `frame_samples` and announces it in `Accept`: 240
+samples (5 ms at 48 kHz) for stereo, 80 for 5.1 and 60 for 7.1, the most
+whose worst case fits. Stereo frames are `lpcm-rice` version 1, exactly as
+5.1.0 sent them; more channels are version 2 (see the codec's module
+documentation), which only a viewer that asked with `audio_channels`
+receives. Channels are in WAVE order (5.1: FL FR FC LFE BL BR; 7.1 adds
+SL SR).
 
 ### Input (4)
 
@@ -249,15 +269,73 @@ once for every `Input` datagram.
 ### KeyframeRequest (6)
 
 `u32 last` at offset 8: the last frame the reassembler delivered to decode. The viewer sends
-it when a frame is lost, and again every 100 ms (or the measured round
-trip, if longer) until a keyframe newer than `last` arrives. The host
-answers with an IDR frame; it encodes at most one requested keyframe per max(50 ms, smoothed RTT).
-Duplicate requests with the same `last` are additionally throttled for 250 ms.
+it when a frame is lost (with `reference_invalidation`, once a recovery
+frame is out of reach; see below), and again every 50 ms (or the measured round
+trip, if longer) until a keyframe newer than `last` arrives. Every further
+frame lost meanwhile (perhaps the keyframe that answered) sends a repeat at
+once. Older viewers repeat every 100 ms only.
+The host answers with an IDR frame; it encodes at most one requested keyframe per max(50 ms, smoothed RTT).
+A repeat with the same `last` is a duplicate, and ignored, until a keyframe
+has gone out since the request it repeats and a round trip (smoothed RTT
+less its variation) has passed since then: the viewer still asking means
+that keyframe was lost too. After 250 ms a repeat is answered regardless.
+Older hosts hold every repeat for 250 ms.
 
 At session start the viewer waits for the host's first keyframe without
 requesting another one, unless a frame is declared lost.
 
-### Ping (7) and Pong (8)
+### RecoveryRequest (14) and RecoveryAck (15)
+
+Only after a `StreamRequest` and an `Accept` that both have
+`reference_invalidation` true; an older host or viewer never sees these
+kinds, and loss goes on being answered with an IDR.
+
+`RecoveryRequest` (24 bytes): `u32 last_delivered`, `u32 first_invalid`,
+`u32 last_invalid`, `u32 id` at offsets 8, 12, 16, 20. `last_delivered`
+has `KeyframeRequest`'s meaning: the last frame the reassembler handed to
+the decoder, after which it delivered nothing. The invalid range (inclusive,
+wrapping) runs from the frame after it to the newest frame the viewer has
+seen. `id` is +1 per loss the viewer asks about (never 0); a repeat of the
+same request keeps its `id`.
+
+`RecoveryAck` (16 bytes): `flags` is the status, `u32 id` at offset 8 and
+`u32 frame` at 12:
+
+| Status | Meaning |
+| --- | --- |
+| 0 pending | received; the encoder will try with its next frame |
+| 1 sent | `frame` is the recovery frame (sent just before it) |
+| 2 refused | the encoder cannot; an IDR follows, under the usual max(50 ms, RTT) gate |
+
+The host answers a new `id` at once with pending, hands it to the encoder
+before the next frame, and answers again with sent or refused. A repeated
+`id` gets the latest answer again; an older one is ignored. The encoder
+refuses when it no longer holds a picture the viewer has: the frame is
+older than what it keeps, an IDR was made after it, or the encoder has no
+reference control at all. It also refuses a base from an earlier capture/
+pipeline generation, even if that old frame was still queued when the
+pipeline reopened: generation accompanies the encoded frame through the
+sender queue and the wire-frame-to-picture map.
+
+The viewer sends a request as soon as a frame is lost, once more halfway to
+its answer deadline, max(100 ms, 1.5 × smoothed RTT), and falls back to
+`KeyframeRequest` when no answer comes by then, when the host refuses, when
+a pending answer is followed by no recovery frame within 250 ms more, or
+when three recovery frames in a row are lost too. Otherwise it waits for
+the recovery frame, delivers it after complete FEC reassembly, and decodes
+on from it. Frames between the loss and the recovery frame are dropped:
+they predict from what was lost.
+
+A recovery frame is decodable by a decoder that has decoded the reference
+frame and nothing after it. Encoders make it as follows:
+
+| Encoder | Recovery frame |
+| --- | --- |
+| Latch software H.264 | keeps the last 300 ms of pictures (at least 4, at most 256 MB) and rolls back to the reference: the next frame predicts from it with the `frame_num` that follows it, so to the decoder the lost frames never existed (bit-exact; tested against the decoder) |
+| AMF HEVC (AMD, Windows) | four long-term references, one picture marked every fps/30 frames round robin; the next frame is forced to predict from the newest one at or before the reference (`HevcForceLTRReferenceBitfield`) |
+| Media Foundation, VideoToolbox, VA-API, NVENC | refused: an IDR, as before |
+
+
 
 `Ping` carries `u64 time` at offset 8, the sender's clock. The receiver
 answers at once with a `Pong` carrying the same `time`. The viewer pings
@@ -317,6 +395,13 @@ receiver applies a snapshot only if its `seq` is newer than the last it
 applied for that slot (serial-number order), so a late or repeated
 datagram never moves a stick back or restarts a rumble that stopped. The
 viewer answers every `PadFeedback` with a `PadFeedbackAck`.
+
+### Mic (13)
+
+The viewer's microphone, laid out exactly as `Audio` (3) with its own
+`seq` and parity groups, sent only after an `Accept` with `mic`, in that
+format (5 ms of 48 kHz mono). The host takes it only from the address the
+session's `Hello` came from. A host that does not know kind 13 drops it.
 
 ## Versioning
 
@@ -413,37 +498,25 @@ completed frame is handed to decode immediately, including mid-receive-batch.
 Protocol 1 datagrams remain at most 1200 bytes. No MTU or socket-offload
 capability is advertised by this change.
 
-AV1 is additive in protocol 1: old hosts skip its unknown codec name in an
-ordered offer and can select the following HEVC/H.264 entry. Hosts send AV1
-only if the viewer explicitly offers it and a hardware encoder has produced
-a trial keyframe. AV1 frames carry low-overhead OBUs with a sequence header
-before each keyframe; no UDP header or control message changes. Current
-viewers do not offer AV1 until their decoder workstream adds support.
+## AV1 and decoder precision
 
-## Proposal: reference-frame invalidation (not implemented)
+`"av1"` is an additive codec name on protocol 1. Existing hosts skip unknown
+offer names and choose a mutually supported codec; an AV1 Accept is only
+sent to a viewer that offered AV1, and a host offers it only once a hardware
+encoder has produced a trial keyframe. One AV1 frame carries a low-overhead
+OBU temporal unit with sized OBUs (not length-prefixed Annex B). Keyframes
+include the sequence header; the existing keyframe flag and recovery rules
+apply; no UDP header or control message changes. The viewer supports Main
+4:2:0, eight or ten bits, but AV1 streams negotiate 8-bit SDR only: Main10
+and HDR10 are HEVC (see [Colour negotiation](#colour-negotiation)).
 
-Negotiate `reference_invalidation: true` in both StreamRequest and Accept,
-with serde default false. Only send the proposed message when both endpoints
-advertise it; protocol 1 peers without the capability keep KeyframeRequest.
-Reserve a future UDP kind after checking the then-current registry. Its payload
-should contain `u32 last_delivered`, `u32 first_invalid`, `u32 last_invalid`
-(inclusive wrapping frame numbers), and `u32 request_id`. Numbers are those
-already used by Video shards; `last_delivered` has exactly KeyframeRequest's
-semantics, never "the missing frame" or "last received shard".
+## Reference invalidation (additive)
 
-On loss, the viewer stops reference-dependent delivery and repeats the same
-request_id at max(100 ms, RTT). The host invalidates the indicated references
-only when its encoder can retain a known-good reference at/before last_delivered;
-it acknowledges request_id and the first safe recovery frame. The viewer resumes
-only at that frame, after complete FEC reassembly, and discards obsolete replies
-using wrapping sequence comparisons. Duplicate requests are idempotent. If no
-safe reference remains, either endpoint falls back to the existing IDR request,
-with the same max(50 ms, RTT) host gate. Never send an unnegotiated new kind.
-
-This needs encoder reference bookkeeping, recovery-frame marking, and a loss
-matrix test with an actual supporting encoder. No message plumbing is shipped
-without those semantics: an acknowledgment must not promise a recoverable frame
-that the encoder cannot produce.
+Implemented as [RecoveryRequest and RecoveryAck](#recoveryrequest-14-and-recoveryack-15).
+Measurements: [recovery frames against keyframes](measurements/2026-11-03/rfi/README.md).
+The viewer test knobs `LATCH_TEST_VIDEO_LOSS=<percent>[:<burst>]` (drop
+that share of video datagrams on arrival, in bursts) and
+`LATCH_TEST_NO_RECOVERY=1` (do not ask for recovery frames) reproduce them.
 
 ## Colour negotiation
 

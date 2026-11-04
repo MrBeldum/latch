@@ -1,0 +1,6 @@
+decodable [Av1, Hevc, H264High, H264Baseline]
+renderer Dx12 AMD Radeon RX 6600
+decoder Media Foundation (DXVA)
+decode_summary frames=1233 p50_ms=4.761 p95_ms=5.812
+render_summary decoded=1233 rendered=1122 decode_to_render_ms_p50=0.512 p95=2.029 p99=3.840
+exit_code= cpu_total_s=5.4375

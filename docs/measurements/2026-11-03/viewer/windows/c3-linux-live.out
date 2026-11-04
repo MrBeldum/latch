@@ -1,0 +1,1 @@
+[2m2026-11-03T21:51:38.658233Z[0m [32m INFO[0m [2mlatch_stream::session[0m[2m:[0m viewer UDP buffers (requested 8388608/8388608; Linux may cap at net.core.wmem_max/rmem_max) [3msend_bytes[0m[2m=[0m8388608 [3mreceive_bytes[0m[2m=[0m8388608

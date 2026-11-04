@@ -118,6 +118,22 @@ pub struct StreamRequest {
     /// The viewer sends gamepads (`docs/PROTOCOL.md`, "Gamepads").
     #[serde(default)]
     pub gamepads: bool,
+    /// The viewer asks for recovery frames after a loss instead of a
+    /// keyframe (`docs/PROTOCOL.md`, "RecoveryRequest").
+    #[serde(default)]
+    pub reference_invalidation: bool,
+    /// Most audio channels the viewer plays (6 for 5.1, 8 for 7.1); absent
+    /// or below 3 means stereo, all an older viewer decodes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub audio_channels: u32,
+    /// The viewer offers its microphone (datagram kind 13) when the host
+    /// answers with an `Accept.mic` format.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mic: bool,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn known_codecs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Codec>, D::Error> {
@@ -171,6 +187,16 @@ pub struct Accept {
     /// Why the host takes no gamepads, when the viewer offered them.
     #[serde(default)]
     pub gamepad_problem: String,
+    /// The host answers `RecoveryRequest`s; only when the viewer asked.
+    #[serde(default)]
+    pub reference_invalidation: bool,
+    /// What the viewer's microphone is to be sent as, when it offered it
+    /// and this host has somewhere to play it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic: Option<AudioFormat>,
+    /// Why the offered microphone is not wanted, when `mic` is null.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mic_problem: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -368,6 +394,29 @@ pub fn token_from_hex(s: &str) -> Option<[u8; 16]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codec_offers_skip_unknown_names_and_preserve_preference() {
+        #[derive(Deserialize)]
+        struct Offer {
+            #[serde(deserialize_with = "known_codecs")]
+            codecs: Vec<Codec>,
+        }
+        let offer: Offer = serde_json::from_str(
+            r#"{"codecs":["future", "av1", "hevc", "h264-high", "h264-baseline"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            offer.codecs,
+            [
+                Codec::Av1,
+                Codec::Hevc,
+                Codec::H264High,
+                Codec::H264Baseline
+            ]
+        );
+        assert_eq!(serde_json::to_string(&Codec::Av1).unwrap(), "\"av1\"");
+    }
 
     #[test]
     fn stream_request_backward_compatible() {

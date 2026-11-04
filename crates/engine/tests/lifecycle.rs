@@ -23,6 +23,9 @@ fn request(name: &str) -> StreamRequest {
         name: name.into(),
         cursor: false,
         gamepads: false,
+        reference_invalidation: false,
+        audio_channels: 0,
+        mic: false,
     }
 }
 
@@ -144,6 +147,9 @@ fn post_accept_end_close_and_missing_media_are_reported_as_failures() {
                     gamepads: 0,
                     gamepad_kinds: Vec::new(),
                     gamepad_problem: String::new(),
+                    reference_invalidation: false,
+                    mic: None,
+                    mic_problem: String::new(),
                 }),
             )
             .unwrap();
@@ -185,6 +191,7 @@ fn post_accept_end_close_and_missing_media_are_reported_as_failures() {
                 name: "failure test".into(),
                 cursor: false,
                 gamepads: false,
+                mic: false,
             },
             Arc::new(FrameSlot::default()),
             tx,

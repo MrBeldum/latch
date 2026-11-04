@@ -226,6 +226,22 @@ on hardware encoders. Four cached NV12 textures and their views are reused.
   or 500 Mbps; MF's u32 bits/sec representation and the encoder's own
   accepted configuration bound the target. Transport overhead reservation
   and congestion adaptation still apply.
+- **Loss recovery.** AMF HEVC keeps four long-term references, marking
+  one picture every fps/30 frames round robin. After a loss the next frame
+  predicts only from the newest one at or before the viewer's last
+  delivered frame (`HevcForceLTRReferenceBitfield`); the slots it does not
+  use are dropped, as AMF's default LTR mode does, and an IDR forgets them
+  all. With none left the host sends an IDR. Measured RX 6600 → Mac
+  (VideoToolbox HEVC): recovery frames of 0.8–6 kB where the IDR was
+  16–18 kB, no decode errors ([measurements](measurements/2026-11-03/rfi/README.md)).
+  A moving 640×360 hardware test also compares uninterrupted decoding
+  with four loss/recovery episodes across LTR slot reuse: all 112 delivered
+  pictures match byte for byte in FFmpeg
+  ([commands](measurements/2026-11-03/rfi/review-fixes/README.md)).
+  Media Foundation encoders refuse and send an IDR: the AMD H.264 MFT
+  accepts the LTR setters but reads none of them back, so nothing shows it
+  honours `CODECAPI_AVEncVideoUseLTRFrame`, and a frame that silently
+  ignored it would decode wrongly instead of failing.
 - **Fallback.** H.264 High/Baseline keep the GPU MFT → Microsoft MFT →
   Latch software path. An AMF runtime failure reopens MF HEVC and starts
   with an IDR. A hardware-only codec that fails through MF ends the stream
@@ -262,8 +278,9 @@ in the interactive desktop. MF HEVC exposes LTR buffer/mark/use values;
 H.264 accepts their setters but rejects their reads; neither result proves reference recovery. `IsModifiable` returns E_NOTIMPL, so it is not a
 reliable capability test on this AMD MFT. Gradual intra-refresh reads are
 rejected. Main10 output-type negotiation succeeds. These probes do not prove
-reference recovery or HDR fidelity. AMF's
-RX 6600 probe marks an LTR and reports its later forced use on a P-frame;
+reference recovery or HDR fidelity through MF. AMF's
+RX 6600 probe marks an LTR and reports its later forced use on a P-frame
+(the loss recovery above is built on it);
 intra-refresh configuration emits non-IDRs, but actual CTB refresh and
 decoder recovery still need dedicated tests. P010 Main10 produces an IDR
 whose SPS identifies profile 2. HDR metadata and fidelity are unverified;
@@ -354,6 +371,31 @@ removes the old task. A game cursor whose visible pixels sit to the right
 of or below its hotspot can therefore be cut off at the right or bottom
 edge.
 
+## Sound: surround and the viewer's microphone
+
+The PC sends what its default playback device plays, losslessly. When the
+viewer's speakers have 5.1 or 7.1 and the PC's playback device is set to
+that layout (Sound settings > the device > Speaker setup), the stream
+carries every channel; otherwise it is stereo, and a stereo viewer gets a
+downmix of whatever the PC plays.
+
+As a viewer, the PC plays the stream on each speaker of its default
+output by position (the endpoint's channel mask) through a low-latency
+WASAPI stream at the smallest period the driver allows. Set
+`LATCH_AUDIO_OUTPUT=cpal` to go back to the older shared stream, for
+instance if a driver crackles with the small period.
+
+With **Send my microphone** on in the viewer's settings, the viewer's
+microphone plays on the PC where games and voice chat can record it.
+Windows has no way to make a microphone without a driver, so Latch plays
+it into a virtual cable: install [VB-CABLE](https://vb-audio.com/Cable/)
+(free) and pick **CABLE Output** as the microphone in the program that
+should hear it. Latch finds the cable's playback side (**CABLE Input**) by
+itself; to use another device, set the user environment variable
+`LATCH_MIC_DEVICE` to the name of the playback device to play it into,
+and restart Latch. Without one, the viewer's stats line says
+"microphone not sent" and why.
+
 ## Troubleshooting
 
 - **The picture is an enlarged, blurry desktop**: the PC's display could not
@@ -419,11 +461,38 @@ from expiring by disabling key expiry for it in the
 [admin console](https://login.tailscale.com/admin/machines); the Mac warns
 about this for every PC it lists.
 
+## Viewer hardware decode
+
+The Windows viewer enumerates installed synchronous Media Foundation
+decoders at session startup and tests AV1, HEVC and H.264 High pictures with
+a D3D11 DXGI device manager. Successful DXVA output is required before a
+codec is offered; Baseline is always offered. Missing Store HEVC/AV1 codec
+extensions can prevent an otherwise capable GPU from being used. MF is
+loaded lazily so Windows without Media Foundation can still start.
+
+Decoders enable `CODECAPI_AVLowLatencyMode` before type negotiation. The
+streaming encoders must disable B-frame/reorder delay too. NV12 and Main10
+P010 decoder outputs are accepted; P010 is reduced to SDR eight-bit output.
+Baseline retains the first-ten-access-unit fallback to `latch-codec`. Modern
+codecs have no pure-Rust software fallback.
+
+The client prefers D3D12 on otherwise equivalent adapters. NV12 pictures
+are GPU-copied into a bounded shared D3D11 texture pool, fenced before
+publication, and opened as D3D12/wgpu plane views. The renderer keeps each
+surface until its GPU reads finish. Every fifteenth picture is also sampled
+through staging for black-screen detection; that sample is scanned on the
+next picture. This is a GPU copy, without per-frame CPU readback/upload,
+rather than direct import of decoder-owned surfaces. P010, headless tools,
+odd picture dimensions, an exhausted pool or unsupported sharing retain
+cached staging readback and CPU upload. A failed import disables sharing.
+The renderer requests `AutoNoVsync`, latency 1 and repaints on decoded frames.
+See [viewer measurements](measurements/2026-11-03/viewer/README.md) for
+interactive-session tests, throughput limits and timing definitions.
+
 ### Transport feedback (2026-11-03)
 
 The shared controller uses 50 ms feedback while viewer display statistics retain
 250 ms windows, and requested recovery IDRs are gated at max(50 ms, RTT).
-Windows sockets retain their scalar send/receive path; USO/URO remains outstanding.
 See [transport measurements](measurements/2026-11-03/transport/README.md).
 
 Transport segments video runs through WSASendMsg USO and receives through

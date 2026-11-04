@@ -232,6 +232,7 @@ it from this network (see below).
 | Frame rate | 30 to 500, and this display's own rate (marked); the PC's display is switched to match when it can |
 | Bitrate | 2 to 1000 Mbps in steps (fine at the low end); arrow keys step once, Shift-arrow ten times. The most the encoder spends; the host's rate control comes down from it when the path drops packets |
 | Codec | Auto (the best both ends have: AV1, then HEVC, then H.264), AV1, HEVC, H.264. A codec either end lacks falls back to H.264 |
+| Send my microphone | Off by default. On, this Mac's microphone plays on the PC as a microphone: by itself on Linux; on Windows and macOS through a virtual cable installed there (VB-CABLE, BlackHole). macOS asks for the microphone the first time |
 | Open streams full screen | How a session starts |
 | Capture the mouse | The toolbar's Mouse choice, remembered |
 | Command acts as Ctrl | Off makes ⌘ the Windows key on Windows and Linux machines; a Mac always gets ⌘ as Command |
@@ -372,6 +373,16 @@ P-frame capped too), and `BaseFrameQP` works only under the low-latency
 rate control above. So a lost frame is best answered without an IDR
 (reference invalidation), and the IDR that remains is paced on the wire.
 
+A Mac host still answers a loss with an IDR: its encoder refuses recovery
+requests. VideoToolbox does have public long-term references since macOS 12
+(`kVTCompressionPropertyKey_EnableLTR`, the per-sample
+`kVTSampleAttachmentKey_RequireLTRAcknowledgementToken`, and the frame
+options `kVTEncodeFrameOptionKey_AcknowledgedLTRTokens` and
+`kVTEncodeFrameOptionKey_ForceLTRRefresh`): acknowledging the tokens of
+frames up to the viewer's last delivered one and forcing a refresh should
+make a recovery frame. That is not built yet; it needs a test that decodes
+the refreshed stream after dropped frames.
+
 ## Permissions
 
 - **Local network**: macOS 15 may ask; allow it so the wake broadcast can
@@ -380,6 +391,14 @@ rate control above. So a lost frame is best answered without an IDR
   the first time the Mac serves a Latch Host install through the stream.
 - Only connecting, nothing else: Latch captures no screen and reads the
   keyboard and mouse only in its own window.
+- **Microphone**: asked for only when **Send my microphone** is on, the
+  first time a stream starts with it. Until it is allowed (System
+  Settings > Privacy & Security > Microphone), macOS hands Latch silence,
+  so the PC hears nothing.
+- Sharing this Mac with a viewer that sends its microphone needs a virtual
+  cable such as [BlackHole](https://existential.audio/blackhole/): Latch
+  plays the viewer's microphone into its output, and apps on this Mac pick
+  BlackHole as their microphone. `LATCH_MIC_DEVICE` names another output.
 - Sharing this Mac also needs **Screen Recording** (the picture and the
   sound, through ScreenCaptureKit) and **Accessibility** (the viewer's
   keyboard and mouse). macOS asks once, when you set up sharing; after
@@ -472,6 +491,23 @@ it says what happened last. A copy that is not running from an app bundle
   MAC. While Tailscale on this Mac is off they stay
   listed with when they were last seen, and **Wake** still works over the
   LAN or the public address.
+
+## Viewer decode and high refresh
+
+The viewer offers hardware-supported codecs in AV1 > HEVC > H.264 High >
+Baseline order. A cached probe requires both VideoToolbox's hardware query
+and a decoded hardware picture, including AV1 on M3 or newer hardware; older hosts skip the new name and negotiate HEVC/H.264.
+AV1 sized OBUs are submitted with an `av1C` format description. All codecs
+retain the IOSurface → Metal path. HEVC Main10 callers can select P010
+output without losing ten-bit samples; normal sessions still request NV12
+and SDR. HDR transfer functions and display negotiation are future work.
+
+Frame arrival wakes egui immediately. `AutoNoVsync` and a maximum frame
+latency of one avoid an application 60 Hz cap on ProMotion. The newest
+picture is prepared for rendering without an extra frame queue; previous
+IOSurfaces live until their GPU submissions complete. Physical scanout and
+compositor delay remain display-dependent. See the [measurements and
+native viewer command](measurements/2026-11-03/viewer/README.md).
 
 ### Transport measurement (2026-11-03)
 

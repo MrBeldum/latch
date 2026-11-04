@@ -51,6 +51,13 @@
   the old viewer learned why it ended.
 - Windows viewers rearm Mio readiness after a batched receive, so packets
   after an idle gap wake the receive loop instead of waiting for its 20 ms timer.
+- A recovery keyframe lost in a burst no longer freezes the picture for
+  400–550 ms: the host held every repeat of a keyframe request for 250 ms,
+  so the viewer's retries were ignored. It now answers a repeat once its
+  keyframe has been out for a round trip, the viewer asks again as soon as
+  another frame is lost, and retries every 50 ms (or the RTT) instead of
+  100 ms. Through 3 % loss with bursts the longest freeze is
+  about 230 ms (simulated, 24 minutes of stream; 5.1 rules: 400 ms).
 
 
 The release workflow publishes the section that matches the tag as the
@@ -58,6 +65,48 @@ GitHub release notes, so each version gets a heading of the form
 `## X.Y.Z (date)`.
 
 ## Unreleased
+
+- A lost frame costs a small recovery frame instead of a keyframe, as on
+  GeForce NOW. Viewer and host negotiate `reference_invalidation`; after a
+  loss the viewer asks for a frame that predicts from the last one it
+  decoded (new datagrams 14 and 15; 13 stays reserved for microphone audio), falling back to a keyframe when the
+  host cannot. Recovery identities include the pipeline generation, so a
+  queued frame from before a capture reopen cannot alias a new reference.
+  The software H.264 encoder rolls back to that picture
+  (bit-exact) and AMD's AMF HEVC encoder uses long-term references; Media
+  Foundation, VideoToolbox, VA-API and NVENC still send an IDR. Linux host
+  → Mac at 1–3% induced burst loss: 34–51 IDRs a minute become 2–3 (the
+  startup ones), resume p50 113 → 41 ms, freeze p95 256–452 → 97–120 ms;
+  recovery frames are 3.3 kB where an IDR was 10–20 kB. Older viewers and
+  hosts keep `KeyframeRequest`.
+- Negotiate hardware-probed AV1, HEVC and H.264 High on the viewer; retain
+  Baseline's ten-access-unit software fallback and protocol-1 compatibility.
+- Decode AV1 through VideoToolbox on supported Macs, with selectable P010
+  Main10 output and IOSurface-to-Metal rendering.
+- Enumerate Windows Media Foundation decoders with D3D11/DXVA and accept
+  NV12/P010 output; import shared NV12 textures into D3D12/wgpu with
+  fenced GPU copies and CPU-readback fallback.
+- Retain native surfaces until GPU work completes; add a native present
+  measurement example and decode-to-render timestamps.
+- A viewer whose AV1, HEVC or H.264 High decoder fails (no picture for ten
+  frames, or three errors without one) asks the PC again without that
+  codec, down to Baseline, and says why, instead of asking for keyframes
+  forever: a picture returns within a second or two.
+- A Media Foundation decoder without transform attributes runs without the
+  low-latency hint instead of failing; a Windows renderer that cannot open
+  a shared picture stops drawing the last one.
+- No wait at a session's end can hang it: the host leaves a media thread
+  stuck in a capture or encoder call behind after 5 s (the session still
+  ends and lets go of the screen), and a second viewer gives up after 30 s,
+  rather than waiting for ever, on one that is still starting a stream. The
+  viewer's control writes time out after 2 s and its receive thread is
+  waited for at most 2 s.
+- CI: the loopback tests' sessions take turns (test mode sends input to the
+  newest test pattern, so the gamepad test's session took the key presses
+  of the picture test, which then waited for ever on a square that never
+  flipped: hours-long hangs on the macOS runner). A test still running after
+  60 s prints every thread's stack and fails the run, and every CI job has
+  a time limit.
 
 - No Latch-imposed ceilings on a stream. The viewer allowed 30–240 fps and
   2–150 Mbps and the host clamped every request to 240 fps, 500 Mbps and
@@ -162,6 +211,39 @@ GitHub release notes, so each version gets a heading of the form
   why a 1440p sweep went from 3.7 to 0.5 Mb/s. Colour conversion keeps
   its threads instead of starting them each frame (a whole 1080p frame:
   1.35 to 1.06 ms on four Neoverse N1 cores).
+- The viewer no longer holds a fixed 40 ms of sound. The host sends each
+  5 ms of sound as soon as it is captured, and the viewer's buffer holds
+  what the measured jitter of the path needs (11–15 ms on a quiet LAN in
+  simulation, about 27 ms where 5.1.0 held 45), widens after an underrun
+  and narrows again slowly, and asks the output device for a 2.5 ms
+  buffer where it allows one. The 30-minute ±300 ppm clock-drift
+  simulation still plays with no gaps and no cuts. Measurements:
+  `docs/measurements/2026-11-03-audio/`.
+- 5.1 and 7.1 sound. A viewer whose speakers have more than two channels
+  asks for them, and the PC sends its own layout up to that, still
+  lossless (`lpcm-rice` version 2; stereo is unchanged, so older viewers
+  and hosts are unaffected). Any layout plays on any device: 5.1 is mixed
+  down for headphones, stereo goes to the front pair of a 5.1 set. Each
+  channel plays on the speaker of its own position, read from the
+  device's layout (CoreAudio's 7.1 puts the sides before the backs, ALSA's
+  5.1 puts centre and LFE last), so back sound no longer comes out of the
+  sides and the centre no longer out of a rear speaker.
+- **Send my microphone** (off by default): the viewer's microphone plays
+  on the PC as a microphone. A Linux host makes a "Latch Microphone"
+  input for the session; Windows needs VB-CABLE and a Mac host BlackHole
+  (or `LATCH_MIC_DEVICE`), since sound becomes a microphone there only
+  through a driver. macOS asks for the microphone the first time.
+- Windows viewers play sound through their own `IAudioClient3` stream at
+  the smallest engine period the driver offers (2.67–3 ms on most onboard
+  and HDMI audio) with two periods written ahead, instead of cpal's
+  stream at the default 10 ms with a larger ring; cpal remains the
+  fallback. On the test PC, whose only output (Steam Streaming Speakers)
+  offers only 10 ms, the host's click reached the speaker 66 ms after
+  it was made instead of 84 (median of three runs each), with the jitter
+  buffer steady at 16–17 ms. `docs/measurements/2026-11-03-audio/`.
+- Audio latency can be measured: `LATCH_TEST_AUDIO=clicks` on a test host
+  and `LATCH_AUDIO_PROBE=1` on `view` report `audio_click_ms`, the time
+  from the host's click to the viewer's speaker.
 - One pointer while the mouse is captured. The Mac's arrow was hidden only
   by egui's cursor, which macOS applies when the pointer moves over the
   window; a captured pointer is held still, so the Mac's arrow could stay

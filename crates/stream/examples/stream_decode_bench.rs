@@ -243,7 +243,7 @@ fn main() -> Result<()> {
     let config = match parse_args(std::env::args())? {
         Some(cfg) => cfg,
         None => {
-            println!("Usage: decode_bench [--fixture <PATH>] [--warmup <N>] [--iterations <N>] [--require-hardware] [--help]\n\nFixture: one Annex B H.264 IDR slice with SPS/PPS (default: built-in 64x64 bars).\nWarmup: 0..10000 (default 30). Iterations: 1..100000 (default 300).\nSynthetic decode plus CPU output copy; excludes capture, encode, network, audio and presentation.");
+            println!("Usage: stream_decode_bench [--fixture <PATH>] [--warmup <N>] [--iterations <N>] [--require-hardware] [--help]\n\nFixture: one Annex B H.264 IDR slice with SPS/PPS (default: built-in 64x64 bars).\nWarmup: 0..10000 (default 30). Iterations: 1..100000 (default 300).\nSynthetic decode plus CPU output copy; excludes capture, encode, network, audio and presentation.");
             return Ok(());
         }
     };

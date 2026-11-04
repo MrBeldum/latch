@@ -10,7 +10,10 @@ use anyhow::{ensure, Context, Result};
 use std::{
     ffi::c_void,
     ptr::{null_mut, NonNull},
-    sync::OnceLock,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        OnceLock,
+    },
     time::{Duration, Instant},
 };
 use windows::{
@@ -211,6 +214,81 @@ fn max_fps(component: &Object, config: &VideoConfig) -> Option<u32> {
         .ok()
         .filter(|&fps| fps > 0)
 }
+/// Long-term reference slots kept for recovery frames.
+const LTR_SLOTS: usize = 4;
+
+/// Picture numbers, unique across encoders: a number from an encoder
+/// that was replaced never names a picture of its successor.
+static PICTURES: AtomicU64 = AtomicU64::new(0);
+
+/// Recovery frames from long-term references (`docs/PROTOCOL.md`,
+/// "RecoveryRequest"). Every few frames one is marked into the next slot,
+/// round robin; after a loss the next frame predicts from the newest
+/// slot whose picture the viewer has, and from nothing else.
+struct Ltr {
+    /// The picture each slot holds, as the encoder sees it.
+    slots: [Option<u64>; LTR_SLOTS],
+    /// Mark one picture in this many: four slots reach back about 130 ms.
+    every: u64,
+    marks: u64,
+    /// The next picture predicts from this slot only; the viewer holds
+    /// everything up to the second picture.
+    force: Option<(usize, u64)>,
+}
+
+impl Ltr {
+    fn new(fps: u32) -> Self {
+        Self {
+            slots: [None; LTR_SLOTS],
+            every: u64::from(fps / 30).max(1),
+            marks: 0,
+            force: None,
+        }
+    }
+
+    /// Per-picture properties for `picture`, and the picture a recovery
+    /// frame predicts from.
+    fn plan(&mut self, picture: u64, keyframe: bool) -> (Vec<(&'static str, i64)>, Option<u64>) {
+        let mut props = Vec::new();
+        let mut recovery = None;
+        if keyframe {
+            // An IDR empties the decoded picture buffer.
+            self.slots = [None; LTR_SLOTS];
+            self.force = None;
+        } else if let Some((slot, base)) = self.force.take() {
+            props.push(("HevcForceLTRReferenceBitfield", 1 << slot));
+            // The encoder drops the long-term references a forced picture
+            // does not use (AMF's default LTR mode).
+            for (i, held) in self.slots.iter_mut().enumerate() {
+                if i != slot {
+                    *held = None;
+                }
+            }
+            recovery = Some(base);
+        }
+        if recovery.is_none() && (keyframe || picture.is_multiple_of(self.every)) {
+            let slot = (self.marks % LTR_SLOTS as u64) as usize;
+            self.marks += 1;
+            props.push(("HevcMarkCurrentWithLTRIndex", slot as i64));
+            self.slots[slot] = Some(picture);
+        }
+        (props, recovery)
+    }
+
+    /// Plans the next picture to predict from the newest slot at or
+    /// before `base`; false when there is none.
+    fn recover_from(&mut self, base: u64) -> bool {
+        let newest = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, held)| held.filter(|&p| p <= base).map(|p| (i, p)))
+            .max_by_key(|&(_, p)| p);
+        self.force = newest.map(|(slot, _)| (slot, base));
+        self.force.is_some()
+    }
+}
+
 pub(super) struct Encoder {
     component: Object,
     context: Object,
@@ -221,20 +299,43 @@ pub(super) struct Encoder {
     time: i64,
     /// Inputs submitted whose output has not been taken yet.
     pub pending: usize,
+    ltr: Option<Ltr>,
 }
 impl Encoder {
     pub fn new(config: &VideoConfig, gpu: &Gpu) -> Result<Self> {
-        Self::open(
+        let format = if config.color.bit_depth == 10 {
+            P010
+        } else {
+            NV12
+        };
+        match Self::open(
             config,
             gpu,
-            if config.color.bit_depth == 10 {
-                P010
-            } else {
-                NV12
-            },
-            &[],
-        )
+            format,
+            &[("HevcMaxOfLTRFrames", Variant::int(LTR_SLOTS as i64))],
+        ) {
+            Ok(mut encoder) => {
+                encoder.ltr = Some(Ltr::new(encoder.fps));
+                Ok(encoder)
+            }
+            Err(e) => {
+                tracing::info!("AMF HEVC without long-term references: {e:#}");
+                Self::open(config, gpu, format, &[])
+            }
+        }
     }
+
+    /// Whether this encoder makes recovery frames.
+    pub fn recovers(&self) -> bool {
+        self.ltr.is_some()
+    }
+
+    /// See [`crate::video::VideoPipeline::recover_from`]: the next picture
+    /// submitted predicts from a long-term reference the viewer holds.
+    pub fn recover_from(&mut self, picture: u64) -> bool {
+        self.ltr.as_mut().is_some_and(|l| l.recover_from(picture))
+    }
+
     /// `extra` properties are set after Latch's own, before the encoder
     /// starts; `format` is the input surface format.
     fn open(
@@ -352,6 +453,7 @@ impl Encoder {
                 fps,
                 time: 0,
                 pending: 0,
+                ltr: None,
             };
             encoder.bitrate(config.bitrate_kbps)?;
             check(
@@ -379,7 +481,13 @@ impl Encoder {
         )
     }
     /// Hands `texture` to the encoder without waiting for its output.
-    pub fn submit(&mut self, texture: &ID3D11Texture2D, keyframe: bool) -> Result<()> {
+    /// Returns the picture's number and, for a recovery frame, the
+    /// picture it was asked to recover from.
+    pub fn submit(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        keyframe: bool,
+    ) -> Result<(u64, Option<u64>)> {
         // SAFETY: AMF wraps and retains this D3D11 texture until its output
         // is taken; the caller keeps fewer inputs pending than its ring has
         // slots, so a slot is never rewritten while the encoder reads it.
@@ -403,6 +511,14 @@ impl Encoder {
                 surface.set("HevcForcePictureType", Variant::int(2))?; // IDR
                 surface.set("HevcInsertHeader", Variant::boolean(true))?;
             }
+            let picture = PICTURES.fetch_add(1, Ordering::Relaxed) + 1;
+            let (props, recovery) = self
+                .ltr
+                .as_mut()
+                .map_or((Vec::new(), None), |l| l.plan(picture, keyframe));
+            for (name, value) in props {
+                surface.set(name, Variant::int(value))?;
+            }
             check(
                 (self.component.table::<ComponentTable>().submit)(
                     self.component.ptr(),
@@ -411,13 +527,13 @@ impl Encoder {
                 "submit input",
             )?;
             self.pending += 1;
-            Ok(())
+            Ok((picture, recovery))
         }
     }
     /// Encodes one picture and waits for it.
     #[cfg(test)]
     pub fn encode(&mut self, texture: &ID3D11Texture2D, keyframe: bool) -> Result<(Vec<u8>, bool)> {
-        self.submit(texture, keyframe)?;
+        let _ = self.submit(texture, keyframe)?;
         self.receive(Duration::from_secs(3))?
             .context("AMF output timed out")
     }
@@ -485,6 +601,40 @@ mod tests {
         height: unsafe extern "system" fn(super::Ptr, *mut i32, *mut i32),
     }
     #[test]
+    fn long_term_references_recover_only_from_what_the_viewer_holds() {
+        use super::{Ltr, LTR_SLOTS};
+        let mut ltr = Ltr::new(60);
+        assert_eq!(ltr.every, 2);
+        let mut marked = Vec::new();
+        for picture in 1..=12 {
+            let (props, recovery) = ltr.plan(picture, picture == 1);
+            assert_eq!(recovery, None);
+            if props
+                .iter()
+                .any(|(n, _)| *n == "HevcMarkCurrentWithLTRIndex")
+            {
+                marked.push(picture);
+            }
+        }
+        // The IDR, then every other picture, round robin over the slots.
+        assert_eq!(marked, [1, 2, 4, 6, 8, 10, 12]);
+        assert_eq!(ltr.slots, [Some(8), Some(10), Some(12), Some(6)]);
+        // The viewer holds up to 11: slot 1 (10) is the newest it has.
+        assert!(ltr.recover_from(11));
+        let (props, recovery) = ltr.plan(13, false);
+        assert_eq!(recovery, Some(11));
+        assert_eq!(props, [("HevcForceLTRReferenceBitfield", 1 << 1)]);
+        assert_eq!(ltr.slots, [None, Some(10), None, None]);
+        // Older than every slot left: nothing to predict from.
+        assert!(!ltr.recover_from(9));
+        // An IDR forgets every slot.
+        ltr.plan(14, true);
+        assert!(!ltr.recover_from(13));
+        assert_eq!(ltr.slots.iter().flatten().count(), 1);
+        assert_eq!(LTR_SLOTS, ltr.slots.len());
+    }
+
+    #[test]
     fn variant_matches_win64_amf_abi() {
         assert_eq!(std::mem::size_of::<super::Variant>(), 24);
         assert_eq!(std::mem::align_of::<super::Variant>(), 8);
@@ -494,6 +644,108 @@ mod tests {
         assert_eq!(std::mem::offset_of!(super::ComponentTable, caps), 26 * 8);
         assert_eq!(std::mem::offset_of!(CapsTable, input), 14 * 8);
         assert_eq!(std::mem::offset_of!(IoCapsTable, width), 3 * 8);
+    }
+
+    /// Produces the same encoded stream with and without dropped pictures.
+    /// Run in the interactive desktop, then independently decode both dumps
+    /// and compare loss.hevc's pictures to full.hevc at the indices in kept.txt.
+    #[test]
+    #[ignore]
+    fn hardware_amf_recovery_across_slot_reuse() -> anyhow::Result<()> {
+        use super::super::{capture::Converter, display};
+        use super::*;
+        use windows::Win32::Graphics::{Direct3D11::*, Dxgi::Common::*};
+        let _runtime = super::super::Runtime::new(false)?;
+        let gpu = Gpu::new(&display::select()?.adapter)?;
+        let (width, height) = (640, 360);
+        let config = VideoConfig {
+            width,
+            height,
+            fps: 60,
+            bitrate_kbps: 8000,
+            codec: crate::video::Codec::Hevc,
+            color: Default::default(),
+        };
+        let mut encoder = Encoder::new(&config, &gpu)?;
+        ensure!(encoder.recovers(), "AMF LTR initialization failed");
+        let texture = gpu.texture(
+            width,
+            height,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            D3D11_BIND_RENDER_TARGET.0 as u32,
+            false,
+        )?;
+        let mut converter = Converter::new(&gpu, (width, height), (width, height), 60)?;
+        let (mut full, mut loss, mut kept) = (Vec::new(), Vec::new(), String::new());
+        let (mut first, mut delivered, mut recoveries) = (0, 0, 0);
+        for n in 0..128u32 {
+            let dropped = [19..23, 43..47, 67..71, 91..95]
+                .iter()
+                .any(|r| r.contains(&n));
+            let recovering = [23, 47, 71, 95].contains(&n);
+            if n == 18 {
+                ensure!(!encoder.recover_from(first), "overwritten slot accepted");
+            }
+            if recovering {
+                ensure!(encoder.recover_from(delivered), "no retained slot at {n}");
+            }
+            let mut pixels = vec![0u8; (width * height * 4) as usize];
+            for y in 0..height {
+                for x in 0..width {
+                    let p = &mut pixels[((y * width + x) * 4) as usize..][..4];
+                    p.copy_from_slice(&[
+                        (x + n * 7) as u8,
+                        (y + n * 3) as u8,
+                        ((x ^ y) + n * 11) as u8,
+                        255,
+                    ]);
+                }
+            }
+            // SAFETY: pixels covers this BGRA texture at width * 4 pitch.
+            unsafe {
+                gpu.context.UpdateSubresource(
+                    &texture,
+                    0,
+                    None,
+                    pixels.as_ptr().cast(),
+                    width * 4,
+                    0,
+                );
+            }
+            let input = converter.convert(&texture)?;
+            let (picture, recovery) = encoder.submit(&input.texture, n == 0)?;
+            let (bytes, idr) = encoder
+                .receive(Duration::from_secs(3))?
+                .context("AMF timeout")?;
+            ensure!(idr == (n == 0), "unexpected IDR at {n}");
+            if n == 0 {
+                first = picture;
+            }
+            if recovering {
+                ensure!(recovery == Some(delivered), "missing recovery mark at {n}");
+                recoveries += 1;
+                eprintln!("AMF recovery at {n}: picture={picture}, base={delivered}");
+            }
+            full.extend_from_slice(&bytes);
+            if !dropped {
+                loss.extend_from_slice(&bytes);
+                kept += &format!("{n}\n");
+                delivered = picture;
+            }
+        }
+        ensure!(recoveries == 4, "missing recovery episodes");
+        let dir = std::env::var_os("LATCH_AMF_RECOVERY_DUMP")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("latch-amf-recovery"));
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("full.hevc"), full)?;
+        std::fs::write(dir.join("loss.hevc"), loss)?;
+        std::fs::write(dir.join("kept.txt"), kept)?;
+        eprintln!(
+            "AMF recovery dumps: {} (128 full, 112 delivered)",
+            dir.display()
+        );
+        Ok(())
     }
 
     /// Run in the signed-in desktop on an AMD GPU: the encoder's own limits,

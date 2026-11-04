@@ -12,11 +12,13 @@ use crate::audio::{self, AudioCapture};
 use crate::gamepad::{self, FeedbackHub, SessionPads};
 use crate::input::{self, DisplayRect, InputSink};
 use crate::video::{self, Codec, VideoConfig, VideoInfo, VideoPipeline};
-use latch_proto::audio::AudioPacketizer;
+use latch_proto::audio::{AudioOut, AudioPacketizer, AudioReceiver};
 use latch_proto::control::{self, end, Accept, AudioFormat, End, Message, Notice, StreamRequest};
 use latch_proto::input::InputReceiver;
 use latch_proto::rtt::RttEstimator;
-use latch_proto::video::{fec_percent_for, OutFrame, Packetizer, DEFAULT_FEC_PERCENT};
+use latch_proto::video::{
+    fec_percent_for, KeyframeAnswers, OutFrame, Packetizer, DEFAULT_FEC_PERCENT,
+};
 use latch_proto::wire::{self, Datagram};
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
@@ -48,11 +50,26 @@ const KEYFRAME_GAP: Duration = Duration::from_millis(50);
 /// screen and the encoder.
 /// Initial capture can wait 10 seconds; undo commands can take another 15.
 const TAKEOVER_WAIT: Duration = Duration::from_secs(30);
+/// How long a session's end waits for its media threads. One stuck in a
+/// capture or encoder call is left behind (it stops at its next check of
+/// the session) so that the session still ends and the screen is let go.
+const MEDIA_STOP: Duration = Duration::from_secs(5);
 const VIDEO_RECOVERY_WINDOW: Duration = Duration::from_secs(60);
 const VIDEO_RECOVERIES: usize = 3;
-/// Capture supplies 10 ms; each coded packet carries 5 ms to fit the MTU,
-/// including the parity packet's extra two length bytes.
-const AUDIO_FRAME: usize = 240;
+/// Samples per channel in one audio packet: the capture's 5 ms frame when
+/// its worst case fits a datagram (stereo: 965 of 1 182 bytes), else the
+/// frame split evenly into parts that do (5.1: 80, 7.1: 60).
+/// Lossless sound grows with its channels: the encoder budget keeps 1.2
+/// Mbps for stereo, and this keeps as much again for each further pair
+/// (centre/LFE, rears, sides), which codes to no more than a stereo pair.
+fn surround_kbps(channels: usize) -> u32 {
+    (channels.saturating_sub(2) as u32).div_ceil(2) * 1200
+}
+
+fn audio_packet_samples(channels: usize) -> usize {
+    let fits = latch_codec::audio::frame_samples_within(channels, latch_proto::audio::MAX_PAYLOAD);
+    audio::FRAME / audio::FRAME.div_ceil(fits.max(1))
+}
 
 /// Readies the desktop for a session (for example, sizes it to the
 /// viewer); returns what undoes that when the session ends.
@@ -63,6 +80,9 @@ pub struct Options {
     pub prepare: Option<Prepare>,
     /// Lines for the owner's log (the host window shows them).
     pub log: Box<dyn Fn(String) + Send + Sync>,
+    /// Plays a viewer's microphone where the engine has no player of its
+    /// own (Windows, macOS). See [`crate::mic`].
+    pub mic: Option<crate::mic::MicOpener>,
 }
 
 impl Default for Options {
@@ -70,6 +90,7 @@ impl Default for Options {
         Self {
             prepare: None,
             log: Box::new(|line| tracing::info!("{line}")),
+            mic: None,
         }
     }
 }
@@ -252,7 +273,12 @@ impl Server {
         req.height = height;
         req.fps = fps;
         req.bitrate_kbps = req.bitrate_kbps.clamp(500, limits.max_kbps);
-        let opening = self.opening.lock();
+        let Some(opening) = self.opening.lock(TAKEOVER_WAIT) else {
+            return Err(Refusal::new(
+                503,
+                "another viewer is still starting a stream here; try again",
+            ));
+        };
         let running = self.current.lock().clone();
         if let Some(old) = running {
             self.log(format!(
@@ -278,6 +304,8 @@ impl Server {
             pipeline: None,
             audio: None,
             audio_problem: String::new(),
+            mic: None,
+            mic_problem: String::new(),
             input: None,
             input_problem: None,
             pads: None,
@@ -334,9 +362,16 @@ impl Server {
         prepared.info = Some(pipeline.info());
         prepared.pipeline = Some((pipeline, config));
         if prepared.req.audio {
-            match audio::open() {
+            let channels = (prepared.req.audio_channels as usize).clamp(2, audio::MAX_CHANNELS);
+            match audio::open_with(audio::Layout::UpTo(channels)) {
                 Ok(capture) => prepared.audio = Some(capture),
                 Err(e) => prepared.audio_problem = format!("{e:#}"),
+            }
+        }
+        if prepared.req.mic {
+            match crate::mic::open(self.options.mic.as_ref()) {
+                Ok(mic) => prepared.mic = Some(mic),
+                Err(e) => prepared.mic_problem = format!("{e:#}"),
             }
         }
         match input::open() {
@@ -364,6 +399,7 @@ impl Server {
             pipeline.set_cursor_drawn(true);
         }
         let info = prepared.info.take().expect("prepared has video info");
+        let recovery = prepared.req.reference_invalidation && pipeline.recovers();
         let token: [u8; 16] = rand::random();
         let id: u32 = rand::random();
         let pads = prepared.pads.take();
@@ -404,8 +440,20 @@ impl Server {
             frames: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             transport: TransportState::new(config.bitrate_kbps),
-            keyframe_request: Mutex::new(None),
+            keyframe_requests: Mutex::default(),
+            recovery: RecoveryState::new(recovery),
             audio_enabled: prepared.audio.is_some(),
+            surround_kbps: prepared
+                .audio
+                .as_ref()
+                .map_or(0, |capture| surround_kbps(capture.channels())),
+            mic: Mutex::new(prepared.mic.take().map(|out| {
+                let format = crate::mic::format();
+                (
+                    AudioReceiver::with_format(id, format.frame_samples, format.rate),
+                    out,
+                )
+            })),
             cursor_supported,
             draw_cursor: AtomicBool::new(!cursor_supported),
             control_writer: Mutex::new(None),
@@ -441,10 +489,10 @@ impl Server {
             fps: config.fps,
             bitrate_kbps: config.bitrate_kbps,
             encoder: info.encoder.clone(),
-            audio: audio.as_ref().map(|_| AudioFormat {
+            audio: audio.as_ref().map(|capture| AudioFormat {
                 rate: audio::RATE,
-                channels: audio::CHANNELS as u32,
-                frame_samples: AUDIO_FRAME as u32,
+                channels: capture.channels() as u32,
+                frame_samples: audio_packet_samples(capture.channels()) as u32,
                 codec: "lpcm-rice".into(),
             }),
             audio_problem: prepared.audio_problem.clone(),
@@ -452,9 +500,12 @@ impl Server {
             gamepads: pad_slots,
             gamepad_kinds: pad_kinds,
             gamepad_problem: prepared.pads_problem.clone(),
+            reference_invalidation: recovery,
+            mic: session.mic.lock().as_ref().map(|_| crate::mic::format()),
+            mic_problem: prepared.mic_problem.clone(),
         };
         self.log(format!(
-            "{} is watching: {}×{} at {} fps, {} kb/s, {}{}",
+            "{} is watching: {}×{} at {} fps, {} kb/s, {}{}{}",
             session.viewer,
             info.width,
             info.height,
@@ -467,6 +518,12 @@ impl Server {
                 format!("; no sound ({})", prepared.audio_problem)
             } else {
                 String::new()
+            },
+            match session.mic.lock().as_ref() {
+                Some((_, out)) => format!("; their microphone → {}", out.describe),
+                None if prepared.req.mic =>
+                    format!("; not their microphone ({})", prepared.mic_problem),
+                None => String::new(),
             }
         ));
         if prepared.req.gamepads && pad_slots == 0 {
@@ -502,7 +559,10 @@ impl Server {
                     let session = session.clone();
                     std::thread::Builder::new()
                         .name("stream-audio".into())
-                        .spawn(move || send_audio(&server, &session, capture, audio::open))
+                        .spawn(move || {
+                            let layout = audio::Layout::Exactly(capture.channels());
+                            send_audio(&server, &session, capture, || audio::open_with(layout))
+                        })
                 });
                 (video.ok(), audio.and_then(Result::ok))
             }
@@ -740,11 +800,15 @@ impl Server {
             }
         }
         let _ = tcp.shutdown(Shutdown::Both);
-        if let Some(v) = video {
-            let _ = v.join();
-        }
-        if let Some(a) = audio {
-            let _ = a.join();
+        let deadline = Instant::now() + MEDIA_STOP;
+        for (what, thread) in [("video", video), ("audio", audio)] {
+            if let Some(thread) = thread {
+                if !join_by(thread, deadline) {
+                    self.log(format!(
+                        "the {what} thread did not stop within {MEDIA_STOP:?}; leaving it behind"
+                    ));
+                }
+            }
         }
         reason
     }
@@ -758,14 +822,31 @@ struct Opening {
 }
 
 impl Opening {
-    fn lock(self: &Arc<Self>) -> OpeningGuard {
+    /// The reservation, once the one holding it lets go; None after `limit`.
+    fn lock(self: &Arc<Self>, limit: Duration) -> Option<OpeningGuard> {
+        let deadline = Instant::now() + limit;
         let mut busy = self.busy.lock();
         while *busy {
-            self.cv.wait(&mut busy);
+            if self.cv.wait_until(&mut busy, deadline).timed_out() && *busy {
+                return None;
+            }
         }
         *busy = true;
-        OpeningGuard(self.clone())
+        Some(OpeningGuard(self.clone()))
     }
+}
+
+/// Joins `thread` if it ends by `deadline`; otherwise leaves it to end by
+/// itself and returns false.
+fn join_by(thread: std::thread::JoinHandle<()>, deadline: Instant) -> bool {
+    while !thread.is_finished() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let _ = thread.join();
+    true
 }
 
 struct OpeningGuard(Arc<Opening>);
@@ -784,6 +865,8 @@ pub struct Prepared {
     pipeline: Option<(Box<dyn VideoPipeline>, VideoConfig)>,
     audio: Option<Box<dyn AudioCapture>>,
     audio_problem: String,
+    mic: Option<crate::mic::MicOut>,
+    mic_problem: String,
     input: Option<Box<dyn InputSink>>,
     input_problem: Option<String>,
     pads: Option<gamepad::Opened>,
@@ -853,11 +936,118 @@ struct Session {
     frames: AtomicU64,
     bytes: AtomicU64,
     transport: TransportState,
-    keyframe_request: Mutex<Option<(u32, Instant)>>,
+    /// Which keyframe requests ask for a keyframe not already sent.
+    keyframe_requests: Mutex<KeyframeAnswers>,
+    recovery: RecoveryState,
     audio_enabled: bool,
+    /// What surround sound needs beyond the stereo allowance the encoder
+    /// budget already keeps for audio.
+    surround_kbps: u32,
+    /// The viewer's microphone: its packets put in order, and where they play.
+    mic: Mutex<Option<(AudioReceiver, crate::mic::MicOut)>>,
     cursor_supported: bool,
     draw_cursor: AtomicBool,
     control_writer: Mutex<Option<TcpStream>>,
+}
+
+/// Reference invalidation (`docs/PROTOCOL.md`, "RecoveryRequest"), when
+/// the viewer and the encoder both take it.
+#[derive(Default)]
+struct RecoveryState {
+    enabled: bool,
+    /// The newest request, for the encoder thread.
+    request: Mutex<Option<wire::RecoveryRequest>>,
+    /// The answer to the newest request, repeated to a repeat.
+    answer: Mutex<Option<wire::RecoveryAck>>,
+    /// The generation and picture a recovery frame was asked from, and the request.
+    asked: Mutex<Option<(u64, u64, u32)>>,
+    /// Frame numbers sent, pipeline generations and picture numbers,
+    /// newest last.
+    sent: Mutex<VecDeque<(u32, u64, u64)>>,
+    /// Recovery frames sent and requests refused.
+    frames: AtomicU64,
+    refused: AtomicU64,
+}
+
+/// Frame numbers remembered for recovery: more than any encoder holds.
+const RECOVERY_SENT: usize = 256;
+
+impl RecoveryState {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            ..Default::default()
+        }
+    }
+
+    /// Answers request `id` (if it is still the newest) and remembers the
+    /// answer for repeats.
+    fn answer(&self, server: &Server, session: &Session, ack: wire::RecoveryAck) {
+        {
+            let mut answer = self.answer.lock();
+            if answer.is_some_and(|a| a.id != ack.id) {
+                return;
+            }
+            *answer = Some(ack);
+        }
+        if let Some(addr) = *session.addr.lock() {
+            let mut out = Vec::with_capacity(16);
+            wire::write_recovery_ack(&mut out, session.id, &ack);
+            let _ = server.udp.send_to(&out, addr);
+        }
+    }
+
+    /// The encoder thread, before each frame: hands the newest request to
+    /// the pipeline, or refuses it and asks for a keyframe.
+    fn take(
+        &self,
+        server: &Server,
+        session: &Session,
+        pipeline: &mut dyn VideoPipeline,
+        generation: u64,
+    ) {
+        let Some(request) = self.request.lock().take() else {
+            return;
+        };
+        let picture = self
+            .sent
+            .lock()
+            .iter()
+            .rev()
+            .find(|(frame, g, _)| *frame == request.last_delivered && *g == generation)
+            .map(|&(_, _, picture)| picture)
+            .filter(|&p| p != 0);
+        let keyframe_owed = session.keyframe.load(Ordering::Acquire);
+        match picture {
+            Some(picture) if !keyframe_owed && pipeline.recover_from(picture) => {
+                *self.asked.lock() = Some((generation, picture, request.id));
+            }
+            _ => {
+                tracing::info!(
+                    frame = request.last_delivered,
+                    "recovery refused ({}); sending a keyframe",
+                    if keyframe_owed {
+                        "a keyframe is owed"
+                    } else if picture.is_none() {
+                        "frame not sent recently"
+                    } else {
+                        "the encoder no longer holds it"
+                    }
+                );
+                self.refused.fetch_add(1, Ordering::Relaxed);
+                session.keyframe.store(true, Ordering::Release);
+                self.answer(
+                    server,
+                    session,
+                    wire::RecoveryAck {
+                        id: request.id,
+                        status: wire::RecoveryStatus::Refused,
+                        frame: 0,
+                    },
+                );
+            }
+        }
+    }
 }
 
 struct TransportState {
@@ -957,7 +1147,12 @@ fn receive(server: Weak<Server>) {
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                continue
+                // A lost microphone packet at the end of speech is given
+                // up on by time.
+                if let Some(session) = server.current.lock().clone() {
+                    play_mic(&session, None);
+                }
+                continue;
             }
             // A reset from an earlier datagram to a closed port (Windows
             // reports those on the next receive).
@@ -1057,20 +1252,46 @@ fn receive(server: Weak<Server>) {
                 }
             }
             Datagram::KeyframeRequest { last, .. } => {
-                let now = Instant::now();
-                let mut previous = session.keyframe_request.lock();
-                if previous.is_none_or(|(n, at)| {
-                    latch_proto::video::before(n, last)
-                        || (n == last && now - at >= Duration::from_millis(250))
-                }) {
-                    *previous = Some((last, now));
+                let rtt = {
+                    let rtt = session.rtt.lock();
+                    rtt.srtt().map(|srtt| srtt.saturating_sub(rtt.rttvar()))
+                };
+                let wanted = session
+                    .keyframe_requests
+                    .lock()
+                    .request(last, Instant::now(), rtt);
+                if wanted {
                     session.keyframe.store(true, Ordering::Release);
+                }
+            }
+            Datagram::RecoveryRequest { request, .. } if session.recovery.enabled => {
+                let ack = {
+                    let mut answer = session.recovery.answer.lock();
+                    match *answer {
+                        Some(a) if a.id == request.id => Some(a),
+                        Some(a) if latch_proto::video::before(request.id, a.id) => None,
+                        _ => {
+                            let a = wire::RecoveryAck {
+                                id: request.id,
+                                status: wire::RecoveryStatus::Pending,
+                                frame: 0,
+                            };
+                            *answer = Some(a);
+                            *session.recovery.request.lock() = Some(request);
+                            Some(a)
+                        }
+                    }
+                };
+                if let Some(ack) = ack {
+                    wire::write_recovery_ack(&mut out, session.id, &ack);
+                    let _ = server.udp.send_to(&out, from);
                 }
             }
             Datagram::Ping { time, .. } => {
                 wire::write_pong(&mut out, session.id, time);
                 let _ = server.udp.send_to(&out, from);
             }
+            Datagram::Mic { packet, .. } => play_mic(&session, Some(&packet)),
             Datagram::Pong { time, .. } => {
                 let rtt = Duration::from_micros(server.now_us().saturating_sub(time));
                 session.rtt.lock().sample(rtt);
@@ -1078,6 +1299,24 @@ fn receive(server: Weak<Server>) {
                 *low = Some(low.map_or(rtt, |low| low.min(rtt)));
             }
             _ => {}
+        }
+    }
+}
+
+/// Puts a microphone packet in order and plays what is ready.
+fn play_mic(session: &Session, packet: Option<&latch_proto::wire::AudioPacket<'_>>) {
+    let mut mic = session.mic.lock();
+    let Some((receiver, out)) = mic.as_mut() else {
+        return;
+    };
+    let now = Instant::now();
+    if let Some(packet) = packet {
+        receiver.push(packet, now);
+    }
+    while let Some(frame) = receiver.pop(now) {
+        match frame {
+            AudioOut::Frame { payload, .. } => (out.push)(&payload),
+            AudioOut::Missing { .. } => (out.push)(&[]),
         }
     }
 }
@@ -1110,6 +1349,7 @@ fn encode_video(
     tx: mpsc::SyncSender<(video::EncodedVideo, Instant)>,
 ) {
     crate::priority::media_thread();
+    let mut generation = 0;
     let mut last_keyframe: Option<Instant> = None;
     let mut info = pipeline.info();
     let mut recoveries = VecDeque::new();
@@ -1117,7 +1357,11 @@ fn encode_video(
     let mut applied = 0;
     while !session.stopping() {
         let target = crate::congestion::video_budget(
-            session.transport.budget.load(Ordering::Relaxed),
+            session
+                .transport
+                .budget
+                .load(Ordering::Relaxed)
+                .saturating_sub(session.surround_kbps),
             session.fec.load(Ordering::Relaxed),
             audio,
         );
@@ -1128,6 +1372,11 @@ fn encode_video(
             session.transport.applied.store(target, Ordering::Relaxed);
         }
         pipeline.set_cursor_drawn(session.draw_cursor.load(Ordering::Relaxed));
+        if session.recovery.enabled {
+            session
+                .recovery
+                .take(server, session, pipeline.as_mut(), generation);
+        }
         let due = recovery_due(last_keyframe, Instant::now(), session.rtt.lock().srtt());
         let keyframe = due && session.keyframe.swap(false, Ordering::AcqRel);
         // Short idle repeats bound how long a request arriving inside next
@@ -1165,6 +1414,10 @@ fn encode_video(
                     match reopen(&config) {
                         Ok(p) => {
                             pipeline = p;
+                            // Queued frames can still arrive from the old pipeline.
+                            generation += 1;
+                            session.recovery.sent.lock().clear();
+                            session.recovery.asked.lock().take();
                             break;
                         }
                         Err(e) if video::Unencodable::is(&e) => {
@@ -1190,6 +1443,7 @@ fn encode_video(
                 frame.data = data;
             }
         }
+        frame.generation = generation;
         if let Some(update) = pipeline.take_cursor().filter(|_| session.cursor_supported) {
             session.send_control(&Message::Cursor(control::Cursor {
                 visible: update.visible,
@@ -1255,6 +1509,20 @@ fn paced_video(
             continue;
         };
         packetizer.set_fec_percent(session.fec.load(Ordering::Relaxed));
+        let recovery = &session.recovery;
+        let asked = frame.recovery.and_then(|base| {
+            let (generation, picture, id) = recovery
+                .asked
+                .lock()
+                .take_if(|(g, p, _)| *g == frame.generation && *p == base)?;
+            let sent = recovery.sent.lock();
+            let &(number, _, _) = sent
+                .iter()
+                .rev()
+                .find(|(_, g, p)| *g == generation && *p == picture)?;
+            packetizer.mark_recovery(number);
+            Some(id)
+        });
         let delay = (frame.captured.elapsed().as_micros() / 100).min(u16::MAX as u128) as u16;
         let out = OutFrame {
             data: &frame.data,
@@ -1262,6 +1530,28 @@ fn paced_video(
             host_delay: delay,
         };
         let pace = session.pace_kbps.load(Ordering::Relaxed);
+        let number = packetizer.next_frame();
+        if recovery.enabled {
+            let mut sent = recovery.sent.lock();
+            if sent.len() >= RECOVERY_SENT {
+                sent.pop_front();
+            }
+            sent.push_back((number, frame.generation, frame.picture));
+        }
+        if let Some(id) = asked {
+            // Before the frame's datagrams, so the viewer hears it is
+            // coming even if the frame is lost.
+            recovery.frames.fetch_add(1, Ordering::Relaxed);
+            recovery.answer(
+                server,
+                session,
+                wire::RecoveryAck {
+                    id,
+                    status: wire::RecoveryStatus::Sent,
+                    frame: number,
+                },
+            );
+        }
         packetizer.packetize_batches(&out, |batch| {
             if pace == 0 {
                 if !session.stopping() {
@@ -1291,6 +1581,9 @@ fn paced_video(
                 send(&server.udp, session, datagram, addr);
             }
         });
+        if frame.keyframe {
+            session.keyframe_requests.lock().sent(Instant::now());
+        }
         session.frames.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -1303,7 +1596,10 @@ fn send_audio(
 ) {
     crate::priority::media_thread();
     let mut packetizer = AudioPacketizer::new(session.id);
-    let mut pcm = [0i16; audio::FRAME * audio::CHANNELS];
+    let channels = capture.channels();
+    let samples = audio_packet_samples(channels);
+    let packet_us = (samples as u64 * 1_000_000 / u64::from(audio::RATE)) as u32;
+    let mut pcm = Vec::with_capacity(audio::FRAME * channels);
     let mut coded = Vec::with_capacity(2048);
     let mut capture = Some(capture);
     let mut backoff = Duration::from_millis(100);
@@ -1333,7 +1629,7 @@ fn send_audio(
         match capture
             .as_mut()
             .expect("open audio")
-            .read(&mut pcm, Duration::from_millis(100))
+            .read_frame(&mut pcm, Duration::from_millis(100))
         {
             Ok(true) => {
                 if problem {
@@ -1355,22 +1651,21 @@ fn send_audio(
         let Some(addr) = *session.addr.lock() else {
             continue;
         };
+        if pcm.len() != audio::FRAME * channels {
+            // A capture that changed its layout under a running session.
+            continue;
+        }
         let pts = server.now_us() as u32;
-        for (i, half) in pcm
-            .as_chunks::<{ AUDIO_FRAME * audio::CHANNELS }>()
-            .0
-            .iter()
-            .enumerate()
-        {
+        for (i, part) in pcm.chunks(samples * channels).enumerate() {
             coded.clear();
-            latch_codec::audio::encode(half, &mut coded);
-            let pts = pts.wrapping_add((i as u32) * 5_000);
-            // 240 samples always fit (lpcm-rice's worst case is 965 bytes);
-            // a refusal would mean the codec changed underneath.
+            latch_codec::audio::encode_channels(part, channels, &mut coded);
+            let pts = pts.wrapping_add(i as u32 * packet_us);
+            // Packets are sized so lpcm-rice's worst case fits; a refusal
+            // would mean the codec changed underneath.
             let fits = packetizer.packetize(pts, &coded, |datagram| {
                 send(&server.udp, session, datagram, addr);
             });
-            debug_assert!(fits, "a coded 5 ms audio frame outgrew a datagram");
+            debug_assert!(fits, "a coded audio frame outgrew a datagram");
         }
     }
 }

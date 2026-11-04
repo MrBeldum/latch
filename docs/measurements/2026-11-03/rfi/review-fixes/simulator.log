@@ -1,0 +1,14 @@
+   Compiling latch-engine v5.1.0 (/Users/daniel/.t3/worktrees/latch/t3-7facfba8/crates/engine)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.48s
+     Running tests/recovery.rs (target/debug/deps/recovery-9bc13fd845afd7e7)
+
+running 2 tests
+bursts, keyframes: 29 losses, IDRs/min 66, resume p50 65 ms p95 149 ms, freeze p50 103 ms p95 202 ms, IDR 19642 B, recovery 0 B, P 1489 B, 1620 of 1800 frames delivered and checked
+bursts, recovery frames: 26 losses, IDRs/min 4, resume p50 64 ms p95 149 ms, freeze p50 102 ms p95 185 ms, IDR 19581 B, recovery 2557 B, P 1439 B, 1645 of 1800 frames delivered and checked
+test recovery_frames_replace_keyframes_on_burst_loss ... ok
+random 12%, keyframes: 49 losses, IDRs/min 190, resume p50 97 ms p95 281 ms, freeze p50 133 ms p95 318 ms, IDR 19624 B, recovery 0 B, P 1595 B, 1417 of 1800 frames delivered and checked
+random 12%, recovery frames: 48 losses, IDRs/min 12, resume p50 48 ms p95 114 ms, freeze p50 84 ms p95 152 ms, IDR 19214 B, recovery 2892 B, P 1444 B, 1543 of 1800 frames delivered and checked
+test recovery_frames_replace_keyframes_on_random_loss ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.75s
+

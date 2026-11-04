@@ -679,9 +679,12 @@ unsafe fn annex_b(sample: Ref, hevc: bool, captured: Instant) -> Result<EncodedV
             append_nals(&bytes, header as usize, &mut data)?;
         }
         Ok(EncodedVideo {
+            generation: 0,
             data,
             keyframe,
             captured,
+            picture: 0,
+            recovery: None,
         })
     }
 }

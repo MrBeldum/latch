@@ -6,11 +6,13 @@
 pub mod audio;
 pub mod gamepad;
 pub mod input;
+pub mod mic;
 #[path = "../../engine/src/priority.rs"]
 mod priority;
 pub mod session;
+mod speakers;
 pub mod video;
 
 pub use latch_proto::control::Codec;
-pub use session::{Event, Input, Server, Session, Settings, Stats};
+pub use session::{Event, Input, LossEvent, RecoveryLog, Server, Session, Settings, Stats};
 pub use video::{Frame, FrameSlot};

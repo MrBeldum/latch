@@ -1,4 +1,5 @@
-//! `lpcm-rice`: a lossless code for short frames of 16-bit stereo PCM.
+//! `lpcm-rice`: a lossless code for short frames of 16-bit PCM, stereo
+//! (version 1) or 1 to 8 channels (version 2).
 //!
 //! Each frame is coded on its own (a lost packet loses nothing else). The
 //! format is defined in this module's documentation by the implementer and
@@ -54,14 +55,35 @@
 //!    - If `q >= 15`: coded as 15 zeros, followed by a `0` bit, followed by
 //!      a full 32-bit unsigned integer holding `u`.
 //! 3. Subframe bitstreams are byte-aligned after each channel.
+//!
+//! ## Version 2: any channel count
+//!
+//! ```text
+//! byte 0: Version (bits 7..4) = 2 | Channels - 1 (bits 3..0, 0..=7)
+//! bytes 1..2: Sample Count per channel (u16 LE)
+//! byte 3: Pair Modes: bits 2p+1..2p are the stereo mode of pair p
+//! ```
+//!
+//! Channels are in WAVE order (5.1: FL FR FC LFE BL BR; 7.1: FL FR FC LFE
+//! BL BR SL SR). Each pair `(2p, 2p + 1)` is transformed exactly as a
+//! version 1 frame's two channels, with its own mode; an odd last channel
+//! is coded on its own, and mode bits for pairs that do not exist are 0.
+//! One subframe per channel follows, in channel order, as above.
+//!
+//! Every frame of either version is at most [`max_coded_len`] bytes: when
+//! the coded frame would be longer, the encoder sends every channel
+//! verbatim and independent instead.
 
 /// Samples per channel in Latch's 10 ms frame at 48 kHz.
 pub const FRAME_SAMPLES: usize = 480;
 pub const CHANNELS: usize = 2;
+/// Most channels one frame may hold (7.1).
+pub const MAX_CHANNELS: usize = 8;
 /// Most samples per channel one frame may hold.
 pub const MAX_SAMPLES: usize = 4096;
 
 const PROTOCOL_VERSION: u8 = 1;
+const PROTOCOL_VERSION_N: u8 = 2;
 
 const MODE_INDEPENDENT: u8 = 0;
 const MODE_LEFT_SIDE: u8 = 1;
@@ -499,26 +521,10 @@ fn decode_channel(reader: &mut BitReader, n: usize, dst: &mut [i32]) -> Result<(
     }
 }
 
-/// Codes interleaved stereo `pcm` (an even number of samples, at most
-/// `2 * MAX_SAMPLES`), appending to `out`
-pub fn encode(pcm: &[i16], out: &mut Vec<u8>) {
-    let n = (pcm.len() / 2).min(MAX_SAMPLES);
-    if n == 0 {
-        // Empty frame
-        out.push((PROTOCOL_VERSION << 4) | MODE_INDEPENDENT);
-        out.extend_from_slice(&0u16.to_le_bytes());
-        out.push(SUBFRAME_SILENCE << 5);
-        out.push(SUBFRAME_SILENCE << 5);
-        return;
-    }
-
-    let mut l = Vec::with_capacity(n);
-    let mut r = Vec::with_capacity(n);
-    for i in 0..n {
-        l.push(pcm[2 * i] as i32);
-        r.push(pcm[2 * i + 1] as i32);
-    }
-
+/// Picks the pair coding with the smallest estimated residual for one
+/// channel pair and returns it with the two transformed channels.
+fn decorrelate(l: &[i32], r: &[i32]) -> (u8, Vec<i32>, Vec<i32>) {
+    let n = l.len();
     // Evaluate stereo modes and pick the one with lowest estimated residual entropy
     let mut mode = MODE_INDEPENDENT;
     let mut best_diff = 0u64;
@@ -562,8 +568,8 @@ pub fn encode(pcm: &[i16], out: &mut Vec<u8>) {
 
     match mode {
         MODE_INDEPENDENT => {
-            ch0.extend_from_slice(&l);
-            ch1.extend_from_slice(&r);
+            ch0.extend_from_slice(l);
+            ch1.extend_from_slice(r);
         }
         MODE_LEFT_SIDE => {
             for i in 0..n {
@@ -587,6 +593,72 @@ pub fn encode(pcm: &[i16], out: &mut Vec<u8>) {
         }
         _ => unreachable!(),
     }
+    (mode, ch0, ch1)
+}
+
+/// Undoes [`decorrelate`] for one sample of a pair: (left, right).
+#[inline(always)]
+fn correlate(mode: u8, ch0: i32, ch1: i32) -> (i16, i16) {
+    match mode {
+        MODE_LEFT_SIDE => (ch0 as i16, ch0.wrapping_sub(ch1) as i16),
+        MODE_RIGHT_SIDE => (ch0.wrapping_add(ch1) as i16, ch0 as i16),
+        MODE_MID_SIDE => {
+            let right = ch0.wrapping_sub(ch1 >> 1) as i16;
+            (right.wrapping_add(ch1 as i16), right)
+        }
+        _ => (ch0 as i16, ch1 as i16),
+    }
+}
+
+/// The most bytes [`encode_channels`] produces for `n` samples per channel:
+/// every channel verbatim behind its header. Hosts size frames with it so
+/// that every frame fits one datagram whatever the sound is.
+pub fn max_coded_len(channels: usize, n: usize) -> usize {
+    let header = if channels == CHANNELS { 3 } else { 4 };
+    header + channels * (1 + 2 * n)
+}
+
+/// The most samples per channel whose worst case fits `max_payload` bytes.
+pub fn frame_samples_within(channels: usize, max_payload: usize) -> usize {
+    let channels = channels.clamp(1, MAX_CHANNELS);
+    let header = max_coded_len(channels, 0);
+    (max_payload.saturating_sub(header) / channels / 2).min(MAX_SAMPLES)
+}
+
+/// Codes interleaved stereo `pcm` (an even number of samples, at most
+/// `2 * MAX_SAMPLES`), appending to `out`
+pub fn encode(pcm: &[i16], out: &mut Vec<u8>) {
+    encode_channels(pcm, CHANNELS, out);
+}
+
+/// Codes interleaved `pcm` of `channels` (1..=[`MAX_CHANNELS`]) channels,
+/// at most `MAX_SAMPLES` per channel, appending to `out`. Stereo is coded
+/// as version 1, which every Latch viewer decodes; any other channel count
+/// as version 2.
+pub fn encode_channels(pcm: &[i16], channels: usize, out: &mut Vec<u8>) {
+    let channels = channels.clamp(1, MAX_CHANNELS);
+    if channels != CHANNELS {
+        encode_v2(pcm, channels, out);
+        return;
+    }
+    let start = out.len();
+    let n = (pcm.len() / 2).min(MAX_SAMPLES);
+    if n == 0 {
+        // Empty frame
+        out.push((PROTOCOL_VERSION << 4) | MODE_INDEPENDENT);
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.push(SUBFRAME_SILENCE << 5);
+        out.push(SUBFRAME_SILENCE << 5);
+        return;
+    }
+
+    let mut l = Vec::with_capacity(n);
+    let mut r = Vec::with_capacity(n);
+    for i in 0..n {
+        l.push(pcm[2 * i] as i32);
+        r.push(pcm[2 * i + 1] as i32);
+    }
+    let (mode, ch0, ch1) = decorrelate(&l, &r);
 
     // Frame header
     out.push((PROTOCOL_VERSION << 4) | (mode & 0x03));
@@ -596,21 +668,65 @@ pub fn encode(pcm: &[i16], out: &mut Vec<u8>) {
     encode_channel(&ch0, out);
     encode_channel(&ch1, out);
     // Side channels can exceed i16; independent verbatim is a hard wire bound.
-    if out.len() > 3 + 2 * (1 + 2 * n) {
-        out.clear();
+    if out.len() - start > max_coded_len(CHANNELS, n) {
+        out.truncate(start);
         out.push(PROTOCOL_VERSION << 4);
         out.extend_from_slice(&(n as u16).to_le_bytes());
         for channel in 0..2 {
             out.push(SUBFRAME_VERBATIM << 5);
-            for pair in pcm.as_chunks::<2>().0 {
+            for pair in pcm[..2 * n].as_chunks::<2>().0 {
                 out.extend_from_slice(&pair[channel].to_le_bytes());
             }
         }
     }
 }
 
-/// Decodes one frame into `pcm` (cleared first), interleaved stereo.
+/// Version 2: any channel count, each channel pair `(0, 1), (2, 3), …`
+/// coded as version 1 codes its one pair, an odd last channel on its own.
+fn encode_v2(pcm: &[i16], channels: usize, out: &mut Vec<u8>) {
+    let start = out.len();
+    let n = (pcm.len() / channels).min(MAX_SAMPLES);
+    let header = |out: &mut Vec<u8>, modes: u8| {
+        out.push((PROTOCOL_VERSION_N << 4) | (channels as u8 - 1));
+        out.extend_from_slice(&(n as u16).to_le_bytes());
+        out.push(modes);
+    };
+    let plane = |c: usize| -> Vec<i32> { (0..n).map(|i| pcm[i * channels + c] as i32).collect() };
+    let mut modes = 0u8;
+    let mut coded = Vec::with_capacity(channels);
+    for pair in 0..channels / 2 {
+        let (mode, ch0, ch1) = decorrelate(&plane(2 * pair), &plane(2 * pair + 1));
+        modes |= mode << (2 * pair);
+        coded.push(ch0);
+        coded.push(ch1);
+    }
+    if channels % 2 == 1 {
+        coded.push(plane(channels - 1));
+    }
+    header(out, modes);
+    for channel in &coded {
+        encode_channel(channel, out);
+    }
+    if out.len() - start > max_coded_len(channels, n) {
+        out.truncate(start);
+        header(out, 0);
+        for c in 0..channels {
+            out.push(SUBFRAME_VERBATIM << 5);
+            for i in 0..n {
+                out.extend_from_slice(&pcm[i * channels + c].to_le_bytes());
+            }
+        }
+    }
+}
+
+/// Decodes one frame into `pcm` (cleared first), interleaved.
 pub fn decode(data: &[u8], pcm: &mut Vec<i16>) -> Result<(), AudioError> {
+    decode_channels(data, pcm).map(drop)
+}
+
+/// Decodes one frame of either version into `pcm` (cleared first),
+/// interleaved, and returns its channel count.
+pub fn decode_channels(data: &[u8], pcm: &mut Vec<i16>) -> Result<usize, AudioError> {
     pcm.clear();
 
     if data.len() < 3 {
@@ -619,65 +735,228 @@ pub fn decode(data: &[u8], pcm: &mut Vec<i16>) -> Result<(), AudioError> {
 
     let header_byte = data[0];
     let version = header_byte >> 4;
-    if version != PROTOCOL_VERSION {
-        return Err(AudioError::Invalid("unsupported protocol version"));
-    }
-
-    let mode = header_byte & 0x03;
+    let (channels, modes, body) = match version {
+        PROTOCOL_VERSION => (CHANNELS, header_byte & 0x03, &data[3..]),
+        PROTOCOL_VERSION_N => {
+            if data.len() < 4 {
+                return Err(AudioError::Truncated);
+            }
+            let channels = usize::from(header_byte & 0x0f) + 1;
+            if channels > MAX_CHANNELS {
+                return Err(AudioError::Invalid("too many channels"));
+            }
+            if data[3].checked_shr(2 * (channels / 2) as u32).unwrap_or(0) != 0 {
+                return Err(AudioError::Invalid("pair mode for a missing pair"));
+            }
+            (channels, data[3], &data[4..])
+        }
+        _ => return Err(AudioError::Invalid("unsupported protocol version")),
+    };
     let n = u16::from_le_bytes([data[1], data[2]]) as usize;
     if n > MAX_SAMPLES {
         return Err(AudioError::Invalid("sample count exceeds MAX_SAMPLES"));
     }
 
     if n == 0 {
-        return Ok(());
+        return Ok(channels);
     }
 
-    let mut ch0 = vec![0i32; n];
-    let mut ch1 = vec![0i32; n];
-
-    let mut reader = BitReader::new(&data[3..]);
-    decode_channel(&mut reader, n, &mut ch0)?;
-    decode_channel(&mut reader, n, &mut ch1)?;
-
-    pcm.reserve(2 * n);
-    match mode {
-        MODE_INDEPENDENT => {
-            for i in 0..n {
-                pcm.push(ch0[i] as i16);
-                pcm.push(ch1[i] as i16);
-            }
-        }
-        MODE_LEFT_SIDE => {
-            for i in 0..n {
-                let left = ch0[i] as i16;
-                let right = ch0[i].wrapping_sub(ch1[i]) as i16;
-                pcm.push(left);
-                pcm.push(right);
-            }
-        }
-        MODE_RIGHT_SIDE => {
-            for i in 0..n {
-                let right = ch0[i] as i16;
-                let left = ch0[i].wrapping_add(ch1[i]) as i16;
-                pcm.push(left);
-                pcm.push(right);
-            }
-        }
-        MODE_MID_SIDE => {
-            for i in 0..n {
-                let mid = ch0[i];
-                let side = ch1[i];
-                let right = mid.wrapping_sub(side >> 1) as i16;
-                let left = right.wrapping_add(side as i16);
-                pcm.push(left);
-                pcm.push(right);
-            }
-        }
-        _ => return Err(AudioError::Invalid("unknown stereo mode")),
+    let mut planes = vec![0i32; channels * n];
+    let mut reader = BitReader::new(body);
+    for plane in planes.chunks_mut(n) {
+        decode_channel(&mut reader, n, plane)?;
     }
 
-    Ok(())
+    pcm.resize(channels * n, 0);
+    for pair in 0..channels / 2 {
+        let mode = (modes >> (2 * pair)) & 0x03;
+        let (ch0, ch1) = planes[2 * pair * n..].split_at(n);
+        for i in 0..n {
+            let (left, right) = correlate(mode, ch0[i], ch1[i]);
+            pcm[i * channels + 2 * pair] = left;
+            pcm[i * channels + 2 * pair + 1] = right;
+        }
+    }
+    if channels % 2 == 1 {
+        let last = &planes[(channels - 1) * n..];
+        for i in 0..n {
+            pcm[i * channels + channels - 1] = last[i] as i16;
+        }
+    }
+
+    Ok(channels)
+}
+
+/// WAVEFORMATEXTENSIBLE speaker bits of Latch's channel layouts: mono,
+/// stereo, 2.1… 5.1 (back) and 7.1, in WAVE order. Zero for counts with no
+/// conventional layout.
+pub fn speaker_mask(channels: usize) -> u32 {
+    match channels {
+        1 => 0x4,
+        2 => 0x3,
+        3 => 0x7,
+        4 => 0x33,
+        5 => 0x37,
+        6 => 0x3f,
+        7 => 0x70f,
+        8 => 0x63f,
+        _ => 0,
+    }
+}
+
+/// Where an output channel plays: the WAVEFORMATEXTENSIBLE speaker bit
+/// (0 front left, 1 front right, 2 centre, 3 LFE, 4 and 5 back, 9 and 10
+/// side, … 17 top back right), or `None` for a channel with no speaker.
+pub type Speaker = Option<u8>;
+
+/// The speakers of Latch's `channels`-channel layout in channel order
+/// ([`speaker_mask`]); a count with no layout is the front pair and then
+/// channels with no speaker.
+pub fn speakers(channels: usize) -> Vec<Speaker> {
+    let mask = speaker_mask(channels);
+    if mask == 0 {
+        let mut out = vec![None; channels];
+        for (c, s) in out.iter_mut().enumerate().take(2) {
+            *s = Some(c as u8);
+        }
+        return out;
+    }
+    (0..32u8)
+        .filter(|bit| mask & (1 << bit) != 0)
+        .map(Some)
+        .collect()
+}
+
+/// Weights taking `from` channels, whose speakers are the set bits of
+/// `mask` in ascending order, onto Latch's `to` channels: `rows[out][in]`.
+/// [`mix_onto`] with [`speakers`]`(to)`.
+pub fn mix_matrix(from: usize, mask: u32, to: usize) -> Vec<Vec<f32>> {
+    mix_onto(from, mask, &speakers(to.max(1)))
+}
+
+const H: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
+/// Where a speaker's sound goes on a device that lacks it: the first of
+/// these whose speakers the device all has.
+fn substitutes(bit: u8) -> &'static [&'static [(u8, f32)]] {
+    match bit {
+        0 => &[&[(2, 1.0)]],
+        1 => &[&[(2, 1.0)]],
+        2 => &[&[(0, H), (1, H)]],
+        3 => &[&[(0, 0.5), (1, 0.5)]],
+        // A back surround moves to the side, and the reverse, at full
+        // level; with neither, it joins its front speaker at −3 dB.
+        4 => &[&[(9, 1.0)], &[(0, H)]],
+        5 => &[&[(10, 1.0)], &[(1, H)]],
+        9 => &[&[(4, 1.0)], &[(0, H)]],
+        10 => &[&[(5, 1.0)], &[(1, H)]],
+        6 => &[&[(0, H), (2, H)], &[(0, H)]],
+        7 => &[&[(1, H), (2, H)], &[(1, H)]],
+        8 => &[&[(4, H), (5, H)], &[(9, H), (10, H)], &[(0, H), (1, H)]],
+        11 | 13 => &[&[(2, H)], &[(0, H), (1, H)]],
+        12 => &[&[(0, H)]],
+        14 => &[&[(1, H)]],
+        15 => &[&[(4, H)], &[(9, H)], &[(0, H)]],
+        17 => &[&[(5, H)], &[(10, H)], &[(1, H)]],
+        16 => &[
+            &[(4, 0.5), (5, 0.5)],
+            &[(9, 0.5), (10, 0.5)],
+            &[(0, H), (1, H)],
+        ],
+        _ => &[&[(0, H), (1, H)]],
+    }
+}
+
+/// Weights taking `from` channels, whose speakers are the set bits of
+/// `mask` in ascending order, onto a device whose channel `i` plays on
+/// speaker `to[i]`: `rows[out][in]`. Each channel goes to its own speaker
+/// wherever the device has it, whatever the device's channel order.
+///
+/// * A speaker the device lacks: back and side surrounds stand in for each
+///   other (−3 dB each where both land on one); otherwise into the front
+///   pair, centre and back-centre at −3 dB on both sides, LFE at −6 dB,
+///   everything on one side at −3 dB to that side; heights and the wide
+///   fronts into the nearest ear-level speakers.
+/// * A device with neither front speaker (mono): the stereo mix's mean, on
+///   its centre or its first channel. Mono sound plays on both ears.
+/// * A device that names no speakers is taken to be Latch's layout of its
+///   channel count. The same count with no known `mask` passes straight
+///   through; anything else gets the mean of every channel on the front
+///   pair.
+pub fn mix_onto(from: usize, mask: u32, to: &[Speaker]) -> Vec<Vec<f32>> {
+    let from = from.max(1);
+    let named;
+    let to = if to.iter().any(Option::is_some) {
+        to
+    } else {
+        named = speakers(to.len().max(1));
+        &named
+    };
+    let mask = if mask.count_ones() as usize == from {
+        mask
+    } else {
+        speaker_mask(from)
+    };
+    let at = |bit: u8| to.iter().position(|s| *s == Some(bit));
+    let has = |bit: u8| at(bit).is_some();
+    let mut rows = vec![vec![0.0; from]; to.len()];
+    let (left, right) = (at(0), at(1));
+    if mask == 0 {
+        if from == to.len() {
+            for (c, row) in rows.iter_mut().enumerate() {
+                row[c] = 1.0;
+            }
+        } else {
+            for o in [left, right].into_iter().flatten() {
+                rows[o].fill(1.0 / from as f32);
+            }
+        }
+        return rows;
+    }
+    if left.is_none() && right.is_none() {
+        let stereo = mix_onto(from, mask, &[Some(0), Some(1)]);
+        let o = at(2).unwrap_or(0);
+        for (i, w) in rows[o].iter_mut().enumerate() {
+            *w = (stereo[0][i] + stereo[1][i]) / 2.0;
+        }
+        return rows;
+    }
+    if from == 1 {
+        // Mono plays on both ears (and the centre is left alone).
+        for o in [left, right].into_iter().flatten() {
+            rows[o][0] = 1.0;
+        }
+        return rows;
+    }
+    let bits: Vec<u8> = (0..32u8).filter(|bit| mask & (1 << bit) != 0).collect();
+    for (i, &bit) in bits.iter().enumerate() {
+        let own: &[(u8, f32)] = &[(bit, 1.0)];
+        let targets = std::iter::once(own)
+            .chain(substitutes(bit).iter().copied())
+            .find(|t| t.iter().all(|&(b, _)| has(b)))
+            .unwrap_or(&[]);
+        for &(b, w) in targets {
+            if let Some(o) = at(b) {
+                rows[o][i] += w;
+            }
+        }
+    }
+    // A back and a side surround on one speaker: −3 dB each.
+    for (back, side) in [(4, 9), (5, 10)] {
+        let (Some(b), Some(s)) = (
+            bits.iter().position(|&x| x == back),
+            bits.iter().position(|&x| x == side),
+        ) else {
+            continue;
+        };
+        for row in &mut rows {
+            if row[b] == 1.0 && row[s] == 1.0 {
+                row[b] = H;
+                row[s] = H;
+            }
+        }
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -718,6 +997,122 @@ mod transport_bounds {
                 super::decode(&encoded, &mut decoded).unwrap();
                 assert_eq!(decoded, pcm);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod layouts {
+    use super::*;
+
+    fn apply(rows: &[Vec<f32>], input: &[f32]) -> Vec<f32> {
+        rows.iter()
+            .map(|row| row.iter().zip(input).map(|(w, s)| w * s).sum())
+            .collect()
+    }
+
+    #[test]
+    fn each_layout_maps_to_its_own_speakers() {
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        for c in 1..=MAX_CHANNELS {
+            let rows = mix_matrix(c, speaker_mask(c), c);
+            for (i, row) in rows.iter().enumerate() {
+                for (j, w) in row.iter().enumerate() {
+                    assert_eq!(*w, if i == j { 1.0 } else { 0.0 }, "{c} ch");
+                }
+            }
+        }
+        // 7.1 into 5.1: sides and backs share the surround pair.
+        let rows = mix_matrix(8, 0x63f, 6);
+        let mut sl = [0.0; 8];
+        sl[6] = 1.0;
+        assert_eq!(apply(&rows, &sl), [0.0, 0.0, 0.0, 0.0, h, 0.0]);
+        // 5.1 with side surrounds into 7.1 keeps them at the sides.
+        let rows = mix_matrix(6, 0x60f, 8);
+        let mut sr = [0.0; 6];
+        sr[5] = 1.0;
+        assert_eq!(apply(&rows, &sr), [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        // ... and into 5.1 at full level, since nothing shares the pair.
+        let rows = mix_matrix(6, 0x60f, 6);
+        assert_eq!(apply(&rows, &sr), [0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        // 5.1 into stereo and mono.
+        let rows = mix_matrix(6, 0x3f, 2);
+        assert_eq!(apply(&rows, &[0.0, 0.0, 1.0, 0.0, 0.0, 0.0]), [h, h]);
+        assert_eq!(apply(&rows, &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]), [0.5, 0.5]);
+        assert_eq!(apply(&rows, &[0.0, 0.0, 0.0, 0.0, 1.0, 0.0]), [h, 0.0]);
+        let rows = mix_matrix(2, 0x3, 1);
+        assert_eq!(apply(&rows, &[1.0, 0.0]), [0.5]);
+        // Stereo onto a 5.1 device: left and right only; mono onto both.
+        let rows = mix_matrix(2, 0x3, 6);
+        assert_eq!(
+            apply(&rows, &[0.25, -0.25]),
+            [0.25, -0.25, 0.0, 0.0, 0.0, 0.0]
+        );
+        let rows = mix_matrix(1, 0x4, 2);
+        assert_eq!(apply(&rows, &[0.5]), [0.5, 0.5]);
+        // Sixteen unknown channels: their mean on both ears.
+        let rows = mix_matrix(16, 0, 2);
+        assert_eq!(apply(&rows, &[1.0; 16]), [1.0, 1.0]);
+    }
+
+    /// Where each of `from` channels (one at a time, at full level) lands.
+    fn landing(rows: &[Vec<f32>], from: usize) -> Vec<Vec<f32>> {
+        (0..from)
+            .map(|i| {
+                let mut x = vec![0.0; from];
+                x[i] = 1.0;
+                apply(rows, &x)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn channels_go_to_their_speakers_in_the_devices_order() {
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        // CoreAudio's 7.1 (L R C LFE Ls Rs Rls Rrs: sides, then backs):
+        // WAVE's backs (channels 4, 5) play on 6, 7, its sides on 4, 5.
+        let apple = [0, 1, 2, 3, 9, 10, 4, 5].map(Some);
+        let got = landing(&mix_onto(8, 0x63f, &apple), 8);
+        for (i, o) in [0, 1, 2, 3, 6, 7, 4, 5].into_iter().enumerate() {
+            let mut want = vec![0.0; 8];
+            want[o] = 1.0;
+            assert_eq!(got[i], want, "WAVE channel {i}");
+        }
+        // ALSA's 5.1 (FL FR RL RR FC LFE): centre and LFE last.
+        let alsa = [0, 1, 4, 5, 2, 3].map(Some);
+        let got = landing(&mix_onto(6, 0x3f, &alsa), 6);
+        for (i, o) in [0, 1, 4, 5, 2, 3].into_iter().enumerate() {
+            assert_eq!(got[i][o], 1.0, "WAVE channel {i}");
+            assert_eq!(got[i].iter().sum::<f32>(), 1.0);
+        }
+        // 7.1 on a 5.1 set with side surrounds (Windows' "5.1 Surround",
+        // 0x60f): back and side share each surround at −3 dB.
+        let side51 = [0, 1, 2, 3, 9, 10].map(Some);
+        let got = landing(&mix_onto(8, 0x63f, &side51), 8);
+        assert_eq!(got[4], [0.0, 0.0, 0.0, 0.0, h, 0.0]);
+        assert_eq!(got[6], [0.0, 0.0, 0.0, 0.0, h, 0.0]);
+        assert_eq!(got[7], [0.0, 0.0, 0.0, 0.0, 0.0, h]);
+        // 5.1 (back) on that set: the backs move to the sides, whole.
+        let got = landing(&mix_onto(6, 0x3f, &side51), 6);
+        assert_eq!(got[4], [0.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        // A set with no LFE or centre (quad): both fold into the fronts.
+        let quad = [0, 1, 4, 5].map(Some);
+        let got = landing(&mix_onto(6, 0x3f, &quad), 6);
+        assert_eq!(got[2], [h, h, 0.0, 0.0]);
+        assert_eq!(got[3], [0.5, 0.5, 0.0, 0.0]);
+        assert_eq!(got[5], [0.0, 0.0, 0.0, 1.0]);
+        // Stereo on an interface whose pair is its channels 3 and 4.
+        let interface = [None, None, Some(0), Some(1)];
+        let got = landing(&mix_onto(2, 0x3, &interface), 2);
+        assert_eq!(got, [[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]);
+        // A one-speaker device, named or not: the stereo mix's mean.
+        let got = landing(&mix_onto(6, 0x3f, &[Some(2)]), 6);
+        assert_eq!(got[2], [h]);
+        assert_eq!(got[0], [0.5]);
+        // A device that names nothing is taken as Latch's own layout.
+        let got = landing(&mix_onto(6, 0x3f, &[None; 6]), 6);
+        for (i, row) in got.iter().enumerate() {
+            assert_eq!(row[i], 1.0);
         }
     }
 }

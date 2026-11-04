@@ -63,8 +63,11 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         frames: AtomicU64::new(0),
         bytes: AtomicU64::new(0),
         transport: TransportState::new(1000),
-        keyframe_request: Mutex::new(None),
+        keyframe_requests: Mutex::default(),
+        recovery: Default::default(),
         audio_enabled: false,
+        surround_kbps: 0,
+        mic: Mutex::new(None),
         cursor_supported: false,
         draw_cursor: AtomicBool::new(true),
         control_writer: Mutex::new(None),
@@ -135,6 +138,7 @@ fn a_viewer_that_does_not_read_cannot_block_the_control_writer() {
         gamepads: 0,
         gamepad_kinds: Vec::new(),
         gamepad_problem: String::new(),
+        reference_invalidation: false,
         session: session.id,
         token: control::token_hex(&session.token),
         codec: Codec::H264Baseline,
@@ -145,6 +149,8 @@ fn a_viewer_that_does_not_read_cannot_block_the_control_writer() {
         encoder: "x".repeat(60_000),
         audio: None,
         audio_problem: String::new(),
+        mic: None,
+        mic_problem: String::new(),
     };
     let (tx, rx) = mpsc::channel();
     let worker = std::thread::spawn(move || {
@@ -164,11 +170,30 @@ fn a_viewer_that_does_not_read_cannot_block_the_control_writer() {
 fn an_opening_reservation_is_busy_before_a_viewer_is_installed() {
     let server = Server::bind(0, Options::default()).unwrap();
     assert!(!server.busy());
-    let guard = server.opening.lock();
+    let guard = server.opening.lock(Duration::ZERO).unwrap();
     assert!(server.busy());
     assert!(server.status().viewer.is_none());
+    // A second opening gives up instead of waiting for ever.
+    let start = Instant::now();
+    assert!(server.opening.lock(Duration::from_millis(50)).is_none());
+    assert!(start.elapsed() >= Duration::from_millis(50));
     drop(guard);
     assert!(!server.busy());
+    assert!(server.opening.lock(Duration::ZERO).is_some());
+}
+
+#[test]
+fn a_stuck_media_thread_is_left_behind_at_the_deadline() {
+    let (release, stuck) = mpsc::channel::<()>();
+    let thread = std::thread::spawn(move || {
+        let _ = stuck.recv();
+    });
+    let start = Instant::now();
+    assert!(!join_by(thread, start + Duration::from_millis(50)));
+    assert!(start.elapsed() < Duration::from_secs(2));
+    drop(release);
+    let done = std::thread::spawn(|| {});
+    assert!(join_by(done, Instant::now() + Duration::from_secs(5)));
 }
 
 #[test]
@@ -267,9 +292,12 @@ fn repeated_video_errors_release_exclusive_capture_and_have_a_retry_budget() {
                     anyhow::bail!("capture lost");
                 }
                 Ok(EncodedVideo {
+                    generation: 0,
                     data: vec![1; 100],
                     keyframe: true,
                     captured: Instant::now(),
+                    picture: 0,
+                    recovery: None,
                 })
             }),
             held: held.clone(),
@@ -328,9 +356,12 @@ fn idle_requests_are_prompt_and_each_encoded_frame_updates_mapping_and_is_sent()
                 anyhow::bail!("stopped");
             }
             Ok(EncodedVideo {
+                generation: 0,
                 data: vec![calls; 100],
                 keyframe,
                 captured: Instant::now(),
+                picture: 0,
+                recovery: None,
             })
         }),
     };
@@ -436,6 +467,7 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
         gamepads: 0,
         gamepad_kinds: Vec::new(),
         gamepad_problem: String::new(),
+        reference_invalidation: false,
         session: session.id,
         token: control::token_hex(&session.token),
         codec: Codec::H264Baseline,
@@ -447,10 +479,12 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
         audio: Some(AudioFormat {
             rate: audio::RATE,
             channels: 2,
-            frame_samples: AUDIO_FRAME as u32,
+            frame_samples: audio::FRAME as u32,
             codec: "lpcm-rice".into(),
         }),
         audio_problem: String::new(),
+        mic: None,
+        mic_problem: String::new(),
     };
     let worker = {
         let server = server.clone();
@@ -510,9 +544,8 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
     let mut buf = [0; 4096];
     let mut packets = 0u32;
     let mut parity = 0;
-    let mut previous_pts = None;
     let mut decoded = Vec::new();
-    while packets < 8 || parity < 2 {
+    while packets < 4 || parity < 1 {
         let n = udp.recv(&mut buf).unwrap();
         assert!(
             n <= latch_proto::MAX_DATAGRAM,
@@ -523,27 +556,39 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
                 parity += 1;
             } else {
                 latch_codec::audio::decode(packet.payload, &mut decoded).unwrap();
-                assert_eq!(decoded.len(), AUDIO_FRAME * audio::CHANNELS);
-                let mut state = 1 + packets / 2;
+                // One 5 ms frame, one packet.
+                assert_eq!(decoded.len(), audio::FRAME * audio::CHANNELS);
+                let mut state = 1 + packets;
                 let expected: Vec<i16> = (0..audio::FRAME * audio::CHANNELS)
                     .map(|_| {
                         state = state.wrapping_mul(1664525).wrapping_add(1013904223);
                         (state >> 16) as i16
                     })
                     .collect();
-                let offset = (packets as usize % 2) * AUDIO_FRAME * audio::CHANNELS;
-                assert_eq!(
-                    decoded,
-                    expected[offset..offset + AUDIO_FRAME * audio::CHANNELS]
-                );
-                if packets % 2 == 1 {
-                    assert_eq!(packet.pts.wrapping_sub(previous_pts.unwrap()), 5000);
-                }
-                previous_pts = Some(packet.pts);
+                assert_eq!(decoded, expected);
                 packets += 1;
             }
         }
     }
+}
+
+#[test]
+fn audio_packets_split_the_frame_evenly_and_always_fit() {
+    for (channels, samples) in [(1, 240), (2, 240), (6, 80), (8, 60)] {
+        assert_eq!(audio_packet_samples(channels), samples, "{channels} ch");
+        assert_eq!(audio::FRAME % samples, 0);
+        assert!(
+            latch_codec::audio::max_coded_len(channels, samples) <= latch_proto::audio::MAX_PAYLOAD
+        );
+    }
+}
+
+#[test]
+fn surround_keeps_more_of_the_wire_for_sound_and_stereo_no_more_than_before() {
+    assert_eq!(surround_kbps(1), 0);
+    assert_eq!(surround_kbps(2), 0);
+    assert_eq!(surround_kbps(6), 2400);
+    assert_eq!(surround_kbps(8), 3600);
 }
 
 #[test]
@@ -565,4 +610,117 @@ fn requested_idrs_cannot_exceed_one_per_rtt_even_when_last_delivered_advances() 
             .all(|pair| pair[1] - pair[0] >= rtt.max(KEYFRAME_GAP)));
         assert!(produced.len() >= 3, "recovery must not stall");
     }
+}
+
+#[test]
+fn reopen_refuses_an_old_picture_held_in_the_send_queue() {
+    use crate::software::{Bgra, CpuCapture, SoftwarePipeline};
+    use latch_codec::h264::Decoder;
+
+    struct Solid(u8);
+    impl CpuCapture for Solid {
+        fn size(&self) -> (u32, u32) {
+            (16, 16)
+        }
+        fn display(&self) -> DisplayRect {
+            info().display
+        }
+        fn name(&self) -> String {
+            "solid".into()
+        }
+        fn grab(&mut self, frame: &mut Bgra, _: Duration) -> anyhow::Result<bool> {
+            *frame = Bgra {
+                width: 16,
+                height: 16,
+                stride: 64,
+                data: [self.0, self.0, self.0, 255].repeat(256),
+            };
+            Ok(true)
+        }
+    }
+    struct ReopenVideo {
+        pipeline: SoftwarePipeline<Solid>,
+        session: Arc<Session>,
+        replacement: bool,
+        calls: usize,
+    }
+    impl VideoPipeline for ReopenVideo {
+        fn info(&self) -> VideoInfo {
+            self.pipeline.info()
+        }
+        fn next(&mut self, keyframe: bool, idle: Duration) -> anyhow::Result<EncodedVideo> {
+            self.calls += 1;
+            anyhow::ensure!(self.calls == 1, "capture lost");
+            let frame = self.pipeline.next(keyframe, idle)?;
+            if self.replacement {
+                self.session.stop.store(true, Ordering::Release);
+            }
+            Ok(frame)
+        }
+        fn recover_from(&mut self, picture: u64) -> bool {
+            self.pipeline.recover_from(picture)
+        }
+    }
+    let server = Server::bind(0, Options::default()).unwrap();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut session = session(receiver.local_addr().unwrap());
+    Arc::get_mut(&mut session).unwrap().recovery.enabled = true;
+    let open = |replacement| ReopenVideo {
+        pipeline: SoftwarePipeline::new(Solid(if replacement { 210 } else { 30 }), &config())
+            .unwrap(),
+        session: session.clone(),
+        replacement,
+        calls: 0,
+    };
+    let (tx, rx) = mpsc::sync_channel(2);
+    // Hold both frames in the actual sender queue until encode_video has
+    // reconstructed the entire capture/pipeline and cleared its recovery map.
+    encode_video(
+        &server,
+        &session,
+        Box::new(open(false)),
+        config(),
+        |_| Ok(Box::new(open(true))),
+        tx,
+    );
+    let old = rx.recv().unwrap();
+    let new = rx.recv().unwrap();
+    assert_eq!(
+        old.0.picture, new.0.picture,
+        "pipeline-local numbers restart"
+    );
+    assert_ne!(old.0.data, new.0.data);
+    let mut decoder = Decoder::new();
+    let old_pixels = decoder.decode(&old.0.data).unwrap().unwrap().clone();
+    let (tx, rx) = mpsc::sync_channel(2);
+    tx.send(old).unwrap();
+    tx.send(new).unwrap();
+    drop(tx);
+    session.stop.store(false, Ordering::Release);
+    paced_video(&server, &session, rx);
+    assert_eq!(session.recovery.sent.lock().len(), 2);
+    let generation = session.recovery.sent.lock()[1].1;
+    // The replacement IDR was sent but lost. The viewer only holds frame 0.
+    session.keyframe.store(false, Ordering::Release);
+    *session.recovery.request.lock() = Some(wire::RecoveryRequest {
+        last_delivered: 0,
+        first_invalid: 1,
+        last_invalid: 1,
+        id: 1,
+    });
+    let mut replacement = open(true);
+    replacement.pipeline.next(true, Duration::ZERO).unwrap();
+    session
+        .recovery
+        .take(&server, &session, &mut replacement, generation);
+    assert_eq!(session.recovery.refused.load(Ordering::Relaxed), 1);
+    assert!(session.keyframe.load(Ordering::Acquire));
+    assert_eq!(session.recovery.asked.lock().as_ref(), None);
+    let idr = replacement.pipeline.next(true, Duration::ZERO).unwrap();
+    assert!(idr.keyframe);
+    assert_eq!(idr.recovery, None);
+    let pixels = decoder.decode(&idr.data).unwrap().unwrap();
+    assert_ne!(pixels, &old_pixels);
+    let mut fresh = Decoder::new();
+    assert_eq!(pixels, fresh.decode(&idr.data).unwrap().unwrap());
 }

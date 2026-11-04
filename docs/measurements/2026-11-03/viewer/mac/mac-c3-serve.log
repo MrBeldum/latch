@@ -1,0 +1,13 @@
+serving on 127.0.0.1:47882 (TCP and UDP)
+host UDP buffers: send=8388608 receive=8388608 bytes (requested 8388608/8388608; Linux may cap at net.core.wmem_max/rmem_max)
+present measurement is watching: 1920×1080 at 120 fps, 50000 kb/s, Latch software H.264 (test pattern)
+present measurement stopped watching after 10 s: the viewer disconnected
+host UDP buffers: send=8388608 receive=8388608 bytes (requested 8388608/8388608; Linux may cap at net.core.wmem_max/rmem_max)
+present measurement is watching: 1920×1080 at 120 fps, 50000 kb/s, Latch software H.264 (test pattern)
+present measurement stopped watching after 10 s: the viewer disconnected
+host UDP buffers: send=8388608 receive=8388608 bytes (requested 8388608/8388608; Linux may cap at net.core.wmem_max/rmem_max)
+present measurement is watching: 3024×1964 at 120 fps, 50000 kb/s, Latch software H.264 (test pattern)
+present measurement stopped watching after 10 s: the viewer disconnected
+host UDP buffers: send=8388608 receive=8388608 bytes (requested 8388608/8388608; Linux may cap at net.core.wmem_max/rmem_max)
+present measurement is watching: 3024×1964 at 120 fps, 50000 kb/s, Latch software H.264 (test pattern)
+present measurement stopped watching after 10 s: the viewer disconnected

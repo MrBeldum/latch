@@ -2822,6 +2822,7 @@ pub(crate) mod tests {
                 name: "UI test".into(),
                 cursor: true,
                 gamepads: false,
+                mic: false,
             },
             frames.clone(),
             tx,
