@@ -141,22 +141,6 @@ impl Controller {
         }
     }
 
-    /// Pacer rate for keyframes and recovery frames. They carry 30% parity
-    /// and usually follow loss, when a bottleneck FIFO is least able to
-    /// absorb a burst: once the path has shown one (a measured capacity,
-    /// congestion pacing, or an idle restart) spread them at 1.5x the
-    /// encoder's share (simulated FIFO paths lose about a third fewer
-    /// frames; 2.5x builds queue at 250 ms report cadence). A clean,
-    /// unconstrained path sends them at once, as before.
-    pub(crate) fn protected_pace_kbps(&self) -> u32 {
-        let protect = self.encoder_wire_budget().saturating_mul(3) / 2;
-        match self.pace_kbps() {
-            0 if self.capacity.is_some() => protect,
-            0 => 0,
-            pace => pace.min(protect),
-        }
-    }
-
     /// What the encoder may spend. The budget is retained through idle, but
     /// a long idle no longer proves the path carries it: the first resumed
     /// frames use the aged trust and restart probes validate the rest.
@@ -196,13 +180,15 @@ impl Controller {
         let falling = delay + 0.5 < self.previous_delay;
         self.gradient = self.gradient * 0.5 + (delay - self.previous_delay) * 0.5;
         self.previous_delay = delay;
-        let jitter = self
-            .jitter
-            .max(if self.application_limited() && !self.pacing {
+        // Idle and restarting streams never learned their radio jitter.
+        let restarting = self.goal.is_some() || self.trusted.is_some();
+        let jitter = self.jitter.max(
+            if (self.application_limited() || restarting) && !self.pacing {
                 3.0
             } else {
                 0.0
-            });
+            },
+        );
         let threshold = 6.0f32.max(self.min_rtt[1].min(self.min_rtt[0]) * 0.1);
         queued |= delay > threshold.max(jitter * 3.0);
         queued |= delay > 3.0f32.max(jitter * 1.5) && self.gradient > jitter.max(1.0);
@@ -274,9 +260,12 @@ impl Controller {
             self.probe.is_some() && self.goal.is_none() && delay > 3.0f32.max(self.jitter * 2.0);
         queued |= probe_queued;
         let old = self.budget;
-        let underfilled = self
-            .sent_kbps
-            .is_some_and(|sent| sent < self.budget * 4 / 5);
+        // A restart's small operating budget makes one keyframe look like a
+        // loaded sender; its sparse windows are no better loss evidence.
+        let underfilled = self.goal.is_some()
+            || self
+                .sent_kbps
+                .is_some_and(|sent| sent < self.budget * 4 / 5);
         let deficit = self
             .sent_kbps
             .is_some_and(|sent| report.received_kbps < sent * 9 / 10);
@@ -429,7 +418,11 @@ impl Controller {
                 }
             }
         }
-        let pressure = queued || (queue_ms > 20.0 && !app_limited) || damaged;
+        // An idle trust or a restart paces deliberately below the target: a
+        // large frame waiting for that pacer is not a slow network.
+        let paced_below_target = self.goal.is_some() || self.trusted.is_some();
+        let pressure =
+            queued || (queue_ms > 20.0 && !app_limited && !paced_below_target) || damaged;
         self.pressure_windows = if pressure {
             self.pressure_windows.saturating_add(1)
         } else {
@@ -624,7 +617,8 @@ impl Controller {
                 } else {
                     self.budget = growth.min(cap);
                 }
-                self.budget = self.budget.min(self.ceiling);
+                // A policer cap from a sparse window can sit under the floor.
+                self.budget = self.budget.min(self.ceiling).max(self.floor);
             }
         }
         self.budget != old

@@ -83,7 +83,7 @@ fn transport_scenarios() {
             delay: Duration::from_millis(base / 2),
         };
         let start = Instant::now();
-        let mut pending = VecDeque::<(Vec<u8>, bool, bool)>::new();
+        let mut pending = VecDeque::<(Vec<u8>, bool)>::new();
         let mut pending_frames = 0;
         let mut pacer = pacing::Pacer::new(start);
         let mut controller = congestion::Controller::new(ceiling, start);
@@ -162,24 +162,19 @@ fn transport_scenarios() {
                                 parity_bytes += (dg.len() + 80) as u64;
                             }
                         }
-                        pending.push_back((dg.to_vec(), keyframe, false));
+                        pending.push_back((dg.to_vec(), false));
                     },
                 );
-                pending.back_mut().unwrap().2 = true;
+                pending.back_mut().unwrap().1 = true;
                 pending_frames += 1;
                 next_frame = ms * fps / 1000 + 1;
             }
-            // The server's pacer and per-frame pacing policy.
-            while let Some((dg, protected, _)) = pending.front() {
-                let pace = if *protected {
-                    controller.protected_pace_kbps()
-                } else {
-                    controller.pace_kbps()
-                };
-                if !pacer.delay(now, dg.len(), pace).is_zero() {
+            // The server's pacer: off on a clean proven path.
+            while let Some((dg, _)) = pending.front() {
+                if !pacer.delay(now, dg.len(), controller.pace_kbps()).is_zero() {
                     break;
                 }
-                let (dg, _, last) = pending.pop_front().unwrap();
+                let (dg, last) = pending.pop_front().unwrap();
                 if last {
                     pending_frames -= 1;
                 }

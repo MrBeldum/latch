@@ -433,7 +433,6 @@ impl Server {
             rtt: Mutex::new(RttEstimator::new()),
             rtt_low: Mutex::new(None),
             pace_kbps: AtomicU32::new(0),
-            protected_pace_kbps: AtomicU32::new(0),
             fec: AtomicU8::new(DEFAULT_FEC_PERCENT),
             fec_burst: AtomicU8::new(0),
             heard_us: AtomicU64::new(self.now_us()),
@@ -718,9 +717,6 @@ impl Server {
                     session
                         .pace_kbps
                         .store(controller.pace_kbps(), Ordering::Relaxed);
-                    session
-                        .protected_pace_kbps
-                        .store(controller.protected_pace_kbps(), Ordering::Relaxed);
                     let (fec, fec_burst) = fec_policy.update(&r, &controller, now - then);
                     session.fec_burst.store(fec_burst, Ordering::Relaxed);
                     session.fec.store(fec, Ordering::Relaxed);
@@ -930,8 +926,6 @@ struct Session {
     rtt_low: Mutex<Option<Duration>>,
     /// How fast to send a frame's datagrams; 0 sends each frame at once.
     pace_kbps: AtomicU32,
-    /// The pacer rate for keyframes and recovery frames (0: send at once).
-    protected_pace_kbps: AtomicU32,
     fec: AtomicU8,
     fec_burst: AtomicU8,
     /// When the viewer was last heard from, on the server's clock.
@@ -1538,12 +1532,7 @@ fn paced_video(
             keyframe: frame.keyframe,
             host_delay: delay,
         };
-        let pace = if frame.keyframe || frame.recovery.is_some() {
-            &session.protected_pace_kbps
-        } else {
-            &session.pace_kbps
-        }
-        .load(Ordering::Relaxed);
+        let pace = session.pace_kbps.load(Ordering::Relaxed);
         let number = packetizer.next_frame();
         if recovery.enabled {
             let mut sent = recovery.sent.lock();
