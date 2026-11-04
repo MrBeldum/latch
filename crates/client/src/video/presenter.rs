@@ -24,6 +24,9 @@ pub(super) struct Presenter {
     /// When the presenter last switched, for the log's rate.
     switches: VecDeque<Instant>,
     total: u64,
+    /// Frames each way since `since`, for a debug line once a second.
+    frames: [u32; 2],
+    since: Instant,
 }
 
 impl Presenter {
@@ -36,6 +39,8 @@ impl Presenter {
             failed: false,
             switches: VecDeque::new(),
             total: 0,
+            frames: [0; 2],
+            since: Instant::now(),
         }
     }
 
@@ -61,6 +66,17 @@ impl Presenter {
             let native = wanted();
             self.set(native, "display changed");
         }
+        self.frames[usize::from(self.native)] += 1;
+        if self.since.elapsed() >= Duration::from_secs(1) {
+            tracing::debug!(
+                "video presenter, last second: {} frames {}, {} wgpu",
+                self.frames[1],
+                self.native_name,
+                self.frames[0]
+            );
+            self.frames = [0; 2];
+            self.since = Instant::now();
+        }
         self.native
     }
 
@@ -74,6 +90,11 @@ impl Presenter {
             );
         }
         self.failed = true;
+        // This frame goes to wgpu after all.
+        if self.native {
+            self.frames[1] = self.frames[1].saturating_sub(1);
+            self.frames[0] += 1;
+        }
         self.set(false, "native presentation failed");
     }
 
