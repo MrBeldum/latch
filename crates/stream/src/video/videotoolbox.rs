@@ -4,14 +4,35 @@
 //! Each access unit arrives in Annex B. Parameter sets go into a format
 //! description; the slices are re-framed with 4-byte lengths (AVCC/HVCC) into
 //! one sample buffer and decoded synchronously; `decode` also waits out any
-//! frame the decoder held back, so the output callback has always run, on
-//! this thread, before `decode` returns.
+//! frame the decoder held back, so the output callback has always run before
+//! `decode` returns.
+//!
+//! The decode calls run on a worker thread of the session, and `decode`
+//! waits for them at most [`DECODE_DEADLINE`]: Apple's H.264 decoder can
+//! block forever inside them (a stream whose reference pictures overflow
+//! `max_num_ref_frames` after a loss, which FFmpeg decodes). A session that
+//! stalls is abandoned to its worker and replaced, and the error makes the
+//! viewer ask for a keyframe, so the picture freezes for the deadline, not
+//! for good.
 
 use super::{nal_units, Decoder, Frame, PixelFormat};
 use anyhow::{anyhow, bail, Result};
 use latch_proto::control::Codec;
 use std::ffi::c_void;
 use std::ptr;
+use std::sync::mpsc;
+use std::time::Duration;
+
+/// How long one access unit may stay in VideoToolbox. A hardware decode
+/// takes milliseconds, even the first of an 8K session; this is a decoder
+/// that will not return.
+const DECODE_DEADLINE: Duration = Duration::from_secs(1);
+/// Sessions a process may abandon. An abandoned session cannot be
+/// invalidated (that blocks too), so its thread and pictures stay; past
+/// this, the decoder fails every access unit and the stream renegotiates
+/// without its codec.
+const MAX_ABANDONED: u32 = 3;
+static ABANDONED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 type OSStatus = i32;
 type CFTypeRef = *const c_void;
@@ -231,9 +252,69 @@ pub struct VideoToolbox {
     /// Parameter sets the current format description was built from.
     params: Vec<Vec<u8>>,
     avcc: Vec<u8>,
+    /// Runs the current session's decode calls; replaced with the session
+    /// when one stalls.
+    worker: Option<Worker>,
+    deadline: Duration,
 }
 
 unsafe impl Send for VideoToolbox {}
+
+/// One access unit for the worker: the session and sample each hold a
+/// reference the worker releases, and `decoded` is where the output
+/// callback writes, owned by whoever waits for it.
+struct Job {
+    session: VTDecompressionSessionRef,
+    sample: CMSampleBufferRef,
+    decoded: Box<Decoded>,
+}
+// SAFETY: the job owns its CF references; VideoToolbox sessions may be used
+// from any thread, one call at a time, which the worker's queue guarantees.
+unsafe impl Send for Job {}
+
+struct Worker {
+    jobs: mpsc::Sender<Job>,
+    done: mpsc::Receiver<(OSStatus, Box<Decoded>)>,
+}
+
+impl Worker {
+    fn spawn() -> Result<Self> {
+        let (jobs, queue) = mpsc::channel::<Job>();
+        let (finished, done) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("latch-vt-decode".into())
+            .spawn(move || {
+                crate::priority::media_thread();
+                while let Ok(mut job) = queue.recv() {
+                    // SAFETY: the job holds the session and sample; the
+                    // callback writes through `decoded`, which this thread
+                    // owns until the wait below has drained every frame.
+                    let status = unsafe {
+                        let status = VTDecompressionSessionDecodeFrame(
+                            job.session,
+                            job.sample,
+                            0,
+                            &mut *job.decoded as *mut Decoded as *mut c_void,
+                            ptr::null_mut(),
+                        );
+                        CFRelease(job.sample);
+                        // Synchronous decode calls back before returning,
+                        // but a decoder may still hold a frame back.
+                        if status == 0 {
+                            VTDecompressionSessionWaitForAsynchronousFrames(job.session);
+                        }
+                        CFRelease(job.session);
+                        status
+                    };
+                    if finished.send((status, job.decoded)).is_err() {
+                        // Abandoned after a stall: nobody waits any more.
+                        return;
+                    }
+                }
+            })?;
+        Ok(Self { jobs, done })
+    }
+}
 
 pub fn supported(codec: Codec) -> bool {
     static CODECS: std::sync::OnceLock<Vec<Codec>> = std::sync::OnceLock::new();
@@ -297,7 +378,39 @@ impl VideoToolbox {
             session: ptr::null(),
             params: Vec::new(),
             avcc: Vec::new(),
+            worker: None,
+            deadline: DECODE_DEADLINE,
         })
+    }
+
+    /// Gives up on a session whose decode call has not returned: its worker
+    /// keeps it until (if ever) the call returns, and a fresh session from
+    /// the same format takes its place.
+    fn abandon_session(&mut self) -> Result<()> {
+        self.worker = None;
+        let stalled = std::mem::replace(&mut self.session, ptr::null());
+        if !stalled.is_null() {
+            // Invalidating may block as the decode does, so it happens on a
+            // thread of its own; it also releases this reference.
+            let stalled = stalled as usize;
+            let _ = std::thread::Builder::new()
+                .name("latch-vt-abandon".into())
+                .spawn(move || unsafe {
+                    let session = stalled as VTDecompressionSessionRef;
+                    VTDecompressionSessionInvalidate(session);
+                    CFRelease(session);
+                });
+        }
+        let abandoned = ABANDONED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if abandoned > MAX_ABANDONED {
+            // No session: every access unit fails from here on.
+            self.params.clear();
+            bail!("VideoToolbox stalled {abandoned} times; not decoding here again");
+        }
+        if !self.format.is_null() {
+            self.create_session()?;
+        }
+        Ok(())
     }
 
     fn nal_type(&self, nal: &[u8]) -> u8 {
@@ -637,6 +750,9 @@ impl Decoder for VideoToolbox {
                 self.set_parameters(sets)?;
             }
         }
+        if ABANDONED.load(std::sync::atomic::Ordering::Relaxed) > MAX_ABANDONED {
+            bail!("VideoToolbox stalled too often in this process");
+        }
         if self.session.is_null() {
             bail!("no parameter sets yet");
         }
@@ -644,11 +760,11 @@ impl Decoder for VideoToolbox {
             return Ok(None);
         }
         let len = self.avcc.len();
-        let mut decoded = Decoded {
+        let decoded = Box::new(Decoded {
             spare,
             ..Default::default()
-        };
-        unsafe {
+        });
+        let sample = unsafe {
             let mut block: CMBlockBufferRef = ptr::null();
             let status = CMBlockBufferCreateWithMemoryBlock(
                 ptr::null(),
@@ -686,32 +802,57 @@ impl Decoder for VideoToolbox {
             if status != 0 {
                 bail!("sample buffer failed ({status})");
             }
-            let status = VTDecompressionSessionDecodeFrame(
-                self.session,
-                sample,
-                0,
-                &mut decoded as *mut Decoded as *mut c_void,
-                ptr::null_mut(),
-            );
-            CFRelease(sample);
-            // `decoded` lives on this stack frame and the callback writes
-            // through it. Synchronous decode calls it before returning, but
-            // a decoder may still hold a frame back; wait it out here so
-            // the callback can never run after this frame is gone.
-            if status == 0 {
-                VTDecompressionSessionWaitForAsynchronousFrames(self.session);
-            }
-            let status = if status != 0 { status } else { decoded.status };
-            if status != 0 {
-                // -12903 kVTInvalidSessionErr, -12911 kVTVideoDecoderMalfunctionErr
-                if status == -12903 || status == -12911 {
-                    self.drop_session();
-                    if !self.format.is_null() {
-                        let _ = self.create_session();
-                    }
+            sample
+        };
+        if self.worker.is_none() {
+            match Worker::spawn() {
+                Ok(worker) => self.worker = Some(worker),
+                Err(error) => {
+                    unsafe { CFRelease(sample) };
+                    return Err(anyhow!("VideoToolbox decode thread: {error}"));
                 }
-                return Err(anyhow!("decode failed ({status})"));
             }
+        }
+        let worker = self.worker.as_ref().expect("worker");
+        let job = Job {
+            // SAFETY: the worker releases this reference after its calls.
+            session: unsafe { CFRetain(self.session) },
+            sample,
+            decoded,
+        };
+        if let Err(mpsc::SendError(job)) = worker.jobs.send(job) {
+            unsafe {
+                CFRelease(job.sample);
+                CFRelease(job.session);
+            }
+            self.worker = None;
+            bail!("VideoToolbox decode thread stopped");
+        }
+        let (status, decoded) = match worker.done.recv_timeout(self.deadline) {
+            Ok(done) => done,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                tracing::warn!(
+                    "VideoToolbox gave no picture in {:?}; replacing the decoder session",
+                    self.deadline
+                );
+                self.abandon_session()?;
+                bail!("VideoToolbox decode stalled; decoder session replaced");
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                self.worker = None;
+                bail!("VideoToolbox decode thread stopped");
+            }
+        };
+        let status = if status != 0 { status } else { decoded.status };
+        if status != 0 {
+            // -12903 kVTInvalidSessionErr, -12911 kVTVideoDecoderMalfunctionErr
+            if status == -12903 || status == -12911 {
+                self.drop_session();
+                if !self.format.is_null() {
+                    let _ = self.create_session();
+                }
+            }
+            return Err(anyhow!("decode failed ({status})"));
         }
         if let Some(error) = decoded.error {
             bail!("{error}");
@@ -817,6 +958,73 @@ mod tests {
             assert!(white >= 920, "{white}");
             assert!(black <= 80, "{black}");
         });
+    }
+
+    /// Access units of an Annex B stream with one slice per picture.
+    fn pictures(stream: &[u8]) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut unit = Vec::new();
+        for nal in nal_units(stream) {
+            unit.extend_from_slice(&[0, 0, 0, 1]);
+            unit.extend_from_slice(nal);
+            if matches!(nal[0] & 0x1f, 1 | 5) {
+                out.push(std::mem::take(&mut unit));
+            }
+        }
+        out
+    }
+
+    /// A VideoToolbox H.264 LTR stream after a loss, recorded by the
+    /// engine's pipelined simulator with the refresh the host now withholds
+    /// (960×540): the lost pictures carried long-term marks, so after the
+    /// frame_num gap the viewer's references exceed `max_num_ref_frames`
+    /// (14 of 10) once the encoder marks those slots again. FFmpeg decodes
+    /// it, warning; Apple's decoder blocks forever on its last picture (the
+    /// #60 review's 1.1 MB stream did the same 41 pictures in). A viewer
+    /// that meets one must not freeze.
+    #[test]
+    fn a_decode_that_never_returns_is_abandoned_and_the_next_keyframe_decodes() {
+        if !supported(Codec::H264High) {
+            return;
+        }
+        let path = std::env::var("LATCH_VT_STALL_FIXTURE").unwrap_or_else(|_| {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/vt-ltr-overflow.h264"
+            )
+            .into()
+        });
+        let units = pictures(&std::fs::read(path).unwrap());
+        let mut decoder = VideoToolbox::new(Codec::H264High).unwrap();
+        decoder.deadline = Duration::from_millis(500);
+        let mut stalled = None;
+        for (i, unit) in units.iter().enumerate() {
+            let start = std::time::Instant::now();
+            let result = decoder.decode(unit, i == 0, None);
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "picture {i} took {:?}",
+                start.elapsed()
+            );
+            match result {
+                Ok(picture) => assert!(picture.is_some(), "picture {i}"),
+                Err(error) => {
+                    eprintln!("picture {i}: {error:#}");
+                    stalled = Some(i);
+                    break;
+                }
+            }
+        }
+        eprintln!("stalled at {stalled:?} of {}", units.len());
+        // Whether or not this macOS still stalls, the session takes a
+        // keyframe afterwards and gives its picture promptly.
+        let start = std::time::Instant::now();
+        let picture = decoder
+            .decode(&units[0], true, None)
+            .unwrap()
+            .expect("keyframe after the stall");
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert_eq!((picture.width, picture.height), (960, 540));
     }
 
     #[test]
