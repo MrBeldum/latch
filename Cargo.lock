@@ -2134,6 +2134,7 @@ dependencies = [
 name = "latch-stream"
 version = "5.1.0"
 dependencies = [
+ "alsa",
  "anyhow",
  "block2 0.6.2",
  "cpal",

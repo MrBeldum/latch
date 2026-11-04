@@ -29,6 +29,9 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi_Common",
+    # Sound out: the endpoint's speakers, and a low-latency shared stream.
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
@@ -49,5 +52,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 [target.'cfg(target_os = "linux")'.dependencies]
 # Gamepads through evdev; pure Rust ioctls.
 evdev = "0.13"
+# The output device's channel map (cpal's own ALSA binding).
+alsa = "0.11"
 
 [dev-dependencies]

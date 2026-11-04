@@ -632,6 +632,7 @@ fn open_output(
     let rate = supported.sample_rate().max(8_000);
     let channels = supported.channels().max(1);
     let small = buffer_frames(rate, supported.buffer_size());
+    let layout = crate::speakers::of_device(&device, channels as usize);
     let mixer = || {
         Mixer::new(
             source_rate,
@@ -644,6 +645,7 @@ fn open_output(
             shared.gain.clone(),
         )
         .linked(shared.link.clone())
+        .on_speakers(&layout)
     };
     let err_fn = {
         let (output, rebuild) = (output.clone(), rebuild.clone());
@@ -751,7 +753,8 @@ fn open_output(
         return None;
     }
     tracing::info!(
-        "audio: playing on {name} at {rate} Hz, {channels} channels, {} buffer",
+        "audio: playing on {name} at {rate} Hz, {channels} channels ({}), {} buffer",
+        crate::speakers::describe(&layout),
         small.map_or("default".into(), |f| format!("{f}-frame"))
     );
     *output.lock() = Output::Playing {
@@ -803,8 +806,9 @@ pub fn take_probe() -> Vec<f32> {
 
 /// Pulls stream frames from the queue for the device: linear
 /// interpolation between rates, the stream's channels mixed onto the
-/// device's speakers ([`latch_codec::audio::mix_matrix`]: 5.1 into
-/// stereo headphones, stereo onto the front of a 5.1 set), silence when
+/// device's speakers by position ([`latch_codec::audio::mix_onto`]: 5.1
+/// into stereo headphones, stereo onto the front of a 5.1 set, 7.1 onto
+/// CoreAudio's sides-first order), silence when
 /// the queue is empty, and the queue steered as the module says.
 struct Mixer {
     queue: Arc<Mutex<VecDeque<f32>>>,
@@ -889,6 +893,15 @@ impl Mixer {
 
     fn linked(mut self, link: Arc<Link>) -> Self {
         self.link = link;
+        self
+    }
+
+    /// Plays each source channel on its own speaker of a device whose
+    /// channel `i` plays on `layout[i]` ([`latch_codec::audio::mix_onto`]).
+    fn on_speakers(mut self, layout: &[latch_codec::audio::Speaker]) -> Self {
+        let mask = latch_codec::audio::speaker_mask(self.src_channels);
+        self.mix = latch_codec::audio::mix_onto(self.src_channels, mask, layout);
+        self.out_channels = layout.len().max(1);
         self
     }
 
