@@ -47,3 +47,58 @@ memory-corruption bugchecks) before the HDR desktop toggle had been started.
 The EDR path is covered only by the offscreen Metal tests
 (`hdr_patches_keep_their_luminance_while_an_overlay_shows`,
 `native_edr_shader_*`) and the presenter unit tests.
+
+## After the review (PR #59 review fixes)
+
+The review found that every **debug** build panicked when the window opened:
+`-[CAMetalLayer setColorspace:]` was sent an untyped pointer, and objc2
+checks argument types in debug builds. The runs above used release bundles,
+which skip that check. The colour space is now typed, and
+`layer_messages_carry_the_types_their_methods_declare` sends each of the
+window path's layer messages in a test (it fails with the old type). The
+presenter also gained a settling time (300 ms), at most one display-driven
+switch a second, and "cannot read the display" counts as no change. On the
+Mac a screen is now its display ID. AppKit hands out a new `NSScreen` for
+the same display each time the app is activated, so in the real app every
+focus change had counted as a display change.
+
+The Windows PC was offline, so these runs used a test `serve` on this Mac
+(software H.264, so an **8-bit SDR** stream). The runs are the real
+Latch.app built by `scripts/bundle-macos.sh` in `dist.noindex` (not
+installed); the debug bundle is the same bundle with the debug binary:
+
+```
+LATCH_TEST_PATTERN=sweep target/release/examples/serve --bind 127.0.0.1 --port 47963
+./drive.sh <Latch.app> <scratch data dir> <events log>   # in this folder
+./summary.sh <scratch data dir>/panel.log
+```
+
+`drive.sh` starts the app with `LATCH_TEST_EXERCISE=3`, which steps through
+stats, toolbar and full screen. From outside it makes six rounds of: Finder
+in front, Latch in front, then the next Space and back (System Events
+Ctrl-→ / Ctrl-←). After each action it notes whether the app's window was on
+screen (`onscreen.js`, from the CoreGraphics window list, since no
+screenshots are possible from this shell). The window left the screen on
+each Space switch and came back.
+
+| 8-bit SDR stream, ~60 s each | 75e4f19 debug | this branch, debug | this branch, release |
+| --- | --- | --- | --- |
+| Starts | **panics** in `Edr::new` (`setColorspace:`, `^v`) | yes | yes |
+| Presenter | – | wgpu, chosen once | wgpu, chosen once |
+| Presenter switches | – | **0** | **0** |
+| Display changes acted on | – | 0 | 0 |
+| Seconds with frames on both presenters | – | 0 of 59 | 0 of 58 |
+| Frames EDR / wgpu | – | 0 / 6323 | 0 / 6369 |
+| `presentation failed` / panics | – | 0 / 0 | 0 / 0 |
+| Exercise steps (full screen) / focus changes | – | 21 (3) / 24 | 21 (3) / 24 |
+| Space switches that took the window off screen and back | – | 6 + 6 | 6 + 6 |
+
+Before the display-ID change, a debug run of this branch logged a
+`video display changed` after every activation. The probe showed the same
+window with a new `NSScreen` pointer each time, though no switch followed
+for SDR. Logs: [review-fixes-real-app.log](review-fixes-real-app.log).
+
+**Still not run live:** an HDR (PQ) stream in the real window. The test
+`serve` only makes 8-bit H.264, and the PC that makes Main10 PQ is offline.
+The EDR layer's messages are covered by the new test, and its picture by the
+offscreen Metal tests.
