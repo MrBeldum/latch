@@ -284,6 +284,8 @@ impl Stream {
             let mmcss = AvSetMmThreadCharacteristicsW(&task, &mut index).ok();
             let frequency = self.clock.GetFrequency().unwrap_or(0).max(1);
             let mut written: u64 = 0;
+            // Wakes that found nothing left to play: the device glitched.
+            let (mut wakes, mut starved) = (0u64, 0u64);
             let mut check_at = Instant::now();
             let mut scratch = Vec::<f32>::new();
             let result = (|| -> Result<()> {
@@ -300,6 +302,10 @@ impl Stream {
                         }
                     }
                     let padding = self.client.GetCurrentPadding().context("device")?;
+                    if written > 0 {
+                        wakes += 1;
+                        starved += u64::from(padding == 0);
+                    }
                     let frames = ahead.saturating_sub(padding);
                     if frames == 0 {
                         continue;
@@ -333,6 +339,9 @@ impl Stream {
                 Ok(())
             })();
             let _ = self.client.Stop();
+            tracing::info!(
+                "audio: WASAPI stream closed after {wakes} wakes, {starved} with nothing left to play"
+            );
             if let Some(h) = mmcss {
                 let _ = AvRevertMmThreadCharacteristics(h);
             }
