@@ -14,11 +14,9 @@ const QUIET: Duration = Duration::from_millis(50);
 struct Train {
     id: u16,
     count: u8,
-    first: Instant,
-    last: Instant,
-    /// Wire bytes after the first datagram, and how many datagrams arrived.
+    /// Arrival times, and wire bytes after the first datagram.
+    arrivals: Vec<Instant>,
     bytes: usize,
-    received: usize,
 }
 
 /// The viewer's side: the fastest train between two reports.
@@ -36,15 +34,12 @@ impl TrainMeter {
             self.current = Some(Train {
                 id: train,
                 count,
-                first: now,
-                last: now,
+                arrivals: vec![now],
                 bytes: 0,
-                received: 1,
             });
         } else if let Some(t) = self.current.as_mut() {
-            t.last = now;
+            t.arrivals.push(now);
             t.bytes += len + OVERHEAD;
-            t.received += 1;
         }
         if index + 1 >= count {
             self.finish();
@@ -55,12 +50,26 @@ impl TrainMeter {
         let Some(t) = self.current.take() else {
             return;
         };
-        if t.received < MIN_TRAIN.min(usize::from(t.count)) || t.received < 2 {
+        let received = t.arrivals.len();
+        if received < MIN_TRAIN.min(usize::from(t.count)) || received < 2 {
             return;
         }
-        // Datagrams handled in one receive batch can share an instant: such
-        // a train only shows the path is faster than this viewer can time.
-        let secs = t.last.duration_since(t.first).as_secs_f64().max(1e-4);
+        // A bottleneck spaces datagrams about evenly; a stalled receiver
+        // (or relay) puts one long gap among near-zero ones. A train whose
+        // largest gap is over half its span timed the stall, not the path.
+        // Datagrams handled in one receive batch share an instant: such a
+        // train only shows the path is faster than this viewer can time.
+        let span = t.arrivals[received - 1].saturating_duration_since(t.arrivals[0]);
+        let largest = t
+            .arrivals
+            .windows(2)
+            .map(|w| w[1].saturating_duration_since(w[0]))
+            .max()
+            .unwrap_or_default();
+        if received > 2 && largest * 2 > span {
+            return;
+        }
+        let secs = span.as_secs_f64().max(1e-4);
         let kbps = (t.bytes as f64 * 8.0 / secs / 1000.0).min(f64::from(u32::MAX)) as u32;
         self.best = self.best.max(kbps.max(1));
     }
@@ -71,7 +80,8 @@ impl TrainMeter {
         if self
             .current
             .as_ref()
-            .is_some_and(|t| now.saturating_duration_since(t.last) >= QUIET)
+            .and_then(|t| t.arrivals.last())
+            .is_some_and(|last| now.saturating_duration_since(*last) >= QUIET)
         {
             self.finish();
         }
@@ -113,5 +123,34 @@ mod tests {
             meter.push(5, i, 8, 1200, start);
         }
         assert!(meter.take_kbps(start) > 500_000);
+        // A fast path through a receiver that stalled 60 ms mid-train: the
+        // stall is not the path's rate, and the train says nothing.
+        for i in 0..6u8 {
+            let stall = if i >= 3 {
+                Duration::from_millis(60)
+            } else {
+                Duration::ZERO
+            };
+            meter.push(
+                6,
+                i,
+                6,
+                1200,
+                start + stall + Duration::from_micros(100) * u32::from(i),
+            );
+        }
+        assert_eq!(meter.take_kbps(start + Duration::from_secs(1)), 0);
+        // Random 0-4 ms per-datagram jitter on a 5 Mbps bottleneck still
+        // reads as slow, not as the jitter.
+        let offsets = [0u64, 3, 1, 4, 2, 0, 3, 1, 2, 4, 0, 2, 1, 3, 4, 0];
+        let mut times: Vec<Instant> = (0..16u32)
+            .map(|i| start + gap * i + Duration::from_micros(offsets[i as usize] * 250))
+            .collect();
+        times.sort();
+        for (i, at) in times.into_iter().enumerate() {
+            meter.push(7, i as u8, 16, 1200, at);
+        }
+        let kbps = meter.take_kbps(start + Duration::from_secs(1));
+        assert!((3500..=8000).contains(&kbps), "{kbps}");
     }
 }

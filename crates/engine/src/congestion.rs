@@ -40,8 +40,8 @@ pub(crate) struct Controller {
     /// The budget before probe trains measured a slower path while idle;
     /// later trains restore up to it.
     held: Option<u32>,
-    /// What an underfilled stream delivered before a standing delay (with
-    /// no delivery deficit) cut it: restored once the delay is gone.
+    /// The budget an underfilled stream had when a standing delay (with no
+    /// delivery deficit) began cutting it: restored once the delay is gone.
     restore: Option<u32>,
     previous_delay: f32,
     gradient: f32,
@@ -577,11 +577,11 @@ impl Controller {
                 self.overload = Some(offered);
                 // Congestion replaces a probe-train measurement.
                 self.held = None;
-                // A delay that delivers everything sent is someone else's
-                // queue, not this stream's rate: remember what got through.
+                // A delay that delivers everything an underfilled stream
+                // sends is someone else's queue (or a starved ping), not
+                // this stream's overload: remember the budget it had.
                 if app_limited && queued && !damaged && !collapsed && received >= sent * 9 / 10 {
-                    self.restore
-                        .get_or_insert((self.received_kbps as u32).max(received).min(offered));
+                    self.restore.get_or_insert(offered);
                 } else if damaged || collapsed || !queued {
                     self.restore = None;
                 }
@@ -643,9 +643,9 @@ impl Controller {
                     .filter(|_| now.duration_since(self.clean_since) >= Duration::from_secs(1))
                 {
                     // The standing delay that cut an underfilled stream has
-                    // been gone for a second: what it delivered before the
-                    // delay came is sustainable again. It cannot prove that
-                    // by probing, since it never fills a probe.
+                    // been gone for a second: the budget it had before is
+                    // usable again. It cannot prove that by probing, since
+                    // it never fills a probe; probe trains guard its idle.
                     self.restore = None;
                     self.budget = self.budget.max(rate.min(cap));
                     self.capacity = self.capacity.max(Some(rate));
@@ -934,12 +934,13 @@ mod tests {
         for tick in 0..100 {
             t += Duration::from_millis(50);
             window(&mut c, t, 10.0, if tick < 20 { 60.0 } else { 0.0 });
-            if c.budget() >= 2000 {
+            if c.budget() == 50_000 {
                 recovered.get_or_insert(tick * 50);
             }
         }
-        // Back to what it delivered before the delay, not further on faith.
-        assert!(recovered.is_some_and(|ms| ms <= 3000), "{recovered:?}");
+        // Back to the budget it had before the delay, a second after the
+        // pacer settles and the delay is gone.
+        assert!(recovered.is_some_and(|ms| ms <= 4000), "{recovered:?}");
     }
 
     #[test]
