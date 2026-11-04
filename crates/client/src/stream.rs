@@ -547,6 +547,15 @@ impl View {
                         egui_wgpu::Callback::new_paint_callback(
                             video,
                             video::Paint {
+                                // Native video sits above egui's surface. Use
+                                // the SDR tone map while controls cover it.
+                                allow_native: !(bar_visible
+                                    || self.stats
+                                    || self.settings.is_some()
+                                    || self.confirm_disconnect.is_some()
+                                    || interruption.is_some()
+                                    || !self.toasts.is_empty()
+                                    || self.hint_since.is_some()),
                                 rect: video,
                                 frames: live.frames.clone(),
                             },

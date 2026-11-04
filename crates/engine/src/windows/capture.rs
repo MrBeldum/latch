@@ -1458,40 +1458,79 @@ mod hdr_probe {
             }
         })?;
         let dir = std::env::var("LATCH_HDR_PROBE_DIR").unwrap_or_else(|_| ".".into());
-        for mf in [false, true] {
-            let name = if mf { "mf" } else { "amf" };
-            let mut stream = latch_proto::color::hevc_hdr_sei(color.hdr.unwrap());
-            let mut times = Vec::new();
-            if mf {
-                let mut encoder = super::super::encode::Encoder::new(&config, &gpu)?;
-                let sample = super::super::encode::Encoder::texture_sample(&picture.texture)?;
-                for i in 0..60 {
-                    let at = Instant::now();
-                    if let Some((bytes, _)) = encoder.encode(&sample, i == 0)? {
+        for mode in ["sdr8", "sdr10", "hdr"] {
+            let color = latch_proto::color::ColorDescription::negotiate(
+                latch_proto::color::ColorCapabilities {
+                    ten_bit: mode != "sdr8",
+                    hdr: mode == "hdr",
+                    peak_nits: 1000,
+                },
+                true,
+                mode == "hdr",
+            );
+            let config = VideoConfig {
+                color,
+                ..config.clone()
+            };
+            let rgb = gpu.texture(
+                960,
+                540,
+                if color.bit_depth == 10 {
+                    DXGI_FORMAT_R10G10B10A2_UNORM
+                } else {
+                    DXGI_FORMAT_B8G8R8A8_UNORM
+                },
+                D3D11_BIND_RENDER_TARGET.0 as u32,
+                false,
+            )?;
+            renderer.draw(
+                &gpu,
+                &source,
+                &rgb,
+                &Default::default(),
+                &Default::default(),
+                (DXGI_MODE_ROTATION_IDENTITY, 1.0, color.is_hdr()),
+            )?;
+            let mut converter = Converter::with_color(&gpu, (960, 540), (960, 540), 60, color)?;
+            let picture = converter.convert(&rgb)?;
+            for mf in [false, true] {
+                let name = if mf { "mf" } else { "amf" };
+                let mut stream = color
+                    .hdr
+                    .map(latch_proto::color::hevc_hdr_sei)
+                    .unwrap_or_default();
+                let mut times = Vec::new();
+                if mf {
+                    let mut encoder = super::super::encode::Encoder::new(&config, &gpu)?;
+                    let sample = super::super::encode::Encoder::texture_sample(&picture.texture)?;
+                    for i in 0..60 {
+                        let at = Instant::now();
+                        if let Some((bytes, _)) = encoder.encode(&sample, i == 0)? {
+                            stream.extend(bytes);
+                        }
+                        times.push(at.elapsed().as_secs_f64() * 1000.0);
+                    }
+                } else {
+                    let mut encoder = super::super::amf::Encoder::new(&config, &gpu)?;
+                    for i in 0..60 {
+                        let at = Instant::now();
+                        let (bytes, _) = encoder.encode(&picture.texture, i == 0)?;
+                        times.push(at.elapsed().as_secs_f64() * 1000.0);
                         stream.extend(bytes);
                     }
-                    times.push(at.elapsed().as_secs_f64() * 1000.0);
                 }
-            } else {
-                let mut encoder = super::super::amf::Encoder::new(&config, &gpu)?;
-                for i in 0..60 {
-                    let at = Instant::now();
-                    let (bytes, _) = encoder.encode(&picture.texture, i == 0)?;
-                    times.push(at.elapsed().as_secs_f64() * 1000.0);
-                    stream.extend(bytes);
-                }
-            }
-            times.sort_by(f64::total_cmp);
-            eprintln!(
-                "HDR {name}: frames=60 bytes={} encode_p50_ms={:.3} encode_p95_ms={:.3}",
+                times.sort_by(f64::total_cmp);
+                eprintln!(
+                "COLOR {mode} {name}: frames=60 bytes={} encode_p50_ms={:.3} encode_p95_ms={:.3}",
                 stream.len(),
                 times[30],
                 times[57]
             );
-            std::fs::write(
-                std::path::Path::new(&dir).join(format!("hdr-{name}.hevc")),
-                stream,
-            )?;
+                std::fs::write(
+                    std::path::Path::new(&dir).join(format!("{mode}-{name}.hevc")),
+                    stream,
+                )?;
+            }
         }
         Ok(())
     }

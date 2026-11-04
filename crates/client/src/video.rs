@@ -274,6 +274,7 @@ struct Planes {
 
 ///// Lives in egui-wgpu's callback resources for the life of the window.
 pub struct Resources {
+    retained: Option<Frame>,
     #[cfg(windows)]
     hdr10: Option<hdr10::Hdr10>,
     #[cfg(windows)]
@@ -386,6 +387,7 @@ impl Resources {
             mapped_at_creation: false,
         });
         Self {
+            retained: None,
             #[cfg(windows)]
             hdr10: None,
             #[cfg(windows)]
@@ -509,27 +511,42 @@ impl Resources {
         slot: &FrameSlot,
         rect: egui::Rect,
         pixels_per_point: f32,
+        allow_native: bool,
     ) {
         #[cfg(target_os = "macos")]
-        if self.edr_active {
+        if self.edr_active && allow_native {
             if let Some(edr) = &self.edr {
                 edr.show();
             }
         }
         #[cfg(windows)]
-        if self.hdr10_active {
+        if self.hdr10_active && allow_native {
             if let Some(hdr) = &self.hdr10 {
                 hdr.show();
             }
         }
-        let Some(frame) = slot.take() else { return };
+        let frame = match slot.take() {
+            Some(frame) => {
+                if let Some(old) = self.retained.take() {
+                    slot.recycle(old);
+                }
+                frame
+            }
+            None if !allow_native => {
+                let Some(frame) = self.retained.take() else {
+                    return;
+                };
+                frame
+            }
+            None => return,
+        };
         #[cfg(windows)]
         if let Some(hdr) = &mut self.hdr10 {
-            if frame.color.bit_depth == 10 {
+            if allow_native && frame.color.bit_depth == 10 {
                 match hdr.draw(&frame, rect, pixels_per_point) {
                     Ok(()) => {
                         self.hdr10_active = true;
-                        slot.recycle(frame);
+                        self.retained = Some(frame);
                         return;
                     }
                     Err(e) => tracing::warn!("HDR10 presentation: {e:#}"),
@@ -542,11 +559,11 @@ impl Resources {
         let _ = (rect, pixels_per_point);
         #[cfg(target_os = "macos")]
         if let Some(edr) = &mut self.edr {
-            if frame.color.bit_depth == 10 && frame.native.is_some() {
+            if allow_native && frame.color.bit_depth == 10 && frame.native.is_some() {
                 match edr.draw(&frame, rect, pixels_per_point) {
                     Ok(()) => {
                         self.edr_active = true;
-                        slot.recycle(frame);
+                        self.retained = Some(frame);
                         return;
                     }
                     Err(e) => tracing::warn!("EDR presentation failed: {e}"),
@@ -855,6 +872,7 @@ impl Resources {
 
 /// The paint callback egui runs for the video rect.
 pub struct Paint {
+    pub allow_native: bool,
     pub rect: egui::Rect,
     pub frames: Arc<FrameSlot>,
 }
@@ -875,6 +893,7 @@ impl egui_wgpu::CallbackTrait for Paint {
                 &self.frames,
                 self.rect,
                 _screen.pixels_per_point,
+                self.allow_native,
             );
         }
         Vec::new()
@@ -974,6 +993,7 @@ mod tests {
                         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                             rect,
                             Paint {
+                                allow_native: true,
                                 rect,
                                 frames: self.0.clone(),
                             },
@@ -1017,7 +1037,12 @@ mod tests {
         for y in [100, 270, 400] {
             for x in [100, 300, 500, 700] {
                 let code = 64 + ((x + y / 4) % 876);
-                let linear = latch_proto::color::pq_eotf(f64::from(code - 64) / 876.0) / 203.0;
+                let nits = if std::env::var_os("LATCH_HDR_RENDER_STRIPES").is_some() {
+                    [10.0, 100.0, 1000.0][x as usize / 320]
+                } else {
+                    latch_proto::color::pq_eotf(f64::from(code - 64) / 876.0)
+                };
+                let linear = nits / 203.0;
                 let mapped = if linear > 0.75 {
                     0.75 + 0.25 * (1.0 - (-(linear - 0.75) / 0.25).exp())
                 } else {
@@ -1052,6 +1077,7 @@ mod tests {
                         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                             ui.max_rect(),
                             Paint {
+                                allow_native: true,
                                 rect: ui.max_rect(),
                                 frames: self.0.clone(),
                             },
@@ -1104,6 +1130,7 @@ mod tests {
                         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                             ui.max_rect(),
                             Paint {
+                                allow_native: true,
                                 rect: ui.max_rect(),
                                 frames: self.0.clone(),
                             },
@@ -1174,6 +1201,7 @@ mod tests {
                         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                             ui.max_rect(),
                             Paint {
+                                allow_native: true,
                                 rect: ui.max_rect(),
                                 frames: self.0.clone(),
                             },
