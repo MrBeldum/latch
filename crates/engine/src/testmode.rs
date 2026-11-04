@@ -14,6 +14,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The pattern the running test session draws, shared with its input.
+/// One per process: the session that opened last takes all test-mode
+/// input, so tests that stream in parallel must take turns.
 static CURRENT: Mutex<Option<Arc<Mutex<Pattern>>>> = Mutex::new(None);
 
 /// The motion asked for in the environment, if test mode is on.
