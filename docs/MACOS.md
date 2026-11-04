@@ -409,16 +409,20 @@ their rate; it sends ⅕–½ of the requested bitrate; under CPU load even
 fails (the old fallback, a software session, then gave no frame back at
 all: the stream froze). HEVC 1080p240 drops from 242.2 to 101.6 fps. So the
 switch stays opt-in, with no size-based default
-([full measurements](measurements/2026-11-04/rfi-vt-mf/README.md)), and an
-opted-in session protects itself:
+([full measurements](measurements/2026-11-04/rfi-vt-mf/README.md)).
+
+Every Mac host session, opted in or not, has a **stall watchdog**: a
+session that holds frames and gives none back for 500 ms (5 s in software)
+is replaced by an ordinary hardware session, without LTR, which starts at
+an IDR (software only if that fails). The stopped session is not waited
+for: it is invalidated on a thread of its own. Under full GPU load plus
+twelve CPU hogs the slowest ordinary hardware encode measured was 60 ms
+(4K60 H.264), so the watchdog has about 8× headroom.
+
+An opted-in session also protects itself:
 
 - **Failure fallback.** A low-latency session whose encode fails reopens
   as an ordinary hardware session (IDR, no LTR), never in software.
-- **Stall watchdog.** Any session that holds frames and gives none back for
-  500 ms (5 s in software) is replaced by an ordinary hardware session,
-  without LTR, which starts at an IDR (software only if that fails). The
-  stopped session is not waited for: it is invalidated on a thread of its
-  own.
 - **Pace fallback.** Over 2-second windows, if more than one frame in
   twenty took longer than the two frames in flight overlap (2 frame
   intervals), or one took over 250 ms, the session reopens in the ordinary
@@ -568,8 +572,15 @@ bit-exactly; the recorded stream is `tests/fixtures/vt-ltr-overflow.h264`).
 A session that misses the deadline is abandoned to its thread (invalidating
 it blocks too) and replaced from the same format; the error makes the
 viewer ask for a keyframe, so the picture freezes for a second, not for
-good. After three abandoned sessions in one process the decoder fails every
-access unit and the stream renegotiates without the codec.
+good. Nothing else calls into an abandoned session; its thread invalidates
+and releases it if the call ever returns. Each abandoned session keeps one
+thread and its pictures (about 0.4 MB at 960×540; at 4K perhaps a couple of
+hundred MB of IOSurfaces, not measured). So each codec (H.264 Baseline and
+High count as one) may abandon three sessions per 10 minutes: once it has,
+its decoders fail every access unit until the oldest stall is 10 minutes
+old, the session's three-error rule renegotiates without that codec alone
+(HEVC and AV1 keep decoding after H.264 stalls), and the next stream may use
+it again once the window has passed.
 
 Frame arrival wakes egui immediately. `AutoNoVsync` and a maximum frame
 latency of one avoid an application 60 Hz cap on ProMotion. The newest

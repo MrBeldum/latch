@@ -3,6 +3,23 @@
 M3 Pro MacBook Pro, synthetic NV12 IOSurfaces; RX 6600 Windows 11.
 No deployed host was connected to, stopped, replaced, or rebooted.
 
+## Second review round (review 60b)
+
+Raw log: [review-fixes-2/stall-budget.txt](review-fixes-2/stall-budget.txt),
+the review's `scratch_vt_leak` replaying the committed stall fixture six
+times in one process, a fresh HEVC decoder after each cycle.
+
+| Case | Before (d0a96af) | After |
+| --- | --- | --- |
+| H.264 stalls absorbed before H.264 refuses | 4 (counter checked after increment) | 3 per 10 minutes, then H.264 decoders fail until the oldest stall is 10 min old |
+| Fresh HEVC decoder after the H.264 cap | fails ("stalled too often in this process"), for the life of the process | decodes (all 6 cycles) |
+| Threads left per stall | 2 (blocked decode worker + blocked invalidate thread) | 1 (the worker; nothing calls into the session while it is blocked) |
+| Media Foundation H.264 LTR on Windows hosts | on by default | opt-in with `LATCH_MF_LTR=1` until it has run on the RX 6600 |
+
+The 500 ms Mac host stall watchdog applies to every session; the review
+measured the slowest ordinary hardware encode under full GPU load plus
+twelve CPU hogs at 60 ms (4K60 H.264), so it has about 8× headroom.
+
 ## Review fixes (after the #60 review)
 
 The review of #60 found a freeze, a

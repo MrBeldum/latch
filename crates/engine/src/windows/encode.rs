@@ -314,8 +314,13 @@ impl Encoder {
     pub fn new(config: &VideoConfig, gpu: &Gpu) -> Result<Self> {
         let codec = config.codec;
         let label = codec.name();
+        let attempts: &[bool] = if super::mf_ltr::enabled() {
+            &[true, false]
+        } else {
+            &[false]
+        };
         for (activation, name) in hardware(codec).unwrap_or_default() {
-            for try_ltr in [true, false] {
+            for &try_ltr in attempts {
                 // SAFETY: Activation is performed on the worker's MTA.
                 let transform = unsafe { activation.ActivateObject::<IMFTransform>() };
                 let result = transform
@@ -357,6 +362,9 @@ impl Encoder {
         Self::software(config)
     }
     pub fn software(config: &VideoConfig) -> Result<Self> {
+        if !super::mf_ltr::enabled() {
+            return Self::software_trial(config, false);
+        }
         Self::software_trial(config, true).or_else(|error| {
             tracing::debug!(%error, "Microsoft MFT LTR probe unavailable; keeping IDRs");
             Self::software_trial(config, false)

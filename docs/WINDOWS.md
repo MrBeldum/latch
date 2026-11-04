@@ -238,7 +238,12 @@ on hardware encoders. Four cached NV12 textures and their views are reused.
   with four loss/recovery episodes across LTR slot reuse: all 112 delivered
   pictures match byte for byte in FFmpeg
   ([commands](measurements/2026-11-03/rfi/review-fixes/README.md)).
-  Media Foundation H.264 enables LTR only after a probe at each encoder open:
+  Media Foundation H.264 LTR is **off unless `LATCH_MF_LTR=1`** is set in
+  the host's environment: it is unverified on the RX 6600 (see the end of
+  this item), and an old Mac viewer without the decode watchdog relies on
+  its loss rules never to freeze. Without the variable, MF H.264 opens
+  without LTR, runs no probe and recovers with IDRs. With it, MF H.264
+  enables LTR only after a probe at each encoder open:
   40 synthetic pictures at the requested configuration, two pictures in
   turn, each drifting, so a picture is best predicted by the one two before
   it, and after a loss by a lost one, which trust-until forbids the recovery
@@ -264,7 +269,11 @@ on hardware encoders. Four cached NV12 textures and their views are reused.
   ([validation and limits](measurements/2026-11-04/rfi-vt-mf/README.md));
   **the periodic-content probe, the slot cadence, the buffering demotion and
   the negative control have not run on Windows hardware** (the PC was
-  offline): they are compile-checked only.
+  offline): they are compile-checked only, which is why `LATCH_MF_LTR=1` is
+  required. To verify on the PC, run the ignored
+  `windows::mf_ltr::hardware_tests::hardware_mf_ltr_open` test with
+  `LATCH_MF_LTR=1` in the interactive session, time the probe per open and
+  per display reopen, and stream H.264 with losses to a Mac viewer.
   The production path uses only AMF HEVC; AMF H.264 is not instantiated.
 - **Fallback.** H.264 High/Baseline keep the GPU MFT → Microsoft MFT →
   Latch software path. An AMF runtime failure reopens MF HEVC and starts

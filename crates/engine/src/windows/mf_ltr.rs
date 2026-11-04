@@ -11,6 +11,15 @@ use windows::Win32::Graphics::{
     Direct3D11::D3D11_BIND_RENDER_TARGET, Dxgi::Common::DXGI_FORMAT_NV12,
 };
 
+/// Whether H.264 MFTs may try LTR recovery at all. Off unless
+/// `LATCH_MF_LTR=1`: the probe, slot cadence and loss rules have not yet run
+/// on Windows hardware (docs/WINDOWS.md), and an old Mac viewer, which has no
+/// decode watchdog, relies on them to never freeze. AMF's own LTR recovery
+/// (`amf.rs`) is separate and stays on.
+pub(super) fn enabled() -> bool {
+    std::env::var_os("LATCH_MF_LTR").is_some_and(|v| v == "1")
+}
+
 /// Four application-controlled slots on two cadences: slots 0 and 1 take a
 /// picture every ~33 ms, so a short round trip recovers from a recent one;
 /// slots 2 and 3 every ~667 ms, so a base up to ⅔ s old (three round trips
@@ -326,6 +335,7 @@ mod tests {
 #[cfg(test)]
 mod hardware_tests {
     use super::*;
+    /// Run with `LATCH_MF_LTR=1` to exercise the probe.
     #[test]
     #[ignore]
     fn hardware_mf_ltr_open() -> Result<()> {
