@@ -96,10 +96,47 @@ fn draw(picture: &mut Yuv420, frame: u32) {
     picture.pad_edges();
 }
 
+trait TestCodec {
+    fn recover_from(&mut self, picture: u64) -> bool;
+    fn encode(
+        &mut self,
+        picture: &Yuv420,
+        keyframe: bool,
+    ) -> (Vec<u8>, bool, u64, Option<u64>, Vec<u8>);
+    fn decode(&mut self, data: &[u8], keyframe: bool) -> Vec<u8>;
+}
+fn nv12(picture: &Yuv420) -> Vec<u8> {
+    let (mut y, mut uv) = (Vec::new(), Vec::new());
+    latch_codec::color::yuv420_to_nv12(picture, &mut y, &mut uv);
+    y.extend(uv);
+    y
+}
+struct SoftwareCodec(Encoder, Decoder);
+impl TestCodec for SoftwareCodec {
+    fn recover_from(&mut self, picture: u64) -> bool {
+        self.0.recover_from(picture)
+    }
+    fn encode(
+        &mut self,
+        picture: &Yuv420,
+        keyframe: bool,
+    ) -> (Vec<u8>, bool, u64, Option<u64>, Vec<u8>) {
+        let mut data = Vec::new();
+        let info = self.0.encode(picture, keyframe, &mut data).unwrap();
+        (
+            data,
+            info.keyframe,
+            info.picture,
+            info.recovery,
+            nv12(self.0.reconstruction()),
+        )
+    }
+    fn decode(&mut self, data: &[u8], _: bool) -> Vec<u8> {
+        nv12(self.1.decode(data).unwrap().unwrap())
+    }
+}
+
 fn simulate(impairment: Impairment, recover: bool, seed: u64) -> Outcome {
-    let t0 = Instant::now();
-    let tick = Duration::from_millis(1);
-    let interval = Duration::from_secs(1) / FPS;
     let mut encoder = Encoder::new(
         EncoderConfig {
             width: WIDTH,
@@ -112,6 +149,23 @@ fn simulate(impairment: Impairment, recover: bool, seed: u64) -> Outcome {
     )
     .unwrap();
     encoder.set_recovery_depth(latch_engine::software::recovery_depth(WIDTH, HEIGHT, FPS));
+    simulate_with(
+        impairment,
+        recover,
+        seed,
+        SoftwareCodec(encoder, Decoder::new()),
+    )
+}
+
+fn simulate_with(
+    impairment: Impairment,
+    recover: bool,
+    seed: u64,
+    mut encoder: impl TestCodec,
+) -> Outcome {
+    let t0 = Instant::now();
+    let tick = Duration::from_millis(1);
+    let interval = Duration::from_secs(1) / FPS;
     let mut packetizer = Packetizer::new(SESSION);
     let mut forward = Link::new(impairment, seed);
     let mut backward = Link::new(
@@ -125,7 +179,7 @@ fn simulate(impairment: Impairment, recover: bool, seed: u64) -> Outcome {
     // Host: frame number to picture number, what the decoder must show
     // for each frame, the newest request and its answer.
     let mut sent: VecDeque<(u32, u64)> = VecDeque::new();
-    let mut expected: HashMap<u32, Yuv420> = HashMap::new();
+    let mut expected: HashMap<u32, Vec<u8>> = HashMap::new();
     let mut request: Option<RecoveryRequest> = None;
     let mut answer: Option<RecoveryAck> = None;
     let mut asked: Option<(u64, u32)> = None;
@@ -134,7 +188,6 @@ fn simulate(impairment: Impairment, recover: bool, seed: u64) -> Outcome {
     let mut last_keyframe: Option<Instant> = None;
     // Viewer.
     let mut reassembler = Reassembler::new(SESSION);
-    let mut decoder = Decoder::new();
     let mut recovery = Recovery::new();
     let mut keyframes = KeyframeRequests::new();
     let round_trip = impairment.delay * 2;
@@ -202,22 +255,22 @@ fn simulate(impairment: Impairment, recover: bool, seed: u64) -> Outcome {
                     && last_keyframe
                         .is_none_or(|t| now - t >= round_trip.max(Duration::from_millis(50))));
             draw(&mut picture, frame);
-            let mut data = Vec::new();
-            let info = encoder.encode(&picture, keyframe, &mut data).unwrap();
-            if info.keyframe {
+            let (data, idr, picture_number, recovery_base, reconstruction) =
+                encoder.encode(&picture, keyframe);
+            if idr {
                 keyframe_owed = false;
                 last_keyframe = Some(now);
                 if frame > 0 {
                     outcome.keyframes += 1;
                     outcome.keyframe_bytes.push(data.len());
                 }
-            } else if info.recovery.is_some() {
+            } else if recovery_base.is_some() {
                 outcome.recovery_bytes.push(data.len());
             } else {
                 outcome.p_bytes.push(data.len());
             }
             let number = packetizer.next_frame();
-            if let Some(base) = info.recovery {
+            if let Some(base) = recovery_base {
                 let (p, id) = asked.take().unwrap();
                 assert_eq!(p, base);
                 let base_frame = sent.iter().find(|(_, q)| *q == base).unwrap().0;
@@ -231,21 +284,21 @@ fn simulate(impairment: Impairment, recover: bool, seed: u64) -> Outcome {
                 wire::write_recovery_ack(&mut out, SESSION, &ack);
                 forward.send(now, &out);
             }
-            sent.push_back((number, info.picture));
+            sent.push_back((number, picture_number));
             if sent.len() > 256 {
                 sent.pop_front();
             }
-            expected.insert(number, encoder.reconstruction().clone());
+            expected.insert(number, reconstruction);
             expected.remove(&number.wrapping_sub(256));
             packetizer.packetize(
                 &OutFrame {
                     data: &data,
-                    keyframe: info.keyframe,
+                    keyframe: idr,
                     host_delay: 0,
                 },
                 |datagram| forward.send(now, datagram),
             );
-            if info.keyframe {
+            if idr {
                 keyframe_answers.sent(now);
             }
             frame += 1;
@@ -261,9 +314,9 @@ fn simulate(impairment: Impairment, recover: bool, seed: u64) -> Outcome {
         while let Some(r) = reassembler.poll(now) {
             match r {
                 Reassembled::Frame(f) => {
-                    let decoded = decoder.decode(&f.data).unwrap().unwrap();
+                    let decoded = encoder.decode(&f.data, f.keyframe);
                     assert_eq!(
-                        Some(decoded),
+                        Some(&decoded),
                         expected.get(&f.frame),
                         "frame {} (recovery {}) is not the encoder's picture",
                         f.frame,
@@ -366,4 +419,98 @@ fn recovery_frames_replace_keyframes_on_burst_loss() {
         },
         23,
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "hardware loss simulation; LATCH_MAC_LTR=1"]
+fn videotoolbox_impairment_simulator() {
+    use latch_engine::{
+        software::PictureEncoder,
+        video::{Codec, VideoConfig},
+    };
+    struct Native {
+        encoder: Box<dyn PictureEncoder>,
+        full: Box<dyn latch_stream::video::Decoder>,
+        loss: Box<dyn latch_stream::video::Decoder>,
+    }
+    impl TestCodec for Native {
+        fn recover_from(&mut self, picture: u64) -> bool {
+            self.encoder.recover_from(picture)
+        }
+        fn encode(
+            &mut self,
+            picture: &Yuv420,
+            keyframe: bool,
+        ) -> (Vec<u8>, bool, u64, Option<u64>, Vec<u8>) {
+            let mut data = Vec::new();
+            let idr = self.encoder.encode(picture, keyframe, &mut data).unwrap();
+            let (number, recovery) = self.encoder.last_picture();
+            let expected = native_pixels(self.full.decode(&data, idr, None).unwrap().unwrap());
+            (data, idr, number, recovery, expected)
+        }
+        fn decode(&mut self, data: &[u8], idr: bool) -> Vec<u8> {
+            native_pixels(self.loss.decode(data, idr, None).unwrap().unwrap())
+        }
+    }
+    fn native_pixels(frame: latch_stream::video::Frame) -> Vec<u8> {
+        frame.with_planes(|y, ys, uv, cs| {
+            let mut out = Vec::new();
+            for (p, stride, rows) in [(y, ys, HEIGHT), (uv, cs, HEIGHT / 2)] {
+                for row in p.chunks(stride).take(rows as usize) {
+                    out.extend_from_slice(&row[..WIDTH as usize]);
+                }
+            }
+            out
+        })
+    }
+    for codec in [Codec::H264High, Codec::Hevc] {
+        for loss in [0.01, 0.03] {
+            for recover in [false, true] {
+                let config = VideoConfig {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    fps: FPS,
+                    bitrate_kbps: 2500,
+                    codec,
+                    color: Default::default(),
+                };
+                let encoder = latch_engine::testmode::videotoolbox_encoder(&config).unwrap();
+                assert!(
+                    encoder.recovers(),
+                    "run with LATCH_MAC_LTR=1 on supporting hardware"
+                );
+                let outcome = simulate_with(
+                    Impairment {
+                        loss: 0.0,
+                        burst_enter: loss / 4.0,
+                        burst_exit: 0.25,
+                        delay: Duration::from_millis(15),
+                        jitter: Duration::from_millis(4),
+                        duplicate: 0.1,
+                        reorder: 0.1,
+                        reorder_delay: Duration::from_millis(30),
+                    },
+                    recover,
+                    23,
+                    Native {
+                        encoder,
+                        full: latch_stream::video::new_decoder(codec).unwrap(),
+                        loss: latch_stream::video::new_decoder(codec).unwrap(),
+                    },
+                );
+                assert!(outcome.checked > FRAMES / 2);
+                if recover {
+                    assert!(!outcome.recovery_bytes.is_empty());
+                }
+                eprintln!(
+                    "{}",
+                    outcome.summary(&format!(
+                        "{codec:?} burst {}% recover={recover}",
+                        loss * 100.0
+                    ))
+                );
+            }
+        }
+    }
 }

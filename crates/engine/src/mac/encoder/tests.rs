@@ -1541,56 +1541,63 @@ fn ltr_boundary_drops_ahead_frames_and_retries_a_dropped_refresh_with_idr() {
         codec: Codec::H264High,
         color: Default::default(),
     };
-    let mut encoder = Encoder::open(&config, true, Depth::Eight, true).unwrap();
-    if !encoder.recovers() {
-        return;
-    }
-    let image = surface();
-    fill(&image, &pattern(0));
-    let base = encoder
-        .encode(image.0, Instant::now(), true)
-        .unwrap()
-        .unwrap()
-        .picture;
-    for _ in 0..2 {
-        encoder.submit(image.0, Instant::now(), false).unwrap();
-    }
-    assert!(encoder.recover_from(base));
-    // Complete the two frames already in flight: neither may escape the boundary.
-    unsafe {
-        check(
-            VTCompressionSessionCompleteFrames(encoder.session.0, INVALID_TIME),
-            "drain ahead frames",
-        )
-        .unwrap();
-    }
-    assert!(encoder.collect(Duration::ZERO).is_none());
-    encoder.submit(image.0, Instant::now(), false).unwrap();
-    unsafe {
-        check(
-            VTCompressionSessionCompleteFrames(encoder.session.0, INVALID_TIME),
-            "drain refresh",
-        )
-        .unwrap();
-    }
-    encoder.output.output.lock().done.front_mut().unwrap().2 = None;
-    assert!(encoder.collect(Duration::ZERO).is_none());
-    assert!(encoder.needs_keyframe());
-    let idr = encoder
-        .encode(image.0, Instant::now(), false)
-        .unwrap()
-        .unwrap();
-    assert!(idr.keyframe);
-    assert!(!encoder.recover_from(base));
-    let prior = idr.picture;
-    encoder.software().unwrap();
-    assert!(!encoder.recover_from(prior));
-    assert!(
-        encoder
+    for missing_callback in [false, true] {
+        let mut encoder = Encoder::open(&config, true, Depth::Eight, true).unwrap();
+        if !encoder.recovers() {
+            return;
+        }
+        let image = surface();
+        fill(&image, &pattern(0));
+        let base = encoder
             .encode(image.0, Instant::now(), true)
             .unwrap()
             .unwrap()
-            .picture
-            > prior
-    );
+            .picture;
+        for _ in 0..2 {
+            encoder.submit(image.0, Instant::now(), false).unwrap();
+        }
+        assert!(encoder.recover_from(base));
+        // Complete the two frames already in flight: neither may escape the boundary.
+        unsafe {
+            check(
+                VTCompressionSessionCompleteFrames(encoder.session.0, INVALID_TIME),
+                "drain ahead frames",
+            )
+            .unwrap();
+        }
+        assert!(encoder.collect(Duration::ZERO).is_none());
+        encoder.submit(image.0, Instant::now(), false).unwrap();
+        encoder.submit(image.0, Instant::now(), false).unwrap();
+        unsafe {
+            check(
+                VTCompressionSessionCompleteFrames(encoder.session.0, INVALID_TIME),
+                "drain refresh",
+            )
+            .unwrap();
+        }
+        if missing_callback {
+            encoder.output.output.lock().done.pop_front();
+        } else {
+            encoder.output.output.lock().done.front_mut().unwrap().2 = None;
+        }
+        assert!(encoder.collect(Duration::ZERO).is_none());
+        assert!(encoder.needs_keyframe());
+        let idr = encoder
+            .encode(image.0, Instant::now(), false)
+            .unwrap()
+            .unwrap();
+        assert!(idr.keyframe);
+        assert!(!encoder.recover_from(base));
+        let prior = idr.picture;
+        encoder.software().unwrap();
+        assert!(!encoder.recover_from(prior));
+        assert!(
+            encoder
+                .encode(image.0, Instant::now(), true)
+                .unwrap()
+                .unwrap()
+                .picture
+                > prior
+        );
+    }
 }

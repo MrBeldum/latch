@@ -23,6 +23,18 @@ pub fn native_encoder() -> bool {
     std::env::var_os("LATCH_TEST_VIDEOTOOLBOX").is_some_and(|v| v == "1")
 }
 
+/// A permission-free native picture encoder for loss simulations and benchmarks.
+#[cfg(target_os = "macos")]
+pub fn videotoolbox_encoder(
+    config: &VideoConfig,
+) -> anyhow::Result<Box<dyn crate::software::PictureEncoder>> {
+    Ok(Box::new(crate::mac::synthetic::Synthetic::open(
+        config.width,
+        config.height,
+        config,
+    )?))
+}
+
 /// The motion asked for in the environment, if test mode is on.
 pub fn motion() -> Option<Motion> {
     match std::env::var("LATCH_TEST_PATTERN").ok()?.as_str() {

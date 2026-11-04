@@ -67,7 +67,22 @@ impl Ltr {
     }
 }
 
-fn pixels(frame: &DecodedNv12) -> Vec<u8> {
+fn pixels(frame: &DecodedNv12, config: &VideoConfig) -> Result<Vec<u8>> {
+    ensure!(
+        frame.bit_depth == 8 && frame.width == config.width && frame.height == config.height,
+        "MFT probe decoded a different format"
+    );
+    ensure!(
+        frame.shared.is_none(),
+        "MFT probe needs CPU pixels, not shared renderer surfaces"
+    );
+    ensure!(
+        frame.y_stride >= config.width as usize
+            && frame.uv_stride >= config.width as usize
+            && frame.y.len() >= frame.y_stride * config.height as usize
+            && frame.uv.len() >= frame.uv_stride * config.height as usize / 2,
+        "MFT probe decoded no complete CPU picture"
+    );
     let mut bytes = Vec::new();
     for (plane, stride, rows) in [
         (&frame.y, frame.y_stride, frame.height),
@@ -77,7 +92,7 @@ fn pixels(frame: &DecodedNv12) -> Vec<u8> {
             bytes.extend_from_slice(&row[..frame.width as usize]);
         }
     }
-    bytes
+    Ok(bytes)
 }
 
 pub(super) fn prove(encoder: &mut Encoder, config: &VideoConfig, gpu: Option<&Gpu>) -> Result<()> {
@@ -136,7 +151,7 @@ pub(super) fn prove(encoder: &mut Encoder, config: &VideoConfig, gpu: Option<&Gp
                 .decode(&bytes)?
                 .context("LTR MFT decode produced no picture")?;
             ensure!(
-                pixels(&actual) == pixels(&expected),
+                pixels(&actual, config)? == pixels(&expected, config)?,
                 "MFT ignored LTR control at probe frame {n}"
             );
             checked += 1;
@@ -152,6 +167,31 @@ pub(super) fn prove(encoder: &mut Encoder, config: &VideoConfig, gpu: Option<&Gp
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn empty_or_shared_output_cannot_pass_a_pixel_comparison() {
+        let config = VideoConfig {
+            width: 64,
+            height: 64,
+            fps: 60,
+            bitrate_kbps: 1000,
+            codec: crate::video::Codec::H264High,
+            color: Default::default(),
+        };
+        let mut frame = DecodedNv12 {
+            bit_depth: 8,
+            width: 64,
+            height: 64,
+            y: Vec::new(),
+            y_stride: 64,
+            uv: Vec::new(),
+            uv_stride: 64,
+            shared: None,
+        };
+        assert!(pixels(&frame, &config).is_err());
+        frame.y = vec![16; 4096];
+        frame.uv = vec![128; 2048];
+        assert_eq!(pixels(&frame, &config).unwrap().len(), 6144);
+    }
     #[test]
     fn stale_slots_idr_and_repeated_loss() {
         let mut ltr = Ltr::new(60);
