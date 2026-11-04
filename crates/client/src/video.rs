@@ -3,6 +3,8 @@
 
 #[cfg(target_os = "macos")]
 mod edr;
+#[cfg(windows)]
+mod hdr10;
 use egui_wgpu::wgpu;
 #[cfg(target_os = "macos")]
 use egui_wgpu::wgpu::hal;
@@ -268,6 +270,10 @@ struct Planes {
 
 ///// Lives in egui-wgpu's callback resources for the life of the window.
 pub struct Resources {
+    #[cfg(windows)]
+    hdr10: Option<hdr10::Hdr10>,
+    #[cfg(windows)]
+    hdr10_active: bool,
     #[cfg(target_os = "macos")]
     edr: Option<edr::Edr>,
     #[cfg(target_os = "macos")]
@@ -370,6 +376,10 @@ impl Resources {
             mapped_at_creation: false,
         });
         Self {
+            #[cfg(windows)]
+            hdr10: hdr10::Hdr10::new().ok(),
+            #[cfg(windows)]
+            hdr10_active: false,
             #[cfg(target_os = "macos")]
             edr: if objc2_foundation::MainThreadMarker::new().is_some() {
                 edr::Edr::new().map_err(|e| tracing::warn!("EDR: {e}")).ok()
@@ -496,7 +506,28 @@ impl Resources {
                 edr.show();
             }
         }
+        #[cfg(windows)]
+        if self.hdr10_active {
+            if let Some(hdr) = &self.hdr10 {
+                hdr.show();
+            }
+        }
         let Some(frame) = slot.take() else { return };
+        #[cfg(windows)]
+        if let Some(hdr) = &mut self.hdr10 {
+            if frame.color.is_hdr() {
+                match hdr.draw(&frame, rect, pixels_per_point) {
+                    Ok(()) => {
+                        self.hdr10_active = true;
+                        slot.recycle(frame);
+                        return;
+                    }
+                    Err(e) => tracing::warn!("HDR10 presentation: {e:#}"),
+                }
+            }
+            hdr.hide();
+            self.hdr10_active = false;
+        }
         #[cfg(not(target_os = "macos"))]
         let _ = (rect, pixels_per_point);
         #[cfg(target_os = "macos")]
@@ -1141,7 +1172,9 @@ mod tests {
 pub fn color_capabilities() -> latch_proto::color::ColorCapabilities {
     #[cfg(target_os = "macos")]
     let peak = edr::peak_nits();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    let peak = hdr10::peak_nits();
+    #[cfg(not(any(target_os = "macos", windows)))]
     let peak = 0;
     latch_proto::color::ColorCapabilities {
         ten_bit: cfg!(any(target_os = "macos", windows)),
@@ -1153,14 +1186,19 @@ pub fn color_capabilities() -> latch_proto::color::ColorCapabilities {
 /// Hide the video sublayer before egui decides whether this frame has a video
 /// callback. The callback makes it visible again, including idle repeats.
 pub fn begin_frame(frame: &eframe::Frame) {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     if let Some(state) = frame.wgpu_render_state() {
         if let Some(r) = state.renderer.read().callback_resources.get::<Resources>() {
+            #[cfg(target_os = "macos")]
             if let Some(edr) = &r.edr {
                 edr.hide();
             }
+            #[cfg(windows)]
+            if let Some(hdr) = &r.hdr10 {
+                hdr.hide();
+            }
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     let _ = frame;
 }

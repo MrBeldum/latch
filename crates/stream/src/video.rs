@@ -208,14 +208,18 @@ impl Frame {
                 }
                 y.chunks(ys).take(self.height as usize).all(|r| {
                     r[..w]
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .all(|v| u16::from_le_bytes([v[0], v[1]]) >> 6 <= max)
                 }) && uv
                     .chunks(uvs)
                     .take(self.height.div_ceil(2) as usize)
                     .all(|r| {
                         r[..w]
-                            .chunks_exact(2)
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
                             .all(|v| (u16::from_le_bytes([v[0], v[1]]) >> 6).abs_diff(512) <= 4)
                     })
             });
@@ -321,7 +325,16 @@ pub fn decodable() -> Vec<Codec> {
     {
         vec![Codec::Hevc, Codec::H264High, Codec::H264Baseline]
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        static HEVC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *HEVC.get_or_init(|| mediafoundation::MfDecoder::with_codec(true).is_ok()) {
+            vec![Codec::Hevc, Codec::H264Baseline]
+        } else {
+            vec![Codec::H264Baseline]
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         vec![Codec::H264Baseline]
     }
