@@ -637,7 +637,15 @@ impl Encoder {
                 if done.0 < boundary {
                     continue;
                 }
+                if let Some(Err(_)) = &done.2 {
+                    return Some(done);
+                }
                 if let Some(Ok(frame)) = &mut done.2 {
+                    if done.0 != boundary && !frame.keyframe {
+                        // VT may omit a dropped frame's callback entirely.
+                        self.request_keyframe();
+                        continue;
+                    }
                     if !frame.keyframe {
                         frame.recovery = Some(base);
                     }

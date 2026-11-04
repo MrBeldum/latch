@@ -18,6 +18,11 @@ use std::time::{Duration, Instant};
 /// input, so tests that stream in parallel must take turns.
 static CURRENT: Mutex<Option<Arc<Mutex<Pattern>>>> = Mutex::new(None);
 
+#[cfg(target_os = "macos")]
+pub fn native_encoder() -> bool {
+    std::env::var_os("LATCH_TEST_VIDEOTOOLBOX").is_some_and(|v| v == "1")
+}
+
 /// The motion asked for in the environment, if test mode is on.
 pub fn motion() -> Option<Motion> {
     match std::env::var("LATCH_TEST_PATTERN").ok()?.as_str() {
@@ -41,6 +46,18 @@ pub fn open_video(config: &VideoConfig, motion: Motion) -> anyhow::Result<Box<dy
         interval: Duration::from_secs(1) / config.fps.max(1),
         next: Instant::now(),
     };
+    #[cfg(target_os = "macos")]
+    if native_encoder() {
+        return Ok(Box::new(SoftwarePipeline::with_encoder(
+            shared,
+            config,
+            Box::new(|w, h, config| {
+                Ok(Box::new(crate::mac::synthetic::Synthetic::open(
+                    w, h, config,
+                )?))
+            }),
+        )?));
+    }
     Ok(Box::new(SoftwarePipeline::new(shared, config)?))
 }
 

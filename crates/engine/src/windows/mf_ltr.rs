@@ -170,3 +170,33 @@ mod tests {
         assert!(!ltr.recover_from(14));
     }
 }
+
+#[cfg(test)]
+mod hardware_tests {
+    use super::*;
+    #[test]
+    #[ignore]
+    fn hardware_mf_ltr_open() -> Result<()> {
+        let _runtime = super::super::Runtime::new(false)?;
+        let gpu = Gpu::new(&super::super::display::select()?.adapter)?;
+        let config = VideoConfig {
+            width: 640,
+            height: 360,
+            fps: 60,
+            bitrate_kbps: 8000,
+            codec: crate::video::Codec::H264High,
+            color: Default::default(),
+        };
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .try_init();
+        let encoder = Encoder::new(&config, &gpu)?;
+        eprintln!(
+            "{}: hardware={} proven LTR={}",
+            encoder.name,
+            encoder.hardware,
+            encoder.recovers()
+        );
+        Ok(())
+    }
+}

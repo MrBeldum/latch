@@ -388,6 +388,13 @@ uninterrupted and dropped-frame output byte for byte in VideoToolbox and
 FFmpeg, including a lost recovery frame. No Screen Recording permission is
 needed. Unsupported sessions retain IDR recovery.
 
+For a permission-free live host, add `LATCH_TEST_VIDEOTOOLBOX=1` to
+`LATCH_TEST_PATTERN=sweep` when running `serve`. It feeds synthetic NV12
+IOSurfaces to VideoToolbox through the existing CPU picture pipeline. This
+measures conversion plus encode, rather than ScreenCaptureKit or the
+asynchronous capture pipeline. `LATCH_TEST_VIDEO_LOSS=1:8` or `3:8` on
+`view` drops datagram bursts; always use a private test port.
+
 ## Permissions
 
 - **Local network**: macOS 15 may ask; allow it so the wake broadcast can

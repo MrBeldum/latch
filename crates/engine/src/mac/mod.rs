@@ -4,6 +4,7 @@ mod capture;
 mod encoder;
 mod ffi;
 mod input;
+pub(crate) mod synthetic;
 
 use crate::audio::{AudioCapture, CHANNELS, FRAME};
 use crate::input::InputSink;
