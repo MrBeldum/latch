@@ -19,6 +19,9 @@
   triangle was culled).
 - Configure canonical HDR capture and PQ-tagged Main10 on Mac hosts, and add
   colour-math, hardware roundtrip, native EDR and banding measurements.
+- Decoders get the negotiated colour: a ten-bit stream decodes to P010 on
+  VideoToolbox and Media Foundation (a hardware MFT starts on NV12 until the
+  sequence header), and a decoder giving another depth renegotiates the codec.
 
 ## Unreleased — transport workstream
 

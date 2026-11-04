@@ -249,5 +249,38 @@ matching the Windows video processor's `*_LEFT_*` output.
 Still unverified after these fixes: a physical EDR/HDR10 panel (CoreAnimation
 composition was checked through egui's alpha and the EDR layer's values, not
 by photographing a screen), the actual ScreenCaptureKit chroma siting of a
-live HDR capture, and the Windows viewer's full Main10 session (no HEVC
-decoder extension on this PC).
+live HDR capture, and the Windows viewer's full Main10 session (its Main10
+decoder now works; see below, but no live Windows-viewer session was run).
+
+## After merging main (2026-11-04)
+
+Re-run after merging #47 (hardware decode, shared textures, codec fallback),
+#50, #53 (recovery frames), #54 and #56, same machines, port and live
+procedure as above (1280×720, 60 fps, 20 Mbps, idle desktop, ~155 ms RTT).
+Means of the one-second samples:
+
+| Desktop → stream | negotiated | host ms | decode ms | video Mbps | fps |
+| --- | --- | ---: | ---: | ---: | ---: |
+| SDR → SDR8 | 1/1/1, 8-bit | 3.175 | 2.142 | 0.059 | 9.6 |
+| SDR → SDR10 | 1/1/1, 10-bit | 2.987 | 2.281 | 0.022 | 9.6 |
+| HDR → HDR10 | 9/16/9, 10-bit, ST 2086 | 2.942 | 1.513 | 0.021 | 10.1 |
+| HDR → legacy SDR8 | 1/1/1, 8-bit | 3.147 | 1.721 | 0.049 | 10.1 |
+
+Every sample reports no video problem. With `LATCH_TEST_VIDEO_LOSS=25:4` on
+an SDR10 stream, AMF's long-term references still work in P010: 9 losses,
+29.9 recovery frames/min (851 bytes mean) against 19.9 keyframes/min, 3
+losses ended by a keyframe. The first SDR8 attempt after the firewall change
+got no UDP picture; the next three sessions connected normally.
+
+The merged Windows decoder found a hardware HEVC MFT this PC did not expose
+before, which showed that a ten-bit Media Foundation decoder never started:
+the MFT offers only NV12 before the sequence header. NV12 now stands in until
+the stream change selects P010, and the AMF HDR access unit decodes through
+DXVA with P010 luma within tolerance (the first Windows Main10 decode here).
+The Windows HDR10 overlay and HDR desktop → SDR capture checks gave the same
+values as before the merge (scRGB 0.908 / 1.797 / 2.678 / 4.473; SDR
+149 / 203 / 236 / 248). HDR/WCG went 81/0 → 115/2 → 81/0 for each hold; the
+Advanced Color report is byte-identical before and after.
+
+[after-merge/](after-merge/): live transcripts, Windows test logs and the
+Advanced Color reports.

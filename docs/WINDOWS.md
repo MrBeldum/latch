@@ -518,6 +518,10 @@ or ACM settings. Tests must snapshot and restore any display state they
 change; synthetic FP16 probes can test the HDR GPU path without toggling it.
 
 Windows viewing uses P010 from the MF HEVC decoder and an RGB10 swapchain.
+A ten-bit stream opens the decoder with P010 required: before its sequence
+header a hardware MFT offers only NV12, which stands in until the stream
+change after the header selects P010 (CPU readback; shared textures are NV12
+only). Eight-bit streams keep the shared NV12 texture path.
 An HDR display uses DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 for PQ and
 receives HDR10 metadata; SDR Main10 uses G22/709. A PQ stream on an SDR
 display uses the wgpu SDR tone map. Native video windows accept no input;
