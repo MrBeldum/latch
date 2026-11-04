@@ -15,12 +15,21 @@ one `latch-host` executable that also runs the control service and the
 window (`latch-engine` on the sharing side, `latch-stream` on the viewing
 side, `latch-proto` for the wire format, `latch-codec` for the software
 H.264 codec and the audio codec). Video and sound travel over UDP with
-Reed–Solomon forward error correction and a keyframe on loss, inside
-Tailscale's WireGuard. A Mac shares with ScreenCaptureKit and VideoToolbox,
-Windows with Desktop Duplication and the Media Foundation H.264 encoder (the
-GPU's, else Microsoft's, else `latch-codec`), and Linux with X11 and
-`latch-codec`. Sound is 48 kHz stereo, coded losslessly with `lpcm-rice`.
-Nothing else is installed, and no crate in the build compiles C, C++ or
+Reed–Solomon forward error correction inside Tailscale's WireGuard; a frame
+lost anyway costs a small recovery frame where the encoder can make one,
+else a keyframe. A Mac shares with ScreenCaptureKit and VideoToolbox (HEVC
+or H.264), Windows with Desktop Duplication and AMD's AMF HEVC or the GPU's
+Media Foundation encoder (HEVC, AV1 or H.264; Microsoft's H.264, else
+`latch-codec`, if none works), and Linux with X11 Damage and NVENC or
+VA-API where there is a GPU (not yet tested on one), else `latch-codec`.
+Viewers decode AV1, HEVC and H.264 in hardware on a Mac or a Windows PC,
+and H.264 with `latch-codec` on Linux. HEVC streams between Macs and
+Windows PCs carry HDR10 or ten-bit colour when both ends and the display
+can. Latch sets no limits of its own: a stream asks for up to 500 fps,
+1 Gbps and 16384 pixels a side, fitted to what the sharing machine's
+encoder takes. Sound is 48 kHz, stereo, 5.1 or 7.1, coded losslessly with
+`lpcm-rice`; gamepads (with rumble) and, if you turn it on, the viewer's
+microphone go the other way. Nothing else is installed, and no crate in the build compiles C, C++ or
 assembler (`scripts/audit-native.sh` checks). [docs/ENGINE.md](docs/ENGINE.md) has the design and
 [docs/PROTOCOL.md](docs/PROTOCOL.md) the wire format.
 
@@ -42,9 +51,12 @@ machine answers only peers signed in to the same Tailscale account.
    drops a toolbar over the
    picture with the stream details, whether the path is direct or relayed,
    the mouse mode, a **Keys** menu for Ctrl+Alt+Del and friends and what the
-   Command key does, stats, full screen, the PC's power menu, **Stream
-   settings** (the default asks for this screen's own size at 50 Mbps, on
-   every path) and **Disconnect**. Click the picture, or press Ctrl+Alt
+   Command key does, **Stats** (frame rate, bitrate, round trip, loss and
+   latency over the picture's corner; the host key with S), full screen,
+   the PC's power menu, sound, **Stream settings** (Balanced, the default,
+   asks for this screen's own size at its own refresh rate; Competitive for
+   1080p at up to 360 fps; Cinematic for up to 4K at 120; the same on every
+   path) and **Disconnect**. Click the picture, or press Ctrl+Alt
    again, and the toolbar goes away. The clipboard follows you both ways.
 4. Leave the PC on if you want to connect from anywhere. Asleep, Tailscale
    is asleep too: this Mac can wake it only from that PC's own network
