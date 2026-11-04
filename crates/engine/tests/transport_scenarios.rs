@@ -95,18 +95,19 @@ fn transport_scenarios() {
                 tokens = (tokens + rate).min(rate * 2000.0 / fps as f64);
             }
             if ms * fps >= next_frame * 1000 {
+                let keyframe = idr_due.is_some_and(|at| at <= now)
+                    && now - last_idr >= Duration::from_millis(base);
                 let size = (u64::from(congestion::video_budget(
                     controller.budget(),
                     tx.fec_percent(),
                     fec_burst.round() as u8,
                     fps as u32,
                     false,
+                    keyframe,
                 )) * 1000
                     / 8
                     / fps) as usize;
                 let data = vec![0x5a; size];
-                let keyframe = idr_due.is_some_and(|at| at <= now)
-                    && now - last_idr >= Duration::from_millis(base);
                 if keyframe {
                     idr_due = None;
                     last_idr = now;
@@ -219,7 +220,7 @@ fn transport_scenarios() {
                     Duration::from_millis(50),
                 );
                 tx.set_fec_burst(fec_burst.round() as u8);
-                tx.set_fec_percent(latch_proto::video::fec_percent_for(
+                tx.set_fec_percent(latch_proto::video::transport_fec_percent(
                     fec_loss,
                     controller.base_rtt(),
                 ));

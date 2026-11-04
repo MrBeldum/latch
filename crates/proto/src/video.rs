@@ -42,6 +42,25 @@ pub fn fec_percent_for(loss_pct: f32, rtt: Option<std::time::Duration>) -> u8 {
     fec_percent_for_loss(loss_pct).max(floor)
 }
 
+/// Production path percentage; burst and protected-frame floors apply separately.
+pub fn transport_fec_percent(loss_pct: f32, rtt: Option<Duration>) -> u8 {
+    fec_percent_for(loss_pct, rtt).min(30)
+}
+
+/// Shared rounded parity layout for reservation and packetization.
+pub fn fec_parity_shards(data: usize, percent: u8, burst: u8, protected: bool) -> usize {
+    let percent = percent.max(if protected { 30 } else { 0 });
+    (data * usize::from(percent))
+        .div_ceil(100)
+        .max(if protected { 4 } else { 1 })
+        .max(if burst > 0 {
+            (usize::from(burst) + 2).min(data)
+        } else {
+            0
+        })
+        .min(255 - data)
+}
+
 /// Fast attack, two-second decay for parity feedback. Brief radio bursts must
 /// not lose their protection on the very next clean feedback window.
 pub fn fec_loss_sample(previous: f32, loss: f32, elapsed: Duration) -> f32 {
@@ -174,14 +193,7 @@ impl Packetizer {
             .scan(0, |first, block| {
                 let data = total / blocks + usize::from(block < total % blocks);
                 let protected = frame.keyframe || recovery != 0;
-                let percent = self.fec_percent.max(if protected { 30 } else { 0 });
-                let burst = usize::from(self.fec_burst);
-                let minimum = if protected { 4 } else { 1 };
-                let parity = (data * percent as usize)
-                    .div_ceil(100)
-                    .max(minimum)
-                    .max(if burst > 0 { (burst + 2).min(data) } else { 0 })
-                    .min(255 - data);
+                let parity = fec_parity_shards(data, self.fec_percent, self.fec_burst, protected);
                 let start = *first;
                 *first += data;
                 Some((start, data, parity))

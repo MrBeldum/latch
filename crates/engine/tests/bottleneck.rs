@@ -229,7 +229,7 @@ fn saturated_ten_megabit_fifo_converges_and_recovers_with_fake_clock() {
     }
     let mean = settled.iter().sum::<u32>() / settled.len() as u32;
     assert!((8_000..=10_500).contains(&mean), "did not converge: {mean}");
-    assert!(congestion::video_budget(10_000, 10, 0, 120, false) < 10_000);
+    assert!(congestion::video_budget(10_000, 10, 0, 120, false, false) < 10_000);
     assert!(pressured >= 4, "must exercise sustained overload");
     assert!(
         clean >= 8,

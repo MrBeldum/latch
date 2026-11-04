@@ -5,7 +5,7 @@ pub(crate) struct Pacer {
     tokens: f64,
     updated: Instant,
 }
-const BURST: f64 = (16 * (latch_proto::MAX_DATAGRAM + 80)) as f64;
+const BURST: f64 = (2 * (latch_proto::MAX_DATAGRAM + 80)) as f64;
 impl Pacer {
     pub(crate) fn new(now: Instant) -> Self {
         Self {
@@ -19,10 +19,10 @@ impl Pacer {
             self.updated = now;
             return Duration::ZERO;
         }
-        let rate = f64::from(kbps.max(1)) * 1000.0 / 8.0 * 2.5;
+        let rate = f64::from(kbps.max(1)) * 1000.0 / 8.0;
         self.tokens = (self.tokens
             + now.saturating_duration_since(self.updated).as_secs_f64() * rate)
-            .min(BURST);
+            .min(BURST.max(rate * 0.001 + (latch_proto::MAX_DATAGRAM + 80) as f64));
         self.updated = now;
         let bytes = (bytes + 80) as f64; // IP, UDP and tunnel allowance
         if self.tokens >= bytes {
@@ -51,7 +51,7 @@ mod tests {
         let mut p = Pacer::new(now);
         for index in 0..500 {
             let delay = p.delay(now, 1200, 20_000);
-            if index < 16 {
+            if index < 2 {
                 assert!(delay.is_zero());
             }
             now += delay;

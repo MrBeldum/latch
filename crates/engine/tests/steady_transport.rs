@@ -65,7 +65,8 @@ fn transport_scenarios() {
             delay: Duration::from_millis(base / 2),
         };
         let start = Instant::now();
-        let mut pending = VecDeque::<Vec<u8>>::new();
+        let mut pending = VecDeque::<(Vec<u8>, bool, bool)>::new();
+        let mut pending_frames = 0;
         let mut pacer = pacing::Pacer::new(start);
         let mut controller = congestion::Controller::new(ceiling, start);
         let mut link = Link::new(impairment, 17);
@@ -93,13 +94,17 @@ fn transport_scenarios() {
             let now = start + Duration::from_millis(ms);
             let capacity = cap;
             link.set_bandwidth(capacity, Duration::from_millis(40));
-            if ms * fps >= next_frame * 1000 {
+            // Two queued encoded frames plus the train currently being sent.
+            if ms * fps >= next_frame * 1000 && pending_frames < 3 {
+                let keyframe = idr_due.is_some_and(|at| at <= now)
+                    && now - last_idr >= Duration::from_millis(base);
                 let size = (u64::from(congestion::video_budget(
-                    controller.budget(),
+                    controller.encoder_wire_budget(fps as u32),
                     tx.fec_percent(),
                     fec_burst.round() as u8,
                     fps as u32,
                     false,
+                    keyframe,
                 )) * 1000
                     / 8
                     / fps) as usize;
@@ -109,8 +114,6 @@ fn transport_scenarios() {
                     size
                 };
                 let data = vec![0x5a; size];
-                let keyframe = idr_due.is_some_and(|at| at <= now)
-                    && now - last_idr >= Duration::from_millis(base);
                 if keyframe {
                     idr_due = None;
                     last_idr = now;
@@ -129,21 +132,31 @@ fn transport_scenarios() {
                                 parity_bytes += (dg.len() + 80) as u64;
                             }
                         }
-                        pending.push_back(dg.to_vec());
+                        pending.push_back((dg.to_vec(), keyframe, false));
                     },
                 );
-                next_frame += 1;
+                pending.back_mut().unwrap().2 = true;
+                pending_frames += 1;
+                next_frame = ms * fps / 1000 + 1;
             }
-            while let Some(dg) = pending.front() {
-                let pace = if controller.pacing() {
-                    controller.budget()
+            while let Some((dg, protected, _)) = pending.front() {
+                let pace = controller.pace_kbps();
+                let pace = if *protected {
+                    if pace == 0 {
+                        controller.budget()
+                    } else {
+                        pace.min(controller.budget())
+                    }
                 } else {
-                    0
+                    pace
                 };
                 if !pacer.delay(now, dg.len(), pace).is_zero() {
                     break;
                 }
-                let dg = pending.pop_front().unwrap();
+                let (dg, _, last) = pending.pop_front().unwrap();
+                if last {
+                    pending_frames -= 1;
+                }
                 sent += dg.len() + 80;
                 link.send(now, &dg);
             }
@@ -246,7 +259,7 @@ fn transport_scenarios() {
                     Duration::from_millis(interval),
                 );
                 tx.set_fec_burst(fec_burst.round() as u8);
-                tx.set_fec_percent(latch_proto::video::fec_percent_for(
+                tx.set_fec_percent(latch_proto::video::transport_fec_percent(
                     fec_loss,
                     controller.base_rtt(),
                 ));
@@ -282,9 +295,14 @@ fn transport_scenarios() {
         }
         if name == "idle_motion" {
             assert_eq!(minimum, ceiling, "idle encoder must retain the budget");
+            assert_eq!(
+                controller.encoder_wire_budget(fps as u32),
+                ceiling,
+                "resume must revalidate the full target"
+            );
             assert!(
-                full_rate_at.is_some_and(|ms| ms < 50),
-                "motion must use the budget immediately"
+                full_rate_at.is_some_and(|ms| ms <= 100),
+                "restart probe must deliver full-rate frames within 100 ms"
             );
         }
         // Main's controller spreads 1.7/3.5/7.1 Mbps at these caps (10 ms,
