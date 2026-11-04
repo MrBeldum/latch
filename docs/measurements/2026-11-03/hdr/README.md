@@ -116,9 +116,9 @@ view 100.106.23.40 --port 47895 --width 1280 --height 720 --fps 60 \
 cargo test --locked -p latch-engine --lib hold_hdr_display_for_live_test -- --ignored --nocapture
 ```
 
-[Live summary](live-summary.json), [SDR8](hdr-live-sdr8.log),
-[SDR10](hdr-live-sdr10.log), [HDR10](hdr-live-hdr10.log),
-[HDR → SDR8](hdr-live-hdr-to-sdr8.log),
+[Live summary](live-summary.json), [SDR8](hdr-live-sdr8.txt),
+[SDR10](hdr-live-sdr10.txt), [HDR10](hdr-live-hdr10.txt),
+[HDR → SDR8](hdr-live-hdr-to-sdr8.txt),
 [HDR state restoration](windows-hdr-state-test.txt),
 [legacy SDR state restoration](windows-hdr-to-sdr-state-test.txt).
 
