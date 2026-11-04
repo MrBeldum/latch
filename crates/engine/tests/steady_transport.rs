@@ -171,11 +171,11 @@ fn transport_scenarios() {
             }
             // The server's pacer and per-frame pacing policy.
             while let Some((dg, protected, _)) = pending.front() {
-                let pace = congestion::frame_pace_kbps(
-                    controller.pace_kbps(),
-                    controller.encoder_wire_budget(),
-                    *protected,
-                );
+                let pace = if *protected {
+                    controller.protected_pace_kbps()
+                } else {
+                    controller.pace_kbps()
+                };
                 if !pacer.delay(now, dg.len(), pace).is_zero() {
                     break;
                 }

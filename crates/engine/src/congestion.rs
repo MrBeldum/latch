@@ -107,6 +107,13 @@ impl Controller {
         self.budget
     }
 
+    /// The target the budget returns to: the goal while restarting after
+    /// idle, else the budget. Reported to the viewer; the encoder's actual
+    /// share is [`Self::encoder_wire_budget`].
+    pub(crate) fn target(&self) -> u32 {
+        self.goal.unwrap_or(self.budget).max(self.budget)
+    }
+
     pub(crate) fn observe_sent(&mut self, kbps: u32) {
         self.sent_kbps = Some(kbps);
         self.app_limited_windows = if kbps < self.encoder_wire_budget() * 4 / 5 {
@@ -131,6 +138,22 @@ impl Controller {
             self.encoder_wire_budget().saturating_mul(5) / 2
         } else {
             0
+        }
+    }
+
+    /// Pacer rate for keyframes and recovery frames. They carry 30% parity
+    /// and usually follow loss, when a bottleneck FIFO is least able to
+    /// absorb a burst: once the path has shown one (a measured capacity,
+    /// congestion pacing, or an idle restart) spread them at 1.5x the
+    /// encoder's share (simulated FIFO paths lose about a third fewer
+    /// frames; 2.5x builds queue at 250 ms report cadence). A clean,
+    /// unconstrained path sends them at once, as before.
+    pub(crate) fn protected_pace_kbps(&self) -> u32 {
+        let protect = self.encoder_wire_budget().saturating_mul(3) / 2;
+        match self.pace_kbps() {
+            0 if self.capacity.is_some() => protect,
+            0 => 0,
+            pace => pace.min(protect),
         }
     }
 
@@ -245,7 +268,10 @@ impl Controller {
         }
         // A small probe needs a smaller queue threshold than an emergency
         // cut. Wait for its own feedback before increasing again.
-        let probe_queued = self.probe.is_some() && delay > 3.0f32.max(self.jitter * 2.0);
+        // Restart steps after idle use the ordinary threshold: they run on
+        // app-limited streams whose radio jitter was never learned.
+        let probe_queued =
+            self.probe.is_some() && self.goal.is_none() && delay > 3.0f32.max(self.jitter * 2.0);
         queued |= probe_queued;
         let old = self.budget;
         let underfilled = self
@@ -364,6 +390,15 @@ impl Controller {
             .trusted
             .is_some_and(|rate| u64::from(sent) * 5 >= u64::from(rate) * 3);
         if !resumed && self.application_limited() && sent.saturating_mul(2) < self.budget {
+            if self.idle_since.is_none() {
+                // Idle again mid-restart: the target stays the goal, and
+                // only the rate validated so far is trusted.
+                if let Some(goal) = self.goal.filter(|goal| self.budget < *goal) {
+                    let held = self.probe.take().map_or(self.budget, |(before, _)| before);
+                    self.trusted = Some(held.min(self.budget));
+                    self.budget = goal;
+                }
+            }
             let (since, peak) = self.idle_since.get_or_insert((now, 0));
             *peak = (*peak).max(sent);
             let (since, peak) = (*since, *peak);
@@ -530,18 +565,21 @@ impl Controller {
                 // Bound a first probe's excess to a few ms of queue even on
                 // long RTT paths; only one increase is in flight at a time.
                 let base = (0.0025 / horizon.as_secs_f64()).clamp(0.01, 0.05);
-                if let Some((_, at)) = self.probe {
+                if let Some((before, at)) = self.probe {
                     if now.duration_since(at) >= horizon {
                         // The probe survived a feedback round trip: its rate
                         // holds, and the next probe may reach twice as far.
-                        if !app_limited {
+                        if self.goal.is_some() {
+                            // A restart step proves itself only if the
+                            // encoder used it; otherwise step back.
+                            if self.sent_kbps.unwrap_or(0).saturating_mul(2) >= self.budget {
+                                self.capacity = Some(self.budget);
+                            } else {
+                                self.budget = before;
+                            }
+                        } else if !app_limited {
                             self.capacity = Some(self.budget);
                             self.step = (self.step.max(base) * 2.0).min(1.0);
-                        } else if self.goal.is_some() {
-                            // A restart step the encoder half used proves
-                            // only what it carried; bound the climb by that.
-                            let sent = self.sent_kbps.unwrap_or(0).min(self.budget);
-                            self.capacity = Some(self.capacity.unwrap_or(0).max(sent));
                         }
                         self.probe = None;
                     }
@@ -586,20 +624,6 @@ impl Controller {
             }
         }
         self.budget != old
-    }
-}
-
-/// Pacer rate for one frame. Keyframes and recovery frames carry 30% parity
-/// and usually follow loss, when a FIFO is least able to absorb a burst: pace
-/// them at 1.5x the encoder's wire budget even on a clean path (simulated
-/// FIFO paths lose about a third fewer frames; 2.5x builds queue at 250 ms
-/// report cadence). Other frames follow the controller.
-pub(crate) fn frame_pace_kbps(pace: u32, wire_budget: u32, protected: bool) -> u32 {
-    let protect = wire_budget.saturating_mul(3) / 2;
-    match (protected, pace) {
-        (false, _) => pace,
-        (true, 0) => protect,
-        (true, pace) => pace.min(protect),
     }
 }
 
@@ -780,6 +804,29 @@ mod tests {
         assert_eq!(c.budget(), 50_000);
         assert!(doublings >= 4);
         assert_eq!(c.pace_kbps(), 0);
+        // A burst that ends mid-restart (a few key presses) leaves the goal
+        // as the budget and only the validated rate trusted.
+        for _ in 0..80 {
+            t += Duration::from_millis(50);
+            c.observe_sent(0);
+            c.update(t, &clean(0), 10.0, 0.0);
+        }
+        let trust = c.encoder_wire_budget();
+        let mut validated = trust;
+        for _ in 0..3 {
+            t += Duration::from_millis(50);
+            validated = validated.max(c.encoder_wire_budget().min(c.budget()));
+            c.observe_sent(c.encoder_wire_budget());
+            c.update(t, &clean(c.encoder_wire_budget()), 10.0, 0.0);
+        }
+        assert!(c.budget() < 50_000, "resumed below the goal");
+        for _ in 0..10 {
+            t += Duration::from_millis(50);
+            c.observe_sent(0);
+            c.update(t, &clean(0), 10.0, 0.0);
+        }
+        assert_eq!(c.budget(), 50_000, "idle restores the goal");
+        assert!(c.encoder_wire_budget() <= validated);
     }
 
     #[test]
