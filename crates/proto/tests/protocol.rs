@@ -758,6 +758,7 @@ fn test_5_wire_fuzz_random_and_mutations() {
 fn test_6_control_messages_roundtrip_and_errors() {
     let messages = vec![
         Message::Accept(Accept {
+            color: Default::default(),
             session: 0x12345678,
             token: "0123456789abcdef0123456789abcdef".into(),
             codec: Codec::Hevc,
@@ -1055,6 +1056,7 @@ fn startup_grace_bounds_silence_and_allows_a_healthy_idr_to_finish() {
 fn av1_offer_is_additive_and_unknown_codecs_still_fall_through() {
     use latch_proto::control::StreamRequest;
     let mut request: serde_json::Value = serde_json::to_value(StreamRequest {
+        color: Default::default(),
         protocol: 1,
         width: 1920,
         height: 1080,

@@ -26,6 +26,7 @@ fn a_cold_software_host_does_not_take_4k_at_the_display_refresh_rate() {
     .unwrap();
     let peer = "127.0.0.1:12345".parse().unwrap();
     let request = StreamRequest {
+        color: Default::default(),
         protocol: latch_proto::PROTOCOL,
         width: 3840,
         height: 2160,

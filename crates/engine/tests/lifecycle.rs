@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 fn request(name: &str) -> StreamRequest {
     StreamRequest {
+        color: Default::default(),
         protocol: latch_proto::PROTOCOL,
         width: 64,
         height: 64,
@@ -128,6 +129,7 @@ fn post_accept_end_close_and_missing_media_are_reported_as_failures() {
             control::write_message(
                 &mut tcp,
                 &Message::Accept(Accept {
+                    color: Default::default(),
                     session: 123,
                     token: control::token_hex(&[7; 16]),
                     codec: Codec::H264Baseline,
