@@ -656,6 +656,7 @@ fn test_5_wire_fuzz_random_and_mutations() {
     let shard_bytes = vec![0xee; 500];
     let shard = VideoShard {
         keyframe: true,
+        recovery: 0,
         host_delay: 15,
         frame: 100,
         frame_len: 2000,
@@ -779,6 +780,7 @@ fn test_6_control_messages_roundtrip_and_errors() {
             gamepads: 4,
             gamepad_kinds: vec![latch_proto::gamepad::PadKind::Xbox],
             gamepad_problem: String::new(),
+            reference_invalidation: false,
         }),
         Message::End(End {
             code: end::CAPTURE_FAILED,
@@ -1126,6 +1128,7 @@ fn av1_offer_is_additive_and_unknown_codecs_still_fall_through() {
         name: String::new(),
         cursor: false,
         gamepads: false,
+        reference_invalidation: false,
         audio_channels: 0,
         mic: false,
     })

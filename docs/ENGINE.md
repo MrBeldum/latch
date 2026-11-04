@@ -43,7 +43,9 @@ cpal ◀─ jitter buffer ◀─ decode
 Input (redundant until acked) ──────────────▶ inject (SendInput / CGEvent / XTest)
 Pad snapshots (newest, until acked) ────────▶ virtual pads (ViGEmBus / uinput)
                       ◀── PadFeedback ──────  the game's rumble and lights
-KeyframeRequest on loss ────────────────────▶ next frame is IDR
+RecoveryRequest on loss ────────────────────▶ next frame predicts from the last delivered
+                      ◀── RecoveryAck ──────  (or refused: IDR)
+KeyframeRequest (fallback, older hosts) ────▶ next frame is IDR
 ```
 
 | Crate | What | Platform code |
@@ -297,11 +299,17 @@ through `libc`.
   account, or the tailnet of a tagged host) already guards `/v1/update`,
   which replaces the executable. A stream needs no stronger check. The
   session token travels inside WireGuard.
-* **UDP + FEC + keyframe on loss**, as Moonlight did, without RTSP, ENet or
-  a second encryption layer. Input is reliable by redundancy, not timers.
+* **UDP + FEC + a recovery frame on loss**, as GeForce NOW does, keyframe
+  where the encoder cannot, without RTSP, ENet or a second encryption layer.
+  Input is reliable by redundancy, not timers.
 * **Newest frame wins** on the viewer (`FrameSlot`), every frame is decoded
   (P-frames depend on each other), and a lost frame stops decoding until a
-  keyframe.
+  recovery frame that predicts from the last frame delivered, or a
+  keyframe. The software encoder makes one by rolling back to that picture
+  (bit-exact), AMF from a long-term reference; the others answer with an
+  IDR. Recovery maps pair pipeline generation with picture identity, so
+  queued frames cannot alias a reference after capture reconstruction
+  ([PROTOCOL.md](PROTOCOL.md#recoveryrequest-14-and-recoveryack-15)).
 * **Frames on a fixed grid.** Every pipeline takes frames on a grid 1%
   faster than the asked-for rate (`video::Pacer`): capture and encode time
   comes out of the interval instead of adding to it, a screen refreshing at

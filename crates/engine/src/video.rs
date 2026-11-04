@@ -24,6 +24,15 @@ pub struct EncodedVideo {
     pub keyframe: bool,
     /// When the picture was captured.
     pub captured: Instant,
+    /// The pipeline's number for this frame, which
+    /// [`VideoPipeline::recover_from`] takes; 0 where it recovers nothing.
+    pub picture: u64,
+    /// Assigned by the session encoder thread before enqueueing. Recovery
+    /// identities are (generation, picture), including after capture reopens.
+    pub generation: u64,
+    /// A recovery frame: it predicts only from this picture (see
+    /// [`VideoPipeline::recover_from`]).
+    pub recovery: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -56,6 +65,23 @@ pub trait VideoPipeline: Send {
     /// without a change. With `keyframe`, the next frame is an IDR and comes
     /// within one frame interval even if nothing changed.
     fn next(&mut self, keyframe: bool, idle: Duration) -> anyhow::Result<EncodedVideo>;
+
+    /// Whether this encoder can make recovery frames at all, so the host
+    /// offers reference invalidation (`docs/PROTOCOL.md`).
+    fn recovers(&self) -> bool {
+        false
+    }
+
+    /// After a loss: a coming frame (the next one where the encoder can)
+    /// predicts only from `picture` (an [`EncodedVideo::picture`]) and
+    /// says so in [`EncodedVideo::recovery`], so a decoder that holds
+    /// that frame and nothing after it decodes it. False when the encoder
+    /// cannot (it no longer holds that picture, or has no reference
+    /// control): the caller sends a keyframe instead.
+    fn recover_from(&mut self, picture: u64) -> bool {
+        let _ = picture;
+        false
+    }
 
     /// Takes effect from the next frame where the encoder allows.
     fn set_bitrate(&mut self, kbps: u32) {

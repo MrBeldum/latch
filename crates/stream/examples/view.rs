@@ -446,6 +446,7 @@ fn main() -> anyhow::Result<()> {
         "seconds": lines,
         "pads": { "asked": pads, "host_slots": session.input().pad_slots(),
                   "problem": session.pad_problem(), "log": pad_log.lock().clone() },
+        "recovery": recovery_summary(&session.recovery_log(), elapsed),
     });
     println!("{}", serde_json::to_string_pretty(&summary)?);
     session.stop();
@@ -459,4 +460,27 @@ fn main() -> anyhow::Result<()> {
     );
     eprintln!("stream stopped in {:?}", start.elapsed());
     Ok(())
+}
+
+/// Losses and how they ended: keyframes and recovery frames a minute,
+/// their sizes, and how long each loss held the picture.
+fn recovery_summary(log: &latch_stream::RecoveryLog, seconds: f64) -> serde_json::Value {
+    let pct = |mut v: Vec<f32>, p: f64| {
+        v.sort_by(f32::total_cmp);
+        v.get(((v.len() as f64 - 1.0) * p).round() as usize)
+            .copied()
+    };
+    let resume: Vec<f32> = log.losses.iter().map(|l| l.resume_ms).collect();
+    let freeze: Vec<f32> = log.losses.iter().map(|l| l.freeze_ms).collect();
+    let minutes = seconds / 60.0;
+    serde_json::json!({
+        "losses": log.losses.len(),
+        "ended_by_keyframe": log.losses.iter().filter(|l| l.keyframe).count(),
+        "keyframes_per_min": log.keyframes as f64 / minutes,
+        "recovery_frames_per_min": log.recovery_frames as f64 / minutes,
+        "keyframe_bytes_mean": log.keyframe_bytes.checked_div(log.keyframes),
+        "recovery_bytes_mean": log.recovery_bytes.checked_div(log.recovery_frames),
+        "resume_ms": { "p50": pct(resume.clone(), 0.5), "p95": pct(resume, 0.95) },
+        "freeze_ms": { "p50": pct(freeze.clone(), 0.5), "p95": pct(freeze, 0.95) },
+    })
 }

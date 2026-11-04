@@ -16,7 +16,9 @@ use latch_proto::control::{self, Accept, Codec, Message, Report, StreamRequest};
 use latch_proto::gamepad::{Feedback, LatestReceiver, PadKind, PadSender, PadState};
 use latch_proto::input::{Event as InputEvent, InputSender};
 use latch_proto::rtt::RttEstimator;
-use latch_proto::video::{InFrame, KeyframeRequests, Reassembled, Reassembler, ReassemblyStats};
+use latch_proto::video::{
+    InFrame, KeyframeRequests, Reassembled, Reassembler, ReassemblyStats, Recovery,
+};
 use latch_proto::wire::{self, Datagram};
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
@@ -195,6 +197,128 @@ pub struct Stats {
     pub frame_jitter_ms: f32,
 }
 
+/// Every loss of the session and how it ended, for tools that measure
+/// recovery ([`Session::recovery_log`]).
+#[derive(Debug, Clone, Default)]
+pub struct RecoveryLog {
+    /// Keyframes and recovery frames delivered, and their bytes.
+    pub keyframes: u64,
+    pub keyframe_bytes: u64,
+    pub recovery_frames: u64,
+    pub recovery_bytes: u64,
+    /// Oldest first; at most [`RecoveryLog::KEPT`].
+    pub losses: Vec<LossEvent>,
+}
+
+impl RecoveryLog {
+    pub const KEPT: usize = 100_000;
+}
+
+/// One loss, from the frame given up on to the frame that ended it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LossEvent {
+    /// From the loss being declared to the next frame delivered.
+    pub resume_ms: f32,
+    /// From the last frame delivered before the loss to the next one:
+    /// how long the picture stood still.
+    pub freeze_ms: f32,
+    /// Ended by a keyframe rather than a recovery frame.
+    pub keyframe: bool,
+    /// The size of the frame that ended it.
+    pub bytes: usize,
+}
+
+/// Loss bookkeeping for [`RecoveryLog`].
+#[derive(Default)]
+struct Losses {
+    /// When the current loss was declared, and the delivery before it.
+    open: Option<(Instant, Option<Instant>)>,
+    last_delivery: Option<Instant>,
+}
+
+impl Losses {
+    fn lost(&mut self, now: Instant) {
+        if self.open.is_none() {
+            self.open = Some((now, self.last_delivery));
+        }
+    }
+
+    fn delivered(&mut self, log: &Mutex<RecoveryLog>, frame: &InFrame, now: Instant) {
+        let ended = self.open.take();
+        self.last_delivery = Some(now);
+        if !frame.keyframe && !frame.recovery && ended.is_none() {
+            return;
+        }
+        let mut log = log.lock();
+        if frame.keyframe {
+            log.keyframes += 1;
+            log.keyframe_bytes += frame.data.len() as u64;
+        }
+        if frame.recovery {
+            log.recovery_frames += 1;
+            log.recovery_bytes += frame.data.len() as u64;
+        }
+        if let Some((at, before)) = ended.filter(|_| log.losses.len() < RecoveryLog::KEPT) {
+            let ms = |t: Instant| now.saturating_duration_since(t).as_secs_f32() * 1000.0;
+            log.losses.push(LossEvent {
+                resume_ms: ms(at),
+                freeze_ms: before.map_or(0.0, ms),
+                keyframe: frame.keyframe,
+                bytes: frame.data.len(),
+            });
+        }
+    }
+}
+
+/// Test knob: `LATCH_TEST_VIDEO_LOSS=<percent>[:<burst>]` drops that share
+/// of the host's video datagrams on arrival, `burst` in a row (default 1),
+/// so loss recovery can be measured on a clean network. Seeded, so runs
+/// compare.
+struct TestLoss {
+    chance: f64,
+    burst: u32,
+    left: u32,
+    seed: u64,
+}
+
+impl TestLoss {
+    fn from_env() -> Option<Self> {
+        let value = std::env::var("LATCH_TEST_VIDEO_LOSS").ok()?;
+        let (percent, burst) = value.split_once(':').unwrap_or((&value, "1"));
+        let percent: f64 = percent.trim().parse().ok()?;
+        let burst: u32 = burst.trim().parse().ok().filter(|&b| b > 0)?;
+        (percent > 0.0).then(|| Self {
+            // A burst starts this often, so the share dropped is `percent`.
+            chance: percent / 100.0 / f64::from(burst),
+            burst,
+            left: 0,
+            seed: 0x9e37_79b9_7f4a_7c15,
+        })
+    }
+
+    fn drops(&mut self) -> bool {
+        if self.left > 0 {
+            self.left -= 1;
+            return true;
+        }
+        self.seed ^= self.seed << 13;
+        self.seed ^= self.seed >> 7;
+        self.seed ^= self.seed << 17;
+        let draw = (self.seed >> 11) as f64 / (1u64 << 53) as f64;
+        if draw < self.chance {
+            self.left = self.burst - 1;
+            return true;
+        }
+        false
+    }
+}
+
+/// Test knob: `LATCH_TEST_NO_RECOVERY=1` asks for keyframes after a loss,
+/// as viewers before reference invalidation did.
+fn recovery_wanted() -> bool {
+    std::env::var_os("LATCH_TEST_NO_RECOVERY").is_none()
+}
+
 #[derive(Default)]
 struct VideoHealth {
     connected_at: Option<Instant>,
@@ -281,6 +405,7 @@ struct Inner {
     wake: Box<dyn Fn() + Send + Sync>,
     frames: Arc<FrameSlot>,
     stats: Mutex<Stats>,
+    recovery: Mutex<RecoveryLog>,
     /// Persists across the receive thread's periodic player description.
     host_audio_problem: Mutex<String>,
     video_health: Mutex<VideoHealth>,
@@ -350,6 +475,7 @@ impl Inner {
             wake,
             frames,
             stats: Mutex::new(Stats::default()),
+            recovery: Mutex::default(),
             host_audio_problem: Mutex::new(String::new()),
             mic: Mutex::new(None),
             video_health: Mutex::new(VideoHealth::default()),
@@ -600,6 +726,11 @@ impl Session {
         stats
     }
 
+    /// Every loss so far and how it ended.
+    pub fn recovery_log(&self) -> RecoveryLog {
+        self.inner.recovery.lock().clone()
+    }
+
     /// When the newest picture was published to the [`FrameSlot`]: the
     /// renderer takes how long it waited from this.
     pub fn published_at(&self) -> Option<Instant> {
@@ -732,6 +863,7 @@ fn attempt(inner: &Arc<Inner>, server: &Server, settings: &Settings) {
         name: settings.name.clone(),
         cursor: settings.cursor,
         gamepads: settings.gamepads,
+        reference_invalidation: recovery_wanted(),
         mic: settings.mic,
         // 5.1 or 7.1 when this machine's speakers have them; stereo is the
         // field's absence, which every host understands.
@@ -1165,6 +1297,9 @@ fn receive(
         |format| AudioReceiver::with_format(session, format.frame_samples, format.rate),
     );
     let mut keyframes = KeyframeRequests::new();
+    let mut recovery = accept.reference_invalidation.then(Recovery::new);
+    let mut losses = Losses::default();
+    let mut test_loss = TestLoss::from_env();
     let mut feedback = LatestReceiver::new();
     let mut rtt = RttEstimator::new();
     let mut media_seen = false;
@@ -1217,6 +1352,16 @@ fn receive(
             if from.ip() == host.ip() {
                 if let Ok(datagram) = wire::parse(bytes) {
                     if datagram.session() == session {
+                        if matches!(datagram, Datagram::Video { .. })
+                            && test_loss.as_mut().is_some_and(TestLoss::drops)
+                        {
+                            return;
+                        }
+                        if let (Datagram::RecoveryAck { ack, .. }, Some(r)) =
+                            (&datagram, recovery.as_mut())
+                        {
+                            r.ack(*ack, Instant::now());
+                        }
                         inner.heard();
                         handle(
                             inner,
@@ -1238,6 +1383,7 @@ fn receive(
                             &mut keyframes,
                             &mut throughput,
                             &mut arrivals,
+                            &mut losses,
                             Instant::now(),
                         );
                     }
@@ -1254,6 +1400,11 @@ fn receive(
                 Ok((n, from)) if from.ip() == host.ip() => {
                     if let Ok(datagram) = wire::parse(&buf[..n]) {
                         if datagram.session() == session {
+                            if let (Datagram::RecoveryAck { ack, .. }, Some(r)) =
+                                (&datagram, recovery.as_mut())
+                            {
+                                r.ack(*ack, Instant::now());
+                            }
                             inner.heard();
                             handle(
                                 inner,
@@ -1299,9 +1450,30 @@ fn receive(
             &mut keyframes,
             &mut throughput,
             &mut arrivals,
+            &mut losses,
             now,
         );
-        let waiting = reassembler.needs_keyframe(accepted, now) || inner.queue.lock().want_keyframe;
+        let lost = reassembler.waiting_for_keyframe();
+        if let Some(r) = recovery.as_mut() {
+            if let Some(request) = r.due(
+                lost,
+                reassembler.last_delivered(),
+                reassembler.next_expected(),
+                reassembler.newest_seen(),
+                now,
+                rtt.srtt(),
+            ) {
+                wire::write_recovery_request(&mut out, session, &request);
+                let _ = udp.send_to(&out, host);
+            }
+        }
+        // With recovery frames, a loss asks for a keyframe only once the
+        // host could not recover it.
+        let waiting = (reassembler.needs_keyframe(accepted, now)
+            && recovery
+                .as_ref()
+                .is_none_or(|r| r.wants_keyframe() || reassembler.last_delivered().is_none()))
+            || inner.queue.lock().want_keyframe;
         if keyframes.due(waiting, now, rtt.srtt()) {
             wire::write_keyframe_request(
                 &mut out,
@@ -1401,11 +1573,13 @@ fn hand_off_video(
     keyframes: &mut KeyframeRequests,
     throughput: &mut Throughput,
     arrivals: &mut Arrivals,
+    losses: &mut Losses,
     now: Instant,
 ) {
     while let Some(event) = reassembler.poll(now) {
         match event {
             Reassembled::Frame(frame) => {
+                losses.delivered(&inner.recovery, &frame, now);
                 throughput.frame(&frame);
                 arrivals.frame(now);
                 let mut q = inner.queue.lock();
@@ -1426,6 +1600,7 @@ fn hand_off_video(
                 inner.queue_cv.notify_one();
             }
             Reassembled::Lost { frame } => {
+                losses.lost(now);
                 tracing::debug!("video frame {frame} lost");
                 // Perhaps the keyframe asked for: ask again.
                 keyframes.lost();
@@ -2013,6 +2188,7 @@ mod tests {
             frame: 1,
             data: vec![0, 0, 0, 1],
             keyframe: true,
+            recovery: false,
             host_delay: 0,
             assembly: Duration::ZERO,
         };
@@ -2056,6 +2232,7 @@ mod tests {
                     frame,
                     data: vec![0, 0, 0, 1],
                     keyframe: true,
+                    recovery: false,
                     host_delay: 0,
                     assembly: Duration::ZERO,
                 },

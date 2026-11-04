@@ -14,5 +14,5 @@ mod speakers;
 pub mod video;
 
 pub use latch_proto::control::Codec;
-pub use session::{Event, Input, Server, Session, Settings, Stats};
+pub use session::{Event, Input, LossEvent, RecoveryLog, Server, Session, Settings, Stats};
 pub use video::{Frame, FrameSlot};

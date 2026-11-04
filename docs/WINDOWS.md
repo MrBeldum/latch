@@ -226,6 +226,22 @@ on hardware encoders. Four cached NV12 textures and their views are reused.
   or 500 Mbps; MF's u32 bits/sec representation and the encoder's own
   accepted configuration bound the target. Transport overhead reservation
   and congestion adaptation still apply.
+- **Loss recovery.** AMF HEVC keeps four long-term references, marking
+  one picture every fps/30 frames round robin. After a loss the next frame
+  predicts only from the newest one at or before the viewer's last
+  delivered frame (`HevcForceLTRReferenceBitfield`); the slots it does not
+  use are dropped, as AMF's default LTR mode does, and an IDR forgets them
+  all. With none left the host sends an IDR. Measured RX 6600 → Mac
+  (VideoToolbox HEVC): recovery frames of 0.8–6 kB where the IDR was
+  16–18 kB, no decode errors ([measurements](measurements/2026-11-03/rfi/README.md)).
+  A moving 640×360 hardware test also compares uninterrupted decoding
+  with four loss/recovery episodes across LTR slot reuse: all 112 delivered
+  pictures match byte for byte in FFmpeg
+  ([commands](measurements/2026-11-03/rfi/review-fixes/README.md)).
+  Media Foundation encoders refuse and send an IDR: the AMD H.264 MFT
+  accepts the LTR setters but reads none of them back, so nothing shows it
+  honours `CODECAPI_AVEncVideoUseLTRFrame`, and a frame that silently
+  ignored it would decode wrongly instead of failing.
 - **Fallback.** H.264 High/Baseline keep the GPU MFT → Microsoft MFT →
   Latch software path. An AMF runtime failure reopens MF HEVC and starts
   with an IDR. A hardware-only codec that fails through MF ends the stream
@@ -262,8 +278,9 @@ in the interactive desktop. MF HEVC exposes LTR buffer/mark/use values;
 H.264 accepts their setters but rejects their reads; neither result proves reference recovery. `IsModifiable` returns E_NOTIMPL, so it is not a
 reliable capability test on this AMD MFT. Gradual intra-refresh reads are
 rejected. Main10 output-type negotiation succeeds. These probes do not prove
-reference recovery or HDR encoding: neither is implemented here. AMF's
-RX 6600 probe marks an LTR and reports its later forced use on a P-frame;
+reference recovery or HDR encoding through MF. AMF's
+RX 6600 probe marks an LTR and reports its later forced use on a P-frame
+(the loss recovery above is built on it);
 intra-refresh configuration emits non-IDRs, but actual CTB refresh and
 decoder recovery still need dedicated tests. P010 Main10 produces an IDR
 whose SPS identifies profile 2. HDR metadata and fidelity are unverified;

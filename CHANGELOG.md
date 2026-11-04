@@ -46,6 +46,19 @@ GitHub release notes, so each version gets a heading of the form
 
 ## Unreleased
 
+- A lost frame costs a small recovery frame instead of a keyframe, as on
+  GeForce NOW. Viewer and host negotiate `reference_invalidation`; after a
+  loss the viewer asks for a frame that predicts from the last one it
+  decoded (new datagrams 14 and 15; 13 stays reserved for microphone audio), falling back to a keyframe when the
+  host cannot. Recovery identities include the pipeline generation, so a
+  queued frame from before a capture reopen cannot alias a new reference.
+  The software H.264 encoder rolls back to that picture
+  (bit-exact) and AMD's AMF HEVC encoder uses long-term references; Media
+  Foundation, VideoToolbox, VA-API and NVENC still send an IDR. Linux host
+  → Mac at 1–3% induced burst loss: 34–51 IDRs a minute become 2–3 (the
+  startup ones), resume p50 113 → 41 ms, freeze p95 256–452 → 97–120 ms;
+  recovery frames are 3.3 kB where an IDR was 10–20 kB. Older viewers and
+  hosts keep `KeyframeRequest`.
 - Negotiate hardware-probed AV1, HEVC and H.264 High on the viewer; retain
   Baseline's ten-access-unit software fallback and protocol-1 compatibility.
 - Decode AV1 through VideoToolbox on supported Macs, with selectable P010

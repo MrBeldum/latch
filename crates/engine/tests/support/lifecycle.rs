@@ -62,6 +62,7 @@ fn session(addr: SocketAddr) -> Arc<Session> {
         bytes: AtomicU64::new(0),
         transport: TransportState::new(1000),
         keyframe_requests: Mutex::default(),
+        recovery: Default::default(),
         audio_enabled: false,
         surround_kbps: 0,
         mic: Mutex::new(None),
@@ -134,6 +135,7 @@ fn a_viewer_that_does_not_read_cannot_block_the_control_writer() {
         gamepads: 0,
         gamepad_kinds: Vec::new(),
         gamepad_problem: String::new(),
+        reference_invalidation: false,
         session: session.id,
         token: control::token_hex(&session.token),
         codec: Codec::H264Baseline,
@@ -287,9 +289,12 @@ fn repeated_video_errors_release_exclusive_capture_and_have_a_retry_budget() {
                     anyhow::bail!("capture lost");
                 }
                 Ok(EncodedVideo {
+                    generation: 0,
                     data: vec![1; 100],
                     keyframe: true,
                     captured: Instant::now(),
+                    picture: 0,
+                    recovery: None,
                 })
             }),
             held: held.clone(),
@@ -348,9 +353,12 @@ fn idle_requests_are_prompt_and_each_encoded_frame_updates_mapping_and_is_sent()
                 anyhow::bail!("stopped");
             }
             Ok(EncodedVideo {
+                generation: 0,
                 data: vec![calls; 100],
                 keyframe,
                 captured: Instant::now(),
+                picture: 0,
+                recovery: None,
             })
         }),
     };
@@ -455,6 +463,7 @@ fn audio_reports_failure_retries_with_backoff_clears_notice_and_fits_the_mtu() {
         gamepads: 0,
         gamepad_kinds: Vec::new(),
         gamepad_problem: String::new(),
+        reference_invalidation: false,
         session: session.id,
         token: control::token_hex(&session.token),
         codec: Codec::H264Baseline,
@@ -597,4 +606,117 @@ fn requested_idrs_cannot_exceed_one_per_rtt_even_when_last_delivered_advances() 
             .all(|pair| pair[1] - pair[0] >= rtt.max(KEYFRAME_GAP)));
         assert!(produced.len() >= 3, "recovery must not stall");
     }
+}
+
+#[test]
+fn reopen_refuses_an_old_picture_held_in_the_send_queue() {
+    use crate::software::{Bgra, CpuCapture, SoftwarePipeline};
+    use latch_codec::h264::Decoder;
+
+    struct Solid(u8);
+    impl CpuCapture for Solid {
+        fn size(&self) -> (u32, u32) {
+            (16, 16)
+        }
+        fn display(&self) -> DisplayRect {
+            info().display
+        }
+        fn name(&self) -> String {
+            "solid".into()
+        }
+        fn grab(&mut self, frame: &mut Bgra, _: Duration) -> anyhow::Result<bool> {
+            *frame = Bgra {
+                width: 16,
+                height: 16,
+                stride: 64,
+                data: [self.0, self.0, self.0, 255].repeat(256),
+            };
+            Ok(true)
+        }
+    }
+    struct ReopenVideo {
+        pipeline: SoftwarePipeline<Solid>,
+        session: Arc<Session>,
+        replacement: bool,
+        calls: usize,
+    }
+    impl VideoPipeline for ReopenVideo {
+        fn info(&self) -> VideoInfo {
+            self.pipeline.info()
+        }
+        fn next(&mut self, keyframe: bool, idle: Duration) -> anyhow::Result<EncodedVideo> {
+            self.calls += 1;
+            anyhow::ensure!(self.calls == 1, "capture lost");
+            let frame = self.pipeline.next(keyframe, idle)?;
+            if self.replacement {
+                self.session.stop.store(true, Ordering::Release);
+            }
+            Ok(frame)
+        }
+        fn recover_from(&mut self, picture: u64) -> bool {
+            self.pipeline.recover_from(picture)
+        }
+    }
+    let server = Server::bind(0, Options::default()).unwrap();
+    let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut session = session(receiver.local_addr().unwrap());
+    Arc::get_mut(&mut session).unwrap().recovery.enabled = true;
+    let open = |replacement| ReopenVideo {
+        pipeline: SoftwarePipeline::new(Solid(if replacement { 210 } else { 30 }), &config())
+            .unwrap(),
+        session: session.clone(),
+        replacement,
+        calls: 0,
+    };
+    let (tx, rx) = mpsc::sync_channel(2);
+    // Hold both frames in the actual sender queue until encode_video has
+    // reconstructed the entire capture/pipeline and cleared its recovery map.
+    encode_video(
+        &server,
+        &session,
+        Box::new(open(false)),
+        config(),
+        |_| Ok(Box::new(open(true))),
+        tx,
+    );
+    let old = rx.recv().unwrap();
+    let new = rx.recv().unwrap();
+    assert_eq!(
+        old.0.picture, new.0.picture,
+        "pipeline-local numbers restart"
+    );
+    assert_ne!(old.0.data, new.0.data);
+    let mut decoder = Decoder::new();
+    let old_pixels = decoder.decode(&old.0.data).unwrap().unwrap().clone();
+    let (tx, rx) = mpsc::sync_channel(2);
+    tx.send(old).unwrap();
+    tx.send(new).unwrap();
+    drop(tx);
+    session.stop.store(false, Ordering::Release);
+    paced_video(&server, &session, rx);
+    assert_eq!(session.recovery.sent.lock().len(), 2);
+    let generation = session.recovery.sent.lock()[1].1;
+    // The replacement IDR was sent but lost. The viewer only holds frame 0.
+    session.keyframe.store(false, Ordering::Release);
+    *session.recovery.request.lock() = Some(wire::RecoveryRequest {
+        last_delivered: 0,
+        first_invalid: 1,
+        last_invalid: 1,
+        id: 1,
+    });
+    let mut replacement = open(true);
+    replacement.pipeline.next(true, Duration::ZERO).unwrap();
+    session
+        .recovery
+        .take(&server, &session, &mut replacement, generation);
+    assert_eq!(session.recovery.refused.load(Ordering::Relaxed), 1);
+    assert!(session.keyframe.load(Ordering::Acquire));
+    assert_eq!(session.recovery.asked.lock().as_ref(), None);
+    let idr = replacement.pipeline.next(true, Duration::ZERO).unwrap();
+    assert!(idr.keyframe);
+    assert_eq!(idr.recovery, None);
+    let pixels = decoder.decode(&idr.data).unwrap().unwrap();
+    assert_ne!(pixels, &old_pixels);
+    let mut fresh = Decoder::new();
+    assert_eq!(pixels, fresh.decode(&idr.data).unwrap().unwrap());
 }

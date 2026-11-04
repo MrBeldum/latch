@@ -116,6 +116,10 @@ pub struct StreamRequest {
     /// The viewer sends gamepads (`docs/PROTOCOL.md`, "Gamepads").
     #[serde(default)]
     pub gamepads: bool,
+    /// The viewer asks for recovery frames after a loss instead of a
+    /// keyframe (`docs/PROTOCOL.md`, "RecoveryRequest").
+    #[serde(default)]
+    pub reference_invalidation: bool,
     /// Most audio channels the viewer plays (6 for 5.1, 8 for 7.1); absent
     /// or below 3 means stereo, all an older viewer decodes.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -179,6 +183,9 @@ pub struct Accept {
     /// Why the host takes no gamepads, when the viewer offered them.
     #[serde(default)]
     pub gamepad_problem: String,
+    /// The host answers `RecoveryRequest`s; only when the viewer asked.
+    #[serde(default)]
+    pub reference_invalidation: bool,
     /// What the viewer's microphone is to be sent as, when it offered it
     /// and this host has somewhere to play it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
