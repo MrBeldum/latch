@@ -366,6 +366,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn codec_offers_skip_unknown_names_and_preserve_preference() {
+        #[derive(Deserialize)]
+        struct Offer {
+            #[serde(deserialize_with = "known_codecs")]
+            codecs: Vec<Codec>,
+        }
+        let offer: Offer = serde_json::from_str(
+            r#"{"codecs":["future", "av1", "hevc", "h264-high", "h264-baseline"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            offer.codecs,
+            [
+                Codec::Av1,
+                Codec::Hevc,
+                Codec::H264High,
+                Codec::H264Baseline
+            ]
+        );
+        assert_eq!(serde_json::to_string(&Codec::Av1).unwrap(), "\"av1\"");
+    }
+
+    #[test]
     fn stream_request_backward_compatible() {
         let json = r#"{
             "protocol": 1,

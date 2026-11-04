@@ -1,0 +1,22 @@
+{
+  "mac-c3-before-native": {
+    "decode_window_mean_ms": 2.0624650555555553,
+    "fps_window_mean": 19.667898166666664,
+    "summary": "render_summary decoded=198 rendered=197 decode_to_render_ms_p50=0.264 p95=2.685 p99=7.089"
+  },
+  "mac-c3-after-1080": {
+    "decode_window_mean_ms": 1.1732573999999998,
+    "fps_window_mean": 62.54249422222222,
+    "summary": "render_summary decoded=613 rendered=556 decode_to_render_ms_p50=2.947 p95=7.302 p99=8.535"
+  },
+  "mac-c3-before-1080": {
+    "decode_window_mean_ms": 1.180690888888889,
+    "fps_window_mean": 60.34034744444445,
+    "summary": "render_summary decoded=645 rendered=578 decode_to_render_ms_p50=2.458 p95=7.322 p99=8.499"
+  },
+  "mac-c3-after-native": {
+    "decode_window_mean_ms": 1.8985867555555553,
+    "fps_window_mean": 22.654447777777776,
+    "summary": "render_summary decoded=217 rendered=217 decode_to_render_ms_p50=0.252 p95=2.698 p99=5.144"
+  }
+}

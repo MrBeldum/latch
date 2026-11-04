@@ -63,8 +63,8 @@ KeyframeRequest on loss ──────────────────�
 
 | Viewer | Decode |
 | --- | --- |
-| macOS | VideoToolbox (HEVC or H.264) |
-| Windows | Media Foundation H.264 decoder (DXVA when present), with `latch-codec` behind it |
+| macOS | VideoToolbox (hardware-probed AV1, HEVC or H.264), IOSurface → Metal; NV12 by default, selectable P010 |
+| Windows | Media Foundation + D3D11/DXVA for hardware-probed AV1, HEVC and H.264 High; Baseline with `latch-codec` fallback. Shared NV12 D3D11 texture → D3D12/wgpu; staging readback when unavailable |
 | Linux | `latch-codec` |
 
 The viewer lists what it decodes; the host picks the first it can encode,
@@ -80,10 +80,47 @@ whose hardware has some codecs, only the others are held, and the rate is
 in their `max_pixel_rate` rather than `max_fps`). Sizes are counted in coded 16-pixel blocks.
 `latch-codec` decodes Constrained Baseline only, so a host asked for
 `h264-baseline` configures its hardware encoder for that profile. A
-Windows viewer asks for Constrained Baseline only, so that when Media
-Foundation gives no picture (the first ten access units decide) the
-stream continues in `latch-codec` from the next keyframe; a Mac viewer
-does the same for Baseline streams.
+viewer probes platform codecs before offering AV1 > HEVC > H.264 High >
+Baseline. Windows probes actual pictures through the installed synchronous
+MFT and D3D11 manager, caching the result; missing codec extensions or drivers
+leave that codec out of negotiation. Mac checks `VTIsHardwareDecodeSupported` and requires a decoded hardware
+picture too; a capability query alone can succeed on an unusable decoder.
+Only Baseline streams have the ten-access-unit `latch-codec` safety net.
+High, HEVC and AV1 have the session's instead (`session::HARDWARE_PROBATION`):
+a decoder that cannot be created, gives no picture for ten access units, or
+fails three times without one ends that attempt, and the session asks the
+host again without the codec (down to Baseline), with a notice saying why;
+the codec is not offered again until the viewer restarts.
+`LATCH_TEST_BREAK_DECODER=hevc,h264-high` (or `all`; `hevc=silent` for a
+decoder that gives nothing) breaks decoders on purpose to test this.
+Unknown codec names in an offer are skipped by protocol-1 hosts.
+
+Main10 input is supported by the platform decoders. Mac callers can choose
+P010 with `new_decoder_with_format`; its two 16-bit Metal planes retain ten
+bits. The normal session still requests NV12/SDR. Windows accepts NV12 or
+P010 MFT output, reducing P010 to eight bits for the current SDR renderer.
+With a D3D12 renderer on the same adapter, NV12 pictures use a bounded pool
+of shared D3D11 textures opened as wgpu plane views. A D3D11 fence completes
+the GPU copy before publication; the renderer retains each surface through
+GPU completion before the decoder can reuse it. Headless tools, P010, odd
+picture sizes, pool exhaustion and unsupported sharing use staging readback.
+A failed import disables sharing for subsequent pictures.
+Neither path negotiates HDR, tone maps, or changes the display's colour mode.
+
+The client requests `AutoNoVsync` and maximum frame latency 1, wakes egui on
+every published picture, and samples the newest `FrameSlot` in the paint
+callback. There is no frame timer or 60 Hz cap. Mac native buffers are retained
+until previous GPU submissions complete, rather than for an arbitrary three
+frames. This retention is not a presentation queue. The compositor, VRR and
+scanout still determine physical display latency; immediate mode may tear.
+`cargo run --release -p latch-client --example present -- --port 47882`
+measures decode completion to renderer preparation on the viewer clock;
+it does not measure GPU completion, OS present or photons.
+
+Linux remains Baseline software decode. VA-API needs a Rust bitstream-to-VA
+picture/slice parameter path (loading libva alone is not a decoder), plus
+synchronized dma-buf import into wgpu. It is deferred; no native codec
+library or C/C++ build is added.
 
 The decoder's reconstruction kernels were adapted from the MIT-licensed
 `pith-h264` (see `crates/codec/src/h264/decode/SOURCE.md`); everything it

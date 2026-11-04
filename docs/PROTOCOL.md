@@ -43,7 +43,7 @@ Content-Length: <n>
 | `width`, `height` | u32 | picture size the viewer wants (even numbers) |
 | `fps` | u32 | frames per second wanted |
 | `bitrate_kbps` | u32 | video bitrate wanted (a ceiling: the host's rate control comes down from it) |
-| `codecs` | [string] | what the viewer decodes, best first: `"av1"`, `"hevc"`, `"h264-high"`, `"h264-baseline"`; a name the host does not know is skipped |
+| `codecs` | [string] | what the viewer decodes, best first: `"av1"`, `"hevc"`, `"h264-high"`, `"h264-baseline"`; only hardware-supported codecs are advertised above Baseline; a name the host does not know is skipped |
 | `udp_port` | u16 | the viewer's media socket port |
 | `audio` | bool | send desktop audio |
 | `name` | string | the viewer's machine name, for the host's log |
@@ -419,12 +419,17 @@ completed frame is handed to decode immediately, including mid-receive-batch.
 Protocol 1 datagrams remain at most 1200 bytes. No MTU or socket-offload
 capability is advertised by this change.
 
-AV1 is additive in protocol 1: old hosts skip its unknown codec name in an
-ordered offer and can select the following HEVC/H.264 entry. Hosts send AV1
-only if the viewer explicitly offers it and a hardware encoder has produced
-a trial keyframe. AV1 frames carry low-overhead OBUs with a sequence header
-before each keyframe; no UDP header or control message changes. Current
-viewers do not offer AV1 until their decoder workstream adds support.
+## AV1 and decoder precision
+
+`"av1"` is an additive codec name on protocol 1. Existing hosts skip unknown
+offer names and choose a mutually supported codec; an AV1 Accept is only
+sent to a viewer that offered AV1, and a host offers it only once a hardware
+encoder has produced a trial keyframe. One AV1 frame carries a low-overhead
+OBU temporal unit with sized OBUs (not length-prefixed Annex B). Keyframes
+include the sequence header; the existing keyframe flag and recovery rules
+apply; no UDP header or control message changes. The viewer supports Main
+4:2:0, eight or ten bits. HEVC still negotiates SDR; P010 decoder output is a
+local API choice for future HDR work, not an HDR capability on the wire.
 
 ## Proposal: reference-frame invalidation (not implemented)
 

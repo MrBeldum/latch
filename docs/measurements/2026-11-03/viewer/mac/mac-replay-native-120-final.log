@@ -1,0 +1,4 @@
+decodable [Av1, Hevc, H264High, H264Baseline]
+decoder H.264 · hardware
+decode_summary frames=1802 p50_ms=4.122 p95_ms=4.837
+render_summary decoded=1802 rendered=1774 decode_to_render_ms_p50=0.232 p95=0.547 p99=4.184
