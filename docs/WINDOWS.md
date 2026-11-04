@@ -257,7 +257,9 @@ uses the lowest sufficient refresh, then the highest available. There is
 no fixed 240→120 mapping in the selector.
 
 The installed VDD 11.30.4.434 accepted 98 mode combinations on the test PC,
-but 102 prevented monitor creation for at least 25 seconds. Setup used to
+with 100 also working; 101 and 102 prevented monitor creation (102 for
+at least 25 seconds). The driver logged monitor-arrival status
+`-1073741637` (`0xC00000BB`, not supported). Setup used to
 append the two 8K sizes twice (they already belong to `stream_modes`),
 producing 102 entries from the PC's existing 84 instead of 98. The wanted
 sizes now come from that deduplicated list alone. The full cross-product
