@@ -65,7 +65,7 @@ KeyframeRequest (fallback, older hosts) ────▶ next frame is IDR
 
 | Viewer | Decode |
 | --- | --- |
-| macOS | VideoToolbox (hardware-probed AV1, HEVC Main/Main10 or H.264), IOSurface → Metal; NV12, or P010 for a negotiated ten-bit stream (drawn by the native EDR layer where available) |
+| macOS | VideoToolbox (hardware-probed AV1, HEVC Main/Main10 or H.264), IOSurface → Metal; NV12, or P010 for a negotiated ten-bit stream (HDR drawn by the native EDR layer where available) |
 | Windows | Media Foundation + D3D11/DXVA for hardware-probed AV1, HEVC Main/Main10 and H.264 High; Baseline with `latch-codec` fallback. Shared NV12 D3D11 texture → D3D12/wgpu; staging readback when unavailable and for ten-bit P010 (drawn by the native HDR10 swapchain where available) |
 | Linux | `latch-codec` |
 
@@ -492,8 +492,8 @@ into BT.709 toward their own luminance and rolls highlights up to the
 does not silently retry the legacy BGRA conversion that can produce black.
 
 Viewers retain P010 through decode and upload. macOS uses a native float
-Metal sublayer for ten-bit video because egui 0.31 fixes its main framebuffer
-to BGRA8. HDR is rendered in extended linear Display P3, with a smooth
+Metal sublayer for HDR video because egui 0.31 fixes its main framebuffer
+to BGRA8; ten-bit SDR goes through the wgpu P010 shader. HDR is rendered in extended linear Display P3, with a smooth
 highlight shoulder at the display's current EDR headroom. Windows uses a
 10-bit child swapchain: G2084/P2020 for an HDR display and PQ stream, G22/709
 for SDR Main10. PQ falls back to a GPU SDR tone map only when native HDR
@@ -502,7 +502,12 @@ layer sits below egui's, which is cleared to transparent over the video,
 and Windows cuts the child window around everything egui draws above the
 background layer. Native renderers sample chroma at the colour
 description's siting (`chroma`, left by default). Eight-bit SDR keeps the
-existing rendering path.
+existing rendering path. Which presenter draws is decided per stream (and
+again when the window's display changes and the change has held for
+300 ms, at most once a second), never per frame. A display that cannot be
+read for a moment is no change. A native
+presenter that fails hands that stream to wgpu instead of being retried
+frame by frame, which alternated surfaces (a flicker).
 
 See [colour measurements](measurements/2026-11-03/hdr/README.md) for tests,
 measurements and platform limitations.

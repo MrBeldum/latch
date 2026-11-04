@@ -40,6 +40,7 @@ metal = "0.31"
 objc2 = "0.5"
 objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSCursor", "NSEvent", "NSMenu", "NSMenuItem", "NSPasteboard", "NSResponder", "NSScreen", "NSGraphics"] }
 objc2-foundation = { version = "0.2", features = ["NSString", "NSThread"] }
+raw-window-handle = "0.6"
 
 [dev-dependencies]
 x11rb = { version = "0.13", features = ["randr"] }
