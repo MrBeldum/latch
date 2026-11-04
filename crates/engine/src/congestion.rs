@@ -951,7 +951,7 @@ mod tests {
             let start = Instant::now();
             let mut c = Controller::new(50_000, start);
             let mut t = start;
-            let mut step = |c: &mut Controller, t: Instant, lost: u64, probe: u32| {
+            let step = |c: &mut Controller, t: Instant, lost: u64, probe: u32| {
                 c.observe_sent(500);
                 c.update(
                     t,
